@@ -502,6 +502,8 @@ export class SessionsPageComponent implements OnInit, OnDestroy {
   // /sessions/:id are two routes, so moving between them makes a new
   // page; the store (drafts, cached conversations) is shared and stays.
   readonly id = input<string>();
+  // ?new=1 (the create menu's New session) opens the New session dialog.
+  readonly new = input<string>();
 
   protected readonly director = DIRECTOR_ID;
   protected readonly freshOpen = signal(false);
@@ -589,6 +591,21 @@ export class SessionsPageComponent implements OnInit, OnDestroy {
         this.store.select(id);
         this.freshOpen.set(false);
         this.confirmDelete.set(false);
+      });
+    });
+    // Waits for access to be known (canCreate is tracked), so a request
+    // that arrives before the config does is not dropped.
+    effect(() => {
+      if (!this.new()) return;
+      const allowed = this.canCreate();
+      untracked(() => {
+        if (allowed) this.openNew();
+        // Drop the parameter so Back and a reload do not reopen it.
+        void this.router.navigate([], {
+          queryParams: { new: null },
+          queryParamsHandling: "merge",
+          replaceUrl: true,
+        });
       });
     });
     // Keep the newest message in view when one arrives, unless the
@@ -717,8 +734,11 @@ export class SessionsPageComponent implements OnInit, OnDestroy {
   }
 
   protected onEscape(ev: Event): void {
-    // Something nearer the focus (a menu, a tooltip) already took it.
+    // Something nearer the focus (a menu, a tooltip) already took it, or
+    // a modal outside this page (the New task sheet) owns the key.
     if (ev.defaultPrevented) return;
+    const outer = this.doc.querySelector('[aria-modal="true"]');
+    if (outer && !outer.closest("g-sessions-page")) return;
     if (this.newOpen()) {
       ev.preventDefault();
       this.closeNew();
