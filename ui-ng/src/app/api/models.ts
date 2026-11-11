@@ -134,6 +134,15 @@ export interface Comment {
 export interface Attempt {
   number: number;
   startedAt?: string;
+  agentStartedAt?: string;
+  promptTokens?: number;
+  // The grain hostd this attempt's host work went to (model.TaskRunHostd).
+  hostd?: {
+    hostd: string;
+    instance?: string;
+    owner?: string;
+    deleted?: boolean;
+  };
   finishedAt?: string;
   outcome?: string;
   detail?: string;
