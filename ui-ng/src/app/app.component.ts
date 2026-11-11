@@ -544,7 +544,7 @@ export class AppComponent implements OnInit, OnDestroy {
   protected readonly createTask = inject(CreateTaskService);
   protected readonly classicNewTask = CLASSIC_NEW_TASK;
   protected readonly onSessions = signal(false);
-  protected readonly inboxCount = computed(() => this.store.entries().length);
+  protected readonly inboxCount = computed(() => this.store.decisions().length);
   protected readonly createOpen = signal(false);
   protected readonly createPos = signal({ top: 0, left: 0 });
   protected readonly moreOpen = signal(false);
@@ -628,11 +628,7 @@ export class AppComponent implements OnInit, OnDestroy {
   // page with a full navigation.
   open(d: Destination): void {
     if (d.route) void this.router.navigateByUrl(d.route);
-    else this.go(d.classic);
-  }
-
-  private go(href: string): void {
-    this.doc.defaultView?.location.assign(href);
+    else this.doc.defaultView?.location.assign(d.classic);
   }
 
   protected toggleCreate(ev: Event): void {
