@@ -12,12 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { RouterLink } from "@angular/router";
+import { Router, RouterLink } from "@angular/router";
+import { SnackbarService } from "../services/snackbar.service";
+import {
+  DEFAULT_RATIO,
+  bounds,
+  clampRatio,
+  keyStep,
+  loadCollapsed,
+  loadRatio,
+  percent,
+  saveCollapsed,
+  saveRatio,
+} from "./split";
 import {
   ChangeDetectionStrategy,
   Component,
   ElementRef,
   HostListener,
+  afterNextRender,
   OnInit,
   computed,
   effect,
@@ -81,6 +94,22 @@ export function questionOf(
   const c = id ? d.comments?.find((x) => x.id === id) : undefined;
   return c?.body || entry.summary;
 }
+
+// What a batch answer is called once given, for the snackbar.
+const PAST: Record<string, string> = {
+  approve: "Approved",
+  defer: "Deferred",
+  close: "Closed",
+  decline: "Declined",
+  acknowledge: "Acknowledged",
+  submit: "Submitted",
+  retry: "Retried",
+  "retry-merge": "Retried the merge of",
+};
+
+// Answers the `a` key may give in one keystroke; anything else (approving
+// a host script, submitting a merge) asks first.
+const ONE_KEY = new Set(["approve"]);
 
 @Component({
   selector: "g-inbox-page",
@@ -163,9 +192,16 @@ export function questionOf(
         </p>
       }
 
-      <div class="inbox-split">
+      <div
+        class="inbox-split"
+        #split
+        [class.is-collapsed]="collapsed()"
+        [class.is-dragging]="dragging()"
+        [style.--queue-w.%]="ratioExact()"
+      >
         <section
           class="queue-pane"
+          id="queue-pane"
           aria-label="Decision queue"
           data-testid="next-inbox-queue"
         >
@@ -187,12 +223,41 @@ export function questionOf(
                 class="queue-group"
                 [attr.data-testid]="'inbox-group-' + group.id"
               >
-                <h2 class="queue-group-header" [id]="'group-' + group.id">
-                  <span>{{ group.title }}</span>
-                  <span class="group-count tabular">{{
-                    group.entries.length
-                  }}</span>
-                </h2>
+                <div class="queue-group-head">
+                  <h2 class="queue-group-header" [id]="'group-' + group.id">
+                    <span class="group-title">{{ group.title }}</span>
+                    <span class="group-count tabular">{{
+                      group.entries.length
+                    }}</span>
+                  </h2>
+                  <button
+                    type="button"
+                    class="btn-text group-select"
+                    [attr.data-testid]="'group-select-' + group.id"
+                    [attr.aria-label]="
+                      (allChecked(group.entries)
+                        ? 'Clear the selection in '
+                        : 'Select all in ') + group.title
+                    "
+                    (click)="selectGroup(group.entries)"
+                  >
+                    {{ allChecked(group.entries) ? "Clear" : "Select all" }}
+                  </button>
+                  @if (approvable(group.entries); as n) {
+                    <button
+                      type="button"
+                      class="btn-tonal group-approve"
+                      [attr.data-testid]="'group-approve-' + group.id"
+                      [attr.aria-label]="
+                        'Approve all ' + n + ' in ' + group.title
+                      "
+                      [disabled]="!!store.busy()"
+                      (click)="approveGroup(group.entries)"
+                    >
+                      Approve all {{ n }}
+                    </button>
+                  }
+                </div>
                 <p class="queue-group-note">{{ group.hint }}</p>
                 <ul
                   class="queue-rows"
@@ -252,13 +317,18 @@ export function questionOf(
           @if (store.checked().size > 0) {
             <div
               class="batch-bar"
-              role="toolbar"
+              role="group"
               aria-label="Selected items"
               data-testid="batch-bar"
             >
-              <span class="batch-count tabular"
-                >{{ store.checked().size }} selected</span
-              >
+              <span class="batch-count tabular" role="status"
+                >{{ store.checked().size }} selected
+                @if (outsideFilter(); as n) {
+                  <span class="muted" data-testid="outside-filter"
+                    >({{ n }} outside this filter)</span
+                  >
+                }
+              </span>
               @for (b of bulkActions(); track b.id) {
                 <button
                   type="button"
@@ -284,6 +354,39 @@ export function questionOf(
             </div>
           }
         </section>
+
+        <div
+          class="inbox-resizer"
+          id="inbox-resizer"
+          role="separator"
+          tabindex="0"
+          aria-orientation="vertical"
+          aria-controls="queue-pane"
+          aria-label="Resize the list"
+          [attr.aria-valuemin]="collapsed() ? 0 : minPct()"
+          [attr.aria-valuemax]="maxPct()"
+          [attr.aria-valuenow]="collapsed() ? 0 : ratioPct()"
+          [attr.aria-valuetext]="
+            collapsed()
+              ? 'List hidden'
+              : 'List ' + ratioPct() + ' percent of the width'
+          "
+          data-testid="inbox-resizer"
+          (pointerdown)="onResizeStart($event)"
+          (pointermove)="onResizeMove($event)"
+          (pointerup)="onResizeEnd($event)"
+          (pointercancel)="onResizeEnd($event)"
+          (lostpointercapture)="onResizeEnd($event)"
+          (dblclick)="resetSplit()"
+          (keydown)="onResizerKey($event)"
+        >
+          <span class="inbox-resizer-pill" aria-hidden="true"></span>
+          @if (dragging()) {
+            <span class="inbox-resizer-badge" aria-hidden="true"
+              >{{ ratioPct() }} / {{ 100 - ratioPct() }}</span
+            >
+          }
+        </div>
 
         <section
           class="inspector-pane"
@@ -316,6 +419,44 @@ export function questionOf(
                       Open pull request
                     </a>
                   }
+                </div>
+                <div
+                  class="split-controls"
+                  role="group"
+                  aria-label="List width"
+                >
+                  <button
+                    type="button"
+                    class="btn-text"
+                    data-testid="split-toggle"
+                    [attr.aria-expanded]="!collapsed()"
+                    aria-controls="queue-pane"
+                    (click)="toggleCollapsed()"
+                  >
+                    {{
+                      collapsed()
+                        ? "Show list (" + store.ordered().length + ")"
+                        : "Hide list"
+                    }}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-text"
+                    data-testid="split-30"
+                    [attr.aria-pressed]="!collapsed() && ratioPct() === 30"
+                    (click)="setPreset(0.3)"
+                  >
+                    30 / 70
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-text"
+                    data-testid="split-42"
+                    [attr.aria-pressed]="!collapsed() && ratioPct() === 42"
+                    (click)="setPreset(0.42)"
+                  >
+                    42 / 58
+                  </button>
                 </div>
                 <button
                   type="button"
@@ -370,6 +511,7 @@ export function questionOf(
                     </p>
                   }
                   <textarea
+                    #replyBox
                     class="reply-textarea"
                     rows="3"
                     aria-label="Reply to the agent"
@@ -757,6 +899,55 @@ export function questionOf(
         }
       </ng-template>
 
+      @if (helpOpen()) {
+        <div class="scrim" aria-hidden="true" (click)="closeHelp()"></div>
+        <div
+          class="g-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="inbox-help-title"
+          data-testid="inbox-help"
+        >
+          <h2 id="inbox-help-title">Inbox keys</h2>
+          <dl class="facts key-list">
+            <dt><kbd>j</kbd> / <kbd>k</kbd></dt>
+            <dd>Next / previous item</dd>
+            <dt><kbd>Enter</kbd></dt>
+            <dd>Open the full task</dd>
+            <dt><kbd>a</kbd></dt>
+            <dd>Answer with the item's main action</dd>
+            <dt><kbd>e</kbd></dt>
+            <dd>Write a reply</dd>
+            <dt><kbd>x</kbd></dt>
+            <dd>Select the item</dd>
+            <dt><kbd>*</kbd></dt>
+            <dd>Select everything in this filter</dd>
+            <dt><kbd>Shift</kbd>+<kbd>A</kbd></dt>
+            <dd>Approve the selected items</dd>
+            <dt><kbd>u</kbd></dt>
+            <dd>Undo the last answer</dd>
+            <dt><kbd>/</kbd></dt>
+            <dd>Filter this view</dd>
+            <dt><kbd>Esc</kbd></dt>
+            <dd>Clear the selection, or close</dd>
+            <dt>Divider</dt>
+            <dd>
+              Arrows move it, Shift+arrows faster, Home/End to the ends, Enter
+              hides the list, double-click resets to 30 / 70
+            </dd>
+          </dl>
+          <div class="dialog-actions">
+            <button
+              type="button"
+              class="btn-primary"
+              data-testid="inbox-help-close"
+              (click)="closeHelp()"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      }
       @if (confirming(); as c) {
         <div class="modal-backdrop">
           <div
@@ -804,6 +995,40 @@ export class InboxPageComponent implements OnInit {
   protected readonly theme = inject(ThemeService);
   private readonly api = inject(GrainApi);
   private readonly host = inject(ElementRef<HTMLElement>);
+  private readonly router = inject(Router);
+  private readonly snackbar = inject(SnackbarService);
+  private readonly split = viewChild<ElementRef<HTMLElement>>("split");
+  private readonly replyBox =
+    viewChild<ElementRef<HTMLTextAreaElement>>("replyBox");
+
+  // ---------- the split (D-3) ----------
+  protected readonly ratio = signal(loadRatio());
+  protected readonly collapsed = signal(loadCollapsed());
+  protected readonly dragging = signal(false);
+  private readonly stage = signal(0);
+  private dragFrom: number | null = null;
+  // The column gets the exact share; ARIA gets a whole percent.
+  protected readonly ratioExact = computed(
+    () =>
+      (this.stage() ? clampRatio(this.ratio(), this.stage()) : this.ratio()) *
+      100,
+  );
+  private lastUndoSnack: number | null = null;
+  private dragWasCollapsed = false;
+  private helpReturn: HTMLElement | null = null;
+  private resizeObs: ResizeObserver | null = null;
+  protected readonly ratioPct = computed(() =>
+    percent(
+      this.stage() ? clampRatio(this.ratio(), this.stage()) : this.ratio(),
+    ),
+  );
+  protected readonly minPct = computed(() =>
+    this.stage() ? percent(bounds(this.stage()).min / this.stage()) : 15,
+  );
+  protected readonly maxPct = computed(() =>
+    this.stage() ? percent(bounds(this.stage()).max / this.stage()) : 80,
+  );
+  protected readonly helpOpen = signal(false);
   private readonly keyboard = inject(KeyboardService);
 
   protected readonly filters = FILTERS;
@@ -863,6 +1088,17 @@ export class InboxPageComponent implements OnInit {
   });
 
   constructor() {
+    // The divider's bounds depend on the split's width, known once drawn.
+    afterNextRender(() => {
+      this.measure();
+      // The rail or a window change can resize the split without a window
+      // resize event.
+      const el = this.split()?.nativeElement;
+      if (el && typeof ResizeObserver === "function") {
+        this.resizeObs = new ResizeObserver(() => this.measure());
+        this.resizeObs.observe(el);
+      }
+    });
     // A new selection starts with a clean dock. Only the selected row's key
     // is tracked: every refresh (an SSE event, another row answered) builds
     // fresh entry objects, and resetting on those would wipe a reply the
@@ -971,7 +1207,7 @@ export class InboxPageComponent implements OnInit {
       message: `${label}: ${n} selected ${n === 1 ? "item" : "items"}? Each is answered as if you had pressed its own button.`,
       accept: label,
       destructive: id === "close" || id === "decline",
-      run: () => this.store.actAll(id),
+      run: () => this.batch(id, PAST[id] ?? "Done:"),
     });
   }
 
@@ -1054,26 +1290,287 @@ export class InboxPageComponent implements OnInit {
     }
   }
 
+  private measure(): number {
+    const w = this.split()?.nativeElement.clientWidth ?? 0;
+    if (w) this.stage.set(w);
+    return w;
+  }
+
+  @HostListener("window:resize")
+  onResize(): void {
+    this.measure();
+  }
+
+  protected onResizeStart(ev: PointerEvent): void {
+    if (ev.button !== 0) return;
+    this.measure();
+    this.dragFrom = this.ratio();
+    this.dragWasCollapsed = this.collapsed();
+    this.dragging.set(true);
+    // Escape cancels a drag wherever focus is: the separator does not take
+    // focus on pointerdown, so its own keydown would not see the key.
+    window.addEventListener("keydown", this.onDragEscape, true);
+    (ev.currentTarget as HTMLElement).setPointerCapture?.(ev.pointerId);
+    ev.preventDefault();
+  }
+
+  protected onResizeMove(ev: PointerEvent): void {
+    if (!this.dragging()) return;
+    const el = this.split()?.nativeElement;
+    const w = this.stage();
+    if (!el || !w) return;
+    const x = ev.clientX - el.getBoundingClientRect().left;
+    if (this.collapsed()) this.collapsed.set(false);
+    this.ratio.set(clampRatio(x / w, w));
+  }
+
+  private readonly onDragEscape = (ev: KeyboardEvent): void => {
+    if (ev.key !== "Escape" || !this.dragging()) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    this.onResizeCancel();
+  };
+
+  protected onResizeEnd(ev?: Event): void {
+    if (!this.dragging()) return;
+    window.removeEventListener("keydown", this.onDragEscape, true);
+    this.dragging.set(false);
+    this.dragFrom = null;
+    saveRatio(this.ratio());
+    saveCollapsed(false);
+    (ev?.currentTarget as HTMLElement | undefined)?.releasePointerCapture?.(
+      (ev as PointerEvent).pointerId,
+    );
+  }
+
+  // Escape during a drag puts the divider back where it started.
+  protected onResizeCancel(): void {
+    if (!this.dragging()) return;
+    window.removeEventListener("keydown", this.onDragEscape, true);
+    if (this.dragFrom !== null) this.ratio.set(this.dragFrom);
+    if (this.dragWasCollapsed) this.collapsed.set(true);
+    this.dragging.set(false);
+    this.dragFrom = null;
+  }
+
+  protected resetSplit(): void {
+    this.setPreset(DEFAULT_RATIO);
+  }
+
+  protected setPreset(r: number): void {
+    const w = this.measure();
+    this.ratio.set(w ? clampRatio(r, w) : r);
+    this.collapsed.set(false);
+    saveRatio(this.ratio());
+    saveCollapsed(false);
+  }
+
+  protected toggleCollapsed(): void {
+    this.collapsed.update((v) => !v);
+    saveCollapsed(this.collapsed());
+  }
+
+  protected onResizerKey(ev: KeyboardEvent): void {
+    if (ev.key === "Enter") {
+      ev.preventDefault();
+      this.toggleCollapsed();
+      return;
+    }
+    if (ev.key === "Escape" && this.dragging()) {
+      ev.preventDefault();
+      this.onResizeCancel();
+      return;
+    }
+    const w = this.measure();
+    const next = keyStep(ev.key, ev.shiftKey, this.ratio(), w || 1);
+    if (next === null) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    this.collapsed.set(false);
+    this.ratio.set(next);
+    saveRatio(next);
+    saveCollapsed(false);
+  }
+
+  // ---------- groups and batches (D-4) ----------
+  protected selectGroup(entries: InboxEntry[]): void {
+    const next = new Set(this.store.checked());
+    const all = entries.every((e) => next.has(e.key));
+    for (const e of entries) {
+      if (all) next.delete(e.key);
+      else next.add(e.key);
+    }
+    this.store.checked.set(next);
+  }
+
+  protected allChecked(entries: InboxEntry[]): boolean {
+    const c = this.store.checked();
+    return entries.length > 0 && entries.every((e) => c.has(e.key));
+  }
+
+  protected approvable(entries: InboxEntry[]): number {
+    return entries.filter((e) =>
+      e.actions.some(
+        (a) => a.id === "approve" && this.access.can(a.route, a.repo),
+      ),
+    ).length;
+  }
+
+  protected approveGroup(entries: InboxEntry[]): void {
+    const keys = entries
+      .filter((e) => e.actions.some((a) => a.id === "approve"))
+      .map((e) => e.key);
+    this.confirming.set({
+      title: "Approve all",
+      message: `Approve all ${keys.length}? Each starts in the Backlog at its priority.`,
+      accept: `Approve ${keys.length}`,
+      destructive: false,
+      run: () => this.batch("approve", "Approved", keys),
+    });
+  }
+
+  protected readonly outsideFilter = computed(() => {
+    const visible = new Set(this.store.visible().map((e) => e.key));
+    return [...this.store.checked()].filter((k) => !visible.has(k)).length;
+  });
+
+  // batch answers many rows at once and offers Undo where the server has
+  // an inverse for that answer.
+  private async batch(
+    id: string,
+    verb: string,
+    keys?: readonly string[],
+  ): Promise<void> {
+    const { count, undo } = await this.store.actAll(id, keys);
+    if (!count) return;
+    const snack = this.snackbar.show(
+      `${verb} ${count === 1 ? "1 item" : `${count} items`}`,
+      undo
+        ? { label: "Undo", run: () => this.store.undoAll(undo.route, undo.ids) }
+        : undefined,
+    );
+    this.lastUndoSnack = undo ? snack.id : null;
+  }
+
+  // j and k move focus with the selection, so Enter acts on what is
+  // selected, not on the row clicked last.
+  private focusRow(): void {
+    const row = (this.host.nativeElement as HTMLElement).querySelector(
+      ".queue-row.is-selected",
+    );
+    row?.scrollIntoView?.({ block: "nearest" });
+    const main = row?.querySelector(".row-main") as HTMLElement | null;
+    if (main && this.host.nativeElement.contains(document.activeElement))
+      main.focus();
+  }
+
+  // Enter opens the selected task from its own row or from nowhere in
+  // particular, never from another control (a checkbox, a reply box).
+  private isRowOrPage(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (!el || el === document.body) return true;
+    if (el.closest(".queue-row.is-selected .row-main")) return true;
+    return !el.closest("a,button,input,textarea,select");
+  }
+
+  protected openHelp(): void {
+    this.helpReturn = document.activeElement as HTMLElement | null;
+    this.helpOpen.set(true);
+    setTimeout(() =>
+      (
+        this.host.nativeElement.querySelector(
+          '[data-testid="inbox-help-close"]',
+        ) as HTMLElement | null
+      )?.focus(),
+    );
+  }
+
+  protected closeHelp(): void {
+    this.helpOpen.set(false);
+    const back = this.helpReturn;
+    this.helpReturn = null;
+    if (back?.isConnected) setTimeout(() => back.focus());
+  }
+
   @HostListener("document:keydown", ["$event"])
   onKey(ev: KeyboardEvent): void {
     // The shell's menus and sheets handle their own Escape first and
     // mark it handled; typing and widgets keep their keys.
     if (ev.defaultPrevented || isTypingTarget(ev.target)) return;
     if (ev.metaKey || ev.ctrlKey || ev.altKey || this.confirming()) return;
+    if (this.helpOpen()) {
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        this.closeHelp();
+      }
+      return;
+    }
     // j, k and x are character-key shortcuts: off when the person has
     // turned shortcuts off (WCAG 2.1.4). Escape always works.
     const letters = this.keyboard.enabled() && !ev.repeat;
+    const sel = this.store.selected();
     if (letters && ev.key === "j") this.store.step(1);
     else if (letters && ev.key === "k") this.store.step(-1);
     else if (letters && ev.key === "x") {
-      const key = this.store.selected()?.key;
-      if (key) this.store.toggleChecked(key);
-    } else if (ev.key === "Escape") this.store.closeSheet();
-    else return;
+      if (sel) this.store.toggleChecked(sel.key);
+    } else if (letters && ev.key === "*") {
+      // Adds the filter's rows to whatever is already selected.
+      this.store.checked.set(
+        new Set([
+          ...this.store.checked(),
+          ...this.store.visible().map((e) => e.key),
+        ]),
+      );
+    } else if (letters && ev.code === "KeyA" && ev.shiftKey) {
+      const n =
+        this.bulkActions().find((b) => b.id === "approve")?.allowed ?? 0;
+      if (n) this.confirmBulk("approve", "Approve all", n);
+    } else if (letters && ev.code === "KeyA" && !ev.shiftKey) {
+      // Resolve: the selected row's primary answer. Only a plain approval
+      // goes through in one keystroke; anything else (approving a host
+      // script, submitting a merge) asks first.
+      const primary = sel?.actions.find((x) => x.variant === "primary");
+      if (primary && this.access.can(primary.route, primary.repo)) {
+        if (ONE_KEY.has(primary.id) || primary.confirm) this.run(primary);
+        else
+          this.confirming.set({
+            title: primary.label,
+            message: `${primary.label}: ${sel?.title ?? "this item"}?`,
+            accept: primary.label,
+            destructive: !!primary.destructive,
+            run: () => this.store.act(primary),
+          });
+      }
+    } else if (letters && ev.key === "e") {
+      setTimeout(() => this.replyBox()?.nativeElement.focus());
+    } else if (letters && ev.key === "u") {
+      // Only this page's own last Undo, never another page's snack.
+      const snack = this.snackbar.current();
+      if (snack?.action && snack.id === this.lastUndoSnack) {
+        void this.snackbar.runAction(snack.id);
+      }
+    } else if (letters && ev.key === "/") {
+      (
+        document.querySelector(
+          '[data-testid="view-filter"]',
+        ) as HTMLElement | null
+      )?.focus();
+    } else if (letters && ev.key === "?") {
+      this.openHelp();
+    } else if (
+      ev.key === "Enter" &&
+      sel?.taskLink &&
+      this.isRowOrPage(ev.target)
+    ) {
+      void this.router.navigateByUrl(sel.taskLink);
+    } else if (ev.key === "Escape") {
+      if (this.dragging()) this.onResizeCancel();
+      else if (this.store.checked().size && !this.store.sheetOpen())
+        this.store.clearChecked();
+      else this.store.closeSheet();
+    } else return;
     ev.preventDefault();
-    this.host.nativeElement
-      .querySelector(".queue-row.is-selected")
-      ?.scrollIntoView?.({ block: "nearest" });
+    this.focusRow();
   }
 }
 
