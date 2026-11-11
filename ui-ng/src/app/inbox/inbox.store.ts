@@ -12,7 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { Injectable, NgZone, computed, inject, signal } from "@angular/core";
+import {
+  Injectable,
+  NgZone,
+  OnDestroy,
+  computed,
+  inject,
+  signal,
+} from "@angular/core";
 import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import type { RouteKey } from "../api/generated-routes";
@@ -24,6 +31,7 @@ import type {
   TaskDetail,
 } from "../api/models";
 import { AccessService } from "../services/access.service";
+import { TaskFeedStore } from "../services/task-feed.service";
 import { versionLabel } from "../api/version";
 import { ViewFilter } from "../services/view-filter.service";
 import {
@@ -97,13 +105,14 @@ function errorText(err: unknown): string {
 // the reader has narrowed it, what is selected, and the calls that
 // answer it. Everything the page shows is a computed signal over it.
 @Injectable({ providedIn: "root" })
-export class InboxStore {
+export class InboxStore implements OnDestroy {
   private readonly api = inject(GrainApi);
   private readonly events = inject(GrainEvents);
   private readonly access = inject(AccessService);
+  private readonly feed = inject(TaskFeedStore);
   private readonly zone = inject(NgZone);
 
-  readonly tasks = signal<Task[]>([]);
+  readonly tasks = this.feed.tasks;
   readonly notifications = signal<Notification[]>([]);
   readonly localScripts = signal<LocalScriptApproval[]>([]);
   readonly loaded = signal(false);
@@ -274,8 +283,17 @@ export class InboxStore {
   private refreshing: Promise<void> | null = null;
   private queuedRefresh: Promise<void> | null = null;
   private eventSub: { unsubscribe(): void } | null = null;
+  private started = false;
+
+  constructor() {
+    this.feed.onBeforeChange(() => this.remember());
+  }
 
   start(): void {
+    if (!this.started) {
+      this.started = true;
+      this.feed.start(false);
+    }
     void this.refresh();
     if (!this.eventSub) {
       this.eventSub = this.events
@@ -293,10 +311,22 @@ export class InboxStore {
   }
 
   stop(): void {
+    if (this.started) {
+      this.started = false;
+      this.feed.stop(false);
+    }
+    if (this.debounce) {
+      clearTimeout(this.debounce);
+      this.debounce = null;
+    }
     this.eventSub?.unsubscribe();
     this.eventSub = null;
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+  }
+
+  ngOnDestroy(): void {
+    this.stop();
   }
 
   private debounce: ReturnType<typeof setTimeout> | null = null;
@@ -329,22 +359,29 @@ export class InboxStore {
   }
 
   private async load(): Promise<void> {
-    const [config, tasks, notifications, scripts] = await Promise.allSettled([
-      this.api.config(),
-      this.api.tasks(),
-      this.api.openNotifications(),
-      this.access.can("GET /api/local-script-approvals")
-        ? this.api.localScriptApprovals()
-        : Promise.resolve([] as LocalScriptApproval[]),
-    ]);
+    this.remember();
+    const needWhoami =
+      !this.access.whoami() && typeof this.api.whoami === "function";
+    const [config, feedOk, notifications, scripts, who] =
+      await Promise.allSettled([
+        this.api.config(),
+        this.feed.refresh(),
+        this.api.openNotifications(),
+        this.access.can("GET /api/local-script-approvals")
+          ? this.api.localScriptApprovals()
+          : Promise.resolve([] as LocalScriptApproval[]),
+        needWhoami
+          ? this.api.whoami().catch(() => null)
+          : Promise.resolve(null),
+      ]);
     if (config.status === "fulfilled") {
       this.access.setConfig(config.value);
       this.version.set(versionLabel(config.value.version));
     }
-    // Remember every row as it was before the new read replaces it.
-    this.remember();
-    if (tasks.status === "fulfilled") {
-      this.tasks.set(Array.isArray(tasks.value) ? tasks.value : []);
+    if (who.status === "fulfilled" && who.value) {
+      this.access.setWhoami(who.value);
+    }
+    if (feedOk.status === "fulfilled" && feedOk.value) {
       this.loadError.set(null);
     } else {
       this.loadError.set("Could not read tasks; retrying.");

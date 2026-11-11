@@ -12,11 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { Injectable, NgZone, computed, inject, signal } from "@angular/core";
+import {
+  Injectable,
+  NgZone,
+  OnDestroy,
+  computed,
+  effect,
+  inject,
+  signal,
+  untracked,
+} from "@angular/core";
 import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import { InboxStore } from "../inbox/inbox.store";
 import type { Task, TaskDetail } from "../api/models";
+import { TaskFeedStore } from "../services/task-feed.service";
 import { isListCiPlaceholder } from "../shared/gates";
 import { errorText } from "../sessions/session-view";
 import {
@@ -44,21 +54,23 @@ export interface Undo {
 // tasks a page at a time, and the calls that act on them. Every action
 // re-reads the list; nothing is shown that the server has not said.
 @Injectable({ providedIn: "root" })
-export class TasksStore {
+export class TasksStore implements OnDestroy {
   private readonly api = inject(GrainApi);
   private readonly events = inject(GrainEvents);
   private readonly zone = inject(NgZone);
+  private readonly feed = inject(TaskFeedStore);
   // The shell's list feeds Next up and the Inbox badge; it is told to
   // read again after every action here so neither lags behind.
   private readonly inbox = inject(InboxStore);
 
-  readonly live = signal<Task[]>([]);
+  readonly live = this.feed.tasks;
   readonly details = signal<Record<string, TaskDetail>>({});
   readonly closed = signal<Task[]>([]);
   readonly closedCursor = signal<string | null>(null);
   readonly closedLoaded = signal(false);
   readonly closedTotal = signal<number | null>(null);
-  readonly loaded = signal(false);
+  private readonly ownLoaded = signal(false);
+  readonly loaded = computed(() => this.ownLoaded() || this.feed.loaded());
   readonly loadError = signal<string | null>(null);
   readonly actionError = signal<string | null>(null);
   readonly busy = signal<ReadonlySet<string>>(new Set());
@@ -81,38 +93,79 @@ export class TasksStore {
     return c;
   });
 
-  private timer: ReturnType<typeof setInterval> | null = null;
   private eventSub: { unsubscribe(): void } | null = null;
   private refreshing: Promise<void> | null = null;
   private eventTimer: ReturnType<typeof setTimeout> | null = null;
   private queuedRefresh: Promise<void> | null = null;
   private readonly detailInFlight = new Set<string>();
+  private started = false;
+
+  constructor() {
+    effect(() => {
+      const rev = this.feed.revision();
+      const err = this.feed.loadError();
+      const feedLoaded = this.feed.loaded();
+      untracked(() => {
+        if (err) {
+          if (this.started) {
+            this.loadError.set(
+              `The task list could not be read: ${err}. This page tries again on its own.`,
+            );
+          }
+          return;
+        }
+        if (rev === 0 && !feedLoaded) return;
+        this.loadError.set(null);
+        this.ownLoaded.set(true);
+        if (this.started) {
+          void this.ensureSubmitDetails(this.live());
+        }
+      });
+    });
+  }
 
   start(): void {
-    void this.refresh();
-    // Events come in bursts; one read covers a burst.
-    this.eventSub ??= this.events.events().subscribe(() => {
-      if (this.eventTimer) return;
-      this.eventTimer = setTimeout(() => {
-        this.eventTimer = null;
-        void this.refresh();
-      }, 250);
-    });
-    if (!this.timer) {
-      this.zone.runOutsideAngular(() => {
-        this.timer = setInterval(
-          () => this.zone.run(() => void this.refresh()),
-          POLL_MS,
-        );
-      });
+    const wasStarted = this.started;
+    if (!this.started) {
+      this.started = true;
+      this.feed.start(false);
+      this.feed.acquireFast();
     }
+    if (!wasStarted && this.feed.loaded()) {
+      void this.refresh();
+    } else if (this.feed.loaded()) {
+      void this.ensureSubmitDetails(this.live());
+    }
+    // TaskFeedStore owns task.* SSE refreshes and the 3s fast poll; here we
+    // only wake submit-gate detail checks on non-task events (e.g. ci.*).
+    this.eventSub ??= this.events.events().subscribe((ev) => {
+      if (!ev.type || ev.type.startsWith("task.")) return;
+      if (this.eventTimer) return;
+      this.zone.runOutsideAngular(() => {
+        this.eventTimer = setTimeout(() => {
+          this.eventTimer = null;
+          this.zone.run(() => void this.ensureSubmitDetails(this.live()));
+        }, 250);
+      });
+    });
   }
 
   stop(): void {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
+    if (this.started) {
+      this.started = false;
+      this.feed.releaseFast();
+      this.feed.stop(false);
+    }
+    if (this.eventTimer) {
+      clearTimeout(this.eventTimer);
+      this.eventTimer = null;
+    }
     this.eventSub?.unsubscribe();
     this.eventSub = null;
+  }
+
+  ngOnDestroy(): void {
+    this.stop();
   }
 
   refresh(): Promise<void> {
@@ -131,21 +184,16 @@ export class TasksStore {
   }
 
   private async load(): Promise<void> {
-    let loadedLive = false;
-    try {
-      const r = await this.api.getIfChanged<Task[]>("GET /api/tasks");
-      if (r.changed || this.live().length === 0) {
-        this.live.set(Array.isArray(r.body) ? r.body : []);
-      }
+    const ok = await this.feed.refresh();
+    if (ok) {
       this.loadError.set(null);
-      loadedLive = true;
-    } catch (err) {
+    } else {
       this.loadError.set(
-        `The task list could not be read: ${errorText(err)}. This page tries again on its own.`,
+        `The task list could not be read: ${this.feed.loadError() ?? "The request failed."}. This page tries again on its own.`,
       );
     }
-    this.loaded.set(true);
-    if (loadedLive) await this.ensureSubmitDetails(this.live());
+    this.ownLoaded.set(true);
+    if (ok) await this.ensureSubmitDetails(this.live());
   }
 
   private async ensureSubmitDetails(tasks: readonly Task[]): Promise<void> {
@@ -183,7 +231,7 @@ export class TasksStore {
         { id },
         "comments_limit=1&attempts_limit=1",
       );
-      if (d.changed && d.body) {
+      if (d?.body) {
         this.details.update((m) => ({ ...m, [id]: d.body! }));
       }
     } catch {
