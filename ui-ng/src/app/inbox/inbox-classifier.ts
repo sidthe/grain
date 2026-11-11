@@ -464,7 +464,7 @@ function taskEntry(t: Task, kind: EntryKind, groupId: string): InboxEntry {
     at: t.updatedAt || t.createdAt || null,
     rationale: "",
     taskId: t.id,
-    taskLink: `/tasks/${encodeURIComponent(t.id)}`,
+    taskLink: `/task/${encodeURIComponent(t.id)}`,
     externalLink: pullRequestUrl(t),
     task: t,
     actions: [],
@@ -676,7 +676,7 @@ export function classifyNotification(n: Notification): InboxEntry {
       : "An alert stays open until somebody acknowledges or clears it.",
     taskId: n.investigationTaskId || null,
     taskLink: n.investigationTaskId
-      ? `/tasks/${encodeURIComponent(n.investigationTaskId)}`
+      ? `/task/${encodeURIComponent(n.investigationTaskId)}`
       : null,
     externalLink: null,
     notification: n,
@@ -732,8 +732,9 @@ export function classifyLocalScript(a: LocalScriptApproval): InboxEntry {
     rationale:
       "The script runs on a host, so a person approves the exact call.",
     taskId: a.taskId,
-    taskLink: `/tasks/${encodeURIComponent(a.taskId)}`,
-    externalLink: null,
+    // Host-script approvals live on the classic task page for now.
+    taskLink: null,
+    externalLink: `/tasks/${encodeURIComponent(a.taskId)}`,
     localScript: a,
     actions: [
       {
