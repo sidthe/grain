@@ -26,6 +26,7 @@ import {
   viewChild,
 } from "@angular/core";
 import {
+  NavigationEnd,
   NavigationStart,
   Router,
   RouterLink,
@@ -55,7 +56,7 @@ const ICONS: Record<string, string> = {
   tasks:
     "M3 5h2v2H3zm4 0h14v2H7zM3 11h2v2H3zm4 0h14v2H7zm-4 6h2v2H3zm4 0h14v2H7z",
   sessions:
-    "M4 4h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H8l-4 4V6a2 2 0 0 1 2-2zm0 2v11.17L7.17 16H20V6H4z",
+    "M20 2H4a2 2 0 0 0-2 2v18l4-4h14a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2zm0 14H5.17L4 17.17V4h16v12z",
   ci: "M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z",
   processes:
     "M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8zm.5-13H11v6l5.25 3.15.75-1.23-4.5-2.67z",
@@ -293,7 +294,7 @@ interface CreateItem {
       </main>
 
       <footer class="bottom-bar">
-        <span class="muted"
+        <span class="muted bottom-version" [attr.title]="store.version()"
           >grain{{ store.version() ? " " + store.version() : "" }}</span
         >
         <span class="bottom-actions">
@@ -311,16 +312,20 @@ interface CreateItem {
         </span>
       </footer>
 
-      <a
-        class="phone-fab"
-        data-testid="phone-new-task"
-        [href]="newTaskHref"
-        aria-label="New task"
-      >
-        <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">
-          <path [attr.d]="icons['add']" fill="currentColor" />
-        </svg>
-      </a>
+      <!-- Sessions has a composer where the phone FAB would sit, and is
+        itself a place to ask for work (the prototype hides it there too). -->
+      @if (!onSessions()) {
+        <a
+          class="phone-fab"
+          data-testid="phone-new-task"
+          [href]="newTaskHref"
+          aria-label="New task"
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true">
+            <path [attr.d]="icons['add']" fill="currentColor" />
+          </svg>
+        </a>
+      }
 
       <nav class="compact-nav" aria-label="Primary destinations (compact)">
         @for (d of phoneDestinations; track d.id) {
@@ -438,6 +443,7 @@ export class AppComponent implements OnInit, OnDestroy {
       tip: "Start a standing conversation with an agent.",
     },
   ];
+  protected readonly onSessions = signal(false);
   protected readonly inboxCount = computed(() => this.store.entries().length);
   protected readonly createOpen = signal(false);
   protected readonly createPos = signal({ top: 0, left: 0 });
@@ -463,11 +469,17 @@ export class AppComponent implements OnInit, OnDestroy {
     );
     r(",", "Open Settings", () => this.open(SETTINGS));
     r("t", "Switch light and dark", () => this.theme.toggle());
+    // The rail's Inbox badge and the footer's version come from the Inbox
+    // store, so it runs on every page, not only on the Inbox.
+    this.store.start();
     // Menus belong to the page they were opened on.
     this.navSub = this.router.events.subscribe((e) => {
       if (e instanceof NavigationStart) {
         this.createOpen.set(false);
         this.moreOpen.set(false);
+      }
+      if (e instanceof NavigationEnd) {
+        this.onSessions.set(e.urlAfterRedirects.startsWith("/sessions"));
       }
     });
     // The create menu is placed from its button once; a scrolled rail or
@@ -481,6 +493,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.store.stop();
     this.unregister.forEach((u) => u());
     this.navSub?.unsubscribe();
     this.doc.defaultView?.removeEventListener("resize", this.onViewportChange);
