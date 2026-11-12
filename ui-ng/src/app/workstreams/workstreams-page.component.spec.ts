@@ -30,6 +30,7 @@ import {
   WS_VIEW_STORAGE_KEY,
   WorkstreamsPageComponent,
 } from "./workstreams-page.component";
+import { WS_INSPECTOR_RATIO_KEY } from "./workstream-detail.component";
 import { STARTED_STORAGE_KEY, WorkstreamsStore } from "./workstreams.store";
 
 function t(id: string, over: Partial<Task> = {}): Task {
@@ -38,9 +39,9 @@ function t(id: string, over: Partial<Task> = {}): Task {
     title: `Task ${id}`,
     state: "queued",
     repo: "sidthe/grain-scratch-repo",
-    author: "rarcea",
+    author: "alice",
     authorKind: "human",
-    owner: "rarcea",
+    owner: "alice",
     createdAt: "2026-11-11T09:00:00Z",
     updatedAt: "2026-11-11T10:00:00Z",
     ...over,
@@ -54,7 +55,7 @@ class FakeApi {
   calls: { route: string; params?: unknown; body?: unknown; query?: string }[] =
     [];
 
-  config = () => Promise.resolve({ access: null, viewerOwner: "rarcea" });
+  config = () => Promise.resolve({ access: null, viewerOwner: "alice" });
   openNotifications = () => Promise.resolve([]);
   localScriptApprovals = () => Promise.resolve([]);
   tasks = () => Promise.resolve(this.open);
@@ -107,6 +108,8 @@ describe("WorkstreamsPageComponent", () => {
   beforeEach(() => {
     localStorage.removeItem(WS_VIEW_STORAGE_KEY);
     localStorage.removeItem(STARTED_STORAGE_KEY);
+    localStorage.removeItem(WS_INSPECTOR_RATIO_KEY);
+    localStorage.removeItem("grain.ws.treeRatio");
     api = new FakeApi();
     Object.defineProperty(window, "matchMedia", {
       writable: true,
@@ -155,7 +158,7 @@ describe("WorkstreamsPageComponent", () => {
     });
     TestBed.inject(AccessService).setConfig({
       access: null,
-      viewerOwner: "rarcea",
+      viewerOwner: "alice",
     });
     const router = TestBed.inject(Router);
     const harness = await RouterTestingHarness.create(
@@ -356,5 +359,83 @@ describe("WorkstreamsPageComponent", () => {
       origin: "task:300",
       repo: "__none__",
     });
+  });
+
+  it("uses <g-pill-select> with zero native <select> elements and supports 3-column inspector resizer + running halos", async () => {
+    api.open = [
+      t("500", {
+        title: "Observability rollout",
+        state: "completed",
+        repo: "sidthe/grain",
+      }),
+      t("501", {
+        title: "Add Prometheus exporter",
+        state: "running",
+        repo: "sidthe/grain",
+        origin: "task:500",
+        generatedFrom: "500",
+      }),
+    ];
+
+    const { fixture, router } = await mount("/workstreams");
+    const el = fixture.nativeElement as HTMLElement;
+    expect(el.querySelectorAll("select")).toHaveLength(0);
+
+    // Filter by repository via <g-pill-select>
+    const navSpy = vi.spyOn(router, "navigate");
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="ws-repo-filter"]',
+    )!.click();
+    fixture.detectChanges();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="ws-repo-filter-opt-sidthe/grain"]',
+    )!.click();
+    expect(navSpy).toHaveBeenCalledWith([], {
+      queryParams: { repo: "sidthe/grain" },
+      queryParamsHandling: "merge",
+      replaceUrl: true,
+    });
+
+    // Open workstream detail: verify 21% tree, 42% inspector default, running node halos, and widening up to 55%
+    await router.navigateByUrl("/workstreams/task:500?node=501");
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(el.querySelectorAll("select")).toHaveLength(0);
+    expect(el.querySelectorAll("rect.ws-run-halo").length).toBe(3);
+
+    const treeResizer = el.querySelector<HTMLElement>(
+      '[data-testid="ws-tree-resizer"]',
+    )!;
+    const inspResizer = el.querySelector<HTMLElement>(
+      '[data-testid="ws-inspector-resizer"]',
+    )!;
+    expect(treeResizer.getAttribute("aria-valuenow")).toBe("21");
+    expect(inspResizer.getAttribute("aria-valuenow")).toBe("42");
+
+    inspResizer.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "End", bubbles: true }),
+    );
+    fixture.detectChanges();
+    expect(inspResizer.getAttribute("aria-valuenow")).toBe("55");
+    expect(localStorage.getItem(WS_INSPECTOR_RATIO_KEY)).toBe("0.5500");
+
+    inspResizer.dispatchEvent(new MouseEvent("dblclick", { bubbles: true }));
+    fixture.detectChanges();
+    expect(inspResizer.getAttribute("aria-valuenow")).toBe("42");
+
+    // Collapsing the tree via Enter exposes the "Show tree" button in .ws-dtoolbar
+    expect(el.querySelector('[data-testid="ws-show-tree"]')).toBeNull();
+    treeResizer.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    fixture.detectChanges();
+    const showTreeBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="ws-show-tree"]',
+    );
+    expect(showTreeBtn?.textContent?.trim()).toBe("Show tree");
+    showTreeBtn!.click();
+    fixture.detectChanges();
+    expect(el.querySelector('[data-testid="ws-show-tree"]')).toBeNull();
   });
 });

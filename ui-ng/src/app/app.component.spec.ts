@@ -48,7 +48,7 @@ class FakeShellApi {
     authenticated: true,
     source: "oidc",
     verified: true,
-    actor: { kind: "human", id: "rarcea@google.com", label: "Roman Arcea" },
+    actor: { kind: "human", id: "alice@example.com", label: "Roman Arcea" },
   };
   logoutRedirect = "/signed-out";
   logoutCalls = 0;
@@ -427,6 +427,7 @@ describe("AppComponent shell", () => {
     };
 
     help.open("about");
+    f.detectChanges();
     expect(el(f).querySelector("#main")?.hasAttribute("inert")).toBe(true);
     comp.onDeferError("help");
     await f.whenStable();

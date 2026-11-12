@@ -28,6 +28,7 @@ import {
   untracked,
   viewChild,
 } from "@angular/core";
+import { Router } from "@angular/router";
 import { AccessService } from "../services/access.service";
 import { KeyboardService, isTypingTarget } from "../services/keyboard.service";
 import { SnackbarService } from "../services/snackbar.service";
@@ -72,6 +73,37 @@ export const NODE_GLYPHS: Record<NodeGlyphKind, string> = {
   blocked: "M6 1.4a4.6 4.6 0 1 0 .01 0zM3.4 6h5.2",
 };
 
+export const WS_INSPECTOR_RATIO_KEY = "grain.ws.inspectorRatio";
+const DEFAULT_INSPECTOR_RATIO = 0.42;
+const MIN_INSPECTOR_RATIO = 0.3;
+const MAX_INSPECTOR_RATIO = 0.55;
+
+function clampInspRatio(r: number): number {
+  if (!Number.isFinite(r)) return DEFAULT_INSPECTOR_RATIO;
+  return Math.max(MIN_INSPECTOR_RATIO, Math.min(MAX_INSPECTOR_RATIO, r));
+}
+
+function loadInspRatio(): number {
+  try {
+    const raw = localStorage.getItem(WS_INSPECTOR_RATIO_KEY);
+    if (!raw) return DEFAULT_INSPECTOR_RATIO;
+    const parsed = Number.parseFloat(raw);
+    return Number.isFinite(parsed)
+      ? clampInspRatio(parsed)
+      : DEFAULT_INSPECTOR_RATIO;
+  } catch {
+    return DEFAULT_INSPECTOR_RATIO;
+  }
+}
+
+function saveInspRatio(r: number): void {
+  try {
+    localStorage.setItem(WS_INSPECTOR_RATIO_KEY, clampInspRatio(r).toFixed(4));
+  } catch {
+    // Ignore storage quota / privacy mode errors.
+  }
+}
+
 const MODES: { id: LayoutMode; label: string }[] = [
   { id: "split", label: "Split" },
   { id: "list", label: "List" },
@@ -86,6 +118,7 @@ const MODES: { id: LayoutMode; label: string }[] = [
   styleUrls: ["./workstream-detail.css", "./workstreams-shared.css"],
   host: {
     "(document:keydown)": "onKey($event)",
+    "(window:resize)": "onWindowResize()",
   },
   template: `
     @let s = stream();
@@ -287,6 +320,18 @@ const MODES: { id: LayoutMode; label: string }[] = [
         >
           Show all deps
         </button>
+        @if (sp.collapsed()) {
+          <button
+            type="button"
+            class="btn-tonal"
+            data-testid="ws-show-tree"
+            aria-controls="ws-tree-pane"
+            [attr.aria-expanded]="!sp.collapsed()"
+            (click)="restoreTree()"
+          >
+            Show tree
+          </button>
+        }
         @if (expandAll()) {
           <button
             type="button"
@@ -326,10 +371,12 @@ const MODES: { id: LayoutMode; label: string }[] = [
         #dbody
         class="ws-dbody"
         [class.is-collapsed]="sp.collapsed()"
+        [class.is-dragging]="sp.dragging() || inspDragging()"
         [class.mode-split]="mode() === 'split'"
         [class.mode-list]="mode() === 'list'"
         [class.mode-graph]="mode() === 'graph'"
         [style.--ws-tree-w.%]="sp.ratioExact()"
+        [style.--ws-insp-w.%]="inspRatioExact()"
       >
         <div class="ws-tpane" id="ws-tree-pane">
           <div class="ws-tbar">
@@ -422,12 +469,13 @@ const MODES: { id: LayoutMode; label: string }[] = [
         </div>
 
         <div
-          class="ws-resizer"
+          class="ws-resizer ws-tree-resizer"
           role="separator"
           tabindex="0"
           aria-orientation="vertical"
           aria-controls="ws-tree-pane"
           aria-label="Resize stream tree pane"
+          data-testid="ws-tree-resizer"
           [attr.aria-valuemin]="sp.minPct()"
           [attr.aria-valuemax]="sp.maxPct()"
           [attr.aria-valuenow]="sp.ratioPct()"
@@ -441,7 +489,9 @@ const MODES: { id: LayoutMode; label: string }[] = [
           (lostpointercapture)="sp.onResizeEnd($event)"
           (dblclick)="sp.reset()"
           (keydown)="sp.onKey($event)"
-        ></div>
+        >
+          <span class="ws-resizer-pill" aria-hidden="true"></span>
+        </div>
 
         <div class="ws-gpane" data-testid="ws-graph-pane">
           @let g = graph();
@@ -532,6 +582,19 @@ const MODES: { id: LayoutMode; label: string }[] = [
                     $event.preventDefault(); onGraphNodeClick(pn)
                   "
                 >
+                  @if (pn.category === "run" && !pn.isPack) {
+                    @for (pulse of [0, 1, 2]; track pulse) {
+                      <rect
+                        class="ws-run-halo"
+                        [attr.x]="pn.x"
+                        [attr.y]="pn.y"
+                        [attr.width]="pn.w"
+                        [attr.height]="pn.h"
+                        rx="10"
+                        [style.animation-delay.s]="pulse * 0.8"
+                      />
+                    }
+                  }
                   <rect
                     [attr.x]="pn.x"
                     [attr.y]="pn.y"
@@ -562,8 +625,32 @@ const MODES: { id: LayoutMode; label: string }[] = [
           </div>
         </div>
 
+        <div
+          class="ws-resizer ws-insp-resizer"
+          role="separator"
+          tabindex="0"
+          aria-orientation="vertical"
+          aria-controls="ws-inspector"
+          aria-label="Resize task inspector"
+          data-testid="ws-inspector-resizer"
+          aria-valuemin="30"
+          aria-valuemax="55"
+          [attr.aria-valuenow]="inspRatioPct()"
+          [attr.aria-valuetext]="'Inspector ' + inspRatioPct() + ' percent'"
+          (pointerdown)="onInspResizeStart($event)"
+          (pointermove)="onInspResizeMove($event)"
+          (pointerup)="onInspResizeEnd($event)"
+          (pointercancel)="onInspResizeEnd($event)"
+          (lostpointercapture)="onInspResizeEnd($event)"
+          (dblclick)="resetInspRatio()"
+          (keydown)="onInspResizerKey($event)"
+        >
+          <span class="ws-resizer-pill" aria-hidden="true"></span>
+        </div>
+
         <aside
           #inspEl
+          id="ws-inspector"
           class="ws-insp"
           [class.is-open]="inspMobileOpen()"
           tabindex="-1"
@@ -689,8 +776,10 @@ const MODES: { id: LayoutMode; label: string }[] = [
             <g-task-detail
               [id]="tid"
               [pane]="true"
+              [closable]="false"
               [from]="'workstreams:' + s.key"
               (openTask)="onOpenTask($event)"
+              (expand)="openFullTask(tid)"
               (acted)="wsStore.refresh(true)"
             />
           }
@@ -708,6 +797,7 @@ export class WorkstreamDetailComponent implements OnDestroy {
   private readonly access = inject(AccessService);
   private readonly snackbar = inject(SnackbarService);
   private readonly keyboard = inject(KeyboardService);
+  private readonly router = inject(Router);
   private readonly host = inject(ElementRef) as ElementRef<HTMLElement>;
 
   readonly stream = input.required<Workstream>();
@@ -730,12 +820,63 @@ export class WorkstreamDetailComponent implements OnDestroy {
   protected readonly dbodyEl = viewChild<ElementRef<HTMLElement>>("dbody");
   private readonly inspEl = viewChild<ElementRef<HTMLElement>>("inspEl");
   private inspReturn: HTMLElement | null = null;
+  private dbodyResizeObs: ResizeObserver | null = null;
+  protected readonly dbodyStage = signal(0);
   protected readonly sp = new SplitController({
     ratioKey: "grain.ws.treeRatio",
     collapsedKey: "grain.ws.treeCollapsed",
-    defaultRatio: 0.28,
+    defaultRatio: 0.21,
+    bounds: (stage) => ({
+      min: Math.min(236, stage),
+      max: Math.max(Math.min(236, stage), Math.min(320, stage - 280)),
+    }),
     element: () => this.dbodyEl()?.nativeElement,
   });
+
+  protected readonly inspRatio = signal(loadInspRatio());
+  protected readonly inspDragging = signal(false);
+  private inspDragFrom: number | null = null;
+
+  private clampInspForStage(r: number): number {
+    const base = clampInspRatio(r);
+    const stage =
+      this.dbodyStage() || this.dbodyEl()?.nativeElement?.clientWidth || 0;
+    if (stage <= 0) return base;
+    const isDesktopSplit =
+      this.mode() === "split" &&
+      (typeof window === "undefined" || window.innerWidth >= 1280);
+    const treePx =
+      isDesktopSplit && !this.sp.collapsed()
+        ? Math.min(320, Math.max(236, (this.sp.ratioExact() / 100) * stage))
+        : 0;
+    const maxInspPx = Math.max(360, stage - treePx - 280);
+    const minInspPx = Math.min(isDesktopSplit ? 380 : 440, maxInspPx);
+    const clampedPx = Math.max(
+      minInspPx,
+      Math.min(Math.min(stage * MAX_INSPECTOR_RATIO, maxInspPx), base * stage),
+    );
+    return clampedPx / stage;
+  }
+
+  protected readonly effectiveInspRatio = computed(() =>
+    this.clampInspForStage(this.inspRatio()),
+  );
+  protected readonly inspRatioExact = computed(() =>
+    Number((this.effectiveInspRatio() * 100).toFixed(2)),
+  );
+  protected readonly inspRatioPct = computed(() =>
+    Math.round(this.effectiveInspRatio() * 100),
+  );
+
+  private readonly onInspDragEscape = (ev: KeyboardEvent): void => {
+    if (ev.key !== "Escape" || !this.inspDragging()) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (this.inspDragFrom !== null) this.inspRatio.set(this.inspDragFrom);
+    this.inspDragging.set(false);
+    this.inspDragFrom = null;
+    window.removeEventListener("keydown", this.onInspDragEscape, true);
+  };
 
   protected readonly modes = MODES;
   protected readonly short = repoShort;
@@ -745,7 +886,15 @@ export class WorkstreamDetailComponent implements OnDestroy {
   protected readonly confirming = signal<ConfirmRequest | null>(null);
 
   constructor() {
-    afterNextRender(() => this.sp.attach());
+    afterNextRender(() => {
+      this.sp.attach();
+      this.measureDbody();
+      const el = this.dbodyEl()?.nativeElement;
+      if (el && typeof ResizeObserver === "function" && !this.dbodyResizeObs) {
+        this.dbodyResizeObs = new ResizeObserver(() => this.measureDbody());
+        this.dbodyResizeObs.observe(el);
+      }
+    });
     effect(() => {
       const s = this.stream();
       untracked(() => {
@@ -758,6 +907,90 @@ export class WorkstreamDetailComponent implements OnDestroy {
 
   ngOnDestroy(): void {
     this.sp.detach();
+    this.dbodyResizeObs?.disconnect();
+    this.dbodyResizeObs = null;
+    window.removeEventListener("keydown", this.onInspDragEscape, true);
+  }
+
+  protected onWindowResize(): void {
+    this.sp.measure();
+    this.measureDbody();
+  }
+
+  private measureDbody(): void {
+    const w = this.dbodyEl()?.nativeElement?.clientWidth ?? 0;
+    if (w > 0) this.dbodyStage.set(w);
+  }
+
+  protected restoreTree(): void {
+    if (this.mode() === "graph") {
+      this.setMode("split");
+    }
+    if (this.sp.collapsed()) {
+      this.sp.toggleCollapsed();
+    }
+  }
+
+  protected openFullTask(taskId: string): void {
+    void this.router.navigate(["/task", taskId], {
+      queryParams: { from: `workstreams:${this.stream().key}` },
+    });
+  }
+
+  protected onInspResizeStart(ev: PointerEvent): void {
+    if (ev.button !== 0) return;
+    this.measureDbody();
+    this.inspDragFrom = this.inspRatio();
+    this.inspDragging.set(true);
+    window.addEventListener("keydown", this.onInspDragEscape, true);
+    (ev.currentTarget as HTMLElement).setPointerCapture?.(ev.pointerId);
+    ev.preventDefault();
+  }
+
+  protected onInspResizeMove(ev: PointerEvent): void {
+    if (!this.inspDragging()) return;
+    const el = this.dbodyEl()?.nativeElement;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    this.dbodyStage.set(rect.width);
+    const next = this.clampInspForStage((rect.right - ev.clientX) / rect.width);
+    this.inspRatio.set(next);
+  }
+
+  protected onInspResizeEnd(ev?: Event): void {
+    if (!this.inspDragging()) return;
+    window.removeEventListener("keydown", this.onInspDragEscape, true);
+    this.inspDragging.set(false);
+    this.inspDragFrom = null;
+    saveInspRatio(this.effectiveInspRatio());
+    (ev?.currentTarget as HTMLElement | undefined)?.releasePointerCapture?.(
+      (ev as PointerEvent).pointerId,
+    );
+  }
+
+  protected resetInspRatio(): void {
+    this.inspRatio.set(DEFAULT_INSPECTOR_RATIO);
+    saveInspRatio(DEFAULT_INSPECTOR_RATIO);
+  }
+
+  protected onInspResizerKey(ev: KeyboardEvent): void {
+    this.measureDbody();
+    const cur = this.effectiveInspRatio();
+    const step = ev.shiftKey ? 0.06 : 0.02;
+    let next: number | null = null;
+    // Moving divider left widens the right-hand inspector; moving right narrows it.
+    if (ev.key === "ArrowLeft") next = this.clampInspForStage(cur + step);
+    else if (ev.key === "ArrowRight") next = this.clampInspForStage(cur - step);
+    else if (ev.key === "Home")
+      next = this.clampInspForStage(MIN_INSPECTOR_RATIO);
+    else if (ev.key === "End")
+      next = this.clampInspForStage(MAX_INSPECTOR_RATIO);
+    if (next === null) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    this.inspRatio.set(next);
+    saveInspRatio(next);
   }
 
   protected readonly activeNodeId = computed<string>(() => {
