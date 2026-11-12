@@ -120,7 +120,7 @@
 }
 
 .pop-item:disabled {
-  opacity: 0.45;
+  color: var(--md-sys-color-outline);
   cursor: not-allowed;
 }
 
@@ -278,6 +278,12 @@
   min-width: 0;
 }
 
+.ops-table-wrap:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
 .ops-table {
   width: 100%;
   border-collapse: collapse;
@@ -310,8 +316,8 @@
   padding: 12px 14px;
   border-radius: var(--md-sys-shape-corner-medium);
   border: 1px solid #2d323e;
-  background: #13151a;
-  color: #e4e6eb;
+  background: var(--grain-well-bg, #13151a);
+  color: var(--grain-well-fg, #e4e6eb);
   font: 12px/18px var(--grain-font-mono);
   overflow: auto;
   max-height: 440px;
