@@ -48,7 +48,7 @@ class FakeShellApi {
     authenticated: true,
     source: "oidc",
     verified: true,
-    actor: { kind: "human", id: "alice@example.com", label: "Roman Arcea" },
+    actor: { kind: "human", id: "alice@example.com", label: "Alice Example" },
   };
   logoutRedirect = "/signed-out";
   logoutCalls = 0;
@@ -86,6 +86,9 @@ async function render(
         { path: "tasks", children: [] },
         { path: "agents", children: [] },
         { path: "sessions", children: [] },
+        { path: "processes", children: [] },
+        { path: "processes/:tab", children: [] },
+        { path: "ci", children: [] },
       ]),
       { provide: APP_BASE_HREF, useValue: "/next/" },
       { provide: GrainApi, useValue: api },
@@ -164,8 +167,12 @@ describe("AppComponent shell", () => {
     const { fixture: f } = await render();
     const inbox = el(f).querySelector('[data-testid="rail-inbox"]')!;
     expect(inbox.getAttribute("href")).toBe("/next/inbox");
+    const processes = el(f).querySelector('[data-testid="rail-processes"]')!;
+    expect(processes.getAttribute("href")).toBe("/next/processes");
     const ci = el(f).querySelector('[data-testid="rail-ci"]')!;
-    expect(ci.getAttribute("href")).toBe("/ci");
+    expect(ci.getAttribute("href")).toBe("/next/ci");
+    const telemetry = el(f).querySelector('[data-testid="rail-telemetry"]')!;
+    expect(telemetry.getAttribute("href")).toBe("/metrics");
   });
 
   it("opens the 2-line rich create disclosure, and Escape closes it back onto its button", async () => {
@@ -193,9 +200,10 @@ describe("AppComponent shell", () => {
       "New session",
       "Task from template",
       "Run a suite",
+      "New schedule",
       "New board",
     ]);
-    expect(subs.length).toBe(6);
+    expect(subs.length).toBe(7);
     expect(subs[0].textContent?.trim()).toContain("Describe work");
 
     const links = [
@@ -351,7 +359,7 @@ describe("AppComponent shell", () => {
     const avatar = el(f).querySelector<HTMLButtonElement>(
       '[data-testid="avatar-btn"]',
     )!;
-    expect(avatar.textContent?.trim()).toBe("RA");
+    expect(avatar.textContent?.trim()).toBe("AE");
 
     avatar.click();
     await f.whenStable();
@@ -364,7 +372,7 @@ describe("AppComponent shell", () => {
       pop
         .querySelector('[data-testid="account-identity"]')
         ?.textContent?.trim(),
-    ).toBe("Roman Arcea");
+    ).toBe("Alice Example");
     expect(
       pop.querySelector('[data-testid="account-role"]')?.textContent?.trim(),
     ).toBe("grain/operator");
