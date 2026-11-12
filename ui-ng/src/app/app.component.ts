@@ -56,12 +56,7 @@ import { TipDirective } from "./shared/tip.directive";
 import { AccountPopoverComponent } from "./shell/account-popover.component";
 import { CustomizeNavDialogComponent } from "./shell/customize-nav-dialog.component";
 import { HelpDialogComponent } from "./shell/help-dialog.component";
-import {
-  CLASSIC_NEW_TASK,
-  type Destination,
-  SETTINGS,
-  hrefFor,
-} from "./shell/nav";
+import { type Destination, SETTINGS, hrefFor } from "./shell/nav";
 import { NextUpComponent } from "./shell/next-up.component";
 import { SnackbarComponent } from "./shell/snackbar.component";
 
@@ -469,11 +464,6 @@ export class DeferErrorDirective implements OnInit {
             aria-label="Grain home: Inbox"
             >Grain</a
           >
-          <span
-            class="next-chip"
-            gTip="The new UI, built beside the classic one."
-            >Next</span
-          >
         </div>
         <div class="top-actions">
           <g-next-up />
@@ -607,7 +597,6 @@ export class DeferErrorDirective implements OnInit {
           >
             Shortcuts {{ keyboard.enabled() ? "on" : "off" }}
           </button>
-          <a class="btn-text bottom-link" href="/">Classic UI</a>
         </span>
       </footer>
 
@@ -859,12 +848,12 @@ export class DeferErrorDirective implements OnInit {
         }
       }
 
-      @defer (when customizeNavOpen()) {
-        @if (customizeNavOpen()) {
+      @defer (when navConfig.dialogOpen()) {
+        @if (navConfig.dialogOpen()) {
           <g-customize-nav-dialog (closed)="onCustomizeNavClosed()" />
         }
       } @error {
-        @if (customizeNavOpen()) {
+        @if (navConfig.dialogOpen()) {
           <span gDeferError (recover)="onDeferError('customize')"></span>
         }
       }
@@ -961,7 +950,6 @@ export class AppComponent implements OnInit, OnDestroy {
   ];
 
   protected readonly createTask = inject(CreateTaskService);
-  protected readonly classicNewTask = CLASSIC_NEW_TASK;
   protected readonly onSessions = signal(false);
   protected readonly version = computed(() => this.inboxRef()?.version() ?? "");
   protected readonly inboxCount = computed(
@@ -973,13 +961,14 @@ export class AppComponent implements OnInit, OnDestroy {
   protected readonly railMorePos = signal({ top: 0, left: 0 });
   protected readonly moreOpen = signal(false);
   protected readonly accountOpen = signal(false);
-  protected readonly customizeNavOpen = signal(false);
   protected readonly prefersReducedMotion = signal(false);
   protected readonly spriteFailed = signal(false);
 
   protected readonly modalOpen = computed(
     () =>
-      this.createTask.isOpen() || this.help.isOpen() || this.customizeNavOpen(),
+      this.createTask.isOpen() ||
+      this.help.isOpen() ||
+      this.navConfig.dialogOpen(),
   );
 
   protected readonly animateBrandMark = computed(
@@ -1022,7 +1011,6 @@ export class AppComponent implements OnInit, OnDestroy {
   private readonly avatarBtn =
     viewChild<ElementRef<HTMLButtonElement>>("avatarBtn");
 
-  private customizeOpener: HTMLElement | null = null;
   private unregister: (() => void)[] = [];
   private navSub: { unsubscribe(): void } | null = null;
   private motionMql: MediaQueryList | null = null;
@@ -1195,10 +1183,9 @@ export class AppComponent implements OnInit, OnDestroy {
   ): void {
     if (which === "create") {
       this.createTask.close();
-      this.snackbar.show("The New task form could not load.", {
-        label: "Classic form",
-        run: () => this.doc.defaultView?.location.assign(this.classicNewTask),
-      });
+      this.snackbar.show(
+        "The New task form could not load. Reload the page and try again.",
+      );
     } else if (which === "help") {
       this.help.close();
       this.snackbar.show("Help could not load. Reload the page and try again.");
@@ -1217,27 +1204,21 @@ export class AppComponent implements OnInit, OnDestroy {
 
   protected openCustomizeFromAccount(): void {
     this.accountOpen.set(false);
-    this.customizeOpener = this.avatarBtn()?.nativeElement ?? null;
-    this.customizeNavOpen.set(true);
+    this.navConfig.openDialog(this.avatarBtn()?.nativeElement ?? null);
   }
 
   protected openCustomizeNav(ev: Event): void {
-    this.customizeOpener = this.moreOpen()
+    const opener = this.moreOpen()
       ? (this.moreBtn()?.nativeElement ?? null)
       : this.railMoreOpen()
         ? (this.railMoreBtn()?.nativeElement ?? null)
         : (ev.currentTarget as HTMLElement | null);
     this.closeMenus();
-    this.customizeNavOpen.set(true);
+    this.navConfig.openDialog(opener);
   }
 
   protected onCustomizeNavClosed(): void {
-    this.customizeNavOpen.set(false);
-    const target = this.customizeOpener;
-    this.customizeOpener = null;
-    if (target && typeof target.focus === "function") {
-      setTimeout(() => target.focus());
-    }
+    this.navConfig.closeDialog();
   }
 
   protected closeMenus(): void {
@@ -1249,7 +1230,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   open(d: Destination): void {
     if (d.route) void this.router.navigateByUrl(d.route);
-    else this.doc.defaultView?.location.assign(d.classic);
+    else if (d.classic) this.doc.defaultView?.location.assign(d.classic);
   }
 
   protected toggleCreate(ev: Event): void {

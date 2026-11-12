@@ -138,5 +138,68 @@ export const routes: Routes = [
       ),
   },
   { path: "memory", redirectTo: "context" },
+  { path: "config", redirectTo: "settings/config-repo", pathMatch: "full" },
+  {
+    path: "settings",
+    title: "Settings · grain",
+    loadComponent: () =>
+      import("./settings/settings-page.component").then(
+        (m) => m.SettingsPageComponent,
+      ),
+  },
+  {
+    path: "settings/:section",
+    title: "Settings · grain",
+    loadComponent: () =>
+      import("./settings/settings-page.component").then(
+        (m) => m.SettingsPageComponent,
+      ),
+  },
+  {
+    matcher: (s) =>
+      s.length === 4 && s[0].path === "repos" && /[.:]/.test(s[1].path)
+        ? {
+            consumed: s,
+            posParams: { host: s[1], owner: s[2], name: s[3] },
+          }
+        : null,
+    title: "Repository · grain",
+    loadComponent: () =>
+      import("./repos/repo-detail-page.component").then(
+        (m) => m.RepoDetailPageComponent,
+      ),
+  },
+  {
+    path: "repos/:owner/:name",
+    title: "Repository · grain",
+    loadComponent: () =>
+      import("./repos/repo-detail-page.component").then(
+        (m) => m.RepoDetailPageComponent,
+      ),
+  },
+  {
+    path: "repos/:owner/:name/:tab",
+    title: "Repository · grain",
+    loadComponent: () =>
+      import("./repos/repo-detail-page.component").then(
+        (m) => m.RepoDetailPageComponent,
+      ),
+  },
+  {
+    path: "repos/:host/:owner/:name",
+    title: "Repository · grain",
+    loadComponent: () =>
+      import("./repos/repo-detail-page.component").then(
+        (m) => m.RepoDetailPageComponent,
+      ),
+  },
+  {
+    path: "repos/:host/:owner/:name/:tab",
+    title: "Repository · grain",
+    loadComponent: () =>
+      import("./repos/repo-detail-page.component").then(
+        (m) => m.RepoDetailPageComponent,
+      ),
+  },
   { path: "**", redirectTo: "inbox" },
 ];
