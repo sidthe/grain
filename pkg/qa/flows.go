@@ -25,12 +25,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Built-in deterministic pre-PR S3 rule identifiers.
+// Built-in deterministic pre-PR S3/S3.5 and semantic S4 rule identifiers.
 const (
 	RuleTestIntegrityGuard   = "golden:test-integrity-guard"
 	RuleStrictConfigDecoder  = "golden:strict-config-decoder"
 	RuleSiblingExportHazard  = "golden:sibling-export-hazard"
 	RuleUIBudgetAndSpecFloor = "golden:ui-budget-and-spec-floor"
+	RuleExportedSurfaceDelta = "golden:exported-surface-delta"
+	RuleTestHygiene          = "golden:test-hygiene"
+	RuleMutationHardening    = "golden:mutation-hardening"
+	RuleBoundaryFuzz         = "golden:boundary-fuzz"
 	RuleS4OrthogonalVerifier = "golden:s4-orthogonal-verifier"
 )
 
@@ -40,15 +44,16 @@ var RepoFlowCandidatePaths = []string{
 	".grain/qa/flow.yml",
 }
 
-// RuleSpec describes one deterministic (S3) or fresh-context semantic (S4) rule in a QA flow.
+// RuleSpec describes one deterministic (S3/S3.5) or fresh-context semantic (S4) rule in a QA flow.
 type RuleSpec struct {
-	ID          string   `json:"id" yaml:"id"`
-	Label       string   `json:"label" yaml:"label"`
-	Stage       string   `json:"stage" yaml:"stage"`
-	Severity    string   `json:"severity" yaml:"severity"`
-	Summary     string   `json:"summary" yaml:"summary"`
-	TargetPaths []string `json:"targetPaths" yaml:"target-paths"`
-	Enabled     bool     `json:"enabled" yaml:"enabled"`
+	ID          string         `json:"id" yaml:"id"`
+	Label       string         `json:"label" yaml:"label"`
+	Stage       string         `json:"stage" yaml:"stage"`
+	Severity    string         `json:"severity" yaml:"severity"`
+	Summary     string         `json:"summary" yaml:"summary"`
+	TargetPaths []string       `json:"targetPaths" yaml:"target-paths"`
+	Enabled     bool           `json:"enabled" yaml:"enabled"`
+	Params      map[string]any `json:"params,omitempty" yaml:"params,omitempty"`
 }
 
 // FlowSpec describes a quality control flow package executable by the Grain QA engine.
@@ -57,21 +62,50 @@ type FlowSpec struct {
 	Label              string     `json:"label" yaml:"label"`
 	Summary            string     `json:"summary" yaml:"summary"`
 	InjectSkill        bool       `json:"injectSkill" yaml:"inject-skill"`
+	SkillText          string     `json:"skillText,omitempty" yaml:"-"`
 	SkillBytes         int        `json:"skillBytes" yaml:"-"`
 	StopNudge          bool       `json:"stopNudge" yaml:"stop-nudge"`
 	StagingIsolation   bool       `json:"stagingIsolation" yaml:"staging-isolation"`
 	EnableS4           bool       `json:"enableS4" yaml:"enable-s4"`
+	VerifierTiers      []string   `json:"verifierTiers,omitempty" yaml:"verifier-tiers,omitempty"`
 	MaxS4RepairRounds  int        `json:"maxS4RepairRounds" yaml:"max-s4-repair-rounds"`
+	MaxS4Seconds       int        `json:"maxS4Seconds,omitempty" yaml:"max-s4-seconds,omitempty"`
+	MaxS4Tokens        int        `json:"maxS4Tokens,omitempty" yaml:"max-s4-tokens,omitempty"`
+	VerifierChecklist  string     `json:"verifierChecklist,omitempty" yaml:"verifier-checklist,omitempty"`
 	StrictDecoderPaths []string   `json:"strictDecoderPaths,omitempty" yaml:"strict-decoder-paths,omitempty"`
 	Rules              []RuleSpec `json:"rules" yaml:"rules"`
 }
 
-// SkillPrompt returns the embedded coding-time skill text when InjectSkill is true.
+// SkillPrompt returns the coding-time skill text when InjectSkill is true.
 func (f FlowSpec) SkillPrompt() string {
 	if !f.InjectSkill {
 		return ""
 	}
+	if strings.TrimSpace(f.SkillText) != "" {
+		return strings.TrimSpace(f.SkillText)
+	}
 	return strings.TrimSpace(v1.SkillMarkdown)
+}
+
+// Rule looks up ruleID in f.Rules.
+func (f FlowSpec) Rule(ruleID string) (RuleSpec, bool) {
+	for _, r := range f.Rules {
+		if r.ID == ruleID {
+			return r, true
+		}
+	}
+	return RuleSpec{}, false
+}
+
+// RequiresS4ForTier reports whether S4 semantic verification applies to tier under f.
+func (f FlowSpec) RequiresS4ForTier(tier BlastTier) bool {
+	if !f.EnableS4 {
+		return false
+	}
+	if len(f.VerifierTiers) == 0 {
+		return tier.RequiresS4()
+	}
+	return slices.Contains(f.VerifierTiers, string(tier))
 }
 
 // HasRule reports whether ruleID is enabled in f.
@@ -194,6 +228,9 @@ func LookupFlow(id string) (FlowSpec, bool) {
 		if f.ID == id {
 			return f, true
 		}
+	}
+	if v, ok := LookupBuiltInOrRegisteredVersion(id); ok {
+		return v.Resolved, true
 	}
 	return FlowSpec{}, false
 }
