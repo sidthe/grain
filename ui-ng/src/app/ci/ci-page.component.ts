@@ -1358,6 +1358,62 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
       </div>
     }
 
+    @if (cancelDialogRun(); as target) {
+      <div class="scrim" aria-hidden="true" (click)="closeCancelDialog()"></div>
+      <div
+        class="g-dialog ci-cancel-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ci-cancel-dialog-title"
+        aria-describedby="ci-cancel-dialog-body"
+        data-testid="ci-cancel-dialog"
+        gDialogTrap
+        (gDialogClose)="closeCancelDialog()"
+      >
+        <h2 id="ci-cancel-dialog-title">Cancel CI run?</h2>
+        <p id="ci-cancel-dialog-body" class="ci-cancel-body">
+          Stop {{ titleOf(target) }} on {{ target.repo }} ({{
+            branchOf(target) || target.id
+          }})? In-flight jobs are told to stop and their sandboxes are
+          destroyed.
+        </p>
+        <label class="field">
+          <span>Reason (optional)</span>
+          <textarea
+            rows="2"
+            name="cancelReason"
+            data-testid="ci-cancel-reason-input"
+            placeholder="Optional note for whoever inspects this run or any waiting agent"
+            [value]="cancelReason()"
+            (input)="cancelReason.set($any($event.target).value)"
+          ></textarea>
+        </label>
+        <div class="dialog-actions">
+          <button
+            type="button"
+            class="btn-text"
+            data-testid="ci-cancel-dismiss"
+            [disabled]="submitting()"
+            (click)="closeCancelDialog()"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="btn-primary is-destructive"
+            data-testid="ci-cancel-submit"
+            [disabled]="
+              submitting() ||
+              !access.can('DELETE /api/ci/runs/{id}', target.repo)
+            "
+            (click)="submitCancelRun()"
+          >
+            {{ submitting() ? "Cancelling…" : "Cancel run" }}
+          </button>
+        </div>
+      </div>
+    }
+
     @if (confirming(); as req) {
       <g-confirm-dialog [request]="req" (done)="onConfirmDone($event)" />
     }
@@ -1421,6 +1477,9 @@ export class CIPageComponent implements OnInit, OnDestroy {
     null,
   );
 
+  protected readonly cancelDialogRun = signal<CIRun | null>(null);
+  protected readonly cancelReason = signal("");
+
   protected readonly submitting = signal(false);
   protected readonly confirming = signal<ConfirmRequest | null>(null);
 
@@ -1428,6 +1487,7 @@ export class CIPageComponent implements OnInit, OnDestroy {
     () =>
       this.runDialogOpen() ||
       this.quarantineDialogOpen() ||
+      !!this.cancelDialogRun() ||
       !!this.confirming(),
   );
 
@@ -1916,16 +1976,39 @@ export class CIPageComponent implements OnInit, OnDestroy {
   }
 
   protected confirmCancelRun(run: CIRun): void {
-    this.confirming.set({
-      title: "Cancel CI run?",
-      message: `Stop ${runTitle(run)} on ${run.repo} (${runBranch(run) || run.id})?`,
-      accept: "Cancel run",
-      destructive: true,
-      run: async () => {
-        await this.store.cancelRun(run.id, "Cancelled from CI workspace");
-        this.snackbar.show("CI run cancelled.");
-      },
-    });
+    this.openMenu.set(null);
+    this.cancelReason.set("");
+    this.cancelDialogRun.set(run);
+  }
+
+  protected closeCancelDialog(): void {
+    if (this.submitting()) return;
+    this.cancelDialogRun.set(null);
+    this.cancelReason.set("");
+  }
+
+  protected async submitCancelRun(): Promise<void> {
+    const target = this.cancelDialogRun();
+    if (
+      !target ||
+      this.submitting() ||
+      !this.access.can("DELETE /api/ci/runs/{id}", target.repo)
+    ) {
+      return;
+    }
+    this.submitting.set(true);
+    try {
+      await this.store.cancelRun(target.id, this.cancelReason());
+      this.cancelDialogRun.set(null);
+      this.cancelReason.set("");
+      this.snackbar.show("CI run cancelled.");
+    } catch (err) {
+      this.cancelDialogRun.set(null);
+      this.cancelReason.set("");
+      this.store.actionError.set(errorText(err));
+    } finally {
+      this.submitting.set(false);
+    }
   }
 
   protected confirmFlushCache(kind: "ci" | "actions" | "package"): void {
