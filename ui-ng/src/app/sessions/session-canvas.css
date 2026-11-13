@@ -1,32 +1,52 @@
+g-session-canvas {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .session-canvas {
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--md-sys-color-outline-variant);
   background: var(--md-sys-color-surface);
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
   min-height: 0;
   height: 100%;
+  overflow: hidden;
 }
 
 .canvas-head {
+  box-sizing: border-box;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   padding: 10px 14px;
+  min-width: 0;
+  max-width: 100%;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
   background: var(--md-sys-color-surface-container-low);
 }
 
 .canvas-tabs {
   display: flex;
+  flex: 1 1 auto;
   flex-wrap: wrap;
   gap: 4px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .canvas-tab {
   min-height: 32px;
+  max-width: 100%;
   padding: 0 10px;
   border-radius: var(--md-sys-shape-corner-full);
   border: 1px solid var(--md-sys-color-outline-variant);
@@ -43,7 +63,10 @@
 }
 
 .canvas-body {
+  box-sizing: border-box;
   flex: 1;
+  width: 100%;
+  max-width: 100%;
   min-height: 0;
   min-width: 0;
   overflow-x: hidden;
@@ -58,16 +81,25 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .canvas-chip {
+  box-sizing: border-box;
   min-height: 28px;
-  padding: 0 10px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 5px 10px;
   border-radius: var(--md-sys-shape-corner-small);
   border: 1px solid var(--md-sys-color-outline-variant);
   background: var(--md-sys-color-surface-container-low);
   color: var(--md-sys-color-on-surface);
   font-size: 12px;
+  line-height: 1.3;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
 
@@ -83,15 +115,28 @@
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.canvas-toolbar > * {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .canvas-btn-group {
   display: inline-flex;
+  flex-wrap: wrap;
   gap: 4px;
+  max-width: 100%;
 }
 
 .canvas-iframe {
+  box-sizing: border-box;
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   min-height: 420px;
   flex: 1;
   border: 1px solid var(--md-sys-color-outline-variant);
@@ -100,6 +145,10 @@
 }
 
 .canvas-source {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   margin: 0;
   padding: 12px;
   border-radius: var(--md-sys-shape-corner-medium);
@@ -109,9 +158,13 @@
   font-size: 12px;
   overflow: auto;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .canvas-card {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
   padding: 12px;
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-corner-medium);
@@ -120,20 +173,56 @@
   flex-direction: column;
   gap: 8px;
   min-width: 0;
+  overflow-x: hidden;
+  overflow-wrap: anywhere;
+}
+
+.canvas-overflow-wrap {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: auto;
   overflow-wrap: anywhere;
 }
 
 .canvas-card .msg-body {
   min-width: 0;
+  max-width: 100%;
   overflow-wrap: anywhere;
+}
+
+.canvas-card .msg-body .code-card {
+  max-width: 100%;
+  min-width: 0;
 }
 
 .canvas-card .msg-body pre {
   max-width: 100%;
+  box-sizing: border-box;
   overflow-x: auto;
 }
 
+.canvas-card .msg-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.canvas-card .msg-body :not(pre) > code {
+  overflow-wrap: anywhere;
+}
+
+.canvas-card .msg-body img,
+.canvas-card .msg-body svg {
+  max-width: 100%;
+  height: auto;
+}
+
 .canvas-pin-form {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -147,6 +236,8 @@
 .canvas-pin-form textarea {
   box-sizing: border-box;
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   padding: 6px 10px;
   border-radius: var(--md-sys-shape-corner-small);
   border: 1px solid var(--md-sys-color-outline);
@@ -156,8 +247,17 @@
   font-size: 12.5px;
 }
 
+.canvas-pin-form textarea {
+  resize: vertical;
+}
+
 .plan-node {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
   gap: 8px;
@@ -166,10 +266,34 @@
   border-radius: var(--md-sys-shape-corner-small);
   background: var(--md-sys-color-surface);
   font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.plan-node > * {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .canvas-empty {
   font-size: 13px;
   color: var(--md-sys-color-on-surface-variant);
   padding: 12px 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 599.95px) {
+  .session-canvas {
+    border-left: none;
+  }
+  .canvas-head {
+    padding: 8px 12px;
+  }
+  .canvas-body {
+    padding: 10px 12px;
+  }
+  .canvas-iframe {
+    min-height: 280px;
+  }
 }
