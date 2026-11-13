@@ -370,7 +370,21 @@ function saveView(v: WsView): void {
           <div class="ws-cards" data-testid="ws-cards">
             @for (s of filtered().visible; track s.key) {
               @let th = thumbOf(s);
-              <article class="ws-card">
+              <article
+                class="ws-card"
+                [class.is-selected]="s.key === selectedListKey()"
+                [attr.aria-current]="
+                  s.key === selectedListKey() ? 'true' : null
+                "
+                [attr.aria-labelledby]="'ws-card-title-' + s.key"
+                tabindex="0"
+                data-ws-row-trigger
+                [attr.data-ws-key]="s.key"
+                [attr.data-testid]="'ws-card-' + s.key"
+                (click)="pick($event, s.key)"
+                (keydown.enter)="pickKey($event, s.key)"
+                (keydown.space)="pickKey($event, s.key)"
+              >
                 <div class="ws-ctop">
                   <span [class]="markClass(s, true)" [gTip]="markTip(s)">{{
                     markText(s)
@@ -383,16 +397,8 @@ function saveView(v: WsView): void {
                   }
                   <span style="margin-left:auto">{{ lastText(s) }}</span>
                 </div>
-                <h2 class="ws-ctitle">
-                  <button
-                    type="button"
-                    class="ws-stretch-btn"
-                    data-ws-row-trigger
-                    [attr.data-testid]="'ws-card-' + s.key"
-                    (click)="openStream(s.key)"
-                  >
-                    {{ s.title }}
-                  </button>
+                <h2 class="ws-ctitle" [id]="'ws-card-title-' + s.key">
+                  {{ s.title }}
                 </h2>
                 <svg class="ws-thumb" viewBox="0 0 280 64" aria-hidden="true">
                   @for (e of th.edges; track $index) {
@@ -512,21 +518,27 @@ function saveView(v: WsView): void {
                 <span class="muted tabular">{{ grp.streams.length }}</span>
               </div>
               @for (s of grp.streams; track s.key) {
-                <div class="ws-row">
+                <div
+                  class="ws-row"
+                  [class.is-selected]="s.key === selectedListKey()"
+                  [attr.aria-current]="
+                    s.key === selectedListKey() ? 'true' : null
+                  "
+                  [attr.aria-labelledby]="'ws-row-title-' + s.key"
+                  tabindex="0"
+                  data-ws-row-trigger
+                  [attr.data-ws-key]="s.key"
+                  [attr.data-testid]="'ws-row-' + s.key"
+                  (click)="pick($event, s.key)"
+                  (keydown.enter)="pickKey($event, s.key)"
+                  (keydown.space)="pickKey($event, s.key)"
+                >
                   <span [class]="markClass(s, false)" [gTip]="markTip(s)">{{
                     markText(s)
                   }}</span>
                   <div style="min-width:0">
-                    <div class="ws-ttl">
-                      <button
-                        type="button"
-                        class="ws-stretch-btn"
-                        data-ws-row-trigger
-                        [attr.data-testid]="'ws-row-' + s.key"
-                        (click)="openStream(s.key)"
-                      >
-                        {{ s.title }}
-                      </button>
+                    <div class="ws-ttl" [id]="'ws-row-title-' + s.key">
+                      {{ s.title }}
                     </div>
                     <div class="ws-rmeta">
                       <span>{{ whoShort(s) }}</span>
@@ -687,6 +699,7 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
 
   readonly key = input<string>();
   readonly ws = input<string>();
+  readonly selected = input<string>();
   readonly view = input<string>();
   readonly scope = input<string>();
   readonly mine = input<string>();
@@ -821,10 +834,31 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
     })).filter((g) => g.streams.length > 0);
   });
 
+  private readonly picked = signal<{
+    key: string | null;
+    fromSelected: string | undefined;
+    fromLast: string | null;
+  } | null>(null);
+
+  protected readonly selectedListKey = computed(() => {
+    const sel = this.selected();
+    const last = this.store.lastSelectedKey();
+    const p = this.picked();
+    const k =
+      p && p.fromSelected === sel && p.fromLast === last
+        ? p.key
+        : (sel ?? last ?? null);
+    if (!k) return null;
+    return this.filtered().visible.some((s) => s.key === k) ? k : null;
+  });
+
   constructor() {
     effect(() => {
       const k = this.activeKey();
-      untracked(() => this.store.selectedKey.set(k));
+      untracked(() => {
+        this.store.selectedKey.set(k);
+        if (k) this.store.lastSelectedKey.set(k);
+      });
     });
   }
 
@@ -883,6 +917,38 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
       queryParamsHandling: "merge",
       replaceUrl: true,
     });
+  }
+
+  // pick selects and opens a card or row from a click, but leaves a click
+  // on any nested link or button inside it to that control.
+  protected pick(ev: MouseEvent, key: string): void {
+    const t = ev.target as Element | null;
+    const cur = ev.currentTarget as Element | null;
+    const control = t?.closest("a, button");
+    if (control && control !== cur && cur?.contains(control)) return;
+    this.selectAndOpen(key);
+  }
+
+  // pickKey activates a focused card or row on Enter or Space and consumes
+  // the key so page-level shortcuts do not also act on it.
+  protected pickKey(ev: Event, key: string): void {
+    if (ev.target !== ev.currentTarget) return;
+    ev.preventDefault();
+    this.selectAndOpen(key);
+  }
+
+  private setPickedKey(key: string | null): void {
+    this.picked.set({
+      key,
+      fromSelected: this.selected(),
+      fromLast: this.store.lastSelectedKey(),
+    });
+  }
+
+  private selectAndOpen(key: string): void {
+    this.store.lastSelectedKey.set(key);
+    this.setPickedKey(key);
+    this.openStream(key);
   }
 
   protected openStream(key: string, nodeId?: string): void {
@@ -992,17 +1058,25 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
 
   private stepStreamFocus(delta: number): void {
     const triggers = Array.from(
-      this.host.nativeElement.querySelectorAll<HTMLButtonElement>(
+      this.host.nativeElement.querySelectorAll<HTMLElement>(
         "[data-ws-row-trigger]",
       ),
     );
     if (!triggers.length) return;
-    const active = document.activeElement as HTMLButtonElement | null;
-    const idx = active ? triggers.indexOf(active) : -1;
+    const active = document.activeElement as HTMLElement | null;
+    let idx = active ? triggers.indexOf(active) : -1;
+    if (idx < 0) {
+      const sel = this.selectedListKey();
+      if (sel) {
+        idx = triggers.findIndex((el) => el.dataset["wsKey"] === sel);
+      }
+    }
     const next =
       idx < 0
         ? triggers[delta > 0 ? 0 : triggers.length - 1]
         : triggers[Math.max(0, Math.min(triggers.length - 1, idx + delta))];
+    const key = next?.dataset["wsKey"] ?? null;
+    if (key) this.setPickedKey(key);
     next?.focus();
     next?.scrollIntoView?.({ block: "nearest" });
   }
@@ -1035,6 +1109,20 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
     } else if ((letters && ev.key === "k") || ev.key === "ArrowUp") {
       ev.preventDefault();
       this.stepStreamFocus(-1);
+    } else if (ev.key === "Enter") {
+      const target = ev.target as HTMLElement | null;
+      if (target?.closest?.("a, button, [data-ws-row-trigger]")) return;
+      const sel = this.selectedListKey();
+      if (sel) {
+        ev.preventDefault();
+        this.selectAndOpen(sel);
+      }
+    } else if (ev.key === "Escape") {
+      if (this.selectedListKey()) {
+        ev.preventDefault();
+        this.store.lastSelectedKey.set(null);
+        this.setPickedKey(null);
+      }
     }
   }
 }
