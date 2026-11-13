@@ -14,8 +14,10 @@
 
 import { APP_BASE_HREF } from "@angular/common";
 import { TestBed } from "@angular/core/testing";
+import { By } from "@angular/platform-browser";
 import { provideRouter, withComponentInputBinding } from "@angular/router";
 import { RouterTestingHarness } from "@angular/router/testing";
+import { vi } from "vitest";
 import { GrainApi, type RouteParams } from "../api/grain-api.service";
 import type { GrainConfig } from "../api/models";
 import { RepoDetailPageComponent } from "./repo-detail-page.component";
@@ -31,6 +33,11 @@ class FakeRepoApi {
   calls: RepoCall[] = [];
   ciMode = "grain";
   refusePut: string | null = null;
+  refusePutMessage = 'ciMode: must be "grain", "github", or "none"';
+  declarationsBody: Record<string, unknown> = {
+    declarations: false,
+    declarationsStatus: null,
+  };
 
   configBody: GrainConfig = {
     version: "v3.6.0",
@@ -59,6 +66,9 @@ class FakeRepoApi {
         mergeOnGreen: true,
         requireBranchUpToDate: false,
       });
+    }
+    if (key === "GET /api/repos/{owner}/{name}/declarations") {
+      return Promise.resolve(structuredClone(this.declarationsBody));
     }
     if (key === "GET /api/deployment/git-connections") {
       return Promise.resolve([
@@ -94,10 +104,16 @@ class FakeRepoApi {
       // is already rejected when the component awaits it is reported
       // by zone.js as unhandled before the await attaches.
       return new Promise((_, reject) =>
-        setTimeout(() =>
-          reject(new Error('ciMode: must be "grain", "github", or "none"')),
-        ),
+        setTimeout(() => reject(new Error(this.refusePutMessage))),
       );
+    }
+    if (key === "PUT /api/repos/{owner}/{name}/declarations") {
+      const next = Boolean((body as { declarations?: boolean })?.declarations);
+      this.declarationsBody = {
+        ...this.declarationsBody,
+        declarations: next,
+      };
+      return Promise.resolve(structuredClone(this.declarationsBody));
     }
     return Promise.resolve({ ok: true });
   };
@@ -113,6 +129,28 @@ class FakeRepoApi {
   };
 }
 
+async function flushUi(harness: RouterTestingHarness) {
+  await harness.fixture.whenStable();
+  await Promise.resolve();
+  await harness.fixture.whenStable();
+  harness.detectChanges();
+}
+
+async function waitForEl<T extends Element>(
+  harness: RouterTestingHarness,
+  selector: string,
+): Promise<T> {
+  let found: T | null = null;
+  await vi.waitFor(() => {
+    harness.detectChanges();
+    found = (harness.fixture.nativeElement as HTMLElement).querySelector<T>(
+      selector,
+    );
+    expect(found).not.toBeNull();
+  });
+  return found!;
+}
+
 async function mountRepo(url: string, api = new FakeRepoApi()) {
   localStorage.clear();
   TestBed.configureTestingModule({
@@ -125,6 +163,10 @@ async function mountRepo(url: string, api = new FakeRepoApi()) {
           },
           {
             path: "repos/:owner/:name/:tab",
+            component: RepoDetailPageComponent,
+          },
+          {
+            path: "repos/:host/:owner/:name/:tab",
             component: RepoDetailPageComponent,
           },
           { path: "settings/repositories", children: [] },
@@ -356,5 +398,501 @@ describe("RepoDetailPageComponent (/next/repos/:owner/:name)", () => {
       { baseRepairBypassesHumanGates: true },
       { baseRepairBypassesHumanGates: false },
     ]);
+  });
+
+  it("loads, toggles, and refreshes repo declarations via GET and PUT /api/repos/{owner}/{name}/declarations", async () => {
+    const api = new FakeRepoApi();
+    const { el, harness } = await mountRepo("/repos/acme/platform", api);
+
+    // Loaded automatically with repo core data
+    expect(
+      api.calls.some(
+        (c) =>
+          c.method === "GET" &&
+          c.key === "GET /api/repos/{owner}/{name}/declarations" &&
+          c.params?.["owner"] === "acme" &&
+          c.params?.["name"] === "platform",
+      ),
+    ).toBe(true);
+
+    // Switch to Declarations tab
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="repo-tab-declarations"]',
+    )!.click();
+    await waitForEl(harness, '[data-testid="card-repo-declarations"]');
+
+    const statePill = () =>
+      el.querySelector('[data-testid="repo-declarations-state"]');
+    const sw = () =>
+      el.querySelector<HTMLButtonElement>(
+        '[data-testid="switch-repo-declarations"]',
+      )!;
+
+    await vi.waitFor(() => {
+      harness.detectChanges();
+      expect(statePill()?.textContent?.trim()).toBe("Disabled");
+    });
+    expect(sw().getAttribute("aria-checked")).toBe("false");
+    expect(
+      el.querySelector('[data-testid="repo-declarations-off"]')?.textContent,
+    ).toContain("Declarations sync is off for acme/platform");
+
+    // Toggle declarations on -> PUT { declarations: true } -> shows pending message
+    sw().click();
+    await flushUi(harness);
+    expect(
+      api.calls.some(
+        (c) =>
+          c.method === "PUT" &&
+          c.key === "PUT /api/repos/{owner}/{name}/declarations" &&
+          c.params?.["owner"] === "acme" &&
+          c.params?.["name"] === "platform" &&
+          (c.body as { declarations?: boolean })?.declarations === true,
+      ),
+    ).toBe(true);
+    expect(statePill()?.textContent?.trim()).toBe("Enabled");
+    expect(sw().getAttribute("aria-checked")).toBe("true");
+    expect(
+      el.querySelector('[data-testid="repo-declarations-pending"]')
+        ?.textContent,
+    ).toContain("Not read yet — grain picks this up on its next cycle.");
+
+    // Refresh picks up synced status, discovered files, pushes, warnings, and ports
+    api.declarationsBody = {
+      declarations: true,
+      declarationsStatus: {
+        commit: "abcdef1234567890",
+        checkedAt: "2026-11-13T21:00:00Z",
+        syncedAt: "2026-11-13T21:00:00Z",
+        templates: [".grain/templates/release.yml"],
+        suites: [".grain/suites/sweep.yml"],
+        schedules: [".grain/schedules/nightly.yml"],
+        triggers: [".grain/triggers/docs.yml"],
+        mergeRules: ".grain/merge-rules.yml",
+        pushes: [
+          {
+            repo: "acme/platform",
+            path: ".grain/templates/release.yml",
+            refs: [{ ref: "refs/tags/v*", force: true, delete: false }],
+          },
+        ],
+        warnings: ["duplicate warning"],
+      },
+      pairedBranches: ["main", "release/v1"],
+      portBranches: ["main"],
+      declaredPortBranches: ["release/v1"],
+      portDirections: [
+        {
+          from: "main",
+          to: "release/v1",
+          paired: true,
+          operatorTypes: ["fix"],
+          declaredTypes: ["feat"],
+          types: ["fix", "feat"],
+        },
+      ],
+      portWarnings: ["duplicate warning", "operator-only port warning"],
+    };
+
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="refresh-repo-declarations-btn"]',
+    )!.click();
+    await flushUi(harness);
+
+    expect(
+      el.querySelector('[data-testid="repo-declarations-summary"]')
+        ?.textContent,
+    ).toContain(
+      "Read at abcdef123456: 1 template(s), 1 suite(s), 1 schedule(s), 1 trigger(s), merge rules in .grain/merge-rules.yml",
+    );
+    const filesText = el.querySelector(
+      '[data-testid="repo-declarations-files"]',
+    )?.textContent;
+    expect(filesText).toContain(".grain/templates/release.yml");
+    expect(filesText).toContain(".grain/suites/sweep.yml");
+    expect(filesText).toContain(".grain/schedules/nightly.yml");
+    expect(filesText).toContain(".grain/triggers/docs.yml");
+    expect(filesText).toContain(".grain/merge-rules.yml");
+    expect(
+      el.querySelector('[data-testid="repo-declarations-push"]')?.textContent,
+    ).toContain(
+      "Tasks from .grain/templates/release.yml may also push: refs/tags/v* (force)",
+    );
+    expect(
+      el.querySelectorAll('[data-testid="repo-declarations-warning"]').length,
+    ).toBe(1);
+    expect(
+      el.querySelector('[data-testid="card-repo-ports"]')?.textContent,
+    ).toContain("Grain ports each merge between main, release/v1");
+    // Deduplicates warnings already shown in declarationsStatus.warnings
+    const portWarnings = el.querySelectorAll(
+      '[data-testid="repo-port-warning"]',
+    );
+    expect(portWarnings.length).toBe(1);
+    expect(portWarnings[0].textContent).toContain("operator-only port warning");
+  });
+
+  it("renders failed sync status with last-good summary and keeps switch unchanged when PUT /declarations is refused", async () => {
+    const api = new FakeRepoApi();
+    api.declarationsBody = {
+      declarations: true,
+      declarationsStatus: {
+        commit: "fedcba6543219876",
+        checkedAt: "2026-11-13T21:05:00Z",
+        error:
+          ".grain/templates/bad.yml: unknown key\n.grain/suites/s.yml: bad mode",
+        templates: [".grain/templates/good.yml"],
+      },
+    };
+    api.refusePut = "PUT /api/repos/{owner}/{name}/declarations";
+    api.refusePutMessage = "forbidden: repository declarations locked";
+
+    const { el, harness } = await mountRepo(
+      "/repos/acme/platform/advanced",
+      api,
+    );
+
+    expect(
+      el.querySelector('[data-testid="repo-declarations-sync-error"]')
+        ?.textContent,
+    ).toContain("Last read failed:");
+    expect(
+      el.querySelector('[data-testid="repo-declarations-still-running"]')
+        ?.textContent,
+    ).toContain(
+      "Still running from fedcba654321: 1 template(s), 0 suite(s), 0 schedule(s), 0 trigger(s)",
+    );
+
+    const sw = el.querySelector<HTMLButtonElement>(
+      '[data-testid="switch-repo-declarations"]',
+    )!;
+    sw.click();
+    await new Promise((r) => setTimeout(r, 10));
+    await flushUi(harness);
+
+    expect(sw.getAttribute("aria-checked")).toBe("true");
+    expect(
+      el.querySelector('[data-testid="repo-declarations-error"]')?.textContent,
+    ).toContain("forbidden: repository declarations locked");
+  });
+
+  it("enforces repo-scoped access.can(route, repo) on Repo Detail mutations and declarations to prevent scope escalation", async () => {
+    const api = new FakeRepoApi();
+    api.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "grain/repo-maintainer",
+        roles: ["grain/repo-maintainer"],
+        full: false,
+        scopes: [
+          "repos:read",
+          "repos:write",
+          "capabilities:read",
+          "capabilities:admin",
+          "releases:read",
+          "releases:write",
+          "ci:write",
+          "tasks:write",
+          "connections:write",
+        ],
+        repoLimits: {
+          "repos:write": ["acme/allowed"],
+          "capabilities:admin": ["acme/allowed"],
+          "releases:write": ["acme/allowed"],
+          "ci:write": ["acme/allowed"],
+          "tasks:write": ["acme/allowed"],
+          "connections:write": ["acme/allowed"],
+        },
+      },
+    };
+
+    // Disallowed repo: acme/platform
+    const { el, harness } = await mountRepo("/repos/acme/platform/agents", api);
+    const cmp = harness.fixture.debugElement.query(
+      By.directive(RepoDetailPageComponent),
+    ).componentInstance as unknown as {
+      saveAgentTabSettings: () => Promise<void>;
+      toggleDeclarations: () => Promise<void>;
+      saveRepoConfig: () => Promise<void>;
+      saveCiMode: (mode: string) => Promise<void>;
+      toggleMergeOnGreen: () => Promise<void>;
+      createBranch: () => Promise<void>;
+      createRelease: () => Promise<void>;
+    };
+
+    const setupInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="input-repo-setup-cmd"]',
+    )!;
+    const promptInput = el.querySelector<HTMLTextAreaElement>(
+      '[data-testid="input-repo-prompt-ext"]',
+    )!;
+    const capsInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="input-repo-caps"]',
+    )!;
+    const saveAgentsBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="save-repo-agents-btn"]',
+    )!;
+
+    expect(setupInput.disabled).toBe(true);
+    expect(promptInput.disabled).toBe(true);
+    expect(capsInput.disabled).toBe(true);
+    expect(saveAgentsBtn.disabled).toBe(true);
+
+    // Direct method invocations must also fail closed and emit zero writes
+    await cmp.saveAgentTabSettings();
+    await cmp.toggleDeclarations();
+    await cmp.saveRepoConfig();
+    await cmp.saveCiMode("none");
+    await cmp.toggleMergeOnGreen();
+    await cmp.createBranch();
+    await cmp.createRelease();
+
+    expect(api.calls.filter((c) => c.method !== "GET")).toEqual([]);
+
+    // Switch to Declarations tab on disallowed repo: switch is disabled
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="repo-tab-declarations"]',
+    )!.click();
+    const declSwitch = await waitForEl<HTMLButtonElement>(
+      harness,
+      '[data-testid="switch-repo-declarations"]',
+    );
+    expect(declSwitch.disabled).toBe(true);
+    declSwitch.click();
+    await flushUi(harness);
+    expect(api.calls.filter((c) => c.method !== "GET")).toEqual([]);
+
+    // Now test split scopes on acme/platform: capabilities:admin allowed on acme/platform,
+    // repos:write still limited to acme/allowed -> only capabilities PUT may fire.
+    TestBed.resetTestingModule();
+    const splitApi = new FakeRepoApi();
+    splitApi.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "grain/split-maintainer",
+        roles: ["grain/split-maintainer"],
+        full: false,
+        scopes: [
+          "repos:read",
+          "repos:write",
+          "capabilities:read",
+          "capabilities:admin",
+        ],
+        repoLimits: {
+          "repos:write": ["acme/allowed"],
+          "capabilities:admin": ["acme/platform"],
+        },
+      },
+    };
+    const splitMount = await mountRepo("/repos/acme/platform/agents", splitApi);
+    const splitEl = splitMount.el;
+    expect(
+      splitEl.querySelector<HTMLInputElement>(
+        '[data-testid="input-repo-setup-cmd"]',
+      )!.disabled,
+    ).toBe(true);
+    expect(
+      splitEl.querySelector<HTMLTextAreaElement>(
+        '[data-testid="input-repo-prompt-ext"]',
+      )!.disabled,
+    ).toBe(true);
+    const splitCaps = splitEl.querySelector<HTMLInputElement>(
+      '[data-testid="input-repo-caps"]',
+    )!;
+    expect(splitCaps.disabled).toBe(false);
+    const splitSaveBtn = splitEl.querySelector<HTMLButtonElement>(
+      '[data-testid="save-repo-agents-btn"]',
+    )!;
+    expect(splitSaveBtn.disabled).toBe(false);
+
+    splitCaps.value = "ci:read, tasks:read";
+    splitCaps.dispatchEvent(new Event("input", { bubbles: true }));
+    splitMount.harness.detectChanges();
+    splitSaveBtn.click();
+    await flushUi(splitMount.harness);
+
+    const writeKeys = splitApi.calls
+      .filter((c) => c.method !== "GET")
+      .map((c) => c.key);
+    expect(writeKeys).toEqual(["PUT /api/repos/{owner}/{name}/capabilities"]);
+
+    // Now verify acme/allowed allows declarations & agent saves
+    TestBed.resetTestingModule();
+    const allowedApi = new FakeRepoApi();
+    allowedApi.configBody = structuredClone(api.configBody);
+    const allowedMount = await mountRepo(
+      "/repos/acme/allowed/declarations",
+      allowedApi,
+    );
+    const allowedSwitch = allowedMount.el.querySelector<HTMLButtonElement>(
+      '[data-testid="switch-repo-declarations"]',
+    )!;
+    expect(allowedSwitch.disabled).toBe(false);
+    allowedSwitch.click();
+    await flushUi(allowedMount.harness);
+    expect(
+      allowedApi.calls.some(
+        (c) =>
+          c.method === "PUT" &&
+          c.key === "PUT /api/repos/{owner}/{name}/declarations" &&
+          c.params?.["owner"] === "acme" &&
+          c.params?.["name"] === "allowed",
+      ),
+    ).toBe(true);
+  });
+
+  it("withholds GET /declarations and shows denied banner when repos:read excludes the repo", async () => {
+    const api = new FakeRepoApi();
+    api.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "grain/scoped-reader",
+        roles: ["grain/scoped-reader"],
+        full: false,
+        scopes: ["repos:read"],
+        repoLimits: {
+          "repos:read": ["acme/allowed"],
+        },
+      },
+    };
+    const { el } = await mountRepo("/repos/acme/platform/declarations", api);
+    expect(
+      api.calls.some(
+        (c) => c.key === "GET /api/repos/{owner}/{name}/declarations",
+      ),
+    ).toBe(false);
+    expect(
+      el.querySelector('[data-testid="repo-declarations-denied"]')?.textContent,
+    ).toContain("repos:read on this repository");
+  });
+
+  it("blocks config mutations under configRepoOnly while allowing operational actions, and guards all mutations", async () => {
+    const api = new FakeRepoApi();
+    api.configBody = {
+      version: "v3.6.0",
+      configRepoOnly: true,
+      access: {
+        role: "grain/operator",
+        roles: ["grain/operator"],
+        full: true,
+        scopes: [],
+      },
+    };
+    const { el, harness } = await mountRepo(
+      "/repos/acme/platform/declarations",
+      api,
+    );
+    expect(
+      el.querySelector('[data-testid="repo-readonly-banner"]'),
+    ).not.toBeNull();
+    const declSwitch = el.querySelector<HTMLButtonElement>(
+      '[data-testid="switch-repo-declarations"]',
+    )!;
+    expect(declSwitch.disabled).toBe(true);
+
+    const cmp = harness.fixture.debugElement.query(
+      By.directive(RepoDetailPageComponent),
+    ).componentInstance as unknown as {
+      toggleDeclarations: () => Promise<void>;
+      saveAgentTabSettings: () => Promise<void>;
+      pinGitConnection: (c: string) => Promise<void>;
+      toggleWatchDefaultBranch: () => Promise<void>;
+      saveWorkflows: () => Promise<void>;
+      deleteSelectedWorkflow: () => Promise<void>;
+      saveReleaseSettings: () => Promise<void>;
+      toggleRequireUpToDate: () => Promise<void>;
+      toggleBypassHumanGates: () => void;
+      importIssues: () => Promise<void>;
+    };
+    await cmp.toggleDeclarations();
+    await cmp.saveAgentTabSettings();
+    await cmp.pinGitConnection("other");
+    await cmp.toggleWatchDefaultBranch();
+    await cmp.saveWorkflows();
+    await cmp.deleteSelectedWorkflow();
+    await cmp.saveReleaseSettings();
+    await cmp.toggleRequireUpToDate();
+    cmp.toggleBypassHumanGates();
+    expect(el.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(api.calls.filter((c) => c.method !== "GET")).toEqual([]);
+
+    // Operational actions remain enabled and permitted under configRepoOnly
+    await cmp.importIssues();
+    expect(
+      api.calls.some(
+        (c) =>
+          c.method === "POST" &&
+          c.key === "POST /api/repos/{owner}/{name}/import-issues",
+      ),
+    ).toBe(true);
+  });
+
+  it("scopes host-prefixed repositories and resets state when navigating between repositories", async () => {
+    const api = new FakeRepoApi();
+    api.declarationsBody = {
+      declarations: true,
+      declarationsStatus: {
+        commit: "1122334455667788",
+        templates: [".grain/templates/t.yml"],
+      },
+    };
+    api.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "grain/host-scoped",
+        roles: ["grain/host-scoped"],
+        full: false,
+        scopes: ["repos:read", "repos:write"],
+        repoLimits: {
+          "repos:write": ["ghes.example.com/acme/allowed"],
+        },
+      },
+    };
+
+    const { el, harness } = await mountRepo(
+      "/repos/ghes.example.com/acme/allowed/declarations",
+      api,
+    );
+    expect(
+      el.querySelector('[data-testid="repo-detail-heading"]')?.textContent,
+    ).toContain("ghes.example.com/acme/allowed");
+    expect(
+      api.calls.some(
+        (c) =>
+          c.key === "GET /api/repos/{owner}/{name}/declarations" &&
+          c.params?.["owner"] === "ghes.example.com/acme" &&
+          c.params?.["name"] === "allowed",
+      ),
+    ).toBe(true);
+    expect(
+      el.querySelector<HTMLButtonElement>(
+        '[data-testid="switch-repo-declarations"]',
+      )!.disabled,
+    ).toBe(false);
+
+    // Navigate in-place to a disallowed repo on the same host
+    api.declarationsBody = {
+      declarations: false,
+      declarationsStatus: null,
+    };
+    await harness.navigateByUrl(
+      "/repos/ghes.example.com/acme/forbidden/declarations",
+    );
+    await vi.waitFor(() => {
+      harness.detectChanges();
+      expect(
+        el.querySelector('[data-testid="repo-detail-heading"]')?.textContent,
+      ).toContain("ghes.example.com/acme/forbidden");
+      expect(
+        el
+          .querySelector('[data-testid="repo-declarations-state"]')
+          ?.textContent?.trim(),
+      ).toBe("Disabled");
+    });
+    expect(
+      el.querySelector<HTMLButtonElement>(
+        '[data-testid="switch-repo-declarations"]',
+      )!.disabled,
+    ).toBe(true);
   });
 });
