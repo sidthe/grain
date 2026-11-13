@@ -27,7 +27,8 @@ import {
   viewChild,
 } from "@angular/core";
 import { ActivatedRoute, Router } from "@angular/router";
-import { GrainApi } from "../api/grain-api.service";
+import { type RouteKey } from "../api/generated-routes";
+import { GrainApi, routeScope } from "../api/grain-api.service";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
 import { ViewFilter } from "../services/view-filter.service";
@@ -59,8 +60,10 @@ import {
   documentSize,
   estimateTokens,
   highlightSyntaxHtml,
+  isMemoryRepoDirPrefix,
   isStaleMemory,
   memoryAge,
+  normalizeMemoryFsSegments,
   parseGrepOutput,
   repoFromMemoryFsPath,
   scopeKey,
@@ -468,9 +471,9 @@ type ReachableReposPayload =
                     class="btn-primary"
                     style="min-height: 32px; padding: 0 12px"
                     data-testid="doc-new-btn"
-                    [disabled]="!canWriteMemory()"
+                    [disabled]="!canCreateDoc()"
                     [gTip]="
-                      canWriteMemory()
+                      canCreateDoc()
                         ? 'Create a new memory document in ' +
                           scopeLabel(selectedRepo())
                         : deniedWriteReason(
@@ -1255,80 +1258,109 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     afterNextRender(() => this.sp.attach());
   }
 
+  private scopeRepoLimits(route: RouteKey): string[] {
+    if (this.access.isFullAccess()) return [];
+    const scope = routeScope(route);
+    if (!scope) return [];
+    return (this.access.repoLimits()[scope] ?? [])
+      .map((r) => r.trim())
+      .filter(Boolean);
+  }
+
+  private isRouteRepoLimited(route: RouteKey): boolean {
+    if (this.access.isFullAccess()) return false;
+    const scope = routeScope(route);
+    if (!scope) return false;
+    const raw = this.access.repoLimits()[scope];
+    return Array.isArray(raw) && raw.length > 0;
+  }
+
+  private canDeploymentRoute(route: RouteKey): boolean {
+    return (
+      this.access.canGlobalScope(routeScope(route)) &&
+      !this.isRouteRepoLimited(route)
+    );
+  }
+
+  private canScopedRoute(route: RouteKey, repo: string): boolean {
+    const clean = repo.trim();
+    if (!clean) return this.canDeploymentRoute(route);
+    return this.access.can(route, clean);
+  }
+
   protected readonly memoryReadLimits = computed<string[]>(() =>
-    this.access.isFullAccess()
-      ? []
-      : (this.access.repoLimits()["memory:read"] ?? []),
+    this.scopeRepoLimits("GET /api/memory"),
   );
   protected readonly memoryWriteLimits = computed<string[]>(() =>
-    this.access.isFullAccess()
-      ? []
-      : (this.access.repoLimits()["memory:write"] ?? []),
+    this.scopeRepoLimits("PUT /api/memory"),
   );
-  protected readonly isMemoryReadRepoLimited = computed(
-    () => this.memoryReadLimits().length > 0,
+  protected readonly isMemoryReadRepoLimited = computed(() =>
+    this.isRouteRepoLimited("GET /api/memory"),
   );
   protected readonly isMemoryWriteRepoLimited = computed(
-    () => this.memoryWriteLimits().length > 0,
+    () =>
+      this.isRouteRepoLimited("PUT /api/memory") ||
+      this.isRouteRepoLimited("PUT /api/memory/documents"),
   );
 
   protected readonly canReadDeploymentScope = computed(
-    () => this.access.can("GET /api/memory") && !this.isMemoryReadRepoLimited(),
+    () =>
+      this.canDeploymentRoute("GET /api/memory") &&
+      this.canDeploymentRoute("GET /api/memory/documents"),
   );
 
-  protected readonly canReadMemory = computed(() => {
-    const repo = this.selectedRepo();
-    if (!repo) return this.canReadDeploymentScope();
-    return this.access.can("GET /api/memory", repo);
-  });
+  protected readonly canReadMemory = computed(() =>
+    this.canScopedRoute("GET /api/memory", this.selectedRepo()),
+  );
 
-  protected readonly canWriteMemory = computed(() => {
-    const repo = this.selectedRepo();
-    if (!repo) {
-      return (
-        this.access.can("PUT /api/memory") && !this.isMemoryWriteRepoLimited()
-      );
-    }
-    return this.access.can("PUT /api/memory", repo);
-  });
+  protected readonly canWriteMemory = computed(
+    () =>
+      this.access.configLoaded() &&
+      this.canScopedRoute("PUT /api/memory", this.selectedRepo()),
+  );
+
+  protected readonly canCreateDoc = computed(
+    () =>
+      this.access.configLoaded() &&
+      this.canScopedRoute("PUT /api/memory/documents", this.selectedRepo()),
+  );
 
   protected readonly canWriteDoc = computed(() => {
-    const repo = this.creatingDoc()
-      ? this.selectedRepo()
-      : this.selectedDocRepo();
-    if (!repo) {
-      return (
-        this.access.can("PUT /api/memory/documents") &&
-        !this.isMemoryWriteRepoLimited()
-      );
-    }
-    return this.access.can("PUT /api/memory/documents", repo);
+    if (!this.access.configLoaded()) return false;
+    const repo =
+      this.creatingDoc() || !this.selectedDocName()
+        ? this.selectedRepo()
+        : this.selectedDocRepo();
+    return this.canScopedRoute("PUT /api/memory/documents", repo);
   });
 
+  // config:// exposes state-repository memory files (memory/deployment.md,
+  // tables/memory.json), so require unrestricted deployment-wide access on
+  // both settings:read (pkg/ui/api_fs.go MayReadFullConfig) and memory:read.
   protected readonly canReadConfigFs = computed(
     () =>
-      this.access.can("GET /api/fs/config/{path...}") &&
-      !(
-        !this.access.isFullAccess() &&
-        Boolean(this.access.repoLimits()["settings:read"]?.length)
-      ),
+      this.access.configLoaded() &&
+      this.canDeploymentRoute("GET /api/fs/config/{path...}") &&
+      this.canDeploymentRoute("GET /api/fs/memory/{path...}"),
   );
 
   protected deniedReadReason(repo: string): string {
-    if (!repo && this.isMemoryReadRepoLimited()) {
+    const clean = repo.trim();
+    if (!clean && this.isMemoryReadRepoLimited()) {
       return `Your role ${this.access.roleLabel() || "limited"} holds memory:read only on ${this.memoryReadLimits().join(", ")} and cannot read deployment-wide memory.`;
     }
-    return this.access.deniedReason("GET /api/memory", repo || undefined);
+    return this.access.deniedReason("GET /api/memory", clean || undefined);
   }
 
   protected deniedWriteReason(
     route: "PUT /api/memory" | "PUT /api/memory/documents",
     repo: string,
   ): string {
-    if (!repo && this.isMemoryWriteRepoLimited()) {
+    const clean = repo.trim();
+    if (!clean && this.isMemoryWriteRepoLimited()) {
       return `Your role ${this.access.roleLabel() || "limited"} holds memory:write only on ${this.memoryWriteLimits().join(", ")} and cannot modify deployment-wide memory.`;
     }
-    return this.access.deniedReason(route, repo || undefined);
+    return this.access.deniedReason(route, clean || undefined);
   }
 
   protected readonly scopes = computed(() => {
@@ -1517,7 +1549,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     if (t === "instructions" || t === "documents" || t === "namespace") {
       this.tab.set(t);
     }
-    const r = qp.get("repo");
+    const r = (qp.get("repo") ?? "").trim();
     if (r) {
       this.selectedRepo.set(r);
       this.extraRepos.set([r]);
@@ -1597,14 +1629,26 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     this.loading.set(true);
     this.loadError.set(null);
     try {
-      if (this.isMemoryReadRepoLimited()) {
-        const repos = [
-          ...new Set(
-            [...this.memoryReadLimits(), this.selectedRepo()].filter(
-              (r) => r && this.access.can("GET /api/memory", r),
-            ),
-          ),
-        ];
+      if (this.isMemoryReadRepoLimited() || !this.canReadDeploymentScope()) {
+        const seenRepos = new Set<string>();
+        const repos: string[] = [];
+        for (const candidate of [
+          ...this.memoryReadLimits(),
+          this.selectedRepo(),
+        ]) {
+          const clean = candidate.trim();
+          const k = scopeKey(clean);
+          if (
+            !clean ||
+            seenRepos.has(k) ||
+            !this.access.can("GET /api/memory", clean) ||
+            !this.access.can("GET /api/memory/documents", clean)
+          ) {
+            continue;
+          }
+          seenRepos.add(k);
+          repos.push(clean);
+        }
         const [memLists, docLists] = await Promise.all([
           Promise.all(
             repos.map((r) =>
@@ -1714,6 +1758,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     this.selectedRepo.set(clean);
     this.creatingDoc.set(false);
     this.selectedDocName.set("");
+    this.selectedDocRepo.set("");
     this.syncUrl();
   }
 
@@ -1769,6 +1814,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
   }
 
   private async performSaveMemory(repo: string, text: string): Promise<void> {
+    if (!this.canScopedRoute("PUT /api/memory", repo)) return;
     this.savingMemory.set(true);
     try {
       await this.api.put<Memory>("PUT /api/memory", undefined, { repo, text });
@@ -1788,7 +1834,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
   }
 
   protected startNewDocument(): void {
-    if (!this.canWriteMemory()) return;
+    if (!this.canCreateDoc()) return;
     this.creatingDoc.set(true);
     this.selectedDocName.set("");
     this.selectedDocRepo.set(this.selectedRepo());
@@ -1800,8 +1846,12 @@ export class ContextPageComponent implements OnInit, OnDestroy {
   }
 
   protected async openDocument(doc: MemoryDocument): Promise<void> {
+    const repo = (doc.repo || "").trim();
+    if (!this.canScopedRoute("GET /api/memory/documents/{name}", repo)) {
+      this.snackbar.show(this.deniedReadReason(repo));
+      return;
+    }
     this.creatingDoc.set(false);
-    const repo = doc.repo || "";
     this.selectedDocRepo.set(repo);
     this.selectedDocName.set(doc.name);
     this.docSummaryDraft.set(doc.summary || "");
@@ -1817,7 +1867,12 @@ export class ContextPageComponent implements OnInit, OnDestroy {
         { name: doc.name },
         params.toString() || undefined,
       );
-      if (this.selectedDocName() !== doc.name) return;
+      if (
+        this.selectedDocName() !== doc.name ||
+        scopeKey(this.selectedDocRepo()) !== scopeKey(repo)
+      ) {
+        return;
+      }
       const sum = full?.summary ?? doc.summary ?? "";
       const txt = full?.text ?? "";
       this.loadedDocSummary.set(sum);
@@ -1907,28 +1962,45 @@ export class ContextPageComponent implements OnInit, OnDestroy {
   }
 
   private canReadFsPath(fsPath: string, isFile = false): boolean {
-    const route = this.fsRouteKey();
+    const segs = normalizeMemoryFsSegments(fsPath);
+    if (segs === null) return false;
     if (this.fsScheme() === "config") {
       return this.canReadConfigFs();
     }
-    const fsRepo = repoFromMemoryFsPath(fsPath);
+    const route = "GET /api/fs/memory/{path...}" as const;
+    if (this.canDeploymentRoute(route)) {
+      return true;
+    }
+    if (!this.access.configLoaded() || !this.access.can(route)) {
+      return false;
+    }
+    const normalized = segs.join("/");
+    const fsRepo = repoFromMemoryFsPath(normalized);
     if (fsRepo) {
       return this.access.can(route, fsRepo);
     }
-    if (isFile && fsPath && this.isMemoryReadRepoLimited()) {
+    if (isFile) {
       return false;
     }
-    return this.access.can(route);
+    return isMemoryRepoDirPrefix(normalized, this.memoryReadLimits());
   }
 
   private deniedFsPathReason(fsPath: string): string {
     const route = this.fsRouteKey();
-    if (this.fsScheme() === "memory") {
-      const fsRepo = repoFromMemoryFsPath(fsPath);
-      if (fsRepo) return this.access.deniedReason(route, fsRepo);
+    if (this.fsScheme() === "config") {
       if (this.isMemoryReadRepoLimited()) {
         return this.deniedReadReason("");
       }
+      const settingsLimits = this.scopeRepoLimits(route);
+      if (settingsLimits.length > 0) {
+        return `Your role ${this.access.roleLabel() || "limited"} holds settings:read only on ${settingsLimits.join(", ")} and cannot read deployment-wide config:// paths.`;
+      }
+      return this.access.deniedReason(route);
+    }
+    const fsRepo = repoFromMemoryFsPath(fsPath);
+    if (fsRepo) return this.access.deniedReason(route, fsRepo);
+    if (this.isMemoryReadRepoLimited()) {
+      return this.deniedReadReason("");
     }
     return this.access.deniedReason(route);
   }
@@ -2027,6 +2099,36 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     params.set("i", "1");
     params.set("n", "1");
     try {
+      if (
+        this.fsScheme() === "memory" &&
+        !this.canDeploymentRoute("GET /api/fs/memory/{path...}") &&
+        !repoFromMemoryFsPath(dir)
+      ) {
+        const segs = normalizeMemoryFsSegments(dir) ?? [];
+        const prefix = segs.join("/").toLowerCase();
+        const targetRepos = this.memoryReadLimits().filter((r) => {
+          if (!this.access.can(route, r)) return false;
+          const repoPath = `repos/${r.toLowerCase()}`;
+          return !prefix || repoPath.startsWith(`${prefix}/`);
+        });
+        if (targetRepos.length === 0) {
+          this.snackbar.show(this.deniedFsPathReason(dir));
+          return;
+        }
+        const results = await Promise.all(
+          targetRepos.map(async (r) => {
+            const subDir = `repos/${r}`;
+            const raw = await this.api.getText(
+              route,
+              { path: subDir },
+              params.toString(),
+            );
+            return parseGrepOutput(raw, subDir);
+          }),
+        );
+        this.fsGrepHits.set(results.flat());
+        return;
+      }
       const raw = await this.api.getText(
         route,
         { path: dir },
