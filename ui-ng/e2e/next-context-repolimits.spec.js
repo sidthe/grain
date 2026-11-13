@@ -17,10 +17,11 @@
 
 import { test, expect } from "./fixtures.js";
 
-test("[G-04] repoLimits blocks deployment-wide memory reads/writes, global dir/grep, and config:// bypasses", async ({
+test("[G-04] blocks deployment-wide reads, global dir/grep, and config:// bypasses", async ({
   page,
 }) => {
   const memResp = await page.request.get("/api/memory");
+  expect(memResp.ok()).toBe(true);
   const existing = (await memResp.json()) ?? [];
   const origGlobal = existing.find((m) => !m.repo)?.text ?? "";
   const origWidgets =
