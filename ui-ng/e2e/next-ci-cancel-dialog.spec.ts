@@ -58,6 +58,17 @@ async function setupGrainCIRuns(
   };
 }
 
+function recordDeleteRequests(
+  page: Page,
+  out: { url: string; postData: string | null }[],
+): void {
+  page.on("request", (req) => {
+    if (req.method() === "DELETE" && req.url().includes("/api/ci/runs/")) {
+      out.push({ url: req.url(), postData: req.postData() });
+    }
+  });
+}
+
 test("cancelling a CI run prompts for an optional reason, sends DELETE with { reason }, and supports omitting it", async ({
   page,
 }) => {
@@ -69,11 +80,8 @@ test("cancelling a CI run prompts for an optional reason, sends DELETE with { re
 
   try {
     const deletePayloads: { url: string; postData: string | null }[] = [];
-    page.on("request", (req) => {
-      if (req.method() === "DELETE" && req.url().includes("/api/ci/runs/")) {
-        deletePayloads.push({ url: req.url(), postData: req.postData() });
-      }
-    });
+    recordDeleteRequests(page, deletePayloads);
+    expect(deletePayloads).toEqual([]);
 
     // 1. Open active run and dismiss via Cancel and Escape (no DELETE sent)
     await page.goto(`ci/runs/${runWithReason}`);
