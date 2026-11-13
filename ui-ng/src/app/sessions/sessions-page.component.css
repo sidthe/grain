@@ -1,12 +1,28 @@
 /* Sessions page layout (spec D-8, < 5.5 kB). Attached via ViewEncapsulation.None
  * on SessionsPageComponent so initial shell bundle stays lean. */
 
+.sessions-panel,
+.sessions-split,
+.chat-pane,
+.sessions-panel .chat-log,
+.sessions-panel .msg,
+.sessions-panel .chat-composer {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.sessions-panel,
+.sessions-split,
+.chat-pane {
+  overflow: hidden;
+}
+
 .sessions-split {
   display: grid;
-  grid-template-columns: minmax(260px, 320px) 1fr;
+  grid-template-columns: minmax(260px, 320px) minmax(0, 1fr);
   flex: 1;
   min-height: 0;
-  min-width: 0;
 }
 
 .sessions-split.has-canvas {
@@ -14,6 +30,16 @@
       300px,
       44vw
     );
+}
+
+.sessions-canvas-shell,
+g-session-canvas {
+  display: block;
+  min-width: 0;
+  min-height: 0;
+  max-width: 100%;
+  height: 100%;
+  overflow: hidden;
 }
 
 .msg-artifacts {
@@ -36,20 +62,23 @@
 
 @media (max-width: 1199.95px) {
   .sessions-split.has-canvas {
-    grid-template-columns: minmax(220px, 260px) 1fr;
+    grid-template-columns: minmax(220px, 260px) minmax(0, 1fr);
   }
-  .sessions-split.has-canvas g-session-canvas {
+  .sessions-split.has-canvas .sessions-canvas-shell {
     position: fixed;
     top: var(--grain-topbar-height);
     right: 0;
     bottom: var(--grain-bottombar-height);
     width: min(520px, 100vw);
+    height: auto;
     z-index: 30;
     box-shadow: var(--grain-elevation-3);
   }
 }
 
 .session-list {
+  min-width: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   border-right: 1px solid var(--md-sys-color-outline-variant);
   background: var(--md-sys-color-surface);
@@ -116,7 +145,6 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
-  min-width: 0;
   /* The agent's words sit on the page itself; only a person's turns are
      tinted, so the two read apart at a glance. */
   background: var(--md-sys-color-surface);
@@ -127,9 +155,18 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  min-width: 0;
   padding: 12px 20px;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
   background: var(--md-sys-color-surface);
+}
+
+.chat-head .chat-title,
+.chat-activity,
+.cap-held {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .chat-head .chat-title {
@@ -138,6 +175,18 @@
   font-size: 16px;
   line-height: 24px;
   font-weight: 500;
+}
+
+.chat-pane g-pill-select,
+.chat-pane .pill-select-wrap,
+.chat-pane .pill-select-btn {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.chat-pane .pill-select-btn {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chat-back {
@@ -240,11 +289,12 @@
 
 .session-settings-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
   gap: 10px;
 }
 
 .session-setting-field {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -277,8 +327,18 @@
   color: var(--md-sys-color-on-surface-variant);
 }
 
+.sessions-panel .chat-log {
+  overflow-x: hidden;
+}
+
+.sessions-panel .msg-body table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
 @media (max-width: 839.95px) {
-  .sessions-split.has-canvas g-session-canvas {
+  .sessions-split.has-canvas .sessions-canvas-shell {
     top: 52px;
     bottom: 92px;
   }
@@ -287,7 +347,12 @@
 @media (max-width: 599.95px), (max-height: 480px) and (orientation: landscape) {
   .sessions-split,
   .sessions-split.has-canvas {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .sessions-split.has-canvas .sessions-canvas-shell {
+    left: 0;
+    right: 0;
+    width: 100%;
   }
   .sessions-split .chat-pane {
     display: none;
@@ -306,5 +371,12 @@
   }
   .cap-note {
     margin-left: 0;
+  }
+}
+
+@media (max-height: 480px) and (orientation: landscape) {
+  .sessions-split.has-canvas .sessions-canvas-shell {
+    top: 48px;
+    bottom: 52px;
   }
 }
