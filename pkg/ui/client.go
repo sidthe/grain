@@ -2548,6 +2548,10 @@ type CreateTaskRequest struct {
 	// task filed approved and deferred wakes onto the queue, and one
 	// filed for a human wakes back into proposed.
 	DeferredUntil *time.Time `json:"deferredUntil,omitempty"`
+	// Tags carries explicit QA experiment allocation / benchmark tags
+	// (qa-alloc:<key>, bench-spec:<id>) supplied by an operator filing work.
+	// Refused to agents and proposed tasks; internal tags are rejected.
+	Tags []string `json:"tags,omitempty"`
 
 	// modelFromTemplate is the model fromTemplate filled Model in with,
 	// "" when it filled in none. Never read off the wire: CreateTask
@@ -2574,7 +2578,7 @@ type CreateTaskRequest struct {
 	rawBody *string
 }
 
-func proposalTags(key string, held, holdRequested bool) []string {
+func proposalTags(key string, held, holdRequested bool, extra []string) []string {
 	var tags []string
 	if key != "" {
 		tags = append(tags, key)
@@ -2585,7 +2589,52 @@ func proposalTags(key string, held, holdRequested bool) []string {
 	if holdRequested {
 		tags = append(tags, model.HoldRequestedTag)
 	}
+	for _, t := range extra {
+		if !slices.Contains(tags, t) {
+			tags = append(tags, t)
+		}
+	}
 	return tags
+}
+
+func allowedClientTaskTags(raw []string) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var out []string
+	for _, entry := range raw {
+		tag := strings.TrimSpace(entry)
+		if tag == "" {
+			continue
+		}
+		var rest string
+		switch {
+		case strings.HasPrefix(tag, "qa-alloc:"):
+			rest = strings.TrimPrefix(tag, "qa-alloc:")
+		case strings.HasPrefix(tag, "bench-spec:"):
+			rest = strings.TrimPrefix(tag, "bench-spec:")
+		default:
+			return nil, validationErrorf("unsupported task tag %q: only qa-alloc:<key> and bench-spec:<id> are accepted", tag)
+		}
+		if len(rest) == 0 || len(rest) > 64 || !isSafeClientTagValue(rest) {
+			return nil, validationErrorf("invalid task tag value in %q", tag)
+		}
+		if !slices.Contains(out, tag) {
+			out = append(out, tag)
+		}
+	}
+	return out, nil
+}
+
+func isSafeClientTagValue(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // defaultCapabilities is the capability ids a task filed on this
@@ -3665,6 +3714,13 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 			OnBehalfOf: &model.Principal{Kind: model.PrincipalAgent, ID: proposedBy.ID},
 		}
 	}
+	clientTags, err := allowedClientTaskTags(req.Tags)
+	if err != nil {
+		return Task{}, err
+	}
+	if proposedBy != nil && len(clientTags) > 0 {
+		return Task{}, validationErrorf("a proposed task cannot set tags")
+	}
 	resolvedOwner, sessionBehalf, err := c.resolveNewTaskOwner(ctx, req, proposedBy)
 	if err != nil {
 		return Task{}, err
@@ -3713,7 +3769,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		Reads:                reads,
 		Writes:               writes,
 		CustomFields:         customFields,
-		Tags:                 proposalTags(req.ProposalKey, heldNote != "", req.HoldForApproval && proposedBy != nil),
+		Tags:                 proposalTags(req.ProposalKey, heldNote != "", req.HoldForApproval && proposedBy != nil, clientTags),
 		CreatedAt:            &now,
 		OrderKey:             orderKey,
 		FiledVia:             filedViaFromContext(ctx),

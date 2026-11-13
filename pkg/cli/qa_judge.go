@@ -382,7 +382,12 @@ func runBlindJudgeBatch(
 
 func fetchTaskDiffForJudge(ctx context.Context, c *ui.HTTPClient, t ui.Task, checkoutDir string) string {
 	if checkoutDir != "" && t.Branch != "" && t.Base != "" {
-		cmd := exec.CommandContext(ctx, "git", "-C", checkoutDir, "diff", "origin/"+t.Base+"...origin/"+t.Branch)
+		cmd := exec.CommandContext(ctx, "git", "-C", checkoutDir, "diff", "origin/"+t.Base+"...origin/"+t.Branch, "--")
+		cmd.Env = []string{
+			"PATH=" + os.Getenv("PATH"),
+			"HOME=" + os.Getenv("HOME"),
+			"GIT_TERMINAL_PROMPT=0",
+		}
 		if out, err := cmd.Output(); err == nil && len(out) > 0 {
 			return string(out)
 		}

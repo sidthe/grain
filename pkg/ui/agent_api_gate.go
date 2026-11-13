@@ -2245,6 +2245,17 @@ func (s *Server) filingEscalation(ctx context.Context, held []string, set APIGra
 				}
 				return errors.New("an agent cannot set proposalKey directly")
 			}
+		case "tags":
+			var ts []string
+			if json.Unmarshal(raw, &ts) == nil && len(ts) > 0 {
+				if opts.role != nil {
+					if !set.Allows("qa:admin", repo) {
+						return fmt.Errorf("%s cannot set %s: setting task tags needs scope qa:admin", opts.role.label(), key)
+					}
+					continue
+				}
+				return errors.New("an agent cannot set task tags directly")
+			}
 		case "reviewers":
 			if opts.role == nil && hasReviewersField(pattern, raw) {
 				return errAgentReviewers

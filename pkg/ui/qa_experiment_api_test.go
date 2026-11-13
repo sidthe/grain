@@ -41,8 +41,17 @@ func TestQAExperimentLifecycleBlindSaltResultsAndReadoutAPI(t *testing.T) {
 	if err := store.Init(ctx); err != nil {
 		t.Fatalf("store.Init: %v", err)
 	}
+	if err := store.UpdateConfig(ctx, func(cfg *model.Config) error {
+		cfg.TargetRepos = []string{"acme/grain"}
+		return nil
+	}); err != nil {
+		t.Fatalf("UpdateConfig TargetRepos: %v", err)
+	}
 	const tok = "test-qa-exp-token"
-	srv := ui.NewServer(ui.Config{LocalAPIToken: tok}, store)
+	srv := ui.NewServer(ui.Config{
+		Actor:         ui.DefaultActor("alice"),
+		LocalAPIToken: tok,
+	}, store)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
@@ -62,7 +71,6 @@ func TestQAExperimentLifecycleBlindSaltResultsAndReadoutAPI(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+tok)
 		if body != nil {
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Sec-Fetch-Site", "same-origin")
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -117,25 +125,63 @@ func TestQAExperimentLifecycleBlindSaltResultsAndReadoutAPI(t *testing.T) {
 		t.Fatalf("expected QA.Enabled=true and RolloutPct=0 on start, got %+v", qaCfg)
 	}
 
-	// 4. Enroll 4 pairs via dispatch resolver and verify 100% assignment audit on /results.
-	repo := model.RepoRef{Owner: "acme", Name: "grain"}
+	// 4. File 4 pairs via HTTP POST /api/tasks (carrying tags: ["qa-alloc:..."]), enroll via dispatch resolver, and verify 8/8 checkedCount + 100% assignment audit on /results.
+	// Internal tags (console-session:*, held-for-approval, base-repair:*) must be rejected with 400.
+	if badTagCode, _ := doJSON(http.MethodPost, "/api/tasks", map[string]any{
+		"title": "Evil tag attempt",
+		"repo":  "acme/grain",
+		"tags":  []string{"console-session:director"},
+	}); badTagCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 on internal tag in POST /api/tasks, got %d", badTagCode)
+	}
+	// Sandboxed agents holding api:tasks:write must never be able to set qa-alloc: tags directly.
+	agentRef, _ := model.ParseRepo("acme/grain")
+	if err := store.PutTask(ctx, model.Task{
+		ID:     "agent-filer-1",
+		Intent: model.IntentImplement,
+		Title:  "agent filer",
+		Target: &agentRef,
+		Grants: []model.Grant{{Capability: "api:tasks:write", Via: model.GrantByLabel}},
+	}); err != nil {
+		t.Fatalf("PutTask agent-filer-1: %v", err)
+	}
+	agentBody, _ := json.Marshal(map[string]any{
+		"title": "Agent spoofed enrollment",
+		"repo":  "acme/grain",
+		"tags":  []string{"qa-alloc:spoofed"},
+	})
+	agentReq, _ := http.NewRequestWithContext(ctx, http.MethodPost, ts.URL+"/api/tasks", bytes.NewReader(agentBody))
+	agentReq.Header.Set("Authorization", "Bearer "+tok)
+	agentReq.Header.Set(ui.ActingTaskHeader, "agent-filer-1")
+	agentReq.Header.Set("Content-Type", "application/json")
+	agentResp, err := http.DefaultClient.Do(agentReq)
+	if err != nil {
+		t.Fatalf("Do agent POST /api/tasks: %v", err)
+	}
+	_ = agentResp.Body.Close()
+	if agentResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 when an agent sets task tags on POST /api/tasks, got %d", agentResp.StatusCode)
+	}
 	now := time.Now().UTC()
 	for i, rawPair := range pairs {
 		pm := rawPair.(map[string]any)
 		for slot, kField := range []struct{ keyF, baseF string }{{"keyA", "baseA"}, {"keyB", "baseB"}} {
-			tid := "t-" + string(rune('a'+i)) + "-" + string(rune('0'+slot))
-			tk := model.Task{
-				ID:         tid,
-				Title:      "Bench task " + tid,
-				Target:     &repo,
-				Base:       pm[kField.baseF].(string),
-				Tags:       []string{"qa-alloc:" + pm[kField.keyF].(string)},
-				WorkOrigin: model.WorkOrigin("task:" + tid),
+			tCode, createdTask := doJSON(http.MethodPost, "/api/tasks", map[string]any{
+				"title":       "Bench task pair " + string(rune('a'+i)) + "-" + string(rune('0'+slot)),
+				"description": "Implement parity fix",
+				"repo":        "acme/grain",
+				"base":        pm[kField.baseF].(string),
+				"tags":        []string{"qa-alloc:" + pm[kField.keyF].(string), "bench-spec:G-01"},
+			})
+			if tCode != http.StatusCreated && tCode != http.StatusOK {
+				t.Fatalf("POST /api/tasks status = %d, body = %+v", tCode, createdTask)
 			}
-			if err := store.PutTask(ctx, tk); err != nil {
-				t.Fatalf("PutTask: %v", err)
+			tid, _ := createdTask["id"].(string)
+			tk, gErr := store.GetTask(ctx, tid)
+			if gErr != nil || tk == nil {
+				t.Fatalf("GetTask(%s): %v", tid, gErr)
 			}
-			if _, _, err := resolve.EnsureQAResolutionAtDispatch(ctx, store, tk, tid+"-1", now); err != nil {
+			if _, _, err := resolve.EnsureQAResolutionAtDispatch(ctx, store, *tk, tid+"-1", now); err != nil {
 				t.Fatalf("EnsureQAResolutionAtDispatch: %v", err)
 			}
 		}
@@ -146,8 +192,8 @@ func TestQAExperimentLifecycleBlindSaltResultsAndReadoutAPI(t *testing.T) {
 		t.Fatalf("GET results status = %d, body = %+v", code, results)
 	}
 	audit := results["assignmentAudit"].(map[string]any)
-	if audit["passed"] != true || audit["agreementPct"].(float64) != 100.0 {
-		t.Fatalf("expected 100%% assignment audit pass, got %+v", audit)
+	if audit["passed"] != true || audit["agreementPct"].(float64) != 100.0 || audit["checkedCount"].(float64) != 8 {
+		t.Fatalf("expected 8/8 checkedCount and 100%% assignment audit pass, got %+v", audit)
 	}
 
 	// 5. Stop experiment and import readout -> salt is revealed and paired forest rows populate.
