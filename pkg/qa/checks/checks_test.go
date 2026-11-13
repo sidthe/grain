@@ -168,7 +168,7 @@ new file mode 100644
 			"pkg/calc/old_test.go": "package calc\nimport \"testing\"\nfunc TestOld(t *testing.T) { t.Fatal(\"x\") }\n",
 		},
 		HeadFiles: map[string]string{
-			"pkg/other/add_test.go":              headGoTest,
+			"pkg/other/add_test.go":               headGoTest,
 			"ui-ng/src/app/widget/widget.spec.ts": headTSSpec,
 		},
 	}
@@ -353,10 +353,10 @@ new file mode 100644
 			"ui-ng/src/app/bloated/bloated.css": grownBaseCSS,
 		},
 		HeadFiles: map[string]string{
-			"ui-ng/angular.json":                         angularJSON,
-			"ui-ng/src/app/legacy/legacy.css":            shrunkHeadCSS,
-			"ui-ng/src/app/bloated/bloated.css":          grownHeadCSS,
-			"ui-ng/src/app/app.component.ts":             `import { TelemetryPageComponent } from "./telemetry/telemetry-page.component";`,
+			"ui-ng/angular.json":                           angularJSON,
+			"ui-ng/src/app/legacy/legacy.css":              shrunkHeadCSS,
+			"ui-ng/src/app/bloated/bloated.css":            grownHeadCSS,
+			"ui-ng/src/app/app.component.ts":               `import { TelemetryPageComponent } from "./telemetry/telemetry-page.component";`,
 			"ui-ng/src/app/untested/untested.component.ts": `export class UntestedComponent {}`,
 		},
 	}
@@ -527,7 +527,7 @@ new file mode 100644
 	tiWS := &InMemoryWorkspace{
 		Diff: tiDiff,
 		HeadFiles: map[string]string{
-			"pkg/foo/foo_test.go":      goTestHead,
+			"pkg/foo/foo_test.go":       goTestHead,
 			"ui-ng/src/app/foo.spec.ts": jsSpecHead,
 		},
 	}
@@ -630,7 +630,7 @@ func TestRunnerRespectsDisabledNonFloorCheck(t *testing.T) {
 		},
 	}
 	opts := RunOptions{TaskID: "1", RunID: "2", Arm: "treatment", Attempt: 1}
-	
+
 	report, err := RunS3(context.Background(), ws, flow, opts, profiler)
 	if err != nil {
 		t.Fatalf("RunS3: %v", err)

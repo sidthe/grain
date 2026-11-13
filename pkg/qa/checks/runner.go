@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ai-on-gke/grain/pkg/qa"
 )
@@ -45,12 +46,14 @@ type CheckResult struct {
 
 // RunOptions configures one S3 suite execution.
 type RunOptions struct {
-	TaskID      string
-	RunID       string
-	Arm         string
-	Shadow      bool
-	Attempt     int
-	CallerNotes string
+	TaskID        string
+	RunID         string
+	Arm           string
+	Shadow        bool
+	Attempt       int
+	CallerNotes   string
+	TaskSpecBytes int
+	ExecInSandbox func(ctx context.Context, dir string, argv []string, timeout time.Duration) (string, int, error)
 }
 
 // Report aggregates the full S3 check pass, blast-radius classification, and findings.
@@ -64,6 +67,28 @@ type Report struct {
 	HazardSites  map[string][]int `json:"hazardSites,omitempty"`
 	DurationMS   int64            `json:"durationMs"`
 	AllocBytes   int64            `json:"allocBytes"`
+}
+
+func (r Report) FormatAgentWarnings() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Pre-PR quality gate completed with warnings (%d issue(s) on %s, blast tier %s):\n\n",
+		len(r.Findings), shortRev(r.HeadSHA), r.BlastTier)
+	for i, f := range r.Findings {
+		loc := f.FilePath
+		if loc != "" && f.Line > 0 {
+			loc = fmt.Sprintf("%s:%d", loc, f.Line)
+		}
+		if loc != "" {
+			fmt.Fprintf(&b, "%d. [%s] [%s] %s — %s\n", i+1, f.RuleID, f.Severity, loc, f.Summary)
+		} else {
+			fmt.Fprintf(&b, "%d. [%s] [%s] %s\n", i+1, f.RuleID, f.Severity, f.Summary)
+		}
+		if strings.TrimSpace(f.Evidence) != "" {
+			fmt.Fprintf(&b, "   %s\n", strings.ReplaceAll(strings.TrimSpace(f.Evidence), "\n", "\n   "))
+		}
+	}
+	b.WriteString("\nConsider addressing the warnings above.")
+	return b.String()
 }
 
 // FormatAgentFailure formats blocking S3 findings as a concise, actionable plain-text response
@@ -142,19 +167,34 @@ func RunS3(ctx context.Context, ws WorkspaceReader, flow qa.FlowSpec, opts RunOp
 			if !flow.HasRule(ruleID) {
 				return nil
 			}
+			ruleSpec, _ := flow.Rule(ruleID)
+			stage := ruleSpec.Stage
+			if stage == "" {
+				stage = "S3"
+			}
 			var ruleFindings []Finding
 			sample, rErr := profiler.Measure(qa.PerfSample{
 				TaskID:  opts.TaskID,
 				RunID:   opts.RunID,
-				Stage:   "S3",
+				Stage:   stage,
 				CheckID: ruleID,
 			}, func() (string, error) {
 				fs, err := fn()
 				if err != nil {
 					return "error", err
 				}
+				for i := range fs {
+					if fs[i].Severity == "" {
+						fs[i].Severity = ruleSpec.Severity
+					}
+				}
 				ruleFindings = fs
-				if hasBlocking(fs) {
+				if len(fs) > 0 {
+					if ruleSpec.Severity == "shadow" {
+						return "shadow", nil
+					} else if ruleSpec.Severity == "warn" {
+						return "warn", nil
+					}
 					return "fail", nil
 				}
 				return "pass", nil
@@ -164,7 +204,7 @@ func RunS3(ctx context.Context, ws WorkspaceReader, flow qa.FlowSpec, opts RunOp
 			}
 			report.Results = append(report.Results, CheckResult{
 				CheckID:    ruleID,
-				Stage:      "S3",
+				Stage:      stage,
 				Verdict:    sample.Verdict,
 				DurationMS: sample.DurationMS,
 				AllocBytes: sample.AllocBytes,
@@ -200,6 +240,29 @@ func RunS3(ctx context.Context, ws WorkspaceReader, flow qa.FlowSpec, opts RunOp
 		}
 		if err := runOne(qa.RuleUIBudgetAndSpecFloor, func() ([]Finding, error) {
 			return CheckUIBudgetAndSpecFloor(ctx, ws, pd)
+		}); err != nil {
+			return "error", err
+		}
+		if err := runOne(qa.RuleExportedSurfaceDelta, func() ([]Finding, error) {
+			rSpec, _ := flow.Rule(qa.RuleExportedSurfaceDelta)
+			return CheckExportedSurfaceDelta(ctx, ws, pd, opts, rSpec.Params)
+		}); err != nil {
+			return "error", err
+		}
+		if err := runOne(qa.RuleTestHygiene, func() ([]Finding, error) {
+			return CheckTestHygiene(ctx, ws, pd)
+		}); err != nil {
+			return "error", err
+		}
+		if err := runOne(qa.RuleMutationHardening, func() ([]Finding, error) {
+			rSpec, _ := flow.Rule(qa.RuleMutationHardening)
+			return CheckMutationHardening(ctx, ws, pd, opts, rSpec.Params)
+		}); err != nil {
+			return "error", err
+		}
+		if err := runOne(qa.RuleBoundaryFuzz, func() ([]Finding, error) {
+			rSpec, _ := flow.Rule(qa.RuleBoundaryFuzz)
+			return CheckBoundaryFuzz(ctx, ws, pd, opts, rSpec.Params)
 		}); err != nil {
 			return "error", err
 		}
