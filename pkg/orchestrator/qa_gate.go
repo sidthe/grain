@@ -212,12 +212,27 @@ func salvageQAStageIfPresent(
 		return false, nil
 	}
 	assign, qaCfg, aErr := store.ActiveQAAssignmentForTask(ctx, task.ID)
-	if aErr != nil || assign == nil || !qaCfg.Enabled || assign.Arm != model.QAArmTreatment {
-		return false, nil
-	}
+	qaActive := aErr == nil && assign != nil && qaCfg.Enabled && assign.Arm == model.QAArmTreatment
 
 	stageBranch := model.QAStageBranchName(task.ID)
 	stageExists, err := targetBranchExists(client, *task.Target, stageBranch)
+	if err != nil {
+		return false, fmt.Errorf("orchestrator: checking %s's staging branch: %w", task.ID, err)
+	}
+
+	if !qaActive && stageExists {
+		// Fail-open promotion: QA is disabled or arm is no longer gated, but staging branch exists.
+		head, err := client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, stageBranch)
+		if err == nil && head != nil && head.SHA != "" {
+			if _, err := promoteQAStageBranch(client, *task.Target, stageBranch, task.BranchName(), head.SHA); err == nil {
+																// structured audit note here (to be added when config_audit.go is merged in M10)
+			}
+		}
+		return false, nil
+	}
+	if !qaActive {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("orchestrator: checking %s's staging branch: %w", task.ID, err)
 	}

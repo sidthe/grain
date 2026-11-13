@@ -65,11 +65,11 @@ func TestParseRepoFlowYAMLStrictSchemaAndMandatoryFloors(t *testing.T) {
 		t.Fatal("expected ParseRepoFlowYAML to reject disabling enable-s4")
 	}
 	// Valid tighten-only overlay succeeds.
-	spec, err := ParseRepoFlowYAML([]byte("inject-skill: false\nstrict-decoder-paths:\n  - internal/cfg/\n"))
+	spec, err := ParseRepoFlowYAML([]byte("strict-decoder-paths:\n  - internal/cfg/\n"))
 	if err != nil {
 		t.Fatalf("ParseRepoFlowYAML valid overlay: %v", err)
 	}
-	if spec.ID != model.QAFlowRepoCustom || !spec.EnableS4 || spec.InjectSkill {
+	if spec.ID != model.QAFlowRepoCustom || !spec.EnableS4 || !spec.InjectSkill {
 		t.Fatalf("unexpected parsed spec: %+v", spec)
 	}
 	if len(spec.StrictDecoderPaths) != 1 || spec.StrictDecoderPaths[0] != "internal/cfg/" {

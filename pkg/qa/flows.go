@@ -228,10 +228,10 @@ func ParseRepoFlowYAML(raw []byte) (FlowSpec, error) {
 		return FlowSpec{}, fmt.Errorf("qa: unsupported or weaker base flow %q in .grain/qa-flow.yml (only %q allowed)", b, model.QAFlowGoldenV1Minimal)
 	}
 	if overlay.InjectSkill != nil {
-		base.InjectSkill = *overlay.InjectSkill
-		if !base.InjectSkill {
-			base.SkillBytes = 0
+		if !*overlay.InjectSkill {
+			return FlowSpec{}, fmt.Errorf("qa: inject-skill cannot be disabled in .grain/qa-flow.yml")
 		}
+		base.InjectSkill = *overlay.InjectSkill
 	}
 	if overlay.EnableS4 != nil {
 		if !*overlay.EnableS4 {

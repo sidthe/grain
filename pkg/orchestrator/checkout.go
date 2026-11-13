@@ -327,7 +327,7 @@ func prepareCheckoutWithBranch(ctx context.Context, tools []mcp.Tool, remoteBase
 		}
 		return out, nil
 	}
-	branch := strings.TrimSpace(pushBranch)
+	branch := task.BranchName()
 	if branch == "" {
 		branch = task.BranchName()
 	}

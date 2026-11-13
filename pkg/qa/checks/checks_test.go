@@ -190,8 +190,9 @@ import (
 	"bytes"
 	"gopkg.in/yaml.v3"
 )
+type Decl struct{ Name string }
 func LoadDecl(raw []byte) error {
-	var out map[string]any
+	var out Decl
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	return dec.Decode(&out)
 }
@@ -201,8 +202,9 @@ import (
 	"bytes"
 	"gopkg.in/yaml.v3"
 )
+type Decl struct{ Name string }
 func LoadDecl(raw []byte) error {
-	var out map[string]any
+	var out Decl
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	dec.KnownFields(true)
 	return dec.Decode(&out)
@@ -414,8 +416,9 @@ import (
 	"bytes"
 	"gopkg.in/yaml.v3"
 )
+type Settings struct{ Name string }
 func Load(raw []byte) error {
-	var m map[string]any
+	var m Settings
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	return dec.Decode(&m)
 }
@@ -546,17 +549,18 @@ import (
 	"encoding/json"
 	"gopkg.in/yaml.v3"
 )
+type Both struct{ Name string }
 func LoadBoth(j, y []byte) error {
 	jd := json.NewDecoder(bytes.NewReader(j))
 	jd.DisallowUnknownFields()
-	var a map[string]any
+	var a Both
 	_ = jd.Decode(&a)
 
 	yd := yaml.NewDecoder(bytes.NewReader(y))
 	return yd.Decode(&a)
 }
 func LoadRaw(y []byte) error {
-	var a map[string]any
+	var a map[string]Both
 	return yaml.Unmarshal(y, &a)
 }
 `
@@ -613,5 +617,27 @@ func (b *Beta) Validate() error { return nil }
 	}
 	if len(methFindings) != 1 || !strings.Contains(methFindings[0].Summary, "Alpha.Validate") {
 		t.Fatalf("expected Alpha.Validate hazard finding despite unchanged Beta.Validate, got %+v", methFindings)
+	}
+}
+
+func TestRunnerRespectsDisabledNonFloorCheck(t *testing.T) {
+	ws := &InMemoryWorkspace{Diff: "empty"}
+	profiler := qa.NewProfiler("")
+	flow := qa.FlowSpec{
+		Rules: []qa.RuleSpec{
+			{ID: qa.RuleTestIntegrityGuard, Enabled: true},
+			{ID: qa.RuleSiblingExportHazard, Enabled: false},
+		},
+	}
+	opts := RunOptions{TaskID: "1", RunID: "2", Arm: "treatment", Attempt: 1}
+	
+	report, err := RunS3(context.Background(), ws, flow, opts, profiler)
+	if err != nil {
+		t.Fatalf("RunS3: %v", err)
+	}
+	for _, res := range report.Results {
+		if res.CheckID == qa.RuleSiblingExportHazard {
+			t.Fatalf("RuleSiblingExportHazard was executed despite being disabled")
+		}
 	}
 }

@@ -119,14 +119,14 @@ func TestQATreatmentT1StagingRefPromotesAndOpensPRCleanly(t *testing.T) {
 		"package calc\nfunc Sum(a, b int) int { return a + b }\n",
 		"Add Sum helper\n\nImplements integer addition.")
 
-	// Before OpenPullRequestForTaskWithQA, the real PR branch does not exist on GitHub.
+	// Before orchestrator.OpenPullRequestForTaskWithQA, the real PR branch does not exist on GitHub.
 	if exists, _ := client.BranchExists(repo.Owner, repo.Name, prBranch); exists {
 		t.Fatalf("expected PR branch %s not to exist before QA promotion", prBranch)
 	}
 
 	status, err := orchestrator.OpenPullRequestForTaskWithQA(ctx, store, client, task, orchestrator.QAOpenPROptions{})
 	if err != nil {
-		t.Fatalf("OpenPullRequestForTaskWithQA: %v", err)
+		t.Fatalf("orchestrator.OpenPullRequestForTaskWithQA: %v", err)
 	}
 	if status.PullRequest.Number == 0 || len(sim.PullRequests) != 1 {
 		t.Fatalf("expected 1 opened PR on T1 after promotion, got status=%+v prs=%+v", status, sim.PullRequests)
@@ -201,7 +201,7 @@ func TestQATreatmentT2AlreadyOpenPRNeverLeaksUnverifiedStageAndRunsBoundedS4(t *
 		t.Fatalf("initial OpenPullRequestForTask: %v", err)
 	}
 
-	// Turn 2 pushes unverified T2 commit sha2 to grain-qa-stage/qat2 and calls OpenPullRequestForTaskWithQA.
+	// Turn 2 pushes unverified T2 commit sha2 to grain-qa-stage/qat2 and calls orchestrator.OpenPullRequestForTaskWithQA.
 	stageBranch := model.QAStageBranchName(task.ID)
 	sha2 := commitAndPushFile(t, sim.BareRepo, stageBranch, "pkg/staterepo/loader.go",
 		"package staterepo\nfunc LoadItems(items []string) string {\n\tfirst := items[0]\n\treturn first\n}\n",
@@ -210,7 +210,7 @@ func TestQATreatmentT2AlreadyOpenPRNeverLeaksUnverifiedStageAndRunsBoundedS4(t *
 	_ = sha2
 	deferredStatus, err := orchestrator.OpenPullRequestForTaskWithQA(ctx, store, client, task, orchestrator.QAOpenPROptions{})
 	if err != nil {
-		t.Fatalf("OpenPullRequestForTaskWithQA T2 defer: %v", err)
+		t.Fatalf("orchestrator.OpenPullRequestForTaskWithQA T2 defer: %v", err)
 	}
 	if deferredStatus.PullRequest.Number != 0 || !strings.Contains(deferredStatus.Note, "S4 verification") {
 		t.Fatalf("expected deferred S4 note without promoting PR branch, got %+v", deferredStatus)
@@ -294,7 +294,7 @@ func TestQASalvageS3FailureRequeuesOnceThenHoldsWithGateQA(t *testing.T) {
 	t.Cleanup(func() { orchestrator.SetLiveQARuntime(nil) })
 
 	stageBranch := model.QAStageBranchName(task.ID)
-	badDecoder := "package config\nimport (\n\t\"bytes\"\n\t\"gopkg.in/yaml.v3\"\n)\nfunc Parse(b []byte) error {\n\tvar v map[string]any\n\treturn yaml.NewDecoder(bytes.NewReader(b)).Decode(&v)\n}\n"
+	badDecoder := "package config\nimport (\n\t\"bytes\"\n\t\"gopkg.in/yaml.v3\"\n)\ntype Config struct{ Name string }\nfunc Parse(b []byte) error {\n\tvar v Config\n\treturn yaml.NewDecoder(bytes.NewReader(b)).Decode(&v)\n}\n"
 	commitAndPushFile(t, sim.BareRepo, stageBranch, "pkg/config/parse.go", badDecoder, "Add config parser\n\nBody.")
 
 	now := time.Date(2026, 11, 12, 21, 10, 0, 0, time.UTC)
@@ -367,7 +367,7 @@ func TestQARunCyclePromptAndCheckoutUseStagingBranchOnTreatment(t *testing.T) {
 			{"-C", wd, "config", "user.name", "agent"},
 			{"-C", wd, "add", "hello.txt"},
 			{"-C", wd, "commit", "-q", "-m", "Add hello\n\nBody."},
-			{"-C", wd, "push", "-q", "origin", stageBranch},
+			{"-C", wd, "push", "-q", "origin", task.BranchName() + ":" + stageBranch},
 		} {
 			if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
 				return nil, fmt.Errorf("git %v: %v (%s)", args, err, out)
@@ -446,14 +446,14 @@ func TestQATreatmentS3RetryCapHoldsPRAndPreservesOwnerRepoWorkOrigin(t *testing.
 	t.Cleanup(func() { orchestrator.SetLiveQARuntime(nil) })
 
 	stageBranch := model.QAStageBranchName(task.ID)
-	badDecoder := "package config\nimport \"gopkg.in/yaml.v3\"\nfunc Parse(b []byte) error {\n\tvar v map[string]any\n\treturn yaml.Unmarshal(b, &v)\n}\n"
+	badDecoder := "package config\nimport \"gopkg.in/yaml.v3\"\ntype Config struct{ Name string }\nfunc Parse(b []byte) error {\n\tvar v Config\n\treturn yaml.Unmarshal(b, &v)\n}\n"
 	commitAndPushFile(t, sim.BareRepo, stageBranch, "pkg/config/parse.go", badDecoder, "Add config parser\n\nBody.")
 
 	// Attempt < 3 (AllowHoldAfterS3Cap=false) must refuse PR creation and leave stage unpromoted.
 	if _, err := orchestrator.OpenPullRequestForTaskWithQA(ctx, store, client, task, orchestrator.QAOpenPROptions{
 		AllowHoldAfterS3Cap: false,
 	}); err == nil {
-		t.Fatal("expected OpenPullRequestForTaskWithQA to fail before S3 retry cap")
+		t.Fatal("expected orchestrator.OpenPullRequestForTaskWithQA to fail before S3 retry cap")
 	}
 	if len(sim.PullRequests) != 0 {
 		t.Fatalf("expected 0 PRs before S3 retry cap, got %+v", sim.PullRequests)
@@ -464,7 +464,7 @@ func TestQATreatmentS3RetryCapHoldsPRAndPreservesOwnerRepoWorkOrigin(t *testing.
 		AllowHoldAfterS3Cap: true,
 	})
 	if err != nil || status.PullRequest.Number == 0 {
-		t.Fatalf("OpenPullRequestForTaskWithQA(AllowHoldAfterS3Cap=true) = (%+v, %v)", status, err)
+		t.Fatalf("orchestrator.OpenPullRequestForTaskWithQA(AllowHoldAfterS3Cap=true) = (%+v, %v)", status, err)
 	}
 	reloaded, _ := store.GetTask(ctx, task.ID)
 	if reloaded.AutoMerge {
@@ -480,5 +480,103 @@ func TestQATreatmentS3RetryCapHoldsPRAndPreservesOwnerRepoWorkOrigin(t *testing.
 	}
 	if !foundQA {
 		t.Fatalf("expected GateQA in GateStateFindings on held PR, got %+v", gates)
+	}
+}
+
+
+func TestQAStageBranchLeakIsEliminated(t *testing.T) {
+	store, ctx := openStore(t)
+	enableTestQA(t, ctx, store, 100)
+
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "qatleak", repo)
+	if _, err := store.EnsureQAAssignment(ctx, model.QAAssignment{
+		RootOrigin:         model.ResolveQARootOrigin(task.WorkOrigin, task.ID),
+		Epoch:              1,
+		RegimeID:           1,
+		Arm:                model.QAArmTreatment,
+		FlowID:             model.QAFlowGoldenV1Minimal,
+		RolloutPctAtAssign: 100,
+	}); err != nil {
+		t.Fatalf("EnsureQAAssignment: %v", err)
+	}
+	
+	stageBranch := model.QAStageBranchName(task.ID)
+	// Simulate the agent pushing to the staging branch.
+	commitAndPushFile(t, sim.BareRepo, stageBranch, "pkg/config/parse.go", "package config\n", "fix the thing")
+	
+	// Set the history.PushBranch which the agent would have set.
+	
+	
+	// Promote and open PR.
+	status, err := orchestrator.OpenPullRequestForTaskWithQA(ctx, store, client, task, orchestrator.QAOpenPROptions{})
+	if err != nil {
+		t.Fatalf("orchestrator.OpenPullRequestForTaskWithQA: %v", err)
+	}
+	if status.PullRequest.Number == 0 {
+		t.Fatalf("expected PR to be opened")
+	}
+	
+	if len(sim.PullRequests) == 0 {
+		t.Fatalf("expected PR in sim")
+	}
+	pr := sim.PullRequests[0]
+	if strings.Contains(pr.Head, "grain-qa-stage") {
+		t.Fatalf("PR head leaks grain-qa-stage: %s", pr.Head)
+	}
+	if strings.Contains(pr.Title, "grain-qa-stage") || strings.Contains(pr.Body, "grain-qa-stage") {
+		t.Fatalf("PR metadata leaks grain-qa-stage: title=%q, body=%q", pr.Title, pr.Body)
+	}
+	
+	// Also ensure no commits in the PR have grain-qa-stage.
+	commits, err := client.ListPullRequestCommits(repo.Owner, repo.Name, pr.Number)
+	if err != nil {
+		t.Fatalf("ListPullRequestCommits: %v", err)
+	}
+	for _, c := range commits {
+		if strings.Contains(c.Message, "grain-qa-stage") {
+			t.Fatalf("Commit message leaks grain-qa-stage: %q", c.Message)
+		}
+	}
+}
+
+func TestQASalvagePromotesDisabledQA(t *testing.T) {
+	store, ctx := openStore(t)
+	enableTestQA(t, ctx, store, 100)
+
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "qatsalvage", repo)
+
+	if _, err := store.EnsureQAAssignment(ctx, model.QAAssignment{
+		RootOrigin:         model.ResolveQARootOrigin(task.WorkOrigin, task.ID),
+		Epoch:              1,
+		RegimeID:           1,
+		Arm:                model.QAArmTreatment,
+		FlowID:             model.QAFlowGoldenV1Minimal,
+		RolloutPctAtAssign: 100,
+	}); err != nil {
+		t.Fatalf("EnsureQAAssignment: %v", err)
+	}
+
+	stageBranch := model.QAStageBranchName(task.ID)
+	commitAndPushFile(t, sim.BareRepo, stageBranch, "pkg/config/parse.go", "package config\n", "fix the thing")
+
+	// Disable QA
+	enableTestQA(t, ctx, store, 0)
+
+	handled, err := orchestrator.SalvageQAStageIfPresent(ctx, store, client, task, time.Now())
+	if err != nil {
+		t.Fatalf("salvageQAStageIfPresent: %v", err)
+	}
+	if handled {
+		t.Fatalf("expected handled=false, got true")
+	}
+
+	// Verify it was promoted.
+	promotedHead, err := client.GetBranchHead(repo.Owner, repo.Name, task.BranchName())
+	if err != nil || promotedHead == nil {
+		t.Fatalf("expected promoted PR branch at %s, got error %v", task.BranchName(), err)
 	}
 }
