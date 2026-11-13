@@ -759,6 +759,64 @@ describe("SessionsPageComponent", () => {
     expect(q(f, '[data-testid="canvas-html-iframe"]')).not.toBeNull();
   });
 
+  it("applies mobile canvas overflow wrapper classes when opening and closing the canvas", async () => {
+    const api = new FakeApi();
+    api.details["1"] = {
+      ...api.details["1"],
+      comments: [
+        ...api.details["1"].comments!,
+        {
+          id: 99,
+          author: "grain",
+          authorKind: "automation",
+          body: [
+            "## Mobile Spec",
+            "",
+            "Detailed architectural overview describing mobile canvas containment, horizontal scroll wrapping, and responsive column constraints at 390px width.",
+            "",
+            "| Field | Value |",
+            "|---|---|",
+            "| url | https://example.com/very/long/mobile/overflow/check |",
+          ].join("\n"),
+        },
+      ],
+    };
+    const f = await render(api, "director");
+
+    const panel = q(f, ".sessions-panel")!;
+    const split = q(f, ".sessions-split")!;
+    expect(panel.classList).toContain("is-chat-open");
+    expect(split.classList).toContain("is-chat-open");
+    expect(panel.classList).not.toContain("has-canvas");
+    expect(split.classList).not.toContain("has-canvas");
+    expect(q(f, '[data-testid="session-canvas-shell"]')).toBeNull();
+
+    (
+      q(f, '[data-testid="session-canvas-toggle"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    f.detectChanges();
+
+    expect(panel.classList).toContain("has-canvas");
+    expect(split.classList).toContain("has-canvas");
+    const shell = q(f, '[data-testid="session-canvas-shell"]');
+    expect(shell).not.toBeNull();
+    expect(shell?.classList).toContain("sessions-canvas-shell");
+    expect(
+      shell?.querySelector(
+        'g-session-canvas .session-canvas .canvas-body .canvas-markdown-wrap[data-testid="canvas-doc-markdown"]',
+      ),
+    ).not.toBeNull();
+
+    (q(f, '[data-testid="canvas-close"]') as HTMLButtonElement).click();
+    await f.whenStable();
+    f.detectChanges();
+
+    expect(panel.classList).not.toContain("has-canvas");
+    expect(split.classList).not.toContain("has-canvas");
+    expect(q(f, '[data-testid="session-canvas-shell"]')).toBeNull();
+  });
+
   it("rolls back created tasks when launchWorkstreamPlan fails mid-plan and keeps SessionsStore retained across drawer watch toggles", async () => {
     let createdSeq = 0;
     const api = new FakeApi();
