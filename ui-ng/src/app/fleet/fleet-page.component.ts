@@ -58,10 +58,12 @@ import {
   type SandboxHealthResponse,
   type SandboxProbeResult,
   type SandboxSnapshot,
+  effectivePersistentState,
   extractTaskIdFromSandbox,
   formatBytes,
   formatMB,
   formatRelativeAge,
+  isPersistentActionAllowed,
   parseArgv,
 } from "./fleet.models";
 
@@ -683,19 +685,10 @@ sandbox={{ pr.sandbox }} pod={{ pr.pod }} exit={{ pr.exitCode }}
                                   'persistent-' + act.action + '-' + ps.name
                                 "
                                 [disabled]="
-                                  !canControlPersistent(ps) ||
-                                  busyPersistent() ===
-                                    ps.name + ':' + act.action
+                                  isPersistentActionDisabled(ps, act.action)
                                 "
                                 [gTip]="
-                                  canControlPersistent(ps)
-                                    ? act.label +
-                                      ' persistent sandbox ' +
-                                      ps.name
-                                    : access.deniedReason(
-                                        'POST /api/persistent-sandboxes/{name}/{action}',
-                                        ps.repo || undefined
-                                      )
+                                  persistentActionTip(ps, act.action, act.label)
                                 "
                                 (click)="controlPersistent(ps, act.action)"
                               >
@@ -1705,6 +1698,44 @@ export class FleetPageComponent implements OnInit {
     );
   }
 
+  protected isPersistentBusy(ps: PersistentSandboxStatus): boolean {
+    const busy = this.busyPersistent();
+    return busy !== null && busy.startsWith(`${ps.name}:`);
+  }
+
+  protected isPersistentActionDisabled(
+    ps: PersistentSandboxStatus,
+    action: PersistentAction,
+  ): boolean {
+    return (
+      !this.canControlPersistent(ps) ||
+      !isPersistentActionAllowed(ps, action) ||
+      this.isPersistentBusy(ps)
+    );
+  }
+
+  protected persistentActionTip(
+    ps: PersistentSandboxStatus,
+    action: PersistentAction,
+    label: string,
+  ): string {
+    if (!this.canControlPersistent(ps)) {
+      return (
+        this.access.deniedReason(
+          "POST /api/persistent-sandboxes/{name}/{action}",
+          ps.repo || undefined,
+        ) || this.deniedScopeFallback("deployment:restart")
+      );
+    }
+    if (this.isPersistentBusy(ps)) {
+      return `Action already in progress for ${ps.name}.`;
+    }
+    if (!isPersistentActionAllowed(ps, action)) {
+      return `${label} is unavailable while ${ps.name} is ${effectivePersistentState(ps)}.`;
+    }
+    return `${label} persistent sandbox ${ps.name}`;
+  }
+
   protected canReadPersistentLogs(ps: PersistentSandboxStatus): boolean {
     const repo = ps.repo || undefined;
     if (!repo && this.isScopeRepoLimited("deployment:read")) return false;
@@ -2028,7 +2059,7 @@ export class FleetPageComponent implements OnInit {
     ps: PersistentSandboxStatus,
     action: PersistentAction,
   ): Promise<void> {
-    if (!this.canControlPersistent(ps)) return;
+    if (this.isPersistentActionDisabled(ps, action)) return;
     const key = `${ps.name}:${action}`;
     this.busyPersistent.set(key);
     try {
