@@ -70,7 +70,6 @@ function recordDeleteRequests(
 }
 
 test("prompts for optional reason on CI run cancel", async ({ page }) => {
-  test.setTimeout(60_000);
   const {
     ids: [runWithReason, runWithoutReason],
     restore,
