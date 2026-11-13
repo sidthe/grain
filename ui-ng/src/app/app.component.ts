@@ -403,6 +403,20 @@ export class DeferErrorDirective implements OnInit {
         />
       </nav>
 
+      <ng-template #railBody let-d>
+        <span class="rail-pill">
+          <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+            <path [attr.d]="icons[d.icon]" fill="currentColor" />
+          </svg>
+          @if (d.route && d.id === "inbox" && inboxCount() > 0) {
+            <span class="rail-badge" data-testid="rail-inbox-count">{{
+              inboxCount()
+            }}</span>
+          }
+        </span>
+        <span class="rail-label">{{ d.label }}</span>
+      </ng-template>
+
       <ng-template #railItem let-d let-key="key">
         @if (d.route) {
           <a
@@ -415,22 +429,9 @@ export class DeferErrorDirective implements OnInit {
             [gTip]="key ? d.tip + ' (' + key + ')' : d.tip"
             gTipPlacement="right"
           >
-            <span class="rail-pill">
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                aria-hidden="true"
-              >
-                <path [attr.d]="icons[d.icon]" fill="currentColor" />
-              </svg>
-              @if (d.id === "inbox" && inboxCount() > 0) {
-                <span class="rail-badge" data-testid="rail-inbox-count">{{
-                  inboxCount()
-                }}</span>
-              }
-            </span>
-            <span class="rail-label">{{ d.label }}</span>
+            <ng-container
+              *ngTemplateOutlet="railBody; context: { $implicit: d }"
+            />
           </a>
         } @else {
           <a
@@ -438,23 +439,14 @@ export class DeferErrorDirective implements OnInit {
             [href]="d.classic"
             [attr.data-testid]="'rail-' + d.id"
             [gTip]="
-              key
-                ? d.tip + ' Opens in the classic UI. (' + key + ')'
-                : d.tip + ' Opens in the classic UI.'
+              (key ? d.tip + ' (' + key + ')' : d.tip) +
+              ' Opens in the classic UI.'
             "
             gTipPlacement="right"
           >
-            <span class="rail-pill">
-              <svg
-                width="20"
-                height="20"
-                viewBox="0 0 24 24"
-                aria-hidden="true"
-              >
-                <path [attr.d]="icons[d.icon]" fill="currentColor" />
-              </svg>
-            </span>
-            <span class="rail-label">{{ d.label }}</span>
+            <ng-container
+              *ngTemplateOutlet="railBody; context: { $implicit: d }"
+            />
           </a>
         }
       </ng-template>
@@ -712,34 +704,26 @@ export class DeferErrorDirective implements OnInit {
               #compact="routerLinkActive"
               [attr.aria-current]="compact.isActive ? 'page' : null"
             >
-              <span class="compact-nav-pill">
-                <svg
-                  width="20"
-                  height="20"
-                  viewBox="0 0 24 24"
-                  aria-hidden="true"
-                >
-                  <path [attr.d]="icons[d.icon]" fill="currentColor" />
-                </svg>
-              </span>
-              {{ d.label }}
+              <ng-container
+                *ngTemplateOutlet="compactIcon; context: { $implicit: d }"
+              />
             </a>
           } @else {
             <a class="compact-nav-btn" [href]="d.classic">
-              <span class="compact-nav-pill">
-                <svg
-                  width="20"
-                  height="20"
-                  viewBox="0 0 24 24"
-                  aria-hidden="true"
-                >
-                  <path [attr.d]="icons[d.icon]" fill="currentColor" />
-                </svg>
-              </span>
-              {{ d.label }}
+              <ng-container
+                *ngTemplateOutlet="compactIcon; context: { $implicit: d }"
+              />
             </a>
           }
         }
+        <ng-template #compactIcon let-d>
+          <span class="compact-nav-pill">
+            <svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true">
+              <path [attr.d]="icons[d.icon]" fill="currentColor" />
+            </svg>
+          </span>
+          {{ d.label }}
+        </ng-template>
         <button
           #moreBtn
           type="button"
@@ -1327,32 +1311,18 @@ export class AppComponent implements OnInit, OnDestroy {
   protected onDeferError(
     which: "create" | "help" | "account" | "customize" | "director",
   ): void {
-    if (which === "director") {
-      this.directorCtx.close(false);
-      this.snackbar.show(
-        "The Director drawer could not load. Reload the page and try again.",
-      );
-      return;
-    }
-    if (which === "create") {
-      this.createTask.close();
-      this.snackbar.show(
-        "The New task form could not load. Reload the page and try again.",
-      );
-    } else if (which === "help") {
-      this.help.close();
-      this.snackbar.show("Help could not load. Reload the page and try again.");
-    } else if (which === "account") {
-      this.onAccountClosed(true);
-      this.snackbar.show(
-        "Account menu could not load. Reload the page and try again.",
-      );
-    } else {
-      this.onCustomizeNavClosed();
-      this.snackbar.show(
-        "Navigation settings could not load. Reload the page and try again.",
-      );
-    }
+    const entries: Record<typeof which, [() => void, string]> = {
+      director: [() => this.directorCtx.close(false), "The Director drawer"],
+      create: [() => this.createTask.close(), "The New task form"],
+      help: [() => this.help.close(), "Help"],
+      account: [() => this.onAccountClosed(true), "Account menu"],
+      customize: [() => this.onCustomizeNavClosed(), "Navigation settings"],
+    };
+    const [close, label] = entries[which];
+    close();
+    this.snackbar.show(
+      `${label} could not load. Reload the page and try again.`,
+    );
   }
 
   protected openCustomizeFromAccount(): void {
@@ -1387,50 +1357,60 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   protected toggleCreate(ev: Event): void {
-    ev.stopPropagation();
-    const next = !this.createOpen();
-    this.closeMenus();
-    if (!next) return;
-    const r = (ev.currentTarget as HTMLElement).getBoundingClientRect();
-    const winH = this.doc.defaultView?.innerHeight ?? 900;
-    const estH = Math.min(this.createItems.length * 58 + 16, winH - 24);
-    this.createPos.set({
-      top: Math.max(12, Math.min(Math.round(r.top), winH - estH - 12)),
-      left: Math.round(r.right + 8),
-    });
-    this.createOpen.set(true);
-    this.clampFloatingMenu("create-menu", (top) =>
-      this.createPos.update((p) => ({ ...p, top })),
+    this.openFloatingMenu(
+      ev,
+      this.createOpen,
+      this.createPos,
+      this.createItems.length,
+      0,
+      "create-menu",
     );
   }
 
   protected toggleRailMore(ev: Event): void {
+    this.openFloatingMenu(
+      ev,
+      this.railMoreOpen,
+      this.railMorePos,
+      this.navConfig.hiddenDestinations().length + 1,
+      -40,
+      "rail-more-menu",
+    );
+  }
+
+  private openFloatingMenu(
+    ev: Event,
+    open: ReturnType<typeof signal<boolean>>,
+    pos: ReturnType<typeof signal<{ top: number; left: number }>>,
+    count: number,
+    yOffset: number,
+    id: string,
+  ): void {
     ev.stopPropagation();
-    const next = !this.railMoreOpen();
+    const next = !open();
     this.closeMenus();
     if (!next) return;
     const r = (ev.currentTarget as HTMLElement).getBoundingClientRect();
     const winH = this.doc.defaultView?.innerHeight ?? 900;
-    const count = this.navConfig.hiddenDestinations().length + 1;
     const estH = Math.min(count * 58 + 16, winH - 24);
-    this.railMorePos.set({
-      top: Math.max(12, Math.min(Math.round(r.top - 40), winH - estH - 12)),
+    pos.set({
+      top: Math.max(
+        12,
+        Math.min(Math.round(r.top + yOffset), winH - estH - 12),
+      ),
       left: Math.round(r.right + 8),
     });
-    this.railMoreOpen.set(true);
-    this.clampFloatingMenu("rail-more-menu", (top) =>
-      this.railMorePos.update((p) => ({ ...p, top })),
-    );
-  }
-
-  private clampFloatingMenu(id: string, applyTop: (top: number) => void): void {
+    open.set(true);
     queueMicrotask(() => {
       const menu = this.doc.getElementById(id);
-      const winH = this.doc.defaultView?.innerHeight ?? 0;
-      if (!menu || !winH) return;
+      const vh = this.doc.defaultView?.innerHeight ?? 0;
+      if (!menu || !vh) return;
       const rect = menu.getBoundingClientRect();
-      if (rect.height > 0 && rect.bottom > winH - 12) {
-        applyTop(Math.max(12, Math.round(winH - rect.height - 12)));
+      if (rect.height > 0 && rect.bottom > vh - 12) {
+        pos.update((p) => ({
+          ...p,
+          top: Math.max(12, Math.round(vh - rect.height - 12)),
+        }));
       }
     });
   }
@@ -1451,37 +1431,28 @@ export class AppComponent implements OnInit, OnDestroy {
       this.onCustomizeNavClosed();
       return;
     }
-    if (this.createOpen()) this.closeCreate(ev, true);
-    else if (this.railMoreOpen()) this.closeRailMore(ev, true);
-    else if (this.moreOpen()) this.closeMore(ev, true);
-    else if (this.directorCtx.isOpen()) {
+    if (this.createOpen()) {
+      this.closeMenu(ev, this.createOpen, this.createBtn()?.nativeElement);
+    } else if (this.railMoreOpen()) {
+      this.closeMenu(ev, this.railMoreOpen, this.railMoreBtn()?.nativeElement);
+    } else if (this.moreOpen()) {
+      this.closeMenu(ev, this.moreOpen, this.moreBtn()?.nativeElement);
+    } else if (this.directorCtx.isOpen()) {
       ev.preventDefault();
       this.directorCtx.close(true);
     }
   }
 
-  protected closeCreate(ev: Event, refocus: boolean): void {
-    if (!this.createOpen()) return;
+  private closeMenu(
+    ev: Event,
+    open: { (): boolean; set(v: boolean): void },
+    btn: HTMLButtonElement | undefined,
+  ): void {
+    if (!open()) return;
     ev.preventDefault();
     ev.stopPropagation();
-    this.createOpen.set(false);
-    if (refocus) this.createBtn()?.nativeElement.focus();
-  }
-
-  protected closeRailMore(ev: Event, refocus: boolean): void {
-    if (!this.railMoreOpen()) return;
-    ev.preventDefault();
-    ev.stopPropagation();
-    this.railMoreOpen.set(false);
-    if (refocus) this.railMoreBtn()?.nativeElement.focus();
-  }
-
-  protected closeMore(ev: Event, refocus: boolean): void {
-    if (!this.moreOpen()) return;
-    ev.preventDefault();
-    ev.stopPropagation();
-    this.moreOpen.set(false);
-    if (refocus) this.moreBtn()?.nativeElement.focus();
+    open.set(false);
+    btn?.focus();
   }
 
   protected onCreateFocusOut(ev: FocusEvent): void {
