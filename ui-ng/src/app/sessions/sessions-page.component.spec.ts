@@ -862,4 +862,176 @@ describe("SessionsPageComponent", () => {
     expect(closedIds).toEqual(["t-2", "t-1"]);
     f.destroy();
   });
+
+  it("blocks the composer on a repo-less session when tasks:write has repoLimits, and allows it once tasks:write is global", async () => {
+    const api = new FakeApi();
+    const f = await render(api);
+    const access = TestBed.inject(AccessService);
+    access.setConfig({
+      access: {
+        role: "dev",
+        roles: ["dev"],
+        full: false,
+        scopes: ["tasks:read", "tasks:write"],
+        repoLimits: { "tasks:write": ["acme/allowed"] },
+      },
+    });
+    f.detectChanges();
+    await f.whenStable();
+    expect(q(f, '[data-testid="composer"]')).toBeNull();
+
+    // Switching to a repo-scoped session checks its repository against repoLimits.
+    api.details["9"] = { ...api.details["9"], repo: "acme/other" };
+    TestBed.inject(SessionsStore).select("rel");
+    await settle(f);
+    expect(q(f, '[data-testid="composer"]')).toBeNull();
+
+    api.details["9"] = { ...api.details["9"], repo: "acme/allowed" };
+    await TestBed.inject(SessionsStore).refresh();
+    f.detectChanges();
+    await f.whenStable();
+    expect(q(f, '[data-testid="composer"]')).not.toBeNull();
+
+    // Returning to repo-less director keeps composer hidden until tasks:write is global.
+    TestBed.inject(SessionsStore).select("director");
+    await settle(f);
+    expect(q(f, '[data-testid="composer"]')).toBeNull();
+
+    access.setConfig({
+      access: {
+        role: "dev",
+        roles: ["dev"],
+        full: false,
+        scopes: ["tasks:read", "tasks:write"],
+      },
+    });
+    f.detectChanges();
+    await f.whenStable();
+    expect(q(f, '[data-testid="composer"]')).not.toBeNull();
+    f.destroy();
+  });
+
+  it("requires global sessions:write for console-session actions even when a session task is repo-scoped", async () => {
+    const api = new FakeApi();
+    api.sessions[1] = {
+      ...api.sessions[1],
+      capabilities: ["api:tasks-read"],
+      missingShippedDefaults: ["self-debug"],
+    };
+    api.details["9"] = { ...api.details["9"], repo: "acme/allowed" };
+    const f = await render(api, "rel");
+    const access = TestBed.inject(AccessService);
+    access.setConfig({
+      access: {
+        role: "repo-limited",
+        roles: ["repo-limited"],
+        full: false,
+        scopes: [
+          "sessions:read",
+          "sessions:write",
+          "tasks:read",
+          "tasks:write",
+        ],
+        repoLimits: {
+          "sessions:write": ["acme/allowed"],
+          "tasks:write": ["acme/allowed"],
+        },
+      },
+    });
+    f.componentRef.setInput("new", "1");
+    f.detectChanges();
+    await f.whenStable();
+
+    // Commenting on the repo-scoped session task is allowed, while repo-less
+    // /api/console-sessions* actions stay gated behind global sessions:write.
+    expect(q(f, '[data-testid="composer"]')).not.toBeNull();
+    expect(q(f, '[data-testid="new-session"]')).toBeNull();
+    expect(q(f, '[data-testid="new-session-dialog"]')).toBeNull();
+    expect(q(f, '[data-testid="stop"]')).toBeNull();
+    expect(q(f, '[data-testid="chat-head-model"]')).toBeNull();
+    expect(q(f, '[data-testid="session-settings-toggle"]')).toBeNull();
+    expect(q(f, '[data-testid="adopt-shipped-defaults"]')).toBeNull();
+    expect(q(f, '[data-testid="cap-api-manage"]')).toBeNull();
+    expect(
+      (q(f, '[data-testid="cap-self-debug"]') as HTMLButtonElement).disabled,
+    ).toBe(true);
+    expect(q(f, '[data-testid="delete-session"]')).toBeNull();
+    expect(q(f, '[data-testid="fresh-chat"]')).toBeNull();
+
+    // Global sessions:write unlocks console-session actions while tasks:write
+    // remains repo-bounded for the composer.
+    access.setConfig({
+      access: {
+        role: "session-creator",
+        roles: ["session-creator"],
+        full: false,
+        scopes: [
+          "sessions:read",
+          "sessions:write",
+          "tasks:read",
+          "tasks:write",
+        ],
+        repoLimits: { "tasks:write": ["acme/allowed"] },
+      },
+    });
+    f.detectChanges();
+    await f.whenStable();
+
+    expect(q(f, '[data-testid="composer"]')).not.toBeNull();
+    expect(q(f, '[data-testid="new-session"]')).not.toBeNull();
+    expect(q(f, '[data-testid="stop"]')).not.toBeNull();
+    expect(q(f, '[data-testid="chat-head-model"]')).not.toBeNull();
+    expect(q(f, '[data-testid="session-settings-toggle"]')).not.toBeNull();
+    expect(q(f, '[data-testid="adopt-shipped-defaults"]')).not.toBeNull();
+    expect(q(f, '[data-testid="cap-api-manage"]')).not.toBeNull();
+    expect(
+      (q(f, '[data-testid="cap-self-debug"]') as HTMLButtonElement).disabled,
+    ).toBe(false);
+    expect(q(f, '[data-testid="delete-session"]')).not.toBeNull();
+    expect(q(f, '[data-testid="fresh-chat"]')).not.toBeNull();
+
+    // Switching to a repo-less session keeps session controls enabled via global
+    // sessions:write while hiding the composer because tasks:write is repo-limited.
+    TestBed.inject(SessionsStore).select("director");
+    await settle(f);
+    expect(q(f, '[data-testid="composer"]')).toBeNull();
+    expect(q(f, '[data-testid="new-session"]')).not.toBeNull();
+    expect(q(f, '[data-testid="session-settings-toggle"]')).not.toBeNull();
+    f.destroy();
+  });
+
+  it("respects task.repo from the task list for composer and attachment permissions", async () => {
+    const api = new FakeApi();
+    api.taskList = api.taskList.map((t) =>
+      t.id === "1" ? { ...t, repo: "acme/other" } : t,
+    );
+    const f = await render(api);
+    const access = TestBed.inject(AccessService);
+    access.setConfig({
+      access: {
+        role: "dev",
+        roles: ["dev"],
+        full: false,
+        scopes: ["tasks:read", "tasks:write"],
+        repoLimits: {
+          "tasks:read": ["acme/allowed"],
+          "tasks:write": ["acme/allowed"],
+        },
+      },
+    });
+    f.detectChanges();
+    await f.whenStable();
+    expect(q(f, '[data-testid="composer"]')).toBeNull();
+    expect(q(f, '[data-testid="attachment-77"]')?.tagName).toBe("SPAN");
+
+    api.taskList = api.taskList.map((t) =>
+      t.id === "1" ? { ...t, repo: "acme/allowed" } : t,
+    );
+    await TestBed.inject(SessionsStore).refresh();
+    f.detectChanges();
+    await f.whenStable();
+    expect(q(f, '[data-testid="composer"]')).not.toBeNull();
+    expect(q(f, '[data-testid="attachment-77"]')?.tagName).toBe("A");
+    f.destroy();
+  });
 });
