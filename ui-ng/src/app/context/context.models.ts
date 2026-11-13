@@ -95,18 +95,55 @@ export function validateDocumentSlug(
   return null;
 }
 
-// Mirrors pkg/ui/api_fs.go fsCallRepo for memory://repos/<owner>/<name>...
-export function repoFromMemoryFsPath(
+// Normalizes a namespace path into safe segments, returning null on traversal
+// attempts ("." or ".." segments, or backslashes).
+export function normalizeMemoryFsSegments(
   fsPath: string | undefined | null,
-): string | undefined {
-  const segs = (fsPath || "")
+): string[] | null {
+  const raw = (fsPath || "").trim();
+  if (raw.includes("\\")) return null;
+  const segs = raw
     .replace(/^\/+|\/+$/g, "")
     .split("/")
     .filter(Boolean);
-  if (segs.length >= 3 && segs[0] === "repos" && segs[1] && segs[2]) {
-    return `${segs[1]}/${segs[2].replace(/\.md$/i, "")}`;
-  }
-  return undefined;
+  if (segs.some((s) => s === "." || s === "..")) return null;
+  return segs;
+}
+
+// Mirrors pkg/ui/api_fs.go fsCallRepo & pkg/namespace/stage2.go repoSegmentCount
+// for memory://repos/<owner>/<name>... and memory://repos/<host>/<owner>/<name>...
+export function repoFromMemoryFsPath(
+  fsPath: string | undefined | null,
+): string | undefined {
+  const segs = normalizeMemoryFsSegments(fsPath);
+  if (!segs || segs.length < 3 || segs[0] !== "repos") return undefined;
+  const first = segs[1];
+  if (!first) return undefined;
+  const repoSegs = first.includes(".") || first.includes(":") ? 3 : 2;
+  if (segs.length < 1 + repoSegs) return undefined;
+  const parts = segs.slice(1, 1 + repoSegs);
+  if (parts.some((p) => !p)) return undefined;
+  parts[parts.length - 1] = parts[parts.length - 1].replace(/\.md$/i, "");
+  if (!parts[parts.length - 1]) return undefined;
+  return parts.join("/");
+}
+
+// Reports whether normalized directory fsPath ("" / "repos" / "repos/<owner>")
+// is an ancestor of at least one permitted repository in limits.
+// Deployment-wide directories like "global" never satisfy this check.
+export function isMemoryRepoDirPrefix(
+  fsPath: string | undefined | null,
+  limits: readonly string[],
+): boolean {
+  const segs = normalizeMemoryFsSegments(fsPath);
+  if (!segs) return false;
+  const cleanLimits = limits.map((r) => r.trim().toLowerCase()).filter(Boolean);
+  if (cleanLimits.length === 0) return false;
+  if (segs.length === 0) return true;
+  if (segs[0] !== "repos") return false;
+  if (segs.length === 1) return true;
+  const prefix = `${segs.join("/").toLowerCase()}/`;
+  return cleanLimits.some((repo) => `repos/${repo}`.startsWith(prefix));
 }
 
 function coerceRepoString(val: unknown): string {
