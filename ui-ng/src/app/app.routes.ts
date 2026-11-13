@@ -21,9 +21,6 @@ import { type RedirectFunction, Router, type Routes } from "@angular/router";
 // falling through to the Inbox. Each entry is the path and, for Fleet,
 // the ?tab= that shows it.
 const SYSTEM_TABS: Record<string, readonly [string, string?]> = {
-  health: ["/fleet"],
-  sandboxes: ["/fleet"],
-  top: ["/fleet"],
   logs: ["/fleet", "logs"],
   pipeline: ["/fleet", "controls"],
   power: ["/fleet", "controls"],
@@ -43,6 +40,29 @@ function legacy(tab: string): RedirectFunction {
   };
 }
 
+const loadWorkstreams = () =>
+  import("./workstreams/workstreams-page.component").then(
+    (m) => m.WorkstreamsPageComponent,
+  );
+const loadSessions = () =>
+  import("./sessions/sessions-page.component").then(
+    (m) => m.SessionsPageComponent,
+  );
+const loadCI = () =>
+  import("./ci/ci-page.component").then((m) => m.CIPageComponent);
+const loadProcesses = () =>
+  import("./processes/processes-page.component").then(
+    (m) => m.ProcessesPageComponent,
+  );
+const loadSettings = () =>
+  import("./settings/settings-page.component").then(
+    (m) => m.SettingsPageComponent,
+  );
+const loadRepo = () =>
+  import("./repos/repo-detail-page.component").then(
+    (m) => m.RepoDetailPageComponent,
+  );
+
 // Every page is lazy, so the shell's own bundle stays inside the budget
 // (angular.json) however many pages move over. A path this app does not
 // have yet goes to the Inbox; the shell's links take the reader to the
@@ -58,18 +78,12 @@ export const routes: Routes = [
   {
     path: "workstreams",
     title: "Workstreams · grain",
-    loadComponent: () =>
-      import("./workstreams/workstreams-page.component").then(
-        (m) => m.WorkstreamsPageComponent,
-      ),
+    loadComponent: loadWorkstreams,
   },
   {
     path: "workstreams/:key",
     title: "Workstream · grain",
-    loadComponent: () =>
-      import("./workstreams/workstreams-page.component").then(
-        (m) => m.WorkstreamsPageComponent,
-      ),
+    loadComponent: loadWorkstreams,
   },
   { path: "topology", redirectTo: "/workstreams", pathMatch: "prefix" },
   {
@@ -97,46 +111,32 @@ export const routes: Routes = [
   {
     path: "sessions",
     title: "Sessions · grain",
-    loadComponent: () =>
-      import("./sessions/sessions-page.component").then(
-        (m) => m.SessionsPageComponent,
-      ),
+    loadComponent: loadSessions,
   },
   {
     path: "sessions/:id",
     title: "Sessions · grain",
-    loadComponent: () =>
-      import("./sessions/sessions-page.component").then(
-        (m) => m.SessionsPageComponent,
-      ),
+    loadComponent: loadSessions,
   },
   {
     path: "ci",
     title: "CI · grain",
-    loadComponent: () =>
-      import("./ci/ci-page.component").then((m) => m.CIPageComponent),
+    loadComponent: loadCI,
   },
   {
     path: "ci/runs/:id",
     title: "CI run · grain",
-    loadComponent: () =>
-      import("./ci/ci-page.component").then((m) => m.CIPageComponent),
+    loadComponent: loadCI,
   },
   {
     path: "processes",
     title: "Processes · grain",
-    loadComponent: () =>
-      import("./processes/processes-page.component").then(
-        (m) => m.ProcessesPageComponent,
-      ),
+    loadComponent: loadProcesses,
   },
   {
     path: "processes/:tab",
     title: "Processes · grain",
-    loadComponent: () =>
-      import("./processes/processes-page.component").then(
-        (m) => m.ProcessesPageComponent,
-      ),
+    loadComponent: loadProcesses,
   },
   { path: "schedules", redirectTo: "processes/schedules", pathMatch: "full" },
   { path: "templates", redirectTo: "processes/templates", pathMatch: "full" },
@@ -178,18 +178,12 @@ export const routes: Routes = [
   {
     path: "settings",
     title: "Settings · grain",
-    loadComponent: () =>
-      import("./settings/settings-page.component").then(
-        (m) => m.SettingsPageComponent,
-      ),
+    loadComponent: loadSettings,
   },
   {
     path: "settings/:section",
     title: "Settings · grain",
-    loadComponent: () =>
-      import("./settings/settings-page.component").then(
-        (m) => m.SettingsPageComponent,
-      ),
+    loadComponent: loadSettings,
   },
   {
     matcher: (s) =>
@@ -200,42 +194,27 @@ export const routes: Routes = [
           }
         : null,
     title: "Repository · grain",
-    loadComponent: () =>
-      import("./repos/repo-detail-page.component").then(
-        (m) => m.RepoDetailPageComponent,
-      ),
+    loadComponent: loadRepo,
   },
   {
     path: "repos/:owner/:name",
     title: "Repository · grain",
-    loadComponent: () =>
-      import("./repos/repo-detail-page.component").then(
-        (m) => m.RepoDetailPageComponent,
-      ),
+    loadComponent: loadRepo,
   },
   {
     path: "repos/:owner/:name/:tab",
     title: "Repository · grain",
-    loadComponent: () =>
-      import("./repos/repo-detail-page.component").then(
-        (m) => m.RepoDetailPageComponent,
-      ),
+    loadComponent: loadRepo,
   },
   {
     path: "repos/:host/:owner/:name",
     title: "Repository · grain",
-    loadComponent: () =>
-      import("./repos/repo-detail-page.component").then(
-        (m) => m.RepoDetailPageComponent,
-      ),
+    loadComponent: loadRepo,
   },
   {
     path: "repos/:host/:owner/:name/:tab",
     title: "Repository · grain",
-    loadComponent: () =>
-      import("./repos/repo-detail-page.component").then(
-        (m) => m.RepoDetailPageComponent,
-      ),
+    loadComponent: loadRepo,
   },
   { path: "**", redirectTo: "inbox" },
 ];

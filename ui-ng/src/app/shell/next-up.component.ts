@@ -55,53 +55,34 @@ const SHOWN = 7;
       data-testid="next-up"
       (focusout)="onFocusOut($event)"
     >
-      @if (head(); as h) {
-        <a
-          class="next-up-chip top-next-chip"
-          id="top-next-chip"
-          routerLink="/tasks"
-          [queryParams]="{ tab: 'backlog' }"
-          [attr.title]="why()"
-          [attr.aria-label]="
-            'Next up: #' + h.id + ' ' + h.title + '. Open the backlog'
-          "
-          ><span class="next-up-label">Next up</span>
+      <a
+        class="next-up-chip top-next-chip"
+        id="top-next-chip"
+        routerLink="/tasks"
+        [queryParams]="{ tab: 'backlog' }"
+        [attr.title]="
+          head() || blockedCount() > 0
+            ? why()
+            : 'Nothing is waiting in the backlog. Open the backlog.'
+        "
+        [attr.aria-label]="chipLabel()"
+      >
+        <span class="next-up-label">Next up</span>
+        @if (head(); as h) {
           <span class="tabular">#{{ h.id }}</span>
-          <span class="next-up-title">{{ h.title }}</span></a
-        >
-      } @else if (blockedCount() > 0) {
-        <a
-          class="next-up-chip top-next-chip"
-          id="top-next-chip"
-          routerLink="/tasks"
-          [queryParams]="{ tab: 'backlog' }"
-          [attr.title]="why()"
-          [attr.aria-label]="
-            'Next up: ' +
-            blockedCount() +
-            ' waiting on dependencies. Open the backlog'
-          "
-          ><span class="next-up-label">Next up</span>
+          <span class="next-up-title">{{ h.title }}</span>
+        } @else if (blockedCount() > 0) {
           <span class="next-up-sep" aria-hidden="true">·</span>
           <span class="next-up-empty-text" data-testid="next-up-blocked"
             >{{ blockedCount() }} waiting on deps</span
-          ></a
-        >
-      } @else {
-        <a
-          class="next-up-chip top-next-chip"
-          id="top-next-chip"
-          routerLink="/tasks"
-          [queryParams]="{ tab: 'backlog' }"
-          title="Nothing is waiting in the backlog. Open the backlog."
-          aria-label="Next up: Queue empty. Open the backlog"
-          ><span class="next-up-label">Next up</span>
+          >
+        } @else {
           <span class="next-up-sep" aria-hidden="true">·</span>
           <span class="next-up-empty-text" data-testid="next-up-empty"
             >Queue empty</span
-          ></a
-        >
-      }
+          >
+        }
+      </a>
       <button
         #caret
         type="button"
@@ -202,6 +183,14 @@ export class NextUpComponent {
   protected readonly more = computed(() =>
     Math.max(0, this.backlog().length - SHOWN),
   );
+  protected readonly chipLabel = computed(() => {
+    const h = this.head();
+    if (h) return `Next up: #${h.id} ${h.title}. Open the backlog`;
+    const b = this.blockedCount();
+    return b > 0
+      ? `Next up: ${b} waiting on dependencies. Open the backlog`
+      : "Next up: Queue empty. Open the backlog";
+  });
   protected readonly why = computed(() => {
     const h = this.head();
     if (!h) {
