@@ -69,9 +69,7 @@ function recordDeleteRequests(
   });
 }
 
-test("cancelling a CI run prompts for an optional reason, sends DELETE with { reason }, and supports omitting it", async ({
-  page,
-}) => {
+test("prompts for optional reason on CI run cancel", async ({ page }) => {
   test.setTimeout(60_000);
   const {
     ids: [runWithReason, runWithoutReason],
