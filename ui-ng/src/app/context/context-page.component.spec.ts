@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import { TestBed, type ComponentFixture } from "@angular/core/testing";
-import { provideRouter } from "@angular/router";
+import { Router, provideRouter } from "@angular/router";
 import { NEVER } from "rxjs";
 import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
@@ -261,17 +261,25 @@ describe("ContextPageComponent", () => {
     TestBed.resetTestingModule();
   });
 
-  async function setup(api = new FakeContextApi()) {
+  async function setup(
+    api = new FakeContextApi(),
+    initialQueryParams?: Record<string, string>,
+  ) {
     localStorage.clear();
     TestBed.configureTestingModule({
       imports: [ContextPageComponent],
       providers: [
-        provideRouter([]),
+        provideRouter([{ path: "**", component: ContextPageComponent }]),
         { provide: GrainApi, useValue: api },
         { provide: GrainEvents, useValue: { events: () => NEVER } },
       ],
     });
     TestBed.inject(AccessService).setConfig(api.configBody);
+    if (initialQueryParams) {
+      await TestBed.inject(Router).navigate(["/"], {
+        queryParams: initialQueryParams,
+      });
+    }
     const fixture = TestBed.createComponent(ContextPageComponent);
     fixture.autoDetectChanges();
     await settle(fixture);
@@ -610,5 +618,325 @@ describe("ContextPageComponent", () => {
     expect(
       root.querySelector('[data-testid="scope-row-acme/web"]'),
     ).not.toBeNull();
+  });
+
+  it("blocks deployment-wide writes and clears stale selectedDocRepo when memory:write is repo-limited", async () => {
+    const api = new FakeContextApi();
+    api.configBody = {
+      version: "v3.5.0-test",
+      targetRepos: ["acme/api", "acme/web"],
+      access: {
+        role: "repo-writer",
+        roles: ["repo-writer"],
+        full: false,
+        scopes: ["memory:read", "memory:write", "settings:read"],
+        repoLimits: {
+          "memory:write": ["acme/api"],
+        },
+      },
+    };
+
+    const { fixture, root } = await setup(api);
+
+    // Deployment scope remains readable, so ensurePermittedRepoSelected does not switch away.
+    expect(
+      root.querySelector('[data-testid="memory-scope-title"]')?.textContent,
+    ).toContain("This deployment");
+    const memTextarea = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="memory-textarea"]',
+    )!;
+    expect(memTextarea.readOnly).toBe(true);
+    expect(root.querySelector('[data-testid="memory-save-btn"]')).toBeNull();
+
+    // Documents tab: + New pack and deployment document edits are blocked.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-tab-documents"]',
+      )!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
+        .disabled,
+    ).toBe(true);
+
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="doc-row-db-migrations"] button',
+      )!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="doc-summary-input"]')!
+        .readOnly,
+    ).toBe(true);
+    expect(root.querySelector('[data-testid="doc-save-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-delete-btn"]')).toBeNull();
+
+    // Switch to permitted acme/api: write controls enable and a repo doc opens editable.
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="context-repo-trigger"]')!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-repo-opt-acme/api"]',
+      )!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
+        .disabled,
+    ).toBe(false);
+
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="doc-row-auth-tokens"] button',
+      )!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="doc-summary-input"]')!
+        .readOnly,
+    ).toBe(false);
+    expect(root.querySelector('[data-testid="doc-save-btn"]')).not.toBeNull();
+
+    // Switching back to Deployment resets selectedDocRepo so canWriteDoc cannot stay stale.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-scope-deployment"]',
+      )!
+      .click();
+    await settle(fixture);
+    const cmpWrite = fixture.componentInstance as unknown as {
+      canWriteDoc: () => boolean;
+      canCreateDoc: () => boolean;
+    };
+    expect(cmpWrite.canCreateDoc()).toBe(false);
+    expect(cmpWrite.canWriteDoc()).toBe(false);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
+        .disabled,
+    ).toBe(true);
+  });
+
+  it("denies config:// when settings:read itself has repoLimits and explains why", async () => {
+    const api = new FakeContextApi();
+    api.configBody = {
+      version: "v3.5.0-test",
+      targetRepos: ["acme/api", "acme/web"],
+      access: {
+        role: "settings-limited",
+        roles: ["settings-limited"],
+        full: false,
+        scopes: ["memory:read", "settings:read"],
+        repoLimits: {
+          "settings:read": ["acme/api"],
+        },
+      },
+    };
+
+    const { fixture, root } = await setup(api);
+    const cmp = fixture.componentInstance as unknown as {
+      canReadConfigFs: () => boolean;
+      pickFsScheme: (s: "memory" | "config") => void;
+    };
+    expect(cmp.canReadConfigFs()).toBe(false);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-tab-namespace"]',
+      )!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="fs-scheme-config"]')).toBeNull();
+    cmp.pickFsScheme("config");
+    await settle(fixture);
+    expect(
+      api.calls.some((c) => c.route === "GET /api/fs/config/{path...}"),
+    ).toBe(false);
+  });
+
+  it("hides config:// and blocks deployment-wide memory:// dirs, files, and grep leaks under repoLimits", async () => {
+    const api = new FakeContextApi();
+    api.fsDirs[""] = {
+      scheme: "memory",
+      path: "",
+      entries: [
+        { name: "global", type: "dir" },
+        { name: "repos", type: "dir" },
+        { name: "memory.md", type: "file", size: 58 },
+      ],
+    };
+    api.fsDirs["global"] = {
+      scheme: "memory",
+      path: "global",
+      entries: [{ name: "deployment.md", type: "file", size: 40 }],
+    };
+    api.fsFiles["global/deployment.md"] = "# Secret global memory";
+    api.getText = (route, params, query) => {
+      api.calls.push({ method: "GET_TEXT", route, params, query });
+      if (query?.includes("grep=")) {
+        return Promise.resolve(
+          "acme/api.md:1:Use strict OpenAPI\nacme/web.md:1:Blocked repo\n",
+        );
+      }
+      return Promise.resolve(api.fsFiles[params?.["path"] ?? ""] ?? "");
+    };
+    api.configBody = {
+      version: "v3.5.0-test",
+      targetRepos: ["acme/api", "acme/web"],
+      access: {
+        role: "repo-dev",
+        roles: ["repo-dev"],
+        full: false,
+        scopes: ["memory:read", "memory:write", "settings:read"],
+        repoLimits: {
+          "memory:read": ["acme/api"],
+          "memory:write": ["acme/api"],
+        },
+      },
+    };
+
+    const { fixture, root } = await setup(api);
+    const cmp = fixture.componentInstance as unknown as {
+      pickFsScheme: (s: "memory" | "config") => void;
+      openFsDir: (d: string) => void;
+      openDocument: (doc: MemoryDocument) => Promise<void>;
+    };
+
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-tab-namespace"]',
+      )!
+      .click();
+    await settle(fixture);
+
+    // Even with unrestricted settings:read, config:// is hidden & refused because memory:read is repo-limited.
+    expect(root.querySelector('[data-testid="fs-scheme-config"]')).toBeNull();
+    cmp.pickFsScheme("config");
+    await settle(fixture);
+    expect(
+      api.calls.some((c) => c.route === "GET /api/fs/config/{path...}"),
+    ).toBe(false);
+
+    // Clicking memory://global dir or memory.md file must not hit the API.
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="fs-entry-global"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls.some(
+        (c) =>
+          c.route === "GET /api/fs/memory/{path...}" &&
+          (c.params as { path?: string })?.path === "global",
+      ),
+    ).toBe(false);
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="fs-entry-memory.md"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls.some(
+        (c) =>
+          c.method === "GET_TEXT" &&
+          (c.params as { path?: string })?.path === "memory.md",
+      ),
+    ).toBe(false);
+
+    // Unauthorized owner dir under repos/ is also refused.
+    cmp.openFsDir("repos/other");
+    await settle(fixture);
+    expect(
+      api.calls.some(
+        (c) =>
+          c.route === "GET /api/fs/memory/{path...}" &&
+          (c.params as { path?: string })?.path === "repos/other",
+      ),
+    ).toBe(false);
+
+    // Running grep at root narrows to "repos" and filters unauthorized hits out.
+    const grepInput = root.querySelector<HTMLInputElement>(
+      '[data-testid="fs-grep-input"]',
+    )!;
+    grepInput.value = "OpenAPI";
+    grepInput.dispatchEvent(new Event("input"));
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="fs-grep-btn"]')!
+      .click();
+    await settle(fixture);
+
+    const grepCall = api.calls.find(
+      (c) =>
+        c.route === "GET /api/fs/memory/{path...}" &&
+        c.query?.includes("grep=OpenAPI"),
+    );
+    expect((grepCall?.params as { path?: string })?.path).toBe("repos");
+    const grepText =
+      root.querySelector('[data-testid="fs-grep-results"]')?.textContent ?? "";
+    expect(grepText).toContain("repos/acme/api.md");
+    expect(grepText).not.toContain("repos/acme/web.md");
+
+    // Direct openDocument with whitespace repo is treated as deployment scope and refused.
+    await cmp.openDocument({
+      repo: "   ",
+      name: "db-migrations",
+      summary: "x",
+      length: 1,
+    });
+    expect(
+      api.calls.some(
+        (c) =>
+          c.route === "GET /api/memory/documents/{name}" &&
+          (c.params as { name?: string })?.name === "db-migrations",
+      ),
+    ).toBe(false);
+  });
+
+  it("normalizes whitespace ?repo= query param and handles 3-segment host-qualified repo paths", async () => {
+    const api = new FakeContextApi();
+    api.configBody = {
+      version: "v3.5.0-test",
+      targetRepos: ["acme/api", "acme/web"],
+      access: {
+        role: "repo-dev",
+        roles: ["repo-dev"],
+        full: false,
+        scopes: ["memory:read"],
+        repoLimits: {
+          "memory:read": ["acme/api"],
+        },
+      },
+    };
+
+    const { root } = await setup(api, { repo: "   " });
+    expect(
+      root.querySelector('[data-testid="memory-scope-title"]')?.textContent,
+    ).toContain("acme/api");
+    expect(
+      api.calls.some(
+        (c) => c.route === "GET /api/memory" && !c.query?.includes("repo="),
+      ),
+    ).toBe(false);
+
+    // 3-segment host-qualified repoFromMemoryFsPath parity with pkg/namespace/namespace.go.
+    expect(
+      repoFromMemoryFsPath("repos/git.forge.example/experimental"),
+    ).toBeUndefined();
+    expect(
+      repoFromMemoryFsPath("repos/git.forge.example/experimental.md"),
+    ).toBeUndefined();
+    expect(
+      repoFromMemoryFsPath("repos/git.forge.example/experimental/grain.md"),
+    ).toBe("git.forge.example/experimental/grain");
+    expect(
+      repoFromMemoryFsPath(
+        "repos/git.forge.example/experimental/grain/notes.md",
+      ),
+    ).toBe("git.forge.example/experimental/grain");
+    expect(repoFromMemoryFsPath("repos/localhost:3000/team/app.md")).toBe(
+      "localhost:3000/team/app",
+    );
   });
 });

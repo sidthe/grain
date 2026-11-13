@@ -95,7 +95,8 @@ export function validateDocumentSlug(
   return null;
 }
 
-// Mirrors pkg/ui/api_fs.go fsCallRepo for memory://repos/<owner>/<name>...
+// Mirrors pkg/ui/api_fs.go fsCallRepo and pkg/namespace/namespace.go repoSegmentCount
+// for memory://repos/<owner>/<name>... and memory://repos/<host>/<owner>/<name>...
 export function repoFromMemoryFsPath(
   fsPath: string | undefined | null,
 ): string | undefined {
@@ -103,10 +104,15 @@ export function repoFromMemoryFsPath(
     .replace(/^\/+|\/+$/g, "")
     .split("/")
     .filter(Boolean);
-  if (segs.length >= 3 && segs[0] === "repos" && segs[1] && segs[2]) {
-    return `${segs[1]}/${segs[2].replace(/\.md$/i, "")}`;
-  }
-  return undefined;
+  if (segs[0] !== "repos" || segs.length < 3) return undefined;
+  const repoSegs = /[.:]/.test(segs[1]) ? 3 : 2;
+  if (segs.length < 1 + repoSegs) return undefined;
+  const rawRepo = segs.slice(1, 1 + repoSegs);
+  rawRepo[rawRepo.length - 1] = rawRepo[rawRepo.length - 1].replace(
+    /\.md$/i,
+    "",
+  );
+  return rawRepo.every(Boolean) ? rawRepo.join("/") : undefined;
 }
 
 function coerceRepoString(val: unknown): string {
