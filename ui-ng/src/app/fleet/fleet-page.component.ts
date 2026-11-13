@@ -82,6 +82,38 @@ const PERSISTENT_ACTIONS: readonly {
   { action: "stop", label: "Stop" },
 ];
 
+/** Normalizes a persistent sandbox's reported state with the UI's idle/stopped fallback. */
+export function persistentSandboxState(
+  ps: Pick<PersistentSandboxStatus, "state" | "enabled">,
+): string {
+  const raw = (ps.state ?? "").trim().toLowerCase();
+  if (raw) return raw;
+  return ps.enabled ? "idle" : "stopped";
+}
+
+/** Reports whether a persistent sandbox lifecycle action is valid in its current state. */
+export function isPersistentActionAllowed(
+  ps: Pick<PersistentSandboxStatus, "state" | "enabled">,
+  action: PersistentAction,
+): boolean {
+  switch (persistentSandboxState(ps)) {
+    case "running":
+    case "restarting":
+      return action === "restart" || action === "rebuild" || action === "stop";
+    case "starting":
+      return action === "stop";
+    case "stopped":
+    case "idle":
+    case "failed":
+    case "error":
+    case "errored":
+      return action === "start";
+    case "stopping":
+    default:
+      return false;
+  }
+}
+
 @Component({
   selector: "g-fleet-page",
   imports: [
@@ -683,19 +715,10 @@ sandbox={{ pr.sandbox }} pod={{ pr.pod }} exit={{ pr.exitCode }}
                                   'persistent-' + act.action + '-' + ps.name
                                 "
                                 [disabled]="
-                                  !canControlPersistent(ps) ||
-                                  busyPersistent() ===
-                                    ps.name + ':' + act.action
+                                  !canRunPersistentAction(ps, act.action)
                                 "
                                 [gTip]="
-                                  canControlPersistent(ps)
-                                    ? act.label +
-                                      ' persistent sandbox ' +
-                                      ps.name
-                                    : access.deniedReason(
-                                        'POST /api/persistent-sandboxes/{name}/{action}',
-                                        ps.repo || undefined
-                                      )
+                                  persistentActionTip(ps, act.action, act.label)
                                 "
                                 (click)="controlPersistent(ps, act.action)"
                               >
@@ -1705,6 +1728,44 @@ export class FleetPageComponent implements OnInit {
     );
   }
 
+  protected isPersistentBusy(name: string): boolean {
+    const busy = this.busyPersistent();
+    return busy !== null && busy.startsWith(`${name}:`);
+  }
+
+  protected canRunPersistentAction(
+    ps: PersistentSandboxStatus,
+    action: PersistentAction,
+  ): boolean {
+    return (
+      this.canControlPersistent(ps) &&
+      isPersistentActionAllowed(ps, action) &&
+      !this.isPersistentBusy(ps.name)
+    );
+  }
+
+  protected persistentActionTip(
+    ps: PersistentSandboxStatus,
+    action: PersistentAction,
+    label: string,
+  ): string {
+    if (!this.canControlPersistent(ps)) {
+      return (
+        this.access.deniedReason(
+          "POST /api/persistent-sandboxes/{name}/{action}",
+          ps.repo || undefined,
+        ) || this.deniedScopeFallback("deployment:restart")
+      );
+    }
+    if (!isPersistentActionAllowed(ps, action)) {
+      return `${label} is unavailable while ${ps.name} is ${persistentSandboxState(ps)}.`;
+    }
+    if (this.isPersistentBusy(ps.name)) {
+      return `Action in progress for ${ps.name}…`;
+    }
+    return `${label} persistent sandbox ${ps.name}`;
+  }
+
   protected canReadPersistentLogs(ps: PersistentSandboxStatus): boolean {
     const repo = ps.repo || undefined;
     if (!repo && this.isScopeRepoLimited("deployment:read")) return false;
@@ -2028,7 +2089,7 @@ export class FleetPageComponent implements OnInit {
     ps: PersistentSandboxStatus,
     action: PersistentAction,
   ): Promise<void> {
-    if (!this.canControlPersistent(ps)) return;
+    if (!this.canRunPersistentAction(ps, action)) return;
     const key = `${ps.name}:${action}`;
     this.busyPersistent.set(key);
     try {

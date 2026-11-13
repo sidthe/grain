@@ -210,6 +210,7 @@ class FakeCIApi {
     query?: string;
   }[] = [];
   deleteCalls: { route: string; params?: unknown; body?: unknown }[] = [];
+  deleteError: Error | null = null;
   logCalls: { id: string; query?: string }[] = [];
 
   config = () => Promise.resolve(this.configBody);
@@ -337,25 +338,35 @@ class FakeCIApi {
     return Promise.resolve({});
   };
 
-  delete = (
+  delete = async (
     route: string,
     params?: Record<string, unknown>,
     body?: unknown,
   ) => {
     this.deleteCalls.push({ route, params, body });
+    if (this.deleteError) {
+      throw this.deleteError;
+    }
     if (route === "DELETE /api/ci/runs/{id}") {
       const id = String(params?.["id"] ?? "");
       const found = this.runs.find((r) => r.id === id);
       if (found) {
         found.status = "completed";
         found.conclusion = "cancelled";
+        const r =
+          body && typeof body === "object" && "reason" in body
+            ? (body as { reason?: unknown }).reason
+            : undefined;
+        if (typeof r === "string" && r.trim()) {
+          found.cancelReason = r.trim();
+        }
       }
-      return Promise.resolve({});
+      return {};
     }
     if (route === "DELETE /api/ci/cache") {
-      return Promise.resolve({ enabled: true, available: true, removed: 7 });
+      return { enabled: true, available: true, removed: 7 };
     }
-    return Promise.resolve({});
+    return {};
   };
 }
 
@@ -555,23 +566,36 @@ describe("CIPageComponent (D-26)", () => {
     await flush(harness);
     const root = harness.routeNativeElement!;
 
-    // 1. Cancel active run via confirm dialog — verify confirm-dialog is NOT inside [inert]
+    // 1. Cancel active run via cancel dialog with optional reason — verify ci-cancel-dialog is NOT inside [inert]
     root
       .querySelector<HTMLButtonElement>('[data-testid="ci-cancel-run-btn"]')!
       .click();
     await flush(harness);
-    const confirmDlg = root.querySelector('[data-testid="confirm-dialog"]')!;
-    expect(confirmDlg).not.toBeNull();
-    expect(confirmDlg.closest("[inert]")).toBeNull();
+    const cancelDlg = root.querySelector('[data-testid="ci-cancel-dialog"]')!;
+    expect(cancelDlg).not.toBeNull();
+    expect(cancelDlg.closest("[inert]")).toBeNull();
     expect(root.querySelector(".view-panel")?.hasAttribute("inert")).toBe(true);
 
+    const cancelReasonInput = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="ci-cancel-reason-input"]',
+    )!;
+    cancelReasonInput.value = "  wrong branch  ";
+    cancelReasonInput.dispatchEvent(new Event("input"));
+    await flush(harness);
+
     root
-      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .querySelector<HTMLButtonElement>('[data-testid="ci-cancel-confirm"]')!
       .click();
     await flush(harness);
+    expect(api.deleteCalls).toContainEqual({
+      route: "DELETE /api/ci/runs/{id}",
+      params: { id: "run-running-3" },
+      body: { reason: "wrong branch" },
+    });
+    expect(root.querySelector('[data-testid="ci-cancel-dialog"]')).toBeNull();
     expect(
-      api.deleteCalls.some((c) => c.route === "DELETE /api/ci/runs/{id}"),
-    ).toBe(true);
+      root.querySelector('[data-testid="ci-cancel-reason"]')?.textContent,
+    ).toContain("wrong branch");
 
     // 2. Trigger manual workflow dialog — verify outside [inert], RBAC repo limit, and Escape dismissal
     const openRunBtn = root.querySelector<HTMLButtonElement>(
@@ -681,5 +705,100 @@ describe("CIPageComponent (D-26)", () => {
     expect(
       root.querySelector('[data-testid="ci-quarantine-dialog"]'),
     ).toBeNull();
+  });
+
+  it("cancels CI runs with no reason omitted, aborts on Cancel/Escape, and preserves typed reason on error", async () => {
+    const harness = await RouterTestingHarness.create("/ci/runs/run-running-3");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    // Dismissing with Cancel sends nothing and clears the draft.
+    const cancelBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="ci-cancel-run-btn"]',
+    )!;
+    cancelBtn.click();
+    await flush(harness);
+    const reasonInput = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="ci-cancel-reason-input"]',
+    )!;
+    reasonInput.value = "accidental draft";
+    reasonInput.dispatchEvent(new Event("input"));
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-cancel-dismiss"]')!
+      .click();
+    await flush(harness);
+    expect(api.deleteCalls).toHaveLength(0);
+    expect(root.querySelector('[data-testid="ci-cancel-dialog"]')).toBeNull();
+
+    // Dismissing with Escape also sends nothing.
+    cancelBtn.click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLTextAreaElement>(
+        '[data-testid="ci-cancel-reason-input"]',
+      )!.value,
+    ).toBe("");
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await flush(harness);
+    expect(api.deleteCalls).toHaveLength(0);
+    expect(root.querySelector('[data-testid="ci-cancel-dialog"]')).toBeNull();
+
+    // Error keeps the dialog open with the user's typed reason and shows an alert.
+    cancelBtn.click();
+    await flush(harness);
+    const retryInput = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="ci-cancel-reason-input"]',
+    )!;
+    retryInput.value = "  superseded by newer push  ";
+    retryInput.dispatchEvent(new Event("input"));
+    await flush(harness);
+    api.deleteError = new Error("transient gateway error");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-cancel-confirm"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="ci-cancel-error"]')?.textContent,
+    ).toContain("transient gateway error");
+    expect(
+      root.querySelector('[data-testid="ci-cancel-dialog"]'),
+    ).not.toBeNull();
+    expect(
+      root.querySelector<HTMLTextAreaElement>(
+        '[data-testid="ci-cancel-reason-input"]',
+      )!.value,
+    ).toBe("  superseded by newer push  ");
+
+    // Dismiss error dialog and verify submitting with blank reason omits payload body.
+    api.deleteError = null;
+    api.deleteCalls = [];
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-cancel-dismiss"]')!
+      .click();
+    await flush(harness);
+    cancelBtn.click();
+    await flush(harness);
+    const blankInput = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="ci-cancel-reason-input"]',
+    )!;
+    blankInput.value = "   ";
+    blankInput.dispatchEvent(new Event("input"));
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-cancel-confirm"]')!
+      .click();
+    await flush(harness);
+    expect(api.deleteCalls).toEqual([
+      {
+        route: "DELETE /api/ci/runs/{id}",
+        params: { id: "run-running-3" },
+        body: undefined,
+      },
+    ]);
+    expect(root.querySelector('[data-testid="ci-cancel-dialog"]')).toBeNull();
+    expect(root.querySelector('[data-testid="ci-cancel-reason"]')).toBeNull();
   });
 });

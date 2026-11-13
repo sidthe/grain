@@ -39,9 +39,16 @@ import {
   type PillOption,
   PillSelectComponent,
 } from "../shared/pill-select.component";
+import { StatusIconComponent } from "../shared/status-icon.component";
 
 export type RepoTabId =
-  "overview" | "ci" | "merge-queue" | "agents" | "branches" | "releases";
+  | "overview"
+  | "ci"
+  | "merge-queue"
+  | "agents"
+  | "branches"
+  | "releases"
+  | "advanced";
 
 const REPO_TABS: readonly { id: RepoTabId; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -50,11 +57,17 @@ const REPO_TABS: readonly { id: RepoTabId; label: string }[] = [
   { id: "agents", label: "Agents & Grants" },
   { id: "branches", label: "Branches" },
   { id: "releases", label: "Releases" },
+  { id: "advanced", label: "Advanced" },
 ];
 
-function isRepoTabId(val: string | null | undefined): val is RepoTabId {
+function normalizeRepoTabId(val: string | null | undefined): RepoTabId | null {
   const clean = (val ?? "").toLowerCase();
-  return REPO_TABS.some((t) => t.id === clean);
+  if (clean === "declarations") return "advanced";
+  return REPO_TABS.some((t) => t.id === clean) ? (clean as RepoTabId) : null;
+}
+
+function isRepoTabId(val: string | null | undefined): val is RepoTabId {
+  return normalizeRepoTabId(val) !== null;
 }
 
 function normalizeWorkflowPath(raw: string): string {
@@ -64,6 +77,71 @@ function normalizeWorkflowPath(raw: string): string {
   const withExt =
     clean.endsWith(".yml") || clean.endsWith(".yaml") ? clean : `${clean}.yml`;
   return `.grain/workflows/${withExt}`;
+}
+
+interface DeclaredPushRef {
+  ref?: string;
+  pattern?: string;
+  force?: boolean;
+  delete?: boolean;
+}
+
+interface DeclaredPushRow {
+  repo?: string;
+  path: string;
+  commit?: string;
+  refs?: DeclaredPushRef[];
+}
+
+interface RepoDeclarationsStatus {
+  commit?: string;
+  checkedAt?: string;
+  syncedAt?: string;
+  error?: string;
+  templates?: string[];
+  suites?: string[];
+  schedules?: string[];
+  triggers?: string[];
+  pushes?: DeclaredPushRow[];
+  mergeRules?: string;
+  warnings?: string[];
+}
+
+interface RepoPortDirection {
+  from: string;
+  to: string;
+  paired: boolean;
+  operatorTypes?: string[];
+  declaredTypes?: string[];
+  types?: string[];
+}
+
+interface RepoDeclarationsResponse {
+  repo?: string;
+  declarations: boolean;
+  declarationsStatus?: RepoDeclarationsStatus | null;
+  pairedBranches?: string[];
+  portBranches?: string[];
+  declaredPortBranches?: string[];
+  portDirections?: RepoPortDirection[];
+  portWarnings?: string[];
+}
+
+function declaredSummary(status: RepoDeclarationsStatus): string {
+  const base =
+    `${(status.templates ?? []).length} template(s), ` +
+    `${(status.suites ?? []).length} suite(s), ` +
+    `${(status.schedules ?? []).length} schedule(s), ` +
+    `${(status.triggers ?? []).length} trigger(s)`;
+  return status.mergeRules
+    ? `${base}, merge rules in ${status.mergeRules}`
+    : base;
+}
+
+function formatDeclaredPushRef(r: DeclaredPushRef): string {
+  const name = r.ref ?? r.pattern ?? "";
+  const flags = [r.force && "force", r.delete && "delete"].filter(Boolean);
+  return flags.length ? `${name} (${flags.join(", ")})` : name;
 }
 
 interface BranchRow {
@@ -109,9 +187,124 @@ interface PendingReleaseRow {
   soakReady?: boolean;
 }
 
+type OwnershipState = "" | "on" | "off";
+
+interface RepoWorkDeclaration {
+  repo?: string;
+  path: string;
+}
+
+interface RepoWorkItem {
+  item: string;
+  kind: string;
+  title?: string;
+  override: OwnershipState;
+  runs: boolean;
+  paused?: boolean;
+  declaration?: RepoWorkDeclaration;
+}
+
+interface RepoWorkOwnershipResponse {
+  repo?: string;
+  default: OwnershipState;
+  defaultRuns: boolean;
+  items: RepoWorkItem[];
+}
+
+const OWNERSHIP_OPTIONS: readonly {
+  key: string;
+  state: OwnershipState;
+  label: string;
+  ariaSuffix: string;
+}[] = [
+  { key: "on", state: "on", label: "On", ariaSuffix: "on" },
+  { key: "off", state: "off", label: "Off", ariaSuffix: "off" },
+  {
+    key: "unset",
+    state: "",
+    label: "Say nothing",
+    ariaSuffix: "say nothing",
+  },
+];
+
+function parseOwnershipState(raw: unknown): OwnershipState | null {
+  if (typeof raw !== "string") return null;
+  const clean = raw.trim().toLowerCase();
+  if (clean === "" || clean === "on" || clean === "off") {
+    return clean;
+  }
+  return null;
+}
+
+function validateWorkItemId(raw: string): { id: string; error: string | null } {
+  const id = raw.trim();
+  if (!id) {
+    return { id: "", error: "item: a work item id cannot be empty" };
+  }
+  if (/[=,]/.test(id)) {
+    return {
+      id: "",
+      error: `item: work item "${id}" holds ',' or '=', which the override list separates on`,
+    };
+  }
+  return { id, error: null };
+}
+
+function normalizeWorkOwnership(raw: unknown): RepoWorkOwnershipResponse {
+  const rec =
+    raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const def = parseOwnershipState(rec["default"]) ?? "";
+  const defaultRuns =
+    typeof rec["defaultRuns"] === "boolean"
+      ? rec["defaultRuns"]
+      : def !== "off";
+  const rawItems = Array.isArray(rec["items"]) ? rec["items"] : [];
+  const items: RepoWorkItem[] = [];
+  for (const entry of rawItems) {
+    if (!entry || typeof entry !== "object") continue;
+    const it = entry as Record<string, unknown>;
+    const item = typeof it["item"] === "string" ? it["item"] : "";
+    if (!item) continue;
+    const override = parseOwnershipState(it["override"]) ?? "";
+    const rawDecl = it["declaration"];
+    const declaration =
+      rawDecl &&
+      typeof rawDecl === "object" &&
+      typeof (rawDecl as Record<string, unknown>)["path"] === "string"
+        ? {
+            repo:
+              typeof (rawDecl as Record<string, unknown>)["repo"] === "string"
+                ? ((rawDecl as Record<string, unknown>)["repo"] as string)
+                : undefined,
+            path: (rawDecl as Record<string, unknown>)["path"] as string,
+          }
+        : undefined;
+    items.push({
+      item,
+      kind: typeof it["kind"] === "string" ? it["kind"] : "",
+      title: typeof it["title"] === "string" ? it["title"] : undefined,
+      override,
+      runs: Boolean(it["runs"]),
+      paused: Boolean(it["paused"]),
+      ...(declaration ? { declaration } : {}),
+    });
+  }
+  return {
+    repo: typeof rec["repo"] === "string" ? rec["repo"] : undefined,
+    default: def,
+    defaultRuns,
+    items,
+  };
+}
+
 @Component({
   selector: "g-repo-detail-page",
-  imports: [RouterLink, PillSelectComponent, ConfirmDialogComponent],
+  imports: [
+    RouterLink,
+    PillSelectComponent,
+    ConfirmDialogComponent,
+    StatusIconComponent,
+  ],
   encapsulation: ViewEncapsulation.None,
   styleUrls: [
     "../shared/work-surface.css",
@@ -150,7 +343,7 @@ interface PendingReleaseRow {
             </h1>
             <p class="view-subtitle">
               Per-repository Git connection, CI workflows, merge gates,
-              branches, and release qualification.
+              branches, release qualification, and .grain/ declarations.
             </p>
           </div>
 
@@ -170,7 +363,11 @@ interface PendingReleaseRow {
           </nav>
 
           @if (configRepoOnly()) {
-            <div class="s-banner readonly" data-testid="repo-readonly-banner">
+            <div
+              class="s-banner readonly"
+              id="repo-config-readonly-banner"
+              data-testid="repo-readonly-banner"
+            >
               Repository configuration is managed in the config repository;
               operational actions (branches, issue import, and releases) remain
               available according to your role.
@@ -213,7 +410,10 @@ interface PendingReleaseRow {
                       data-testid="save-repo-config-btn"
                       [disabled]="
                         configRepoOnly() ||
-                        !can('PUT /api/deployment/repos/{owner}/{name}/config')
+                        !access.can(
+                          'PUT /api/deployment/repos/{owner}/{name}/config',
+                          repoSlug()
+                        )
                       "
                       (click)="saveRepoConfig()"
                     >
@@ -233,8 +433,9 @@ interface PendingReleaseRow {
                         [value]="cloneUrl()"
                         [disabled]="
                           configRepoOnly() ||
-                          !can(
-                            'PUT /api/deployment/repos/{owner}/{name}/config'
+                          !access.can(
+                            'PUT /api/deployment/repos/{owner}/{name}/config',
+                            repoSlug()
                           )
                         "
                         (input)="cloneUrl.set($any($event.target).value)"
@@ -251,8 +452,9 @@ interface PendingReleaseRow {
                           [value]="gitCredential()"
                           [disabled]="
                             configRepoOnly() ||
-                            !can(
-                              'PUT /api/deployment/repos/{owner}/{name}/git-connection'
+                            !access.can(
+                              'PUT /api/deployment/repos/{owner}/{name}/git-connection',
+                              repoSlug()
                             )
                           "
                           (valueChange)="pinGitConnection($event)"
@@ -285,8 +487,9 @@ interface PendingReleaseRow {
                         class="btn-tonal s-btn-sm"
                         data-testid="refresh-lifecycle-btn"
                         [disabled]="
-                          !can(
-                            'POST /api/repos/{owner}/{name}/lifecycle/refresh'
+                          !access.can(
+                            'POST /api/repos/{owner}/{name}/lifecycle/refresh',
+                            repoSlug()
                           )
                         "
                         (click)="refreshLifecycle()"
@@ -366,7 +569,10 @@ interface PendingReleaseRow {
                       class="btn-tonal s-btn-sm"
                       data-testid="import-issues-btn"
                       [disabled]="
-                        !can('POST /api/repos/{owner}/{name}/import-issues')
+                        !access.can(
+                          'POST /api/repos/{owner}/{name}/import-issues',
+                          repoSlug()
+                        )
                       "
                       (click)="importIssues()"
                     >
@@ -393,7 +599,10 @@ interface PendingReleaseRow {
                       class="btn-tonal s-btn-sm"
                       data-testid="trigger-base-ci-btn"
                       [disabled]="
-                        !can('POST /api/repos/{owner}/{name}/base-branch-runs')
+                        !access.can(
+                          'POST /api/repos/{owner}/{name}/base-branch-runs',
+                          repoSlug()
+                        )
                       "
                       (click)="triggerBaseCiRun()"
                     >
@@ -412,7 +621,10 @@ interface PendingReleaseRow {
                         [value]="ciMode()"
                         [disabled]="
                           configRepoOnly() ||
-                          !can('PUT /api/repos/{owner}/{name}/ci-mode')
+                          !access.can(
+                            'PUT /api/repos/{owner}/{name}/ci-mode',
+                            repoSlug()
+                          )
                         "
                         (valueChange)="saveCiMode($event)"
                       />
@@ -434,8 +646,9 @@ interface PendingReleaseRow {
                       [attr.aria-checked]="watchDefaultBranch()"
                       [disabled]="
                         configRepoOnly() ||
-                        !can(
-                          'PUT /api/repos/{owner}/{name}/watch-default-branch'
+                        !access.can(
+                          'PUT /api/repos/{owner}/{name}/watch-default-branch',
+                          repoSlug()
                         )
                       "
                       aria-label="Watch default branch"
@@ -468,7 +681,10 @@ interface PendingReleaseRow {
                           [value]="newWorkflowPath()"
                           [disabled]="
                             configRepoOnly() ||
-                            !can('PUT /api/repos/{owner}/{name}/workflows')
+                            !access.can(
+                              'PUT /api/repos/{owner}/{name}/workflows',
+                              repoSlug()
+                            )
                           "
                           (input)="
                             newWorkflowPath.set($any($event.target).value)
@@ -481,7 +697,10 @@ interface PendingReleaseRow {
                           [disabled]="
                             !newWorkflowPath().trim() ||
                             configRepoOnly() ||
-                            !can('PUT /api/repos/{owner}/{name}/workflows')
+                            !access.can(
+                              'PUT /api/repos/{owner}/{name}/workflows',
+                              repoSlug()
+                            )
                           "
                           (click)="addWorkflowFile()"
                         >
@@ -497,7 +716,10 @@ interface PendingReleaseRow {
                       [value]="workflowYaml()"
                       [disabled]="
                         configRepoOnly() ||
-                        !can('PUT /api/repos/{owner}/{name}/workflows')
+                        !access.can(
+                          'PUT /api/repos/{owner}/{name}/workflows',
+                          repoSlug()
+                        )
                       "
                       (input)="onEditWorkflowText($any($event.target).value)"
                     ></textarea>
@@ -508,7 +730,10 @@ interface PendingReleaseRow {
                         data-testid="save-repo-workflow-btn"
                         [disabled]="
                           configRepoOnly() ||
-                          !can('PUT /api/repos/{owner}/{name}/workflows')
+                          !access.can(
+                            'PUT /api/repos/{owner}/{name}/workflows',
+                            repoSlug()
+                          )
                         "
                         (click)="saveWorkflows()"
                       >
@@ -521,7 +746,10 @@ interface PendingReleaseRow {
                           data-testid="delete-repo-workflow-btn"
                           [disabled]="
                             configRepoOnly() ||
-                            !can('PUT /api/repos/{owner}/{name}/workflows')
+                            !access.can(
+                              'PUT /api/repos/{owner}/{name}/workflows',
+                              repoSlug()
+                            )
                           "
                           (click)="deleteSelectedWorkflow()"
                         >
@@ -552,7 +780,10 @@ interface PendingReleaseRow {
                       [attr.aria-checked]="mergeOnGreen()"
                       [disabled]="
                         configRepoOnly() ||
-                        !can('PUT /api/repos/{owner}/{name}/merge-on-green')
+                        !access.can(
+                          'PUT /api/repos/{owner}/{name}/merge-on-green',
+                          repoSlug()
+                        )
                       "
                       aria-label="Merge on green"
                       (click)="toggleMergeOnGreen()"
@@ -572,8 +803,9 @@ interface PendingReleaseRow {
                       [attr.aria-checked]="requireUpToDate()"
                       [disabled]="
                         configRepoOnly() ||
-                        !can(
-                          'PUT /api/repos/{owner}/{name}/require-branch-up-to-date'
+                        !access.can(
+                          'PUT /api/repos/{owner}/{name}/require-branch-up-to-date',
+                          repoSlug()
                         )
                       "
                       aria-label="Require branch up to date"
@@ -594,8 +826,9 @@ interface PendingReleaseRow {
                       [attr.aria-checked]="bypassHumanGates()"
                       [disabled]="
                         configRepoOnly() ||
-                        !can(
-                          'PUT /api/repos/{owner}/{name}/base-repair-bypasses-human-gates'
+                        !access.can(
+                          'PUT /api/repos/{owner}/{name}/base-repair-bypasses-human-gates',
+                          repoSlug()
                         )
                       "
                       aria-label="Base-branch repairs bypass human review gates"
@@ -623,7 +856,10 @@ interface PendingReleaseRow {
                       [value]="setupCommand()"
                       [disabled]="
                         configRepoOnly() ||
-                        !can('PUT /api/repos/{owner}/{name}/setup-command')
+                        !access.can(
+                          'PUT /api/repos/{owner}/{name}/setup-command',
+                          repoSlug()
+                        )
                       "
                       (input)="setupCommand.set($any($event.target).value)"
                     />
@@ -640,7 +876,10 @@ interface PendingReleaseRow {
                       [value]="promptExtension()"
                       [disabled]="
                         configRepoOnly() ||
-                        !can('PUT /api/repos/{owner}/{name}/prompt-extension')
+                        !access.can(
+                          'PUT /api/repos/{owner}/{name}/prompt-extension',
+                          repoSlug()
+                        )
                       "
                       (input)="promptExtension.set($any($event.target).value)"
                     ></textarea>
@@ -653,10 +892,14 @@ interface PendingReleaseRow {
                       id="rp-caps"
                       class="s-input tabular"
                       type="text"
+                      data-testid="input-repo-caps"
                       [value]="repoCaps()"
                       [disabled]="
                         configRepoOnly() ||
-                        !can('PUT /api/repos/{owner}/{name}/capabilities')
+                        !access.can(
+                          'PUT /api/repos/{owner}/{name}/capabilities',
+                          repoSlug()
+                        )
                       "
                       (input)="repoCaps.set($any($event.target).value)"
                     />
@@ -713,7 +956,10 @@ interface PendingReleaseRow {
                         placeholder="release/v1.2"
                         [value]="newBranchName()"
                         [disabled]="
-                          !can('POST /api/repos/{owner}/{name}/branches')
+                          !access.can(
+                            'POST /api/repos/{owner}/{name}/branches',
+                            repoSlug()
+                          )
                         "
                         (input)="newBranchName.set($any($event.target).value)"
                       />
@@ -728,7 +974,10 @@ interface PendingReleaseRow {
                         placeholder="main"
                         [value]="newBranchFrom()"
                         [disabled]="
-                          !can('POST /api/repos/{owner}/{name}/branches')
+                          !access.can(
+                            'POST /api/repos/{owner}/{name}/branches',
+                            repoSlug()
+                          )
                         "
                         (input)="newBranchFrom.set($any($event.target).value)"
                       />
@@ -741,7 +990,10 @@ interface PendingReleaseRow {
                       data-testid="create-branch-btn"
                       [disabled]="
                         !newBranchName().trim() ||
-                        !can('POST /api/repos/{owner}/{name}/branches')
+                        !access.can(
+                          'POST /api/repos/{owner}/{name}/branches',
+                          repoSlug()
+                        )
                       "
                       (click)="createBranch()"
                     >
@@ -752,6 +1004,336 @@ interface PendingReleaseRow {
               }
 
               @case ("releases") {
+                <div class="s-card" data-testid="card-repo-work-ownership">
+                  <div class="s-card-head">
+                    <div>
+                      <h2 class="s-card-title">Work ownership</h2>
+                      <p class="s-card-desc">
+                        Choose whether this deployment runs {{ repoSlug() }}'s
+                        standing automated work and per-item overrides.
+                      </p>
+                    </div>
+                  </div>
+
+                  @if (
+                    !access.can(
+                      "GET /api/repos/{owner}/{name}/work-ownership",
+                      repoSlug()
+                    )
+                  ) {
+                    <div
+                      class="s-banner readonly"
+                      data-testid="work-ownership-read-denied"
+                    >
+                      {{
+                        access.deniedReason(
+                          "GET /api/repos/{owner}/{name}/work-ownership",
+                          repoSlug()
+                        )
+                      }}
+                    </div>
+                  } @else if (workOwnershipError()) {
+                    <div
+                      class="s-banner error"
+                      role="alert"
+                      data-testid="work-ownership-error-banner"
+                    >
+                      <span>{{ workOwnershipError() }}</span>
+                      <button
+                        type="button"
+                        class="btn-tonal s-btn-sm"
+                        data-testid="retry-work-ownership-btn"
+                        (click)="loadWorkOwnership(true)"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  } @else if (workOwnershipData() === null) {
+                    <p class="s-hint" data-testid="work-ownership-loading">
+                      Loading work ownership…
+                    </p>
+                  } @else {
+                    @if (workOwnershipData(); as work) {
+                      <div class="repo-wo-body">
+                        <div class="s-toggle-row">
+                          <div class="s-toggle-copy">
+                            <span
+                              class="s-toggle-name"
+                              data-testid="work-ownership-switch-label"
+                            >
+                              Standing work on this deployment:
+                              {{ work.defaultRuns ? "on" : "off" }}
+                            </span>
+                            @if (
+                              !access.can(
+                                "PUT /api/repos/{owner}/{name}/work-ownership",
+                                repoSlug()
+                              )
+                            ) {
+                              <span
+                                class="s-hint"
+                                id="repo-work-ownership-denied-reason"
+                                data-testid="work-ownership-write-denied"
+                              >
+                                {{
+                                  access.deniedReason(
+                                    "PUT /api/repos/{owner}/{name}/work-ownership",
+                                    repoSlug()
+                                  )
+                                }}
+                              </span>
+                            }
+                          </div>
+                          <button
+                            type="button"
+                            class="g-switch"
+                            role="switch"
+                            data-testid="switch-work-ownership-default"
+                            aria-label="Standing work on this deployment"
+                            [attr.aria-checked]="work.defaultRuns"
+                            [attr.aria-describedby]="workOwnershipDescribedBy()"
+                            [disabled]="
+                              !canWriteWorkOwnership() || workOwnershipSaving()
+                            "
+                            (click)="
+                              setWorkOwnershipDefault(
+                                work.defaultRuns ? 'off' : 'on'
+                              )
+                            "
+                          ></button>
+                        </div>
+
+                        <div class="repo-wo-copy">
+                          <p class="repo-wo-note">
+                            Covers: this repository's schedules (declared, set
+                            up here, and workflow crons), its release, the
+                            base-branch check, post-merge jobs, automatic ports,
+                            and the triage and repair tasks grain files on its
+                            own.
+                          </p>
+                          <p class="repo-wo-note">
+                            Does not cover: tasks people file by hand against
+                            this repository, their pull requests' CI, the merge
+                            queue for them, and the repair of those pull
+                            requests — those run either way.
+                          </p>
+                        </div>
+
+                        <p class="repo-wo-note">
+                          Whether <em>this</em> deployment is the one running
+                          this repository's standing work, as against another
+                          deployment watching the same repository. The
+                          repository declares that the work exists; this says
+                          who does it. Saying nothing is its own answer, and a
+                          different one from saying no: an item that says
+                          nothing follows the default and moves with it, and one
+                          that says off stays off when the default is turned
+                          back on — and one that says on runs while the default
+                          is off.
+                        </p>
+
+                        <div
+                          class="repo-wo-row is-default"
+                          data-testid="work-ownership-default-row"
+                        >
+                          <span class="repo-wo-row-main">
+                            <span class="repo-wo-item-title"
+                              >Repository default:</span
+                            >
+                            <span
+                              [class]="
+                                'status-pill ' + saidPillTone(work.default)
+                              "
+                            >
+                              <g-status-icon
+                                [tone]="saidPillTone(work.default)"
+                                [kind]="saidPillKind(work.default)"
+                              />
+                              {{ saidLabel(work.default) }}
+                            </span>
+                            <span
+                              [class]="
+                                'status-pill repo-wo-resolved ' +
+                                (work.defaultRuns ? 'is-runs' : 'is-off')
+                              "
+                            >
+                              <g-status-icon
+                                [tone]="
+                                  work.defaultRuns ? 'healthy' : 'neutral'
+                                "
+                                [kind]="
+                                  work.defaultRuns ? 'healthy' : 'neutral'
+                                "
+                              />
+                              {{
+                                work.defaultRuns
+                                  ? "Runs this repository's work"
+                                  : "Does not run this repository's work"
+                              }}
+                            </span>
+                          </span>
+                          <div
+                            class="segmented repo-wo-segmented"
+                            role="group"
+                            aria-label="Repository default ownership"
+                          >
+                            @for (opt of ownershipOptions; track opt.key) {
+                              <button
+                                type="button"
+                                [attr.data-testid]="
+                                  'work-ownership-default-' + opt.key
+                                "
+                                [attr.aria-label]="
+                                  'the repository default: ' + opt.ariaSuffix
+                                "
+                                [attr.aria-pressed]="work.default === opt.state"
+                                [attr.aria-describedby]="
+                                  workOwnershipDescribedBy()
+                                "
+                                [disabled]="
+                                  !canWriteWorkOwnership() ||
+                                  workOwnershipSaving()
+                                "
+                                (click)="setWorkOwnershipDefault(opt.state)"
+                              >
+                                {{ opt.label }}
+                              </button>
+                            }
+                          </div>
+                        </div>
+
+                        @if (work.items.length === 0) {
+                          <p class="s-hint" data-testid="work-ownership-empty">
+                            No work items: this repository declares no schedules
+                            here, none fires into it, and nothing has been said
+                            about one.
+                          </p>
+                        } @else {
+                          <div
+                            class="repo-wo-list"
+                            data-testid="work-ownership-items"
+                          >
+                            @for (item of work.items; track item.item) {
+                              @let label = workItemLabel(item);
+                              <div
+                                class="repo-wo-row"
+                                [attr.data-testid]="
+                                  'work-ownership-item-' + item.item
+                                "
+                              >
+                                <span class="repo-wo-row-main">
+                                  <span
+                                    [class]="
+                                      'status-pill repo-wo-resolved ' +
+                                      (item.runs ? 'is-runs' : 'is-off')
+                                    "
+                                  >
+                                    <g-status-icon
+                                      [tone]="item.runs ? 'healthy' : 'neutral'"
+                                      [kind]="item.runs ? 'healthy' : 'neutral'"
+                                    />
+                                    {{ item.runs ? "Runs" : "Not run" }}
+                                  </span>
+                                  <span class="repo-wo-item-title">{{
+                                    label
+                                  }}</span>
+                                  <span
+                                    [class]="
+                                      'status-pill ' +
+                                      saidPillTone(item.override)
+                                    "
+                                  >
+                                    <g-status-icon
+                                      [tone]="saidPillTone(item.override)"
+                                      [kind]="saidPillKind(item.override)"
+                                    />
+                                    {{ saidLabel(item.override) }}
+                                  </span>
+                                  @if (item.title && item.title !== item.item) {
+                                    <code class="repo-decl-code">{{
+                                      item.item
+                                    }}</code>
+                                  }
+                                  @if (item.paused) {
+                                    <span class="status-pill quiet">
+                                      <g-status-icon
+                                        tone="blast"
+                                        kind="warning"
+                                      />
+                                      Paused on its own row
+                                    </span>
+                                  }
+                                  @if (item.declaration; as decl) {
+                                    <span class="repo-wo-meta"
+                                      >declared in {{ decl.path }}</span
+                                    >
+                                  }
+                                  @if (item.kind === "unknown") {
+                                    <span class="repo-wo-meta"
+                                      >nothing here has this id — a decision
+                                      left behind by whatever it named</span
+                                    >
+                                  }
+                                </span>
+                                <div
+                                  class="segmented repo-wo-segmented"
+                                  role="group"
+                                  [attr.aria-label]="label + ' ownership'"
+                                >
+                                  @for (
+                                    opt of ownershipOptions;
+                                    track opt.key
+                                  ) {
+                                    <button
+                                      type="button"
+                                      [attr.data-testid]="
+                                        'work-ownership-item-' +
+                                        item.item +
+                                        '-' +
+                                        opt.key
+                                      "
+                                      [attr.aria-label]="
+                                        label + ': ' + opt.ariaSuffix
+                                      "
+                                      [attr.aria-pressed]="
+                                        item.override === opt.state
+                                      "
+                                      [attr.aria-describedby]="
+                                        workOwnershipDescribedBy()
+                                      "
+                                      [disabled]="
+                                        !canWriteWorkOwnership() ||
+                                        workOwnershipSaving()
+                                      "
+                                      (click)="
+                                        setWorkItemOwnership(
+                                          item.item,
+                                          opt.state
+                                        )
+                                      "
+                                    >
+                                      {{ opt.label }}
+                                    </button>
+                                  }
+                                </div>
+                              </div>
+                            }
+                          </div>
+                        }
+
+                        <p class="repo-wo-caption">
+                          Grain resolves this before every piece of standing
+                          work it starts here. A skipped schedule says so on its
+                          own status and moves on to its next occurrence, so
+                          turning the work back on does not release a backlog of
+                          catch-up firings. The deployment's own configuration
+                          repository is checked whatever this says.
+                        </p>
+                      </div>
+                    }
+                  }
+                </div>
+
                 <div class="s-card" data-testid="card-repo-release-settings">
                   <div class="s-card-head">
                     <div>
@@ -769,7 +1351,10 @@ interface PendingReleaseRow {
                       data-testid="save-repo-release-btn"
                       [disabled]="
                         configRepoOnly() ||
-                        !can('PUT /api/repos/{owner}/{name}/release')
+                        !access.can(
+                          'PUT /api/repos/{owner}/{name}/release',
+                          repoSlug()
+                        )
                       "
                       (click)="saveReleaseSettings()"
                     >
@@ -793,7 +1378,10 @@ interface PendingReleaseRow {
                       [attr.aria-checked]="releaseEnabled()"
                       [disabled]="
                         configRepoOnly() ||
-                        !can('PUT /api/repos/{owner}/{name}/release')
+                        !access.can(
+                          'PUT /api/repos/{owner}/{name}/release',
+                          repoSlug()
+                        )
                       "
                       aria-label="Enable release workflow"
                       (click)="releaseEnabled.set(!releaseEnabled())"
@@ -814,7 +1402,10 @@ interface PendingReleaseRow {
                         [value]="baseBranchJobsText()"
                         [disabled]="
                           configRepoOnly() ||
-                          !can('PUT /api/repos/{owner}/{name}/release')
+                          !access.can(
+                            'PUT /api/repos/{owner}/{name}/release',
+                            repoSlug()
+                          )
                         "
                         (input)="
                           baseBranchJobsText.set($any($event.target).value)
@@ -834,7 +1425,10 @@ interface PendingReleaseRow {
                         [value]="postMergeJobsText()"
                         [disabled]="
                           configRepoOnly() ||
-                          !can('PUT /api/repos/{owner}/{name}/release')
+                          !access.can(
+                            'PUT /api/repos/{owner}/{name}/release',
+                            repoSlug()
+                          )
                         "
                         (input)="
                           postMergeJobsText.set($any($event.target).value)
@@ -893,8 +1487,9 @@ interface PendingReleaseRow {
                                       'approve-pending-release-' + pr.version
                                     "
                                     [disabled]="
-                                      !can(
-                                        'POST /api/repos/{owner}/{name}/pending-releases/{version}/approve'
+                                      !access.can(
+                                        'POST /api/repos/{owner}/{name}/pending-releases/{version}/approve',
+                                        repoSlug()
                                       )
                                     "
                                     (click)="approvePendingRelease(pr.version)"
@@ -908,8 +1503,9 @@ interface PendingReleaseRow {
                                       'reject-pending-release-' + pr.version
                                     "
                                     [disabled]="
-                                      !can(
-                                        'POST /api/repos/{owner}/{name}/pending-releases/{version}/reject'
+                                      !access.can(
+                                        'POST /api/repos/{owner}/{name}/pending-releases/{version}/reject',
+                                        repoSlug()
                                       )
                                     "
                                     (click)="rejectPendingRelease(pr.version)"
@@ -942,7 +1538,10 @@ interface PendingReleaseRow {
                       class="btn-tonal s-btn-sm"
                       data-testid="trigger-release-run-btn"
                       [disabled]="
-                        !can('POST /api/repos/{owner}/{name}/release-runs')
+                        !access.can(
+                          'POST /api/repos/{owner}/{name}/release-runs',
+                          repoSlug()
+                        )
                       "
                       (click)="triggerReleaseRun()"
                     >
@@ -995,8 +1594,9 @@ interface PendingReleaseRow {
                                     class="btn-tonal s-btn-sm"
                                     [attr.data-testid]="'cut-rc-' + rel.name"
                                     [disabled]="
-                                      !can(
-                                        'POST /api/repos/{owner}/{name}/releases/{release}/candidates'
+                                      !access.can(
+                                        'POST /api/repos/{owner}/{name}/releases/{release}/candidates',
+                                        repoSlug()
                                       )
                                     "
                                     (click)="cutCandidate(rel.name)"
@@ -1010,8 +1610,9 @@ interface PendingReleaseRow {
                                       'promote-rc-' + rel.name
                                     "
                                     [disabled]="
-                                      !can(
-                                        'POST /api/repos/{owner}/{name}/releases/{release}/candidates/promote'
+                                      !access.can(
+                                        'POST /api/repos/{owner}/{name}/releases/{release}/candidates/promote',
+                                        repoSlug()
                                       )
                                     "
                                     (click)="promoteCandidate(rel.name)"
@@ -1022,8 +1623,9 @@ interface PendingReleaseRow {
                                     type="button"
                                     class="btn-tonal s-btn-sm"
                                     [disabled]="
-                                      !can(
-                                        'POST /api/repos/{owner}/{name}/releases/{release}/merge'
+                                      !access.can(
+                                        'POST /api/repos/{owner}/{name}/releases/{release}/merge',
+                                        repoSlug()
                                       )
                                     "
                                     (click)="mergeRelease(rel.name)"
@@ -1034,8 +1636,9 @@ interface PendingReleaseRow {
                                     type="button"
                                     class="btn-text s-btn-sm"
                                     [disabled]="
-                                      !can(
-                                        'DELETE /api/repos/{owner}/{name}/releases/{release}'
+                                      !access.can(
+                                        'DELETE /api/repos/{owner}/{name}/releases/{release}',
+                                        repoSlug()
                                       )
                                     "
                                     (click)="deleteRelease(rel.name)"
@@ -1102,8 +1705,9 @@ interface PendingReleaseRow {
                                     'approve-qualification-' + c.id
                                   "
                                   [disabled]="
-                                    !can(
-                                      'POST /api/repos/{owner}/{name}/candidates/{id}/qualification/approve'
+                                    !access.can(
+                                      'POST /api/repos/{owner}/{name}/candidates/{id}/qualification/approve',
+                                      repoSlug()
                                     )
                                   "
                                   (click)="approveQualification('' + c.id)"
@@ -1127,7 +1731,10 @@ interface PendingReleaseRow {
                       placeholder="v1.4.0"
                       [value]="newReleaseName()"
                       [disabled]="
-                        !can('POST /api/repos/{owner}/{name}/releases')
+                        !access.can(
+                          'POST /api/repos/{owner}/{name}/releases',
+                          repoSlug()
+                        )
                       "
                       (input)="newReleaseName.set($any($event.target).value)"
                     />
@@ -1137,7 +1744,10 @@ interface PendingReleaseRow {
                       data-testid="create-release-btn"
                       [disabled]="
                         !newReleaseName().trim() ||
-                        !can('POST /api/repos/{owner}/{name}/releases')
+                        !access.can(
+                          'POST /api/repos/{owner}/{name}/releases',
+                          repoSlug()
+                        )
                       "
                       (click)="createRelease()"
                     >
@@ -1145,6 +1755,371 @@ interface PendingReleaseRow {
                     </button>
                   </div>
                 </div>
+              }
+
+              @case ("advanced") {
+                <div class="s-card" data-testid="card-repo-declarations">
+                  <div class="s-card-head">
+                    <div>
+                      <h2 class="s-card-title">Declarations</h2>
+                      <p class="s-card-desc">
+                        Control whether Grain reads templates, suites,
+                        schedules, path triggers, and merge rules from
+                        <code class="repo-decl-code">.grain/</code> on
+                        {{ repoSlug() }}'s default branch.
+                      </p>
+                    </div>
+                    @if (declarationsData(); as decl) {
+                      <span
+                        [class]="
+                          'status-pill ' +
+                          (decl.declarationsStatus?.error
+                            ? 'error'
+                            : decl.declarations
+                              ? 'healthy'
+                              : 'neutral')
+                        "
+                        data-testid="declarations-state-pill"
+                      >
+                        {{
+                          decl.declarationsStatus?.error
+                            ? "Sync error"
+                            : decl.declarations
+                              ? "Enabled"
+                              : "Off"
+                        }}
+                      </span>
+                    }
+                  </div>
+
+                  @if (
+                    !access.can(
+                      "GET /api/repos/{owner}/{name}/declarations",
+                      repoSlug()
+                    )
+                  ) {
+                    <div
+                      class="s-banner readonly"
+                      data-testid="declarations-read-denied"
+                    >
+                      {{
+                        access.deniedReason(
+                          "GET /api/repos/{owner}/{name}/declarations",
+                          repoSlug()
+                        )
+                      }}
+                    </div>
+                  } @else if (declarationsError()) {
+                    <div
+                      class="s-banner error"
+                      role="alert"
+                      data-testid="declarations-error-banner"
+                    >
+                      <span>{{ declarationsError() }}</span>
+                      <button
+                        type="button"
+                        class="btn-tonal s-btn-sm"
+                        data-testid="retry-declarations-btn"
+                        (click)="loadDeclarations()"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  } @else if (declarationsData() === null) {
+                    <p class="s-hint" data-testid="declarations-loading">
+                      Loading declarations…
+                    </p>
+                  } @else {
+                    @if (declarationsData(); as decl) {
+                      <div class="s-toggle-row">
+                        <div class="s-toggle-copy">
+                          <span class="s-toggle-name"
+                            >Read {{ repoSlug() }}'s own declarations</span
+                          >
+                          <span class="s-hint">
+                            Read the templates, suites, schedules and path
+                            triggers {{ repoSlug() }} declares in its own
+                            .grain/templates, .grain/suites, .grain/schedules
+                            and .grain/triggers. Grain re-reads them within a
+                            couple of minutes of every change, and they cannot
+                            be edited here — the files are. A declaration files
+                            work in {{ repoSlug() }} on a cadence; it can never
+                            widen what that work reads, writes, or holds.
+                          </span>
+                          @if (
+                            !access.can(
+                              "PUT /api/repos/{owner}/{name}/declarations",
+                              repoSlug()
+                            )
+                          ) {
+                            <span
+                              class="s-hint"
+                              id="repo-decl-denied-reason"
+                              data-testid="declarations-write-denied"
+                            >
+                              {{
+                                access.deniedReason(
+                                  "PUT /api/repos/{owner}/{name}/declarations",
+                                  repoSlug()
+                                )
+                              }}
+                            </span>
+                          }
+                        </div>
+                        <button
+                          type="button"
+                          class="g-switch"
+                          role="switch"
+                          data-testid="switch-repo-declarations"
+                          [attr.aria-checked]="!!decl.declarations"
+                          [attr.aria-label]="declarationsSwitchLabel()"
+                          [attr.aria-describedby]="
+                            !access.can(
+                              'PUT /api/repos/{owner}/{name}/declarations',
+                              repoSlug()
+                            )
+                              ? 'repo-decl-denied-reason'
+                              : null
+                          "
+                          [disabled]="
+                            configRepoOnly() ||
+                            declarationsSaving() ||
+                            !access.can(
+                              'PUT /api/repos/{owner}/{name}/declarations',
+                              repoSlug()
+                            )
+                          "
+                          (click)="toggleDeclarations()"
+                        ></button>
+                      </div>
+
+                      @if (decl.declarationsStatus; as status) {
+                        <div
+                          class="repo-decl-status"
+                          data-testid="declarations-status"
+                        >
+                          <p
+                            class="repo-decl-summary"
+                            data-testid="declarations-status-summary"
+                          >
+                            @if (status.error) {
+                              Last read failed: {{ status.error
+                              }}{{
+                                status.commit
+                                  ? " — still running what " +
+                                    status.commit.slice(0, 12) +
+                                    " declared."
+                                  : ""
+                              }}
+                            } @else {
+                              Read at
+                              {{
+                                (status.commit || "").slice(0, 12) ||
+                                  "no commit"
+                              }}: {{ declaredSummaryText(status) }}
+                            }
+                          </p>
+
+                          @if ((status.triggers ?? []).length > 0) {
+                            <p
+                              class="repo-decl-line"
+                              data-testid="declarations-triggers"
+                            >
+                              Path triggers:
+                              @for (
+                                path of status.triggers ?? [];
+                                track path;
+                                let i = $index
+                              ) {
+                                @if (i > 0) {
+                                  ,
+                                }
+                                <code class="repo-decl-code">{{ path }}</code>
+                              }
+                            </p>
+                          }
+
+                          @if (status.error && status.commit) {
+                            <p
+                              class="repo-decl-line"
+                              data-testid="declarations-still-running"
+                            >
+                              Still running from
+                              {{ status.commit.slice(0, 12) }}:
+                              {{ declaredSummaryText(status) }}
+                            </p>
+                          }
+
+                          @for (p of status.pushes ?? []; track p.path) {
+                            <p
+                              class="repo-decl-line"
+                              data-testid="declarations-push"
+                            >
+                              Tasks from
+                              <code class="repo-decl-code">{{ p.path }}</code>
+                              may also push: {{ formatPushRefs(p.refs) }}
+                            </p>
+                          }
+
+                          @for (w of status.warnings ?? []; track w) {
+                            <p
+                              class="repo-decl-warning"
+                              data-testid="declarations-warning"
+                            >
+                              Warning: {{ w }}
+                            </p>
+                          }
+
+                          @if (hasDeclaredFiles(status)) {
+                            <ul
+                              class="repo-decl-files"
+                              data-testid="declarations-files"
+                            >
+                              @for (p of status.templates ?? []; track p) {
+                                <li class="repo-decl-file">
+                                  <code class="repo-decl-code">{{ p }}</code>
+                                  <span class="status-pill neutral"
+                                    >template</span
+                                  >
+                                </li>
+                              }
+                              @for (p of status.suites ?? []; track p) {
+                                <li class="repo-decl-file">
+                                  <code class="repo-decl-code">{{ p }}</code>
+                                  <span class="status-pill neutral">suite</span>
+                                </li>
+                              }
+                              @for (p of status.schedules ?? []; track p) {
+                                <li class="repo-decl-file">
+                                  <code class="repo-decl-code">{{ p }}</code>
+                                  <span class="status-pill neutral"
+                                    >schedule</span
+                                  >
+                                </li>
+                              }
+                              @for (p of status.triggers ?? []; track p) {
+                                <li class="repo-decl-file">
+                                  <code class="repo-decl-code">{{ p }}</code>
+                                  <span class="status-pill neutral"
+                                    >trigger</span
+                                  >
+                                </li>
+                              }
+                              @if (status.mergeRules) {
+                                <li class="repo-decl-file">
+                                  <code class="repo-decl-code">{{
+                                    status.mergeRules
+                                  }}</code>
+                                  <span class="status-pill neutral"
+                                    >merge-rules</span
+                                  >
+                                </li>
+                              }
+                            </ul>
+                          }
+                        </div>
+                      } @else if (decl.declarations) {
+                        <p
+                          class="s-hint"
+                          data-testid="declarations-not-read-yet"
+                        >
+                          Not read yet — grain picks this up on its next cycle.
+                        </p>
+                      } @else {
+                        <p
+                          class="s-hint"
+                          data-testid="declarations-disabled-hint"
+                        >
+                          Declarations are off for {{ repoSlug() }}.
+                        </p>
+                      }
+                    }
+                  }
+                </div>
+
+                @if (declarationsData(); as decl) {
+                  @if (
+                    (decl.pairedBranches?.length ?? 0) > 0 ||
+                    (decl.portDirections?.length ?? 0) > 0
+                  ) {
+                    <div
+                      class="s-card repo-ports"
+                      data-testid="card-repo-ports"
+                    >
+                      <div>
+                        <h2 class="s-card-title">Ports</h2>
+                        <p class="s-card-desc">
+                          {{
+                            (decl.pairedBranches?.length ?? 0) > 0
+                              ? "Grain ports each merge between " +
+                                decl.pairedBranches!.join(", ")
+                              : "No branches are paired"
+                          }}
+                          — operator:
+                          {{ decl.portBranches?.join(", ") || "none" }};
+                          declared in .grain/settings.yml:
+                          {{ decl.declaredPortBranches?.join(", ") || "none" }}.
+                          Set by the operator in grain/config and by
+                          {{ repoSlug() }}'s own port-types; not editable here.
+                        </p>
+                      </div>
+
+                      <div
+                        class="s-table-wrap"
+                        tabindex="0"
+                        role="region"
+                        aria-label="Port directions"
+                      >
+                        <table class="s-table" aria-label="Port directions">
+                          <thead>
+                            <tr>
+                              <th>Direction</th>
+                              <th>Operator</th>
+                              <th>Declared</th>
+                              <th>Ports</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            @for (
+                              d of decl.portDirections ?? [];
+                              track d.from + "->" + d.to
+                            ) {
+                              <tr>
+                                <td>
+                                  <code class="repo-decl-code"
+                                    >{{ d.from }}-&gt;{{ d.to }}</code
+                                  >
+                                </td>
+                                <td>
+                                  {{ d.operatorTypes?.join(", ") || "—" }}
+                                </td>
+                                <td>
+                                  {{ d.declaredTypes?.join(", ") || "—" }}
+                                </td>
+                                <td>
+                                  {{
+                                    !d.paired
+                                      ? "nothing (not a paired branch)"
+                                      : d.types?.join(", ") || "every merge"
+                                  }}
+                                </td>
+                              </tr>
+                            }
+                          </tbody>
+                        </table>
+                      </div>
+
+                      @for (w of portWarningsFiltered(decl); track w) {
+                        <p
+                          class="repo-decl-warning"
+                          data-testid="repo-port-warning"
+                        >
+                          Warning: {{ w }}
+                        </p>
+                      }
+                    </div>
+                  }
+                }
               }
             }
           }
@@ -1229,7 +2204,28 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   protected readonly pendingReleases = signal<PendingReleaseRow[]>([]);
   protected readonly newReleaseName = signal("");
 
+  protected readonly ownershipOptions = OWNERSHIP_OPTIONS;
+
+  protected readonly declarationsData = signal<RepoDeclarationsResponse | null>(
+    null,
+  );
+  protected readonly declarationsLoading = signal(false);
+  protected readonly declarationsSaving = signal(false);
+  protected readonly declarationsError = signal<string | null>(null);
+
+  protected readonly workOwnershipData =
+    signal<RepoWorkOwnershipResponse | null>(null);
+  protected readonly workOwnershipLoading = signal(false);
+  protected readonly workOwnershipSaving = signal(false);
+  protected readonly workOwnershipError = signal<string | null>(null);
+
   private subs: Subscription[] = [];
+  private loadedRepoSlug = "";
+  private declarationsInFlightRepo = "";
+  private workOwnershipInFlightRepo = "";
+  private workOwnershipReadSeq = 0;
+  private workOwnershipSaveSeq = 0;
+  private lastWorkOwnershipError: string | null = null;
 
   private readonly normalizedRouteParts = computed(() => {
     const rawHost = this.routeHost() || this.host() || "";
@@ -1279,10 +2275,9 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     return h ? `${h}/${o}/${n}` : `${o}/${n}`;
   });
 
-  protected readonly activeTab = computed<RepoTabId>(() => {
-    const raw = (this.normalizedRouteParts().tab ?? "overview").toLowerCase();
-    return isRepoTabId(raw) ? raw : "overview";
-  });
+  protected readonly activeTab = computed<RepoTabId>(
+    () => normalizeRepoTabId(this.normalizedRouteParts().tab) ?? "overview",
+  );
 
   protected gitConnOptions(): PillOption[] {
     const creds = this.availableGitCreds();
@@ -1303,17 +2298,98 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     return this.releases().map((r) => ({ value: r.name, label: r.name }));
   }
 
+  protected declaredSummaryText(status: RepoDeclarationsStatus): string {
+    return declaredSummary(status);
+  }
+
+  protected formatPushRefs(refs: DeclaredPushRef[] | undefined): string {
+    return (refs ?? []).map(formatDeclaredPushRef).filter(Boolean).join(", ");
+  }
+
+  protected portWarningsFiltered(decl: RepoDeclarationsResponse): string[] {
+    const seen = new Set(decl.declarationsStatus?.warnings ?? []);
+    return (decl.portWarnings ?? []).filter((w) => !seen.has(w));
+  }
+
+  protected hasDeclaredFiles(
+    status: RepoDeclarationsStatus | null | undefined,
+  ): boolean {
+    if (!status) return false;
+    return Boolean(
+      status.templates?.length ||
+      status.suites?.length ||
+      status.schedules?.length ||
+      status.triggers?.length ||
+      status.mergeRules,
+    );
+  }
+
+  protected hasValidRepo(): boolean {
+    return Boolean(this.resolvedOwner() && this.resolvedName());
+  }
+
   protected canWriteSettings(): boolean {
-    if (this.configRepoOnly()) return false;
-    return this.can("PUT /api/repos/{owner}/{name}/settings");
+    if (this.configRepoOnly() || !this.hasValidRepo()) return false;
+    return this.access.can(
+      "PUT /api/repos/{owner}/{name}/settings",
+      this.repoSlug(),
+    );
+  }
+
+  protected canWriteWorkOwnership(): boolean {
+    if (this.configRepoOnly() || !this.hasValidRepo()) return false;
+    return this.access.can(
+      "PUT /api/repos/{owner}/{name}/work-ownership",
+      this.repoSlug(),
+    );
+  }
+
+  protected workOwnershipDescribedBy(): string | null {
+    const ids: string[] = [];
+    if (this.configRepoOnly()) {
+      ids.push("repo-config-readonly-banner");
+    }
+    if (
+      this.hasValidRepo() &&
+      !this.access.can(
+        "PUT /api/repos/{owner}/{name}/work-ownership",
+        this.repoSlug(),
+      )
+    ) {
+      ids.push("repo-work-ownership-denied-reason");
+    }
+    return ids.length ? ids.join(" ") : null;
+  }
+
+  protected workItemLabel(item: RepoWorkItem): string {
+    return item.title || item.item;
+  }
+
+  protected saidLabel(said: OwnershipState): string {
+    if (said === "on") return "On, set here";
+    if (said === "off") return "Off, set here";
+    return "Nobody has said";
+  }
+
+  protected saidPillTone(said: OwnershipState): string {
+    if (said === "on") return "healthy";
+    if (said === "off") return "error";
+    return "neutral";
+  }
+
+  protected saidPillKind(said: OwnershipState): string {
+    if (said === "on") return "healthy";
+    if (said === "off") return "error";
+    return "neutral";
   }
 
   protected canSaveRepoAgents(): boolean {
-    if (this.configRepoOnly()) return false;
+    if (this.configRepoOnly() || !this.hasValidRepo()) return false;
+    const repo = this.repoSlug();
     return (
-      this.can("PUT /api/repos/{owner}/{name}/setup-command") ||
-      this.can("PUT /api/repos/{owner}/{name}/prompt-extension") ||
-      this.can("PUT /api/repos/{owner}/{name}/capabilities")
+      this.access.can("PUT /api/repos/{owner}/{name}/setup-command", repo) ||
+      this.access.can("PUT /api/repos/{owner}/{name}/prompt-extension", repo) ||
+      this.access.can("PUT /api/repos/{owner}/{name}/capabilities", repo)
     );
   }
 
@@ -1325,7 +2401,13 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
         this.routeName.set(pm.get("name") ?? "");
         this.routeTab.set(pm.get("tab"));
         if (this.ready()) {
-          void this.loadTabData();
+          const slug = this.repoSlug();
+          if (slug !== this.loadedRepoSlug) {
+            this.resetRepoState();
+            void this.reloadRepoAndTab();
+          } else {
+            void this.loadTabData();
+          }
         }
       }),
     );
@@ -1337,6 +2419,7 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected can(route: RouteKey): boolean {
+    if (!this.hasValidRepo()) return false;
     return this.access.can(route, this.repoSlug());
   }
 
@@ -1356,6 +2439,30 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
 
   private params(): { owner: string; name: string } {
     return splitRepo(this.repoSlug());
+  }
+
+  private resetRepoState(): void {
+    this.declarationsData.set(null);
+    this.declarationsError.set(null);
+    this.workOwnershipData.set(null);
+    this.workOwnershipError.set(null);
+    this.workOwnershipLoading.set(false);
+    this.workOwnershipSaving.set(false);
+    this.workOwnershipInFlightRepo = "";
+    this.workOwnershipReadSeq++;
+    this.workOwnershipSaveSeq++;
+    this.clearWorkOwnershipSaveError();
+    this.workflows.set([]);
+    this.branches.set([]);
+    this.releases.set([]);
+    this.candidates.set([]);
+    this.pendingReleases.set([]);
+    this.repoCaps.set("");
+  }
+
+  private async reloadRepoAndTab(): Promise<void> {
+    await this.loadCoreRepo();
+    await this.loadTabData();
   }
 
   private async initPage(): Promise<void> {
@@ -1383,7 +2490,11 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   private async loadCoreRepo(): Promise<void> {
     const p = this.params();
     if (!p.owner || !p.name) return;
-    if (this.can("GET /api/deployment/repos/{owner}/{name}/config")) {
+    const repo = this.repoSlug();
+    this.loadedRepoSlug = repo;
+    if (
+      this.access.can("GET /api/deployment/repos/{owner}/{name}/config", repo)
+    ) {
       try {
         const cfg = await this.api.get<Record<string, unknown>>(
           "GET /api/deployment/repos/{owner}/{name}/config",
@@ -1401,7 +2512,7 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
         // Non-fatal
       }
     }
-    if (this.can("GET /api/repos/{owner}/{name}/settings")) {
+    if (this.access.can("GET /api/repos/{owner}/{name}/settings", repo)) {
       try {
         const st = await this.api.get<Record<string, unknown>>(
           "GET /api/repos/{owner}/{name}/settings",
@@ -1466,8 +2577,9 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   private async loadTabData(t: RepoTabId = this.activeTab()): Promise<void> {
     const p = this.params();
     if (!p.owner || !p.name) return;
+    const repo = this.repoSlug();
     if (t === "overview") {
-      if (this.can("GET /api/repos/{owner}/{name}/lifecycle")) {
+      if (this.access.can("GET /api/repos/{owner}/{name}/lifecycle", repo)) {
         void this.api
           .get<Record<string, unknown>>(
             "GET /api/repos/{owner}/{name}/lifecycle",
@@ -1480,7 +2592,7 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
           .catch(() => undefined);
       }
     } else if (t === "ci") {
-      if (this.can("GET /api/repos/{owner}/{name}/workflows")) {
+      if (this.access.can("GET /api/repos/{owner}/{name}/workflows", repo)) {
         void this.api
           .get<{ workflows?: RepoWorkflowRow[] } | RepoWorkflowRow[]>(
             "GET /api/repos/{owner}/{name}/workflows",
@@ -1508,7 +2620,7 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
           .catch(() => undefined);
       }
     } else if (t === "agents") {
-      if (this.can("GET /api/repos/{owner}/{name}/capabilities")) {
+      if (this.access.can("GET /api/repos/{owner}/{name}/capabilities", repo)) {
         void this.api
           .get<{ defaultCapabilities?: string[] }>(
             "GET /api/repos/{owner}/{name}/capabilities",
@@ -1522,7 +2634,7 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
           .catch(() => undefined);
       }
     } else if (t === "branches") {
-      if (this.can("GET /api/repos/{owner}/{name}/branches")) {
+      if (this.access.can("GET /api/repos/{owner}/{name}/branches", repo)) {
         void this.api
           .get<BranchRow[] | { branches?: BranchRow[] }>(
             "GET /api/repos/{owner}/{name}/branches",
@@ -1535,6 +2647,54 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
       }
     } else if (t === "releases") {
       await this.loadReleasesTab();
+    } else if (t === "advanced") {
+      await this.loadDeclarations();
+    }
+  }
+
+  protected async loadDeclarations(): Promise<void> {
+    if (!this.hasValidRepo()) return;
+    const expectedRepo = this.repoSlug();
+    if (
+      !this.access.can(
+        "GET /api/repos/{owner}/{name}/declarations",
+        expectedRepo,
+      )
+    ) {
+      return;
+    }
+    if (
+      this.declarationsLoading() &&
+      this.declarationsInFlightRepo === expectedRepo
+    ) {
+      return;
+    }
+    this.declarationsInFlightRepo = expectedRepo;
+    this.declarationsLoading.set(true);
+    this.declarationsError.set(null);
+    try {
+      const res = await this.api.get<RepoDeclarationsResponse>(
+        "GET /api/repos/{owner}/{name}/declarations",
+        this.params(),
+      );
+      if (this.repoSlug() !== expectedRepo) return;
+      this.declarationsData.set(
+        res && typeof res === "object"
+          ? {
+              ...res,
+              declarations: Boolean(res.declarations),
+            }
+          : { declarations: false },
+      );
+    } catch (err) {
+      if (this.repoSlug() === expectedRepo) {
+        this.declarationsError.set(errText(err));
+      }
+    } finally {
+      if (this.declarationsInFlightRepo === expectedRepo) {
+        this.declarationsInFlightRepo = "";
+        this.declarationsLoading.set(false);
+      }
     }
   }
 
@@ -1568,37 +2728,99 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
 
   private async loadReleasesTab(): Promise<void> {
     const p = this.params();
-    if (this.can("GET /api/repos/{owner}/{name}/release")) {
-      try {
-        const relCfg = await this.api.get<Record<string, unknown>>(
-          "GET /api/repos/{owner}/{name}/release",
-          p,
-        );
-        this.applyReleaseSettings(relCfg);
-      } catch {
-        // Non-fatal
-      }
-    }
-    if (this.can("GET /api/repos/{owner}/{name}/releases")) {
-      try {
-        const list = await this.api.get<
-          ReleaseRow[] | { releases?: ReleaseRow[]; items?: ReleaseRow[] }
-        >("GET /api/repos/{owner}/{name}/releases", p);
-        const rows = Array.isArray(list)
-          ? list
-          : (list?.releases ?? list?.items ?? []);
-        this.releases.set(rows);
-        const current = this.selectedRelease();
-        const target =
-          rows.find((r) => r.name === current)?.name ?? rows[0]?.name ?? "";
-        this.selectedRelease.set(target);
-        if (target) {
-          await this.loadCandidatesFor(target);
-        } else {
-          this.candidates.set([]);
+    const repo = this.repoSlug();
+    const ownershipTask = this.loadWorkOwnership();
+    const releaseCfgTask = (async () => {
+      if (this.access.can("GET /api/repos/{owner}/{name}/release", repo)) {
+        try {
+          const relCfg = await this.api.get<Record<string, unknown>>(
+            "GET /api/repos/{owner}/{name}/release",
+            p,
+          );
+          this.applyReleaseSettings(relCfg);
+        } catch {
+          // Non-fatal
         }
-      } catch {
-        // Non-fatal
+      }
+    })();
+    const releasesListTask = (async () => {
+      if (this.access.can("GET /api/repos/{owner}/{name}/releases", repo)) {
+        try {
+          const list = await this.api.get<
+            ReleaseRow[] | { releases?: ReleaseRow[]; items?: ReleaseRow[] }
+          >("GET /api/repos/{owner}/{name}/releases", p);
+          const rows = Array.isArray(list)
+            ? list
+            : (list?.releases ?? list?.items ?? []);
+          this.releases.set(rows);
+          const current = this.selectedRelease();
+          const target =
+            rows.find((r) => r.name === current)?.name ?? rows[0]?.name ?? "";
+          this.selectedRelease.set(target);
+          if (target) {
+            await this.loadCandidatesFor(target);
+          } else {
+            this.candidates.set([]);
+          }
+        } catch {
+          // Non-fatal
+        }
+      }
+    })();
+    await Promise.all([ownershipTask, releaseCfgTask, releasesListTask]);
+  }
+
+  protected async loadWorkOwnership(force = false): Promise<void> {
+    if (!this.hasValidRepo()) return;
+    const expectedRepo = this.repoSlug();
+    if (
+      !this.access.can(
+        "GET /api/repos/{owner}/{name}/work-ownership",
+        expectedRepo,
+      )
+    ) {
+      return;
+    }
+    if (
+      !force &&
+      this.workOwnershipLoading() &&
+      this.workOwnershipInFlightRepo === expectedRepo
+    ) {
+      return;
+    }
+    const readSeq = ++this.workOwnershipReadSeq;
+    this.workOwnershipInFlightRepo = expectedRepo;
+    this.workOwnershipLoading.set(true);
+    this.workOwnershipError.set(null);
+    try {
+      const res = await this.api.get<unknown>(
+        "GET /api/repos/{owner}/{name}/work-ownership",
+        this.params(),
+      );
+      if (
+        this.repoSlug() !== expectedRepo ||
+        readSeq !== this.workOwnershipReadSeq
+      ) {
+        return;
+      }
+      const normalized = normalizeWorkOwnership(res);
+      this.workOwnershipData.set(normalized);
+      this.syncReleaseEnabledFromOwnership(normalized);
+      this.clearWorkOwnershipSaveError();
+    } catch (err) {
+      if (
+        this.repoSlug() === expectedRepo &&
+        readSeq === this.workOwnershipReadSeq
+      ) {
+        this.workOwnershipError.set(errText(err));
+      }
+    } finally {
+      if (
+        this.workOwnershipInFlightRepo === expectedRepo &&
+        readSeq === this.workOwnershipReadSeq
+      ) {
+        this.workOwnershipInFlightRepo = "";
+        this.workOwnershipLoading.set(false);
       }
     }
   }
@@ -1611,7 +2833,11 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   private async loadCandidatesFor(release: string): Promise<void> {
     if (
       !release ||
-      !this.can("GET /api/repos/{owner}/{name}/releases/{release}/candidates")
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "GET /api/repos/{owner}/{name}/releases/{release}/candidates",
+        this.repoSlug(),
+      )
     ) {
       return;
     }
@@ -1633,6 +2859,16 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async saveRepoConfig(): Promise<void> {
+    if (
+      this.configRepoOnly() ||
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "PUT /api/deployment/repos/{owner}/{name}/config",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.put(
         "PUT /api/deployment/repos/{owner}/{name}/config",
@@ -1651,6 +2887,16 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async pinGitConnection(credential: string): Promise<void> {
+    if (
+      this.configRepoOnly() ||
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "PUT /api/deployment/repos/{owner}/{name}/git-connection",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     this.gitCredential.set(credential);
     try {
       await this.api.put(
@@ -1665,6 +2911,15 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async refreshLifecycle(): Promise<void> {
+    if (
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "POST /api/repos/{owner}/{name}/lifecycle/refresh",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     try {
       const res = await this.api.post<{ state?: string; stage?: string }>(
         "POST /api/repos/{owner}/{name}/lifecycle/refresh",
@@ -1680,6 +2935,7 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async saveIssueImportSettings(): Promise<void> {
+    if (!this.canWriteSettings()) return;
     try {
       await this.api.put(
         "PUT /api/repos/{owner}/{name}/settings",
@@ -1698,6 +2954,15 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async importIssues(): Promise<void> {
+    if (
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "POST /api/repos/{owner}/{name}/import-issues",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/import-issues",
@@ -1711,6 +2976,13 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async saveCiMode(ciMode: string): Promise<void> {
+    if (
+      this.configRepoOnly() ||
+      !this.hasValidRepo() ||
+      !this.access.can("PUT /api/repos/{owner}/{name}/ci-mode", this.repoSlug())
+    ) {
+      return;
+    }
     const previous = this.ciMode();
     this.ciMode.set(ciMode);
     try {
@@ -1730,6 +3002,16 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async toggleWatchDefaultBranch(): Promise<void> {
+    if (
+      this.configRepoOnly() ||
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "PUT /api/repos/{owner}/{name}/watch-default-branch",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     const next = !this.watchDefaultBranch();
     try {
       await this.api.put(
@@ -1744,6 +3026,15 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async triggerBaseCiRun(): Promise<void> {
+    if (
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "POST /api/repos/{owner}/{name}/base-branch-runs",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/base-branch-runs",
@@ -1775,6 +3066,16 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected addWorkflowFile(): void {
+    if (
+      this.configRepoOnly() ||
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "PUT /api/repos/{owner}/{name}/workflows",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     const path = normalizeWorkflowPath(this.newWorkflowPath());
     if (!path) return;
     this.newWorkflowPath.set("");
@@ -1796,6 +3097,16 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async deleteSelectedWorkflow(): Promise<void> {
+    if (
+      this.configRepoOnly() ||
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "PUT /api/repos/{owner}/{name}/workflows",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     const target = this.selectedWorkflowPath();
     const remaining = this.workflows().filter((w) => w.path !== target);
     try {
@@ -1817,6 +3128,16 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async saveWorkflows(): Promise<void> {
+    if (
+      this.configRepoOnly() ||
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "PUT /api/repos/{owner}/{name}/workflows",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     const path =
       normalizeWorkflowPath(this.selectedWorkflowPath()) ||
       ".grain/workflows/ci.yml";
@@ -1853,6 +3174,13 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async saveReleaseSettings(): Promise<void> {
+    if (
+      this.configRepoOnly() ||
+      !this.hasValidRepo() ||
+      !this.access.can("PUT /api/repos/{owner}/{name}/release", this.repoSlug())
+    ) {
+      return;
+    }
     const parseJobs = (raw: string): string[] =>
       raw
         .split(",")
@@ -1872,12 +3200,23 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
         this.applyReleaseSettings(res);
       }
       this.snackbar.show("Release settings saved");
+      await this.loadWorkOwnership(true);
     } catch (err) {
       this.error.set(errText(err));
     }
   }
 
   protected async toggleMergeOnGreen(): Promise<void> {
+    if (
+      this.configRepoOnly() ||
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "PUT /api/repos/{owner}/{name}/merge-on-green",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     const next = !this.mergeOnGreen();
     try {
       await this.api.put(
@@ -1892,6 +3231,16 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async toggleRequireUpToDate(): Promise<void> {
+    if (
+      this.configRepoOnly() ||
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "PUT /api/repos/{owner}/{name}/require-branch-up-to-date",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     const next = !this.requireUpToDate();
     try {
       await this.api.put(
@@ -1913,6 +3262,16 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected toggleBypassHumanGates(): void {
+    if (
+      this.configRepoOnly() ||
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "PUT /api/repos/{owner}/{name}/base-repair-bypasses-human-gates",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     const next = !this.bypassHumanGates();
     if (next) {
       this.confirmReq.set(
@@ -1924,6 +3283,16 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   private async saveBypassHumanGates(next: boolean): Promise<void> {
+    if (
+      this.configRepoOnly() ||
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "PUT /api/repos/{owner}/{name}/base-repair-bypasses-human-gates",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.put(
         "PUT /api/repos/{owner}/{name}/base-repair-bypasses-human-gates",
@@ -1937,21 +3306,27 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async saveAgentTabSettings(): Promise<void> {
+    if (!this.canSaveRepoAgents()) return;
     const p = this.params();
+    const repo = this.repoSlug();
     try {
-      if (this.can("PUT /api/repos/{owner}/{name}/setup-command")) {
+      if (
+        this.access.can("PUT /api/repos/{owner}/{name}/setup-command", repo)
+      ) {
         await this.api.put("PUT /api/repos/{owner}/{name}/setup-command", p, {
           setupCommand: this.setupCommand(),
         });
       }
-      if (this.can("PUT /api/repos/{owner}/{name}/prompt-extension")) {
+      if (
+        this.access.can("PUT /api/repos/{owner}/{name}/prompt-extension", repo)
+      ) {
         await this.api.put(
           "PUT /api/repos/{owner}/{name}/prompt-extension",
           p,
           { promptExtension: this.promptExtension() },
         );
       }
-      if (this.can("PUT /api/repos/{owner}/{name}/capabilities")) {
+      if (this.access.can("PUT /api/repos/{owner}/{name}/capabilities", repo)) {
         const defaultCapabilities = this.repoCaps()
           .split(",")
           .map((s) => s.trim())
@@ -1967,6 +3342,15 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async createBranch(): Promise<void> {
+    if (
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "POST /api/repos/{owner}/{name}/branches",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     const name = this.newBranchName().trim();
     if (!name) return;
     try {
@@ -1984,6 +3368,15 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async createRelease(): Promise<void> {
+    if (
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "POST /api/repos/{owner}/{name}/releases",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     const name = this.newReleaseName().trim();
     if (!name) return;
     try {
@@ -2001,6 +3394,15 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async cutCandidate(release: string): Promise<void> {
+    if (
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "POST /api/repos/{owner}/{name}/releases/{release}/candidates",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/releases/{release}/candidates",
@@ -2015,6 +3417,15 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async promoteCandidate(release: string): Promise<void> {
+    if (
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "POST /api/repos/{owner}/{name}/releases/{release}/candidates/promote",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/releases/{release}/candidates/promote",
@@ -2029,6 +3440,15 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async mergeRelease(release: string): Promise<void> {
+    if (
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "POST /api/repos/{owner}/{name}/releases/{release}/merge",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/releases/{release}/merge",
@@ -2043,6 +3463,15 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async deleteRelease(release: string): Promise<void> {
+    if (
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "DELETE /api/repos/{owner}/{name}/releases/{release}",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.delete(
         "DELETE /api/repos/{owner}/{name}/releases/{release}",
@@ -2056,6 +3485,15 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async approveQualification(id: string): Promise<void> {
+    if (
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "POST /api/repos/{owner}/{name}/candidates/{id}/qualification/approve",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/candidates/{id}/qualification/approve",
@@ -2070,6 +3508,15 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async triggerReleaseRun(): Promise<void> {
+    if (
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "POST /api/repos/{owner}/{name}/release-runs",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/release-runs",
@@ -2083,6 +3530,15 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async approvePendingRelease(version: string): Promise<void> {
+    if (
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "POST /api/repos/{owner}/{name}/pending-releases/{version}/approve",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/pending-releases/{version}/approve",
@@ -2097,6 +3553,15 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async rejectPendingRelease(version: string): Promise<void> {
+    if (
+      !this.hasValidRepo() ||
+      !this.access.can(
+        "POST /api/repos/{owner}/{name}/pending-releases/{version}/reject",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/pending-releases/{version}/reject",
@@ -2108,5 +3573,158 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     } catch (err) {
       this.error.set(errText(err));
     }
+  }
+
+  protected declarationsSwitchLabel(): string {
+    return `Read ${this.repoSlug()}'s own declarations`;
+  }
+
+  protected async toggleDeclarations(): Promise<void> {
+    if (
+      !this.hasValidRepo() ||
+      this.configRepoOnly() ||
+      this.declarationsSaving() ||
+      !this.access.can(
+        "PUT /api/repos/{owner}/{name}/declarations",
+        this.repoSlug(),
+      )
+    ) {
+      return;
+    }
+    const current = this.declarationsData();
+    if (!current) return;
+    const next = !current.declarations;
+    this.declarationsSaving.set(true);
+    try {
+      const res = await this.api.put<RepoDeclarationsResponse>(
+        "PUT /api/repos/{owner}/{name}/declarations",
+        this.params(),
+        { declarations: next },
+      );
+      if (res && typeof res === "object" && "declarations" in res) {
+        this.declarationsData.set(res);
+      } else {
+        this.declarationsData.set({ ...current, declarations: next });
+      }
+      this.snackbar.show(
+        next
+          ? `Enabled .grain/ declarations for ${this.repoSlug()}`
+          : `Disabled .grain/ declarations for ${this.repoSlug()}`,
+      );
+    } catch (err) {
+      this.error.set(errText(err));
+    } finally {
+      this.declarationsSaving.set(false);
+    }
+  }
+
+  protected async setWorkOwnershipDefault(state: string): Promise<void> {
+    if (!this.canWriteWorkOwnership() || this.workOwnershipSaving()) return;
+    const parsed = parseOwnershipState(state);
+    if (parsed === null) {
+      this.recordWorkOwnershipSaveError(
+        `default: "${state}" is not an ownership setting ("on", "off" or empty)`,
+      );
+      return;
+    }
+    const label = parsed === "" ? "say nothing" : parsed;
+    await this.saveWorkOwnership(
+      { default: parsed },
+      `Updated repository work ownership default (${label})`,
+    );
+  }
+
+  protected async setWorkItemOwnership(
+    item: string,
+    state: string,
+  ): Promise<void> {
+    if (!this.canWriteWorkOwnership() || this.workOwnershipSaving()) return;
+    const checked = validateWorkItemId(item);
+    if (checked.error) {
+      this.recordWorkOwnershipSaveError(checked.error);
+      return;
+    }
+    const parsed = parseOwnershipState(state);
+    if (parsed === null) {
+      this.recordWorkOwnershipSaveError(
+        `state: "${state}" is not an ownership setting ("on", "off" or empty)`,
+      );
+      return;
+    }
+    const label = parsed === "" ? "say nothing" : parsed;
+    await this.saveWorkOwnership(
+      { item: checked.id, state: parsed },
+      `Updated work ownership for ${checked.id} (${label})`,
+    );
+  }
+
+  private async saveWorkOwnership(
+    body: { default: OwnershipState } | { item: string; state: OwnershipState },
+    successNote: string,
+  ): Promise<void> {
+    if (!this.canWriteWorkOwnership() || this.workOwnershipSaving()) return;
+    const expectedRepo = this.repoSlug();
+    const token = ++this.workOwnershipSaveSeq;
+    // Supersede any older in-flight GET so stale reads cannot overwrite this save.
+    this.workOwnershipReadSeq++;
+    this.clearWorkOwnershipSaveError();
+    this.workOwnershipSaving.set(true);
+    try {
+      const res = await this.api.put<unknown>(
+        "PUT /api/repos/{owner}/{name}/work-ownership",
+        this.params(),
+        body,
+      );
+      if (
+        this.repoSlug() !== expectedRepo ||
+        token !== this.workOwnershipSaveSeq
+      ) {
+        return;
+      }
+      if (res && typeof res === "object" && "defaultRuns" in res) {
+        const normalized = normalizeWorkOwnership(res);
+        this.workOwnershipData.set(normalized);
+        this.workOwnershipError.set(null);
+        this.syncReleaseEnabledFromOwnership(normalized);
+      } else {
+        await this.loadWorkOwnership(true);
+      }
+      this.snackbar.show(successNote);
+    } catch (err) {
+      if (
+        this.repoSlug() === expectedRepo &&
+        token === this.workOwnershipSaveSeq
+      ) {
+        this.recordWorkOwnershipSaveError(errText(err));
+      }
+    } finally {
+      if (this.workOwnershipSaveSeq === token) {
+        this.workOwnershipSaving.set(false);
+      }
+    }
+  }
+
+  private syncReleaseEnabledFromOwnership(
+    work: RepoWorkOwnershipResponse,
+  ): void {
+    const releaseRow = work.items.find((i) => i.item === "release");
+    if (releaseRow) {
+      this.releaseEnabled.set(Boolean(releaseRow.runs));
+    }
+  }
+
+  private recordWorkOwnershipSaveError(msg: string): void {
+    this.lastWorkOwnershipError = msg;
+    this.error.set(msg);
+  }
+
+  private clearWorkOwnershipSaveError(): void {
+    if (
+      this.lastWorkOwnershipError !== null &&
+      this.error() === this.lastWorkOwnershipError
+    ) {
+      this.error.set(null);
+    }
+    this.lastWorkOwnershipError = null;
   }
 }

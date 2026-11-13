@@ -105,6 +105,7 @@ export class WorkstreamsStore implements OnDestroy {
   readonly busy = signal<string | null>(null);
   readonly startedIds = signal<ReadonlySet<string>>(loadStarted());
   readonly selectedKey = signal<string | null>(null);
+  readonly lastSelectedKey = signal<string | null>(null);
 
   readonly allTasks = computed<Task[]>(() => {
     const open =
