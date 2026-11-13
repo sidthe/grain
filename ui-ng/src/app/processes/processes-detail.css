@@ -183,6 +183,35 @@
   gap: 12px;
 }
 
+.proc-sched-dialog .filter-strip {
+  flex-wrap: wrap;
+  overflow-x: visible;
+  margin-top: 4px;
+}
+
+.proc-sched-dialog input:focus-visible,
+.proc-sched-dialog textarea:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: -1px;
+}
+
+.proc-sched-dialog input[aria-invalid="true"],
+.proc-sched-dialog textarea[aria-invalid="true"],
+.proc-sched-dialog .pill-trigger[aria-invalid="true"] {
+  border-color: var(--md-sys-color-error);
+}
+
+.proc-field-error {
+  color: var(--md-sys-color-error);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.proc-req-mark {
+  color: var(--md-sys-color-error);
+  margin-left: 2px;
+}
+
 .tmpl-field-editor-list {
   display: flex;
   flex-direction: column;

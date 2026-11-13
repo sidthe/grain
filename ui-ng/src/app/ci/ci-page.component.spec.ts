@@ -349,6 +349,8 @@ class FakeCIApi {
       if (found) {
         found.status = "completed";
         found.conclusion = "cancelled";
+        const reason = (body as { reason?: string } | undefined)?.reason;
+        if (reason) found.cancelReason = reason;
       }
       return Promise.resolve({});
     }
@@ -555,23 +557,39 @@ describe("CIPageComponent (D-26)", () => {
     await flush(harness);
     const root = harness.routeNativeElement!;
 
-    // 1. Cancel active run via confirm dialog — verify confirm-dialog is NOT inside [inert]
+    // 1. Cancel active run via cancel dialog with optional reason — verify dialog is NOT inside [inert]
     root
       .querySelector<HTMLButtonElement>('[data-testid="ci-cancel-run-btn"]')!
       .click();
     await flush(harness);
-    const confirmDlg = root.querySelector('[data-testid="confirm-dialog"]')!;
-    expect(confirmDlg).not.toBeNull();
-    expect(confirmDlg.closest("[inert]")).toBeNull();
+    const cancelDlg = root.querySelector('[data-testid="ci-cancel-dialog"]')!;
+    expect(cancelDlg).not.toBeNull();
+    expect(cancelDlg.closest("[inert]")).toBeNull();
     expect(root.querySelector(".view-panel")?.hasAttribute("inert")).toBe(true);
 
+    const cancelReasonInput = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="ci-cancel-reason-input"]',
+    )!;
+    cancelReasonInput.value = "  Superseded by newer push  ";
+    cancelReasonInput.dispatchEvent(new Event("input"));
+    await flush(harness);
+
     root
-      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .querySelector<HTMLButtonElement>('[data-testid="ci-cancel-submit"]')!
       .click();
     await flush(harness);
+    expect(root.querySelector('[data-testid="ci-cancel-dialog"]')).toBeNull();
+    expect(root.querySelector(".view-panel")?.hasAttribute("inert")).toBe(
+      false,
+    );
+    expect(api.deleteCalls).toContainEqual({
+      route: "DELETE /api/ci/runs/{id}",
+      params: { id: "run-running-3" },
+      body: { reason: "Superseded by newer push" },
+    });
     expect(
-      api.deleteCalls.some((c) => c.route === "DELETE /api/ci/runs/{id}"),
-    ).toBe(true);
+      root.querySelector('[data-testid="ci-cancel-reason"]')?.textContent,
+    ).toContain("Superseded by newer push");
 
     // 2. Trigger manual workflow dialog — verify outside [inert], RBAC repo limit, and Escape dismissal
     const openRunBtn = root.querySelector<HTMLButtonElement>(
@@ -681,5 +699,105 @@ describe("CIPageComponent (D-26)", () => {
     expect(
       root.querySelector('[data-testid="ci-quarantine-dialog"]'),
     ).toBeNull();
+  });
+
+  it("supports dismissing cancel dialog, resetting draft reason, optional empty reason, and error reporting", async () => {
+    const harness = await RouterTestingHarness.create("/ci/runs/run-running-3");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    // Dismiss with Cancel button sends nothing and resets draft on reopen
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-cancel-run-btn"]')!
+      .click();
+    await flush(harness);
+    const reasonEl = () =>
+      root.querySelector<HTMLTextAreaElement>(
+        '[data-testid="ci-cancel-reason-input"]',
+      )!;
+    reasonEl().value = "aborted note";
+    reasonEl().dispatchEvent(new Event("input"));
+    await flush(harness);
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-cancel-dismiss"]')!
+      .click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="ci-cancel-dialog"]')).toBeNull();
+    expect(api.deleteCalls).toEqual([]);
+
+    // Reopen -> draft reason is cleared; Escape dismisses without DELETE
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-cancel-run-btn"]')!
+      .click();
+    await flush(harness);
+    expect(reasonEl().value).toBe("");
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await flush(harness);
+    expect(root.querySelector('[data-testid="ci-cancel-dialog"]')).toBeNull();
+    expect(api.deleteCalls).toEqual([]);
+
+    // Error during DELETE disables buttons in-flight, closes modal on failure, and surfaces ci-action-error
+    const origDelete = api.delete;
+    let rejectDelete!: (err: Error) => void;
+    api.delete = () =>
+      new Promise<unknown>((_, reject) => {
+        rejectDelete = reject;
+      });
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-cancel-run-btn"]')!
+      .click();
+    await flush(harness);
+    reasonEl().value = "too late";
+    reasonEl().dispatchEvent(new Event("input"));
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-cancel-submit"]')!
+      .click();
+    harness.detectChanges();
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="ci-cancel-submit"]')!
+        .disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="ci-cancel-submit"]')!
+        .textContent,
+    ).toContain("Cancelling");
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="ci-cancel-dismiss"]',
+      )!.disabled,
+    ).toBe(true);
+
+    rejectDelete(new Error('no CI run "run-running-3" is still going'));
+    await flush(harness);
+    expect(root.querySelector('[data-testid="ci-cancel-dialog"]')).toBeNull();
+    expect(root.querySelector(".view-panel")?.hasAttribute("inert")).toBe(
+      false,
+    );
+    expect(
+      root.querySelector('[data-testid="ci-action-error"]')?.textContent,
+    ).toContain("no CI run");
+    api.delete = origDelete;
+
+    // Submit with blank/whitespace reason -> DELETE sent with undefined body
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-cancel-run-btn"]')!
+      .click();
+    await flush(harness);
+    reasonEl().value = "   ";
+    reasonEl().dispatchEvent(new Event("input"));
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-cancel-submit"]')!
+      .click();
+    await flush(harness);
+    expect(api.deleteCalls).toContainEqual({
+      route: "DELETE /api/ci/runs/{id}",
+      params: { id: "run-running-3" },
+      body: undefined,
+    });
   });
 });

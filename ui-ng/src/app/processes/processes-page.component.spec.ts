@@ -19,19 +19,22 @@ import { NEVER } from "rxjs";
 import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import type { GrainConfig, Task } from "../api/models";
+import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
 import { ProcessesPageComponent } from "./processes-page.component";
-import type {
-  Composition,
-  DeclarationAcceptanceView,
-  RepoDefaultsView,
-  RepoWorkflowsResponse,
-  Schedule,
-  ScheduleRun,
-  Suite,
-  SuiteRun,
-  Template,
-  TemplateField,
+import {
+  type ScheduleDraftSnapshot,
+  type Composition,
+  type DeclarationAcceptanceView,
+  type RepoDefaultsView,
+  type RepoWorkflowsResponse,
+  type Schedule,
+  type ScheduleRun,
+  type Suite,
+  type SuiteRun,
+  type Template,
+  type TemplateField,
+  validateScheduleDraft,
 } from "./processes.models";
 
 class FakeProcessesApi {
@@ -348,7 +351,10 @@ class FakeProcessesApi {
       return Promise.resolve(structuredClone(this.compositionSample));
     }
     if (route === "GET /api/suite-runs/{id}") {
-      return Promise.resolve(structuredClone(this.suiteRuns[0]));
+      const id = Number(params?.["id"]);
+      const found =
+        this.suiteRuns.find((r) => r.id === id) ?? this.suiteRuns[0];
+      return Promise.resolve(structuredClone(found));
     }
     if (route === "GET /api/repos/{owner}/{name}/declarations") {
       return Promise.resolve(structuredClone(this.repoDecl));
@@ -1003,5 +1009,1185 @@ describe("ProcessesPageComponent (D-9)", () => {
     expect(
       root.querySelectorAll('[data-testid^="decl-repo-row-"]').length,
     ).toBe(2);
+  });
+
+  it("resets all schedule editor form state and pending validations on close and reopen (Cancel, Escape, Scrim, New/Edit switch)", async () => {
+    const harness = await RouterTestingHarness.create("/processes/schedules");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    const setInput = (testid: string, value: string): void => {
+      const el = root.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+        `[data-testid="${testid}"]`,
+      )!;
+      el.value = value;
+      el.dispatchEvent(new Event("input"));
+    };
+
+    // 1. Open New schedule, trigger required field validation, mutate every field, then close via Cancel
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="proc-new-schedule-btn"]',
+      )!
+      .click();
+    await flush(harness);
+
+    // Clicking Save with empty Title triggers required validation and blocks POST
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-title-error"]')?.textContent,
+    ).toContain("Task title is required");
+    expect(
+      root
+        .querySelector('[data-testid="sched-title-input"]')
+        ?.getAttribute("aria-invalid"),
+    ).toBe("true");
+    expect(api.calls.some((c) => c.route === "POST /api/schedules")).toBe(
+      false,
+    );
+
+    // Mutate fields + switch to github_workflow_run + switch overlap + trigger workflow error + preview composition
+    setInput("sched-desc-input", "Stale description");
+    setInput("sched-repo-input", "acme/stale-repo");
+    setInput("sched-base-input", "stale-branch");
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="sched-kind-github_workflow_run"]',
+      )!
+      .click();
+    await flush(harness);
+    setInput("sched-trigger-conclusion-input", "cancelled");
+    setInput("sched-trigger-branch-input", "release/old");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-overlap-allow"]')!
+      .click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="sched-preview-composition-btn"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(root.querySelector("g-composition-view")).not.toBeNull();
+
+    // Trigger pending validation on workflow input before cancelling
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-trigger-workflow-error"]')
+        ?.textContent,
+    ).toContain("Workflow name or file is required");
+
+    // Close via Cancel
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-cancel-btn"]')!
+      .click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="schedule-dialog"]')).toBeNull();
+
+    // Reopen New schedule -> all controls and pending validations must be reset!
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="proc-new-schedule-btn"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-dialog-title"]')?.textContent ||
+        root.querySelector("#sched-dialog-title")?.textContent,
+    ).toContain("New schedule or trigger");
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="sched-title-input"]')!
+        .value,
+    ).toBe("");
+    expect(
+      root.querySelector<HTMLTextAreaElement>(
+        '[data-testid="sched-desc-input"]',
+      )!.value,
+    ).toBe("");
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="sched-repo-input"]')!
+        .value,
+    ).toBe("acme/widgets");
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="sched-base-input"]')!
+        .value,
+    ).toBe("main");
+    expect(
+      root
+        .querySelector('[data-testid="sched-kind-daily"]')
+        ?.getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(
+      root
+        .querySelector('[data-testid="sched-overlap-skip"]')
+        ?.getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(root.querySelector('[data-testid="sched-title-error"]')).toBeNull();
+    expect(
+      root
+        .querySelector('[data-testid="sched-title-input"]')
+        ?.hasAttribute("aria-invalid"),
+    ).toBe(false);
+    expect(
+      root
+        .querySelector('[data-testid="schedule-dialog"]')!
+        .querySelector("g-composition-view"),
+    ).toBeNull();
+
+    // Switching to github_workflow_run also shows clean defaults without stale errors or stale values
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="sched-kind-github_workflow_run"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLInputElement>(
+        '[data-testid="sched-trigger-workflow-input"]',
+      )!.value,
+    ).toBe("");
+    expect(
+      root.querySelector<HTMLInputElement>(
+        '[data-testid="sched-trigger-conclusion-input"]',
+      )!.value,
+    ).toBe("failure");
+    expect(
+      root.querySelector<HTMLInputElement>(
+        '[data-testid="sched-trigger-branch-input"]',
+      )!.value,
+    ).toBe("");
+    expect(
+      root.querySelector('[data-testid="sched-trigger-workflow-error"]'),
+    ).toBeNull();
+
+    // 2. Close via Scrim click after selecting Template target & switching to git_ref, then open Edit on sched-1
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="sched-target-template"]',
+      )!
+      .click();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-kind-git_ref"]')!
+      .click();
+    await flush(harness);
+    setInput("sched-git-ref-repo-input", "stale/upstream");
+    setInput("sched-git-ref-input", "bad-ref");
+    root
+      .querySelector<HTMLInputElement>('[data-testid="sched-git-ref-input"]')!
+      .dispatchEvent(new Event("blur"));
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-git-ref-error"]'),
+    ).not.toBeNull();
+
+    // Click scrim to close
+    root.querySelector<HTMLElement>(".scrim")!.click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="schedule-dialog"]')).toBeNull();
+
+    // Edit sched-1 -> submits PATCH with sched-1's clean state, zero leaked templateId/git_ref
+    root
+      .querySelector<HTMLElement>('[data-testid="sched-row-sched-1"]')!
+      .click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-edit-btn"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-git-ref-error"]'),
+    ).toBeNull();
+    expect(
+      root
+        .querySelector('[data-testid="sched-target-prompt"]')
+        ?.getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="sched-title-input"]')!
+        .value,
+    ).toBe("Audit deps");
+
+    // Mutate sched-1 title to invalid empty, blur -> close via Escape -> reopen New schedule
+    setInput("sched-title-input", "");
+    root
+      .querySelector<HTMLInputElement>('[data-testid="sched-title-input"]')!
+      .dispatchEvent(new Event("blur"));
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-title-error"]'),
+    ).not.toBeNull();
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await flush(harness);
+    expect(root.querySelector('[data-testid="schedule-dialog"]')).toBeNull();
+
+    // Reopen New schedule after Escape from Edit -> must target POST /api/schedules (not PATCH), with clean defaults
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="proc-new-schedule-btn"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="sched-title-error"]')).toBeNull();
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="sched-title-input"]')!
+        .value,
+    ).toBe("");
+
+    setInput("sched-title-input", "Clean new schedule");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+
+    const posts = api.calls.filter((c) => c.route === "POST /api/schedules");
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body).toMatchObject({
+      title: "Clean new schedule",
+      repo: "acme/widgets",
+      base: "main",
+      recurrence: { kind: "daily", timeOfDay: "09:00", timeZone: "UTC" },
+    });
+    expect(api.calls.some((c) => c.route === "PATCH /api/schedules/{id}")).toBe(
+      false,
+    );
+  });
+
+  it("validates required and formatted schedule fields across target kinds and cadence kinds before submission", async () => {
+    // Seed an unbound template-backed schedule and a custom-timezone schedule to verify edit validation & timezone clear
+    api.schedules.push(
+      {
+        id: "sched-tmpl",
+        title: "chore: bump pkg",
+        description: "Bump pkg version in go.mod.",
+        repo: "acme/widgets",
+        base: "main",
+        templateId: "tmpl-deploy-1",
+        templateName: "Go upgrade",
+        autoMerge: true,
+        capabilities: [],
+        recurrence: { kind: "everyNMinutes", everyNMinutes: 15 },
+        overlap: "skip",
+        source: "deployment",
+        type: "template",
+        enabled: true,
+        nextRunAt: "2026-11-13T09:00:00Z",
+        createdAt: "2026-11-01T00:00:00Z",
+        revision: "rev-tmpl",
+      },
+      {
+        id: "sched-tz",
+        title: "NY check",
+        description: "Check NY morning",
+        repo: "acme/widgets",
+        base: "main",
+        autoMerge: false,
+        capabilities: [],
+        recurrence: {
+          kind: "daily",
+          timeOfDay: "09:00",
+          timeZone: "America/New_York",
+        },
+        timeZone: "America/New_York",
+        overlap: "skip",
+        source: "deployment",
+        type: "task",
+        enabled: true,
+        nextRunAt: "2026-11-13T14:00:00Z",
+        createdAt: "2026-11-01T00:00:00Z",
+        revision: "rev-tz",
+      },
+    );
+
+    const harness = await RouterTestingHarness.create("/processes/schedules");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    const setInput = (testid: string, value: string): void => {
+      const el = root.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+        `[data-testid="${testid}"]`,
+      )!;
+      el.value = value;
+      el.dispatchEvent(new Event("input"));
+    };
+
+    // 1. Open New schedule: test blank pill-select clearing repo, everyNMinutes < 10 & empty, everyNHours, daily time/tz, monthly day, github_workflow_run, git_ref, suite base
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="proc-new-schedule-btn"]',
+      )!
+      .click();
+    await flush(harness);
+
+    setInput("sched-title-input", "Validation check");
+
+    // Pick blank placeholder option in sched-repo-select -> clears repo & shows required error
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-repo-select"]')!
+      .click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="sched-repo-select-opt-"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-repo-error"]')?.textContent,
+    ).toContain("Repository (owner/name) is required");
+
+    // Restore valid repo, break daily timeOfDay & timeZone -> blocks submit
+    setInput("sched-repo-input", "acme/widgets");
+    setInput("sched-time-input", "25:99");
+    setInput("sched-tz-input", "Mars/Olympus");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-time-error"]')?.textContent,
+    ).toContain("HH:MM");
+    expect(
+      root.querySelector('[data-testid="sched-tz-error"]')?.textContent,
+    ).toContain("IANA");
+    expect(api.calls.some((c) => c.route === "POST /api/schedules")).toBe(
+      false,
+    );
+
+    // Every N minutes: clearing input does NOT silently submit 15; entering 5 fails min 10
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="sched-kind-everyNMinutes"]',
+      )!
+      .click();
+    await flush(harness);
+    setInput("sched-every-min-input", "");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-every-min-error"]')?.textContent,
+    ).toContain("required");
+    setInput("sched-every-min-input", "5");
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-every-min-error"]')?.textContent,
+    ).toContain("at least 10");
+    expect(api.calls.some((c) => c.route === "POST /api/schedules")).toBe(
+      false,
+    );
+
+    // Every N hours: clearing or 0 blocks submit
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="sched-kind-everyNHours"]',
+      )!
+      .click();
+    await flush(harness);
+    setInput("sched-every-hr-input", "0");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-every-hr-error"]')?.textContent,
+    ).toContain("at least 1");
+
+    // Monthly: dayOfMonth 29 blocks submit
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-kind-monthly"]')!
+      .click();
+    await flush(harness);
+    setInput("sched-time-input", "09:00");
+    setInput("sched-tz-input", "UTC");
+    setInput("sched-day-of-month-input", "29");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-day-of-month-error"]')
+        ?.textContent,
+    ).toContain("at most 28");
+
+    // Suite target requires Base branch
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-kind-daily"]')!
+      .click();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-target-suite"]')!
+      .click();
+    await flush(harness);
+    setInput("sched-base-input", "");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-base-error"]')?.textContent,
+    ).toContain("Base branch is required");
+    expect(api.calls.some((c) => c.route === "POST /api/schedules")).toBe(
+      false,
+    );
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-cancel-btn"]')!
+      .click();
+    await flush(harness);
+
+    // 2. Editing unbound template schedule (sched-tmpl) and clearing repo must block PATCH (no fallback to editing.repo)
+    root
+      .querySelector<HTMLElement>('[data-testid="sched-row-sched-tmpl"]')!
+      .click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-edit-btn"]')!
+      .click();
+    await flush(harness);
+    setInput("sched-repo-input", "");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-repo-error"]')?.textContent,
+    ).toContain("Repository (owner/name) is required");
+    expect(api.calls.some((c) => c.route === "PATCH /api/schedules/{id}")).toBe(
+      false,
+    );
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-cancel-btn"]')!
+      .click();
+    await flush(harness);
+
+    // 3. Clearing timeZone on sched-tz sends timeZone: "" on PATCH; failed PATCH renders error inside dialog and clears on reopen
+    const basePatch = api.patch;
+    let failNext = true;
+    api.patch = async (route, params, body) => {
+      if (route === "PATCH /api/schedules/{id}" && failNext) {
+        failNext = false;
+        throw { error: "stale revision" };
+      }
+      return basePatch(route, params, body);
+    };
+
+    root
+      .querySelector<HTMLElement>('[data-testid="sched-row-sched-tz"]')!
+      .click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-edit-btn"]')!
+      .click();
+    await flush(harness);
+    setInput("sched-tz-input", "");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-dialog-error"]')?.textContent,
+    ).toContain("stale revision");
+
+    // Cancel clears dialog error; reopening and saving succeeds with timeZone: ""
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-cancel-btn"]')!
+      .click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-edit-btn"]')!
+      .click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="sched-dialog-error"]')).toBeNull();
+    setInput("sched-tz-input", "");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    const tzPatch = api.calls.find(
+      (c) =>
+        c.route === "PATCH /api/schedules/{id}" &&
+        (c.params as Record<string, unknown>)?.["id"] === "sched-tz",
+    )!;
+    expect((tzPatch.body as Record<string, unknown>)["timeZone"]).toBe("");
+  });
+
+  it("validateScheduleDraft enforces boundary rules for all target and cadence kinds", () => {
+    const baseDraft: ScheduleDraftSnapshot = {
+      system: false,
+      targetKind: "prompt",
+      templateId: "",
+      boundTemplateRepo: "",
+      suiteId: "",
+      title: "Nightly check",
+      repo: "acme/widgets",
+      base: "main",
+      kind: "daily",
+      everyNMinutes: "15",
+      everyNHours: "6",
+      timeOfDay: "09:00",
+      timeZone: "UTC",
+      dayOfMonth: "1",
+      triggerWorkflow: "",
+      gitRefRepo: "",
+      gitRef: "refs/heads/main",
+    };
+
+    expect(validateScheduleDraft(baseDraft)).toEqual({});
+    expect(
+      validateScheduleDraft({ ...baseDraft, title: "   " }).title,
+    ).toBeDefined();
+    expect(
+      validateScheduleDraft({ ...baseDraft, repo: "not-a-repo" }).repo,
+    ).toBeDefined();
+    expect(
+      validateScheduleDraft({
+        ...baseDraft,
+        repo: "git.example.com/team/lib",
+      }),
+    ).toEqual({});
+    expect(
+      validateScheduleDraft({ ...baseDraft, base: "bad..branch" }).base,
+    ).toBeDefined();
+    expect(
+      validateScheduleDraft({
+        ...baseDraft,
+        targetKind: "template",
+        templateId: "t1",
+        boundTemplateRepo: "acme/bound",
+        repo: "",
+      }),
+    ).toEqual({});
+    expect(
+      validateScheduleDraft({
+        ...baseDraft,
+        targetKind: "template",
+        templateId: "",
+        repo: "acme/widgets",
+      }).templateId,
+    ).toBeDefined();
+    expect(
+      validateScheduleDraft({
+        ...baseDraft,
+        kind: "everyNMinutes",
+        everyNMinutes: "9",
+      }).everyNMinutes,
+    ).toBeDefined();
+    expect(
+      validateScheduleDraft({
+        ...baseDraft,
+        kind: "everyNMinutes",
+        everyNMinutes: "10",
+      }),
+    ).toEqual({});
+    expect(
+      validateScheduleDraft({
+        ...baseDraft,
+        kind: "everyNHours",
+        everyNHours: "8785",
+      }).everyNHours,
+    ).toBeDefined();
+    expect(
+      validateScheduleDraft({
+        ...baseDraft,
+        kind: "git_ref",
+        repo: "",
+        gitRefRepo: "",
+        gitRef: "main",
+      }),
+    ).toMatchObject({
+      repo: expect.any(String),
+      gitRefRepo: expect.any(String),
+      gitRef: expect.any(String),
+    });
+    expect(
+      validateScheduleDraft({
+        ...baseDraft,
+        system: true,
+        title: "",
+        repo: "",
+        kind: "everyNMinutes",
+        everyNMinutes: "5",
+      }),
+    ).toEqual({
+      everyNMinutes: "Interval in minutes must be at least 10.",
+    });
+  });
+});
+
+describe("ProcessesPageComponent RBAC (G-06)", () => {
+  let api: FakeProcessesApi;
+
+  beforeEach(() => {
+    localStorage.clear();
+    Object.defineProperty(window, "innerWidth", {
+      value: 1440,
+      configurable: true,
+      writable: true,
+    });
+    api = new FakeProcessesApi();
+    TestBed.configureTestingModule({
+      providers: [
+        provideRouter(
+          [
+            { path: "processes", component: ProcessesPageComponent },
+            { path: "processes/:tab", component: ProcessesPageComponent },
+            { path: "task/:id", component: ProcessesPageComponent },
+          ],
+          withComponentInputBinding(),
+        ),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => NEVER } },
+      ],
+    });
+  });
+
+  afterEach(() => {
+    TestBed.resetTestingModule();
+  });
+
+  async function mount(
+    url: string,
+    accessConfig: GrainConfig["access"],
+    targetRepos?: string[],
+  ) {
+    api.configBody = {
+      ...api.configBody,
+      access: accessConfig,
+      ...(targetRepos !== undefined ? { targetRepos } : {}),
+    };
+    const harness = await RouterTestingHarness.create(url);
+    const access = TestBed.inject(AccessService);
+    access.setConfig(api.configBody);
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+    const setInput = async (testId: string, val: string) => {
+      const el = root.querySelector<HTMLInputElement>(
+        `[data-testid="${testId}"]`,
+      )!;
+      el.value = val;
+      el.dispatchEvent(new Event("input"));
+      await flush(harness);
+    };
+    const btn = (testId: string) =>
+      root.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`);
+    return { harness, root, access, setInput, btn };
+  }
+
+  it("disables or hides all mutation buttons and blocks deep links for grain/viewer across every tab", async () => {
+    const viewerAccess: GrainConfig["access"] = {
+      role: "grain/viewer",
+      roles: ["grain/viewer"],
+      full: false,
+      scopes: [
+        "schedules:read",
+        "templates:read",
+        "suites:read",
+        "repos:read",
+        "tasks:read",
+      ],
+    };
+
+    const { harness, root, btn } = await mount(
+      "/processes/schedules?new=1",
+      viewerAccess,
+    );
+
+    // Schedules: ?new=1 blocked, New schedule hidden, all row actions disabled
+    expect(root.querySelector('[data-testid="schedule-dialog"]')).toBeNull();
+    expect(btn("proc-new-schedule-btn")).toBeNull();
+    expect(btn("sched-run-now-btn")!.disabled).toBe(true);
+    expect(btn("sched-toggle-enabled-btn")!.disabled).toBe(true);
+    expect(btn("sched-edit-btn")!.disabled).toBe(true);
+    expect(btn("sched-delete-btn")!.disabled).toBe(true);
+    btn("sched-run-now-btn")!.click();
+    await flush(harness);
+
+    // Templates: ?launch=1 blocked, header actions hidden, Launch/Edit/Delete disabled
+    await harness.navigateByUrl("/processes/templates?launch=1");
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="launch-template-dialog"]'),
+    ).toBeNull();
+    expect(btn("proc-launch-template-btn")).toBeNull();
+    expect(btn("proc-new-template-btn")).toBeNull();
+    btn("tmpl-row-tmpl-deploy-1")!.click();
+    await flush(harness);
+    expect(btn("tmpl-launch-btn")!.disabled).toBe(true);
+    expect(btn("tmpl-edit-btn")!.disabled).toBe(true);
+    expect(btn("tmpl-delete-btn")!.disabled).toBe(true);
+
+    // Suites: ?run=1 blocked, header actions hidden, Run/Edit/Delete/Cancel disabled
+    await harness.navigateByUrl("/processes/suites?run=1");
+    await flush(harness);
+    expect(root.querySelector('[data-testid="run-suite-dialog"]')).toBeNull();
+    expect(btn("proc-run-suite-btn")).toBeNull();
+    expect(btn("proc-new-suite-btn")).toBeNull();
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(true);
+    expect(btn("suite-edit-btn")!.disabled).toBe(true);
+    expect(btn("suite-delete-btn")!.disabled).toBe(true);
+
+    btn("suites-subview-runs")!.click();
+    await flush(harness);
+    btn("suite-run-row-7")!.click();
+    await flush(harness);
+    expect(btn("suite-run-cancel-btn")!.disabled).toBe(true);
+
+    // Declarations: toggle switch & accept disabled, add-workflow hidden, inspect remains clickable
+    btn("proc-tab-declarations")!.click();
+    await flush(harness);
+    expect(btn("decl-toggle-switch")!.disabled).toBe(true);
+    const acceptBtns = root.querySelectorAll<HTMLButtonElement>(
+      '[data-testid^="decl-accept-btn-"]',
+    );
+    expect(acceptBtns.length).toBeGreaterThan(0);
+    for (const ab of Array.from(acceptBtns)) {
+      expect(ab.disabled).toBe(true);
+    }
+    expect(btn("decl-add-workflow-btn")).toBeNull();
+    const inspectBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid^="decl-inspect-wf-"]',
+    );
+    expect(inspectBtn).not.toBeNull();
+    expect(inspectBtn!.disabled).toBe(false);
+
+    const writeCalls = api.calls.filter(
+      (c) =>
+        c.method === "POST" ||
+        c.method === "PATCH" ||
+        c.method === "DELETE" ||
+        c.method === "PUT",
+    );
+    expect(writeCalls).toEqual([]);
+  });
+
+  it("enforces repoLimits vs canGlobalScope('suites:write') for cross-repo, unbound, and single-repo suites", async () => {
+    api.templates = [
+      {
+        id: "tmpl-a",
+        name: "A1",
+        title: "A1",
+        description: "",
+        repo: "acme/widgets",
+        autoMerge: false,
+        capabilities: [],
+      },
+      {
+        id: "tmpl-a2",
+        name: "A2",
+        title: "A2",
+        description: "",
+        repo: "acme/widgets",
+        autoMerge: false,
+        capabilities: [],
+      },
+      {
+        id: "tmpl-decl-a",
+        name: "Decl A",
+        title: "Decl A",
+        description: "",
+        declaredIn: {
+          repo: "acme/widgets",
+          path: ".grain/templates/a.yml",
+        },
+        autoMerge: false,
+        capabilities: [],
+      },
+      {
+        id: "tmpl-b",
+        name: "B1",
+        title: "B1",
+        description: "",
+        repo: "acme/other",
+        autoMerge: false,
+        capabilities: [],
+      },
+      {
+        id: "tmpl-any",
+        name: "Any repo",
+        title: "Any",
+        description: "",
+        autoMerge: false,
+        capabilities: [],
+      },
+    ];
+    api.suites = [
+      {
+        id: "suite-multi",
+        name: "Multi-repo sweep",
+        mode: "count",
+        count: 1,
+        items: [{ templateId: "tmpl-a" }, { templateId: "tmpl-b" }],
+      },
+      {
+        id: "suite-any",
+        name: "Unbound sweep",
+        mode: "count",
+        count: 1,
+        items: [{ templateId: "tmpl-any" }],
+      },
+      {
+        id: "suite-other",
+        name: "Other repo sweep",
+        mode: "count",
+        count: 1,
+        items: [{ templateId: "tmpl-b" }],
+      },
+      {
+        id: "suite-allowed",
+        name: "Allowed single-repo sweep",
+        mode: "count",
+        count: 1,
+        items: [{ templateId: "tmpl-a" }, { templateId: "tmpl-a2" }],
+      },
+      {
+        id: "suite-decl-allowed",
+        name: "Allowed declared single-repo sweep",
+        mode: "count",
+        count: 1,
+        declaredIn: {
+          repo: "acme/widgets",
+          path: ".grain/suites/a.yml",
+        },
+        items: [{ templateId: "tmpl-decl-a" }],
+      },
+    ];
+
+    const { harness, root, access, setInput, btn } = await mount(
+      "/processes/suites",
+      {
+        role: "repo-suite-runner",
+        roles: ["repo-suite-runner"],
+        full: false,
+        scopes: ["suites:read", "suites:write", "templates:read", "repos:read"],
+        repoLimits: { "suites:write": ["acme/widgets"] },
+      },
+      ["acme/other", "acme/widgets"],
+    );
+
+    // Global suite creation/editing/deletion stays disabled
+    expect(btn("proc-new-suite-btn")).toBeNull();
+    // Cross-repo (suite-multi), unbound (suite-any), and other-repo (suite-other) cannot run
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(true);
+    expect(btn("suite-edit-btn")!.disabled).toBe(true);
+    expect(btn("suite-delete-btn")!.disabled).toBe(true);
+
+    btn("suite-row-suite-any")!.click();
+    await flush(harness);
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(true);
+
+    btn("suite-row-suite-other")!.click();
+    await flush(harness);
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(true);
+
+    // Single-repo suites bound to allowed repo ARE runnable, while edit/delete stay global-gated
+    btn("suite-row-suite-decl-allowed")!.click();
+    await flush(harness);
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(false);
+
+    btn("suite-row-suite-allowed")!.click();
+    await flush(harness);
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(false);
+    expect(btn("suite-edit-btn")!.disabled).toBe(true);
+    expect(btn("suite-delete-btn")!.disabled).toBe(true);
+
+    // Header Run suite button selects first runnable suite even when cross-repo suite is selected
+    btn("suite-row-suite-multi")!.click();
+    await flush(harness);
+    expect(btn("proc-run-suite-btn")).not.toBeNull();
+    btn("proc-run-suite-btn")!.click();
+    await flush(harness);
+
+    expect(
+      root.querySelector('[data-testid="run-suite-dialog"]'),
+    ).not.toBeNull();
+    expect(
+      root.querySelector<HTMLInputElement>(
+        '[data-testid="run-suite-repo-input"]',
+      )!.value,
+    ).toBe("acme/widgets");
+    expect(btn("run-suite-submit")!.disabled).toBe(false);
+
+    // Unrunnable suites are disabled inside the Run suite picker
+    btn("run-suite-picker")!.click();
+    await flush(harness);
+    const pickerOptions = Array.from(
+      root.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="run-suite-dialog"] [role="option"]',
+      ),
+    );
+    expect(
+      pickerOptions.find((o) => o.textContent?.includes("Multi-repo sweep"))!
+        .disabled,
+    ).toBe(true);
+    expect(
+      pickerOptions.find((o) => o.textContent?.includes("Unbound sweep"))!
+        .disabled,
+    ).toBe(true);
+    expect(
+      pickerOptions.find((o) => o.textContent?.includes("Other repo sweep"))!
+        .disabled,
+    ).toBe(true);
+    expect(
+      pickerOptions.find((o) =>
+        o.textContent?.includes("Allowed single-repo sweep"),
+      )!.disabled,
+    ).toBe(false);
+    btn("run-suite-picker")!.click();
+    await flush(harness);
+
+    // Changing target repo outside repoLimits blocks submission
+    await setInput("run-suite-repo-input", "acme/other");
+    expect(btn("run-suite-submit")!.disabled).toBe(true);
+    await setInput("run-suite-repo-input", "acme/widgets");
+    expect(btn("run-suite-submit")!.disabled).toBe(false);
+    root.querySelector<HTMLElement>(".scrim")!.click();
+    await flush(harness);
+
+    // Granting global suites:write unlocks New suite, cross-repo Run suite, and Edit/Delete
+    access.setConfig({
+      access: {
+        role: "global-suite-admin",
+        roles: ["global-suite-admin"],
+        full: false,
+        scopes: ["suites:read", "suites:write", "templates:read", "repos:read"],
+      },
+    });
+    await flush(harness);
+    expect(btn("proc-new-suite-btn")).not.toBeNull();
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(false);
+    expect(btn("suite-edit-btn")!.disabled).toBe(false);
+    expect(btn("suite-delete-btn")!.disabled).toBe(false);
+
+    btn("suite-row-suite-any")!.click();
+    await flush(harness);
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(false);
+  });
+
+  it("hides proc-run-suite-btn and ignores ?run=1 when repo-scoped user has no single-repo runnable suite", async () => {
+    api.templates = [
+      {
+        id: "tmpl-a",
+        name: "A",
+        title: "A",
+        description: "",
+        repo: "acme/widgets",
+        autoMerge: false,
+        capabilities: [],
+      },
+      {
+        id: "tmpl-b",
+        name: "B",
+        title: "B",
+        description: "",
+        repo: "acme/other",
+        autoMerge: false,
+        capabilities: [],
+      },
+    ];
+    api.suites = [
+      {
+        id: "suite-multi",
+        name: "Multi",
+        mode: "count",
+        count: 1,
+        items: [{ templateId: "tmpl-a" }, { templateId: "tmpl-b" }],
+      },
+    ];
+
+    const { root, btn } = await mount("/processes/suites?run=1", {
+      role: "repo-suite-runner",
+      roles: ["repo-suite-runner"],
+      full: false,
+      scopes: ["suites:read", "suites:write", "templates:read"],
+      repoLimits: { "suites:write": ["acme/widgets"] },
+    });
+
+    expect(btn("proc-run-suite-btn")).toBeNull();
+    expect(root.querySelector('[data-testid="run-suite-dialog"]')).toBeNull();
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(true);
+  });
+
+  it("enforces global scope vs repoLimits across schedules:write, templates:write, and tasks:write", async () => {
+    api.templates = [
+      ...api.templates,
+      {
+        id: "tmpl-sys",
+        name: "System",
+        title: "System workflow",
+        description: "",
+        system: true,
+        autoMerge: false,
+        capabilities: [],
+      },
+      {
+        id: "tmpl-other",
+        name: "Other",
+        title: "Other repo template",
+        description: "",
+        repo: "acme/other",
+        autoMerge: false,
+        capabilities: [],
+      },
+    ];
+    api.suiteRuns = [
+      { ...api.suiteRuns[0], id: 7, repo: "acme/widgets" },
+      { ...api.suiteRuns[0], id: 8, repo: "acme/other" },
+      { ...api.suiteRuns[0], id: 9, repo: "" },
+    ];
+
+    const repoLimitedAccess: GrainConfig["access"] = {
+      role: "repo-dev",
+      roles: ["repo-dev"],
+      full: false,
+      scopes: [
+        "schedules:read",
+        "schedules:write",
+        "templates:read",
+        "templates:write",
+        "suites:read",
+        "tasks:read",
+        "tasks:write",
+        "repos:read",
+      ],
+      repoLimits: {
+        "schedules:write": ["acme/widgets"],
+        "templates:write": ["acme/widgets"],
+        "tasks:write": ["acme/widgets"],
+      },
+    };
+
+    const { harness, root, access, setInput, btn } = await mount(
+      "/processes/schedules",
+      repoLimitedAccess,
+      ["acme/other", "acme/widgets"],
+    );
+
+    // Schedules: {id} routes require global schedules:write; POST allows repo-scoped creation
+    expect(btn("sched-run-now-btn")!.disabled).toBe(true);
+    expect(btn("sched-toggle-enabled-btn")!.disabled).toBe(true);
+    expect(btn("sched-edit-btn")!.disabled).toBe(true);
+    expect(btn("sched-delete-btn")!.disabled).toBe(true);
+    expect(btn("proc-new-schedule-btn")).not.toBeNull();
+
+    btn("proc-new-schedule-btn")!.click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="sched-repo-input"]')!
+        .value,
+    ).toBe("acme/widgets");
+    expect(btn("sched-save-btn")!.disabled).toBe(false);
+    await setInput("sched-repo-input", "acme/other");
+    expect(btn("sched-save-btn")!.disabled).toBe(true);
+    await setInput("sched-repo-input", "");
+    expect(btn("sched-save-btn")!.disabled).toBe(true);
+    root.querySelector<HTMLElement>(".scrim")!.click();
+    await flush(harness);
+
+    // Templates: {id} routes & repoless system launch require global scope
+    btn("proc-tab-templates")!.click();
+    await flush(harness);
+
+    btn("tmpl-row-tmpl-sys")!.click();
+    await flush(harness);
+    expect(btn("tmpl-launch-btn")!.disabled).toBe(true);
+
+    btn("tmpl-row-tmpl-other")!.click();
+    await flush(harness);
+    expect(btn("tmpl-launch-btn")!.disabled).toBe(true);
+    expect(btn("tmpl-edit-btn")!.disabled).toBe(true);
+    expect(btn("tmpl-delete-btn")!.disabled).toBe(true);
+
+    btn("tmpl-row-repo:template:acme/widgets:release-notes")!.click();
+    await flush(harness);
+    expect(btn("tmpl-launch-btn")!.disabled).toBe(false);
+
+    btn("tmpl-row-tmpl-deploy-1")!.click();
+    await flush(harness);
+    expect(btn("tmpl-launch-btn")!.disabled).toBe(false);
+    expect(btn("tmpl-edit-btn")!.disabled).toBe(true);
+    expect(btn("tmpl-delete-btn")!.disabled).toBe(true);
+
+    btn("tmpl-launch-btn")!.click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="launch-repo-input"]')!
+        .value,
+    ).toBe("acme/widgets");
+    expect(btn("launch-template-submit")!.disabled).toBe(false);
+    await setInput("launch-repo-input", "acme/other");
+    expect(btn("launch-template-submit")!.disabled).toBe(true);
+    root.querySelector<HTMLElement>(".scrim")!.click();
+    await flush(harness);
+
+    // Creating a template pre-selects permitted repo and blocks empty/other repo
+    btn("proc-new-template-btn")!.click();
+    await flush(harness);
+    await setInput("tmpl-name-input", "Repo tmpl");
+    await setInput("tmpl-title-input", "Title");
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="tmpl-repo-input"]')!
+        .value,
+    ).toBe("acme/widgets");
+    expect(btn("tmpl-save-btn")!.disabled).toBe(false);
+    await setInput("tmpl-repo-input", "");
+    expect(btn("tmpl-save-btn")!.disabled).toBe(true);
+    await setInput("tmpl-repo-input", "acme/other");
+    expect(btn("tmpl-save-btn")!.disabled).toBe(true);
+    root.querySelector<HTMLElement>(".scrim")!.click();
+    await flush(harness);
+
+    // Suite runs cancel: checks sr.repo or global tasks:write when repo is empty
+    btn("proc-tab-suites")!.click();
+    await flush(harness);
+    btn("suites-subview-runs")!.click();
+    await flush(harness);
+
+    btn("suite-run-row-7")!.click();
+    await flush(harness);
+    expect(btn("suite-run-cancel-btn")!.disabled).toBe(false);
+
+    btn("suite-run-row-8")!.click();
+    await flush(harness);
+    expect(btn("suite-run-cancel-btn")!.disabled).toBe(true);
+
+    btn("suite-run-row-9")!.click();
+    await flush(harness);
+    expect(btn("suite-run-cancel-btn")!.disabled).toBe(true);
+
+    // Global permissions unlock repo-less cancel, schedule {id} actions, template edit/delete & system launch
+    access.setConfig({
+      access: {
+        ...repoLimitedAccess,
+        role: "global-writer",
+        roles: ["global-writer"],
+        repoLimits: undefined,
+      },
+    });
+    await flush(harness);
+    expect(btn("suite-run-cancel-btn")!.disabled).toBe(false);
+
+    btn("proc-tab-templates")!.click();
+    await flush(harness);
+    expect(btn("tmpl-edit-btn")!.disabled).toBe(false);
+    expect(btn("tmpl-delete-btn")!.disabled).toBe(false);
+    btn("tmpl-row-tmpl-sys")!.click();
+    await flush(harness);
+    expect(btn("tmpl-launch-btn")!.disabled).toBe(false);
+
+    btn("proc-tab-schedules")!.click();
+    await flush(harness);
+    expect(btn("sched-run-now-btn")!.disabled).toBe(false);
+    expect(btn("sched-toggle-enabled-btn")!.disabled).toBe(false);
+    expect(btn("sched-edit-btn")!.disabled).toBe(false);
+    expect(btn("sched-delete-btn")!.disabled).toBe(false);
   });
 });
