@@ -267,6 +267,50 @@ func (w *SandboxWorkspace) GrepSymbolSites(ctx context.Context, symbol string) (
 	return parseGitGrepOutput(out, "HEAD:"), nil
 }
 
+// goModuleLocator is an optional WorkspaceReader capability: return the directory and contents of
+// the nearest go.mod at HEAD for dir in one round trip (modDir "" means the repository root).
+// ok is false when no go.mod exists on the path. Readers without it fall back to walking up with
+// ReadFileAtHead, one call per directory level.
+type goModuleLocator interface {
+	NearestGoModAtHead(ctx context.Context, dir string) (modDir string, content []byte, ok bool, err error)
+}
+
+// goModCandidates lists dir/go.mod, parent/go.mod, ..., go.mod (deepest first).
+func goModCandidates(dir string) []string {
+	dir = cleanDir(dir)
+	var out []string
+	for {
+		if dir == "" {
+			return append(out, "go.mod")
+		}
+		out = append(out, dir+"/go.mod")
+		dir = parentDir(dir)
+	}
+}
+
+// NearestGoModAtHead implements goModuleLocator with a single sandbox command.
+func (w *SandboxWorkspace) NearestGoModAtHead(ctx context.Context, dir string) (string, []byte, bool, error) {
+	if w.RunCommand == nil {
+		return "", nil, false, fmt.Errorf("qa/checks: sandbox workspace has no command runner")
+	}
+	var quoted []string
+	for _, c := range goModCandidates(dir) {
+		quoted = append(quoted, shellSingleQuote(c))
+	}
+	cmd := fmt.Sprintf("cd %s && for p in %s; do if git cat-file -e \"HEAD:$p\" 2>/dev/null; then printf '%%s\\n' \"$p\"; git show \"HEAD:$p\"; exit 0; fi; done; exit 1",
+		shellSingleQuote(w.workDir()), strings.Join(quoted, " "))
+	out, isErr, err := w.RunCommand(ctx, cmd)
+	if err != nil {
+		return "", nil, false, err
+	}
+	if isErr {
+		return "", nil, false, nil
+	}
+	first, rest, _ := strings.Cut(out, "\n")
+	modDir := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(first), "go.mod"), "/")
+	return modDir, []byte(rest), true, nil
+}
+
 // MirrorWorkspace implements WorkspaceReader over a shallow bare git mirror on the controller
 // (`<cacheRoot>/<host>/<owner>/<repo>.git`), avoiding per-file GitHub REST calls during salvage
 // and control-arm shadow checks.
@@ -402,6 +446,30 @@ func (m *MirrorWorkspace) GrepSymbolSites(ctx context.Context, symbol string) ([
 		return nil, nil
 	}
 	return parseGitGrepOutput(out, "refs/remotes/origin/"+m.HeadBranch+":"), nil
+}
+
+// NearestGoModAtHead implements goModuleLocator with one ls-tree plus one show.
+func (m *MirrorWorkspace) NearestGoModAtHead(ctx context.Context, dir string) (string, []byte, bool, error) {
+	cands := goModCandidates(dir)
+	out, err := runBareGit(ctx, m.BareDir, "", append([]string{"ls-tree", "--name-only", "--end-of-options", m.Head, "--"}, cands...)...)
+	if err != nil {
+		return "", nil, false, nil
+	}
+	present := map[string]bool{}
+	for _, l := range strings.Split(out, "\n") {
+		present[strings.TrimSpace(l)] = true
+	}
+	for _, c := range cands {
+		if !present[c] {
+			continue
+		}
+		content, sErr := runBareGit(ctx, m.BareDir, "", "show", "--end-of-options", m.Head+":"+c)
+		if sErr != nil {
+			return "", nil, false, nil
+		}
+		return strings.TrimSuffix(strings.TrimSuffix(c, "go.mod"), "/"), []byte(content), true, nil
+	}
+	return "", nil, false, nil
 }
 
 func runBareGit(ctx context.Context, bareDir, bearerToken string, args ...string) (string, error) {

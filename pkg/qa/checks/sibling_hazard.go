@@ -31,18 +31,31 @@ import (
 )
 
 type modifiedExport struct {
-	Symbol        string
-	LookupSymbol  string
+	Symbol        string // display key: Name, Type.Method
+	LookupSymbol  string // identifier callers reference: Name or Method
+	TypeName      string // struct type name for field changes
+	Fields        []string
+	PkgDir        string
+	PkgName       string
 	File          string
 	Line          int
 	ChangeSummary string
 	Breaking      bool
+	Use           goUseKind
+	IsTS          bool
 }
 
 var tsExportedDeclRe = regexp.MustCompile(`(?m)^\s*export\s+(?:function|interface|class|type)\s+([A-Za-z_][A-Za-z0-9_]*)\b([^\n{;]*)`)
 
 // CheckSiblingExportHazard detects modified exported Go/TypeScript declarations referenced by
 // sibling packages that have zero modified files in base...HEAD.
+//
+// Go exports are diffed per package (the union of the package's changed files at base and HEAD),
+// so a declaration moved between files of one package is not a removal, and a brand-new package
+// has nothing to remove. Callers are resolved through real import relationships: a file counts
+// only if it imports the changed package by import path and references the export in a way the
+// change can break (see sibling_callers.go). Adding an exported struct field is a hazard only for
+// positional composite literals of that type.
 //
 // Always returns hazardSites and maxSiblingPkgCount (used by S1 BlastTier classification and S4
 // Inquisitor grounding). Emits blocking <hazard_card> findings only on attempt <= 1 when callerNotes
@@ -62,54 +75,58 @@ func CheckSiblingExportHazard(
 		}
 	}
 
-	var changedExports []modifiedExport
+	changedExports := collectGoPackageChanges(ctx, ws, pd)
 	for _, df := range pd.Files {
 		if df.IsNew || df.IsDeleted {
 			continue
 		}
 		p := df.EffectivePath()
-		if isTestPath(p) {
+		if !strings.HasSuffix(p, ".ts") || isTestPath(p) {
 			continue
 		}
-		switch {
-		case strings.HasSuffix(p, ".go"):
-			baseBytes, bErr := ws.ReadFileAtBase(ctx, nonEmptyPath(df.OldPath, p))
-			headBytes, hErr := ws.ReadFileAtHead(ctx, p)
-			if bErr == nil && hErr == nil {
-				changedExports = append(changedExports, diffGoExports(p, baseBytes, headBytes)...)
-			}
-		case strings.HasSuffix(p, ".ts"):
-			baseBytes, bErr := ws.ReadFileAtBase(ctx, nonEmptyPath(df.OldPath, p))
-			headBytes, hErr := ws.ReadFileAtHead(ctx, p)
-			if bErr == nil && hErr == nil {
-				changedExports = append(changedExports, diffTSExports(p, string(baseBytes), string(headBytes))...)
-			}
+		baseBytes, bErr := ws.ReadFileAtBase(ctx, nonEmptyPath(df.OldPath, p))
+		headBytes, hErr := ws.ReadFileAtHead(ctx, p)
+		if bErr == nil && hErr == nil {
+			changedExports = append(changedExports, diffTSExports(p, string(baseBytes), string(headBytes))...)
 		}
 	}
+	sort.SliceStable(changedExports, func(i, j int) bool {
+		a, b := changedExports[i], changedExports[j]
+		if a.File != b.File {
+			return a.File < b.File
+		}
+		if a.Line != b.Line {
+			return a.Line < b.Line
+		}
+		return a.Symbol < b.Symbol
+	})
 
 	hasWaiver := strings.TrimSpace(callerNotes) != ""
 	seenSymbol := map[string]bool{}
+	resolver := newGoCallerResolver(ws)
 
 	for _, exp := range changedExports {
-		key := path.Dir(exp.File) + ":" + exp.Symbol
+		ownDir := path.Dir(exp.File)
+		if !exp.IsTS {
+			ownDir = exp.PkgDir
+		}
+		key := ownDir + ":" + exp.Symbol
 		if seenSymbol[key] {
 			continue
 		}
 		seenSymbol[key] = true
 
-		grepSym := exp.LookupSymbol
-		if grepSym == "" {
-			grepSym = exp.Symbol
-		}
-		sites, gErr := ws.GrepSymbolSites(ctx, grepSym)
-		if gErr != nil {
-			continue
+		var sites []CallSite
+		if exp.IsTS {
+			sites = tsCallerSites(ctx, ws, resolver, exp)
+		} else {
+			for _, imp := range resolver.importersOf(ctx, exp.PkgDir, exp.PkgName) {
+				sites = append(sites, imp.usageSites(exp)...)
+			}
 		}
 
-		ownDir := path.Dir(exp.File)
 		siblingAllDirs := map[string]bool{}
 		untouchedDirs := map[string][]CallSite{}
-
 		for _, site := range sites {
 			if isTestPath(site.File) {
 				continue
@@ -144,7 +161,6 @@ func CheckSiblingExportHazard(
 			dirList = append(dirList, d)
 		}
 		sort.Strings(dirList)
-
 		var examples []string
 		for _, d := range dirList {
 			cs := untouchedDirs[d][0]
@@ -167,111 +183,244 @@ func CheckSiblingExportHazard(
 		})
 	}
 
+	for f := range hazardSites {
+		sort.Ints(hazardSites[f])
+	}
 	return findings, hazardSites, maxSiblingPkgs, nil
+}
+
+// tsCallerSites returns lines naming exp.Symbol in files that import exp.File's module through a
+// resolvable relative specifier. Candidates are the intersection of a grep for the symbol and a
+// grep for the module's base name, so only plausible importers are read.
+func tsCallerSites(ctx context.Context, ws WorkspaceReader, r *goCallerResolver, exp modifiedExport) []CallSite {
+	symSites := r.grep(ctx, exp.Symbol)
+	if len(symSites) == 0 {
+		return nil
+	}
+	modFiles := map[string]bool{}
+	for _, s := range r.grep(ctx, tsModuleBaseName(exp.File)) {
+		modFiles[cleanRelPath(s.File)] = true
+	}
+	verdict := map[string]bool{}
+	var out []CallSite
+	for _, s := range symSites {
+		f := cleanRelPath(s.File)
+		if f == exp.File || !strings.HasSuffix(f, ".ts") || isVendoredPath(f) || !modFiles[f] {
+			continue
+		}
+		ok, cached := verdict[f]
+		if !cached {
+			if src, err := ws.ReadFileAtHead(ctx, f); err == nil {
+				ok = tsImportsModule(f, string(src), exp.File)
+			}
+			verdict[f] = ok
+		}
+		if ok {
+			out = append(out, CallSite{File: f, Line: s.Line, Snippet: s.Snippet})
+		}
+	}
+	return out
+}
+
+// goPkgSide accumulates the exported API of one package directory at one revision, restricted to
+// the package's files that appear in the diff. Files outside the diff are identical at base and
+// HEAD, so they cannot contribute a removal or change.
+type goPkgSide struct {
+	name    string
+	exports map[string]goSymbolSnap
+}
+
+func (s *goPkgSide) merge(filePath string, src []byte) {
+	name, exps := extractGoExports(filePath, src)
+	if name == "" {
+		return
+	}
+	if s.name == "" {
+		s.name = name
+	}
+	if s.exports == nil {
+		s.exports = map[string]goSymbolSnap{}
+	}
+	for k, v := range exps {
+		if _, dup := s.exports[k]; !dup {
+			s.exports[k] = v
+		}
+	}
+}
+
+func collectGoPackageChanges(ctx context.Context, ws WorkspaceReader, pd ParsedDiff) []modifiedExport {
+	type goDiffFile struct {
+		base, head string // "" when absent on that side
+	}
+	byBaseDir := map[string][]goDiffFile{}
+	byHeadDir := map[string][]goDiffFile{}
+	for _, df := range pd.Files {
+		var basePath, headPath string
+		if !df.IsNew {
+			basePath = nonEmptyPath(df.OldPath, df.NewPath)
+		}
+		if !df.IsDeleted {
+			headPath = df.NewPath
+		}
+		gf := goDiffFile{}
+		if isGoSourcePath(basePath) {
+			gf.base = basePath
+			byBaseDir[cleanDir(path.Dir(basePath))] = append(byBaseDir[cleanDir(path.Dir(basePath))], gf)
+		}
+		if isGoSourcePath(headPath) {
+			gf = goDiffFile{head: headPath}
+			byHeadDir[cleanDir(path.Dir(headPath))] = append(byHeadDir[cleanDir(path.Dir(headPath))], gf)
+		}
+	}
+
+	dirs := make([]string, 0, len(byBaseDir))
+	for d := range byBaseDir {
+		dirs = append(dirs, d) // packages with nothing at base (brand-new) cannot lose exports
+	}
+	sort.Strings(dirs)
+
+	var out []modifiedExport
+	for _, dir := range dirs {
+		var base, head goPkgSide
+		for _, gf := range byBaseDir[dir] {
+			if b, err := ws.ReadFileAtBase(ctx, gf.base); err == nil {
+				base.merge(gf.base, b)
+			}
+		}
+		if len(base.exports) == 0 {
+			continue
+		}
+		headFiles := map[string]bool{}
+		for _, gf := range byHeadDir[dir] {
+			headFiles[gf.head] = true
+			if b, err := ws.ReadFileAtHead(ctx, gf.head); err == nil {
+				head.merge(gf.head, b)
+			}
+		}
+		pkgName := head.name
+		if pkgName == "" {
+			pkgName = base.name
+		}
+		out = append(out, diffGoPackageExports(dir, pkgName, base.exports, head.exports, headFiles)...)
+	}
+	return out
+}
+
+func isGoSourcePath(p string) bool {
+	return p != "" && strings.HasSuffix(p, ".go") && !isTestPath(p) && !isVendoredPath(p)
 }
 
 type goSymbolSnap struct {
 	LookupSymbol string
+	TypeName     string
 	Sig          string
 	Fields       map[string]string
+	File         string
 	Line         int
 	Kind         string // "func", "struct", "interface"
 }
 
-func diffGoExports(filePath string, baseBytes, headBytes []byte) []modifiedExport {
-	baseMap := extractGoExports(filePath, baseBytes)
-	headMap := extractGoExports(filePath, headBytes)
+// diffGoPackageExports compares one package's exported API between base and HEAD.
+// headFiles lists the package's HEAD files present in the diff (removed symbols are reported on
+// the file they were declared in when it still exists, else on any changed HEAD file).
+func diffGoPackageExports(dir, pkgName string, baseMap, headMap map[string]goSymbolSnap, headFiles map[string]bool) []modifiedExport {
 	var out []modifiedExport
+	anyHeadFile := ""
+	for f := range headFiles {
+		if anyHeadFile == "" || f < anyHeadFile {
+			anyHeadFile = f
+		}
+	}
+	names := make([]string, 0, len(baseMap))
+	for n := range baseMap {
+		names = append(names, n)
+	}
+	sort.Strings(names)
 
-	for name, bSnap := range baseMap {
+	for _, name := range names {
+		bSnap := baseMap[name]
 		lookup := bSnap.LookupSymbol
 		if lookup == "" {
 			lookup = name
 		}
+		mk := func(file string, line int, summary string, breaking bool, use goUseKind) modifiedExport {
+			return modifiedExport{
+				Symbol: name, LookupSymbol: lookup, TypeName: bSnap.TypeName,
+				PkgDir: dir, PkgName: pkgName, File: file, Line: line,
+				ChangeSummary: summary, Breaking: breaking, Use: use,
+			}
+		}
 		hSnap, exists := headMap[name]
 		if !exists {
-			out = append(out, modifiedExport{
-				Symbol:        name,
-				LookupSymbol:  lookup,
-				File:          filePath,
-				Line:          1,
-				ChangeSummary: fmt.Sprintf("removed exported %s", bSnap.Kind),
-				Breaking:      true,
-			})
+			file := bSnap.File
+			if !headFiles[file] && anyHeadFile != "" {
+				file = anyHeadFile
+			}
+			use := goUseQualified
+			if strings.Contains(name, ".") {
+				use = goUseMethod
+			}
+			out = append(out, mk(file, 1,
+				fmt.Sprintf("removed exported %s; declared at %s:%d in base", bSnap.Kind, bSnap.File, bSnap.Line),
+				true, use))
+			continue
+		}
+		if bSnap.Kind != hSnap.Kind {
+			out = append(out, mk(hSnap.File, hSnap.Line,
+				fmt.Sprintf("changed exported %s to %s", bSnap.Kind, hSnap.Kind), true, goUseQualified))
 			continue
 		}
 		switch bSnap.Kind {
 		case "func":
 			if bSnap.Sig != hSnap.Sig {
-				out = append(out, modifiedExport{
-					Symbol:        name,
-					LookupSymbol:  lookup,
-					File:          filePath,
-					Line:          hSnap.Line,
-					ChangeSummary: "changed function/method signature",
-					Breaking:      true,
-				})
+				use := goUseQualified
+				if strings.Contains(name, ".") {
+					use = goUseMethod
+				}
+				out = append(out, mk(hSnap.File, hSnap.Line, "changed function/method signature", true, use))
 			}
 		case "interface":
 			if bSnap.Sig != hSnap.Sig {
-				out = append(out, modifiedExport{
-					Symbol:        name,
-					LookupSymbol:  lookup,
-					File:          filePath,
-					Line:          hSnap.Line,
-					ChangeSummary: "changed exported interface method set",
-					Breaking:      true,
-				})
+				out = append(out, mk(hSnap.File, hSnap.Line, "changed exported interface method set", true, goUseQualified))
 			}
 		case "struct":
-			breaking := false
-			changed := false
-			var reason string
+			var broken, added []string
 			for fName, bType := range bSnap.Fields {
-				hType, ok := hSnap.Fields[fName]
-				if !ok {
-					breaking = true
-					changed = true
-					reason = fmt.Sprintf("removed/renamed struct field %s", fName)
-					break
-				}
-				if bType != hType {
-					breaking = true
-					changed = true
-					reason = fmt.Sprintf("changed type of struct field %s", fName)
-					break
+				if hType, ok := hSnap.Fields[fName]; !ok || hType != bType {
+					broken = append(broken, fName)
 				}
 			}
-			if !changed {
-				for fName := range hSnap.Fields {
-					if _, ok := bSnap.Fields[fName]; !ok {
-						changed = true
-						reason = fmt.Sprintf("added exported struct field %s", fName)
-						break
-					}
+			for fName := range hSnap.Fields {
+				if _, ok := bSnap.Fields[fName]; !ok {
+					added = append(added, fName)
 				}
 			}
-			if changed {
-				out = append(out, modifiedExport{
-					Symbol:        name,
-					LookupSymbol:  lookup,
-					File:          filePath,
-					Line:          hSnap.Line,
-					ChangeSummary: reason,
-					Breaking:      breaking,
-				})
+			sort.Strings(broken)
+			sort.Strings(added)
+			switch {
+			case len(broken) > 0:
+				reason := fmt.Sprintf("removed/renamed or re-typed struct field %s", strings.Join(broken, ", "))
+				e := mk(hSnap.File, hSnap.Line, reason, true, goUseFields)
+				e.TypeName, e.LookupSymbol, e.Fields = name, name, broken
+				out = append(out, e)
+			case len(added) > 0:
+				reason := fmt.Sprintf("added exported struct field %s; breaks positional literals only", strings.Join(added, ", "))
+				e := mk(hSnap.File, hSnap.Line, reason, false, goUsePositional)
+				e.TypeName, e.LookupSymbol = name, name
+				out = append(out, e)
 			}
 		}
 	}
 	return out
 }
 
-func extractGoExports(filePath string, src []byte) map[string]goSymbolSnap {
+// extractGoExports returns the package clause name and the exported API declared in one file.
+func extractGoExports(filePath string, src []byte) (string, map[string]goSymbolSnap) {
 	out := map[string]goSymbolSnap{}
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, filePath, src, 0)
+	f, err := parser.ParseFile(fset, filePath, src, parser.SkipObjectResolution)
 	if err != nil {
-		return out
+		return "", out
 	}
 
 	for _, decl := range f.Decls {
@@ -282,6 +431,7 @@ func extractGoExports(filePath string, src []byte) map[string]goSymbolSnap {
 			}
 			symName := d.Name.Name
 			mapKey := symName
+			typeName := ""
 			if d.Recv != nil && len(d.Recv.List) > 0 {
 				recvType := exprString(fset, d.Recv.List[0].Type)
 				recvBase := strings.TrimPrefix(recvType, "*")
@@ -295,10 +445,13 @@ func extractGoExports(filePath string, src []byte) map[string]goSymbolSnap {
 					continue
 				}
 				mapKey = recvBase + "." + symName
+				typeName = recvBase
 			}
 			out[mapKey] = goSymbolSnap{
 				LookupSymbol: symName,
+				TypeName:     typeName,
 				Sig:          funcTypeSignature(fset, d.Type),
+				File:         filePath,
 				Line:         fset.Position(d.Pos()).Line,
 				Kind:         "func",
 			}
@@ -331,13 +484,16 @@ func extractGoExports(filePath string, src []byte) map[string]goSymbolSnap {
 						}
 					}
 					out[ts.Name.Name] = goSymbolSnap{
-						Fields: fields,
-						Line:   fset.Position(ts.Pos()).Line,
-						Kind:   "struct",
+						TypeName: ts.Name.Name,
+						Fields:   fields,
+						File:     filePath,
+						Line:     fset.Position(ts.Pos()).Line,
+						Kind:     "struct",
 					}
 				case *ast.InterfaceType:
 					out[ts.Name.Name] = goSymbolSnap{
 						Sig:  exprString(fset, typ),
+						File: filePath,
 						Line: fset.Position(ts.Pos()).Line,
 						Kind: "interface",
 					}
@@ -345,7 +501,7 @@ func extractGoExports(filePath string, src []byte) map[string]goSymbolSnap {
 			}
 		}
 	}
-	return out
+	return f.Name.Name, out
 }
 
 func funcTypeSignature(fset *token.FileSet, ft *ast.FuncType) string {
@@ -410,6 +566,7 @@ func diffTSExports(filePath, baseText, headText string) []modifiedExport {
 				Line:          1,
 				ChangeSummary: "removed TypeScript export",
 				Breaking:      true,
+				IsTS:          true,
 			})
 		} else if bSig.sig != hSig.sig {
 			out = append(out, modifiedExport{
@@ -418,6 +575,7 @@ func diffTSExports(filePath, baseText, headText string) []modifiedExport {
 				Line:          hSig.line,
 				ChangeSummary: "changed TypeScript export signature",
 				Breaking:      true,
+				IsTS:          true,
 			})
 		}
 	}
