@@ -166,10 +166,12 @@ test("demo walkthrough: Director focus trap & in-place shaping, Sessions 390px c
     await page.keyboard.press("Escape");
     await expect(drawer).toHaveCount(0);
 
-    // Compact modal Director (< 1080px) traps Tab inside drawer and restores focus on Escape
+    // Compact modal Director (< 1080px) traps Tab and Shift+Tab inside drawer and restores focus on Escape
     await page.setViewportSize({ width: 390, height: 844 });
     await page.getByTestId("director-trigger").click();
     await expect(drawer).toBeVisible();
+    await expect(drawer).toHaveAttribute("aria-expanded", "true");
+    await expect(drawer).toHaveAttribute("aria-hidden", "false");
     for (let i = 0; i < 8; i++) {
       await page.keyboard.press("Tab");
       const inside = await page.evaluate(() =>
@@ -179,8 +181,21 @@ test("demo walkthrough: Director focus trap & in-place shaping, Sessions 390px c
       );
       expect(inside).toBe(true);
     }
+    for (let i = 0; i < 8; i++) {
+      await page.keyboard.press("Shift+Tab");
+      const inside = await page.evaluate(() =>
+        Boolean(
+          document.activeElement?.closest('[data-testid="director-drawer"]'),
+        ),
+      );
+      expect(inside).toBe(true);
+    }
     await page.keyboard.press("Escape");
     await expect(drawer).toHaveCount(0);
+    await expect(page.getByTestId("director-trigger")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
     await expect(page.getByTestId("director-trigger")).toBeFocused();
 
     // Shape a task in place and confirm visibility on /next/task/<id> and classic /tasks/<id>
