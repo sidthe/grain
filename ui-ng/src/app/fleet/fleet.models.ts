@@ -388,3 +388,33 @@ export function parseArgv(cmd: string): string[] {
   }
   return out;
 }
+
+const ALLOWED_PERSISTENT_ACTIONS = new Map<
+  string,
+  ReadonlySet<PersistentAction>
+>([
+  ["stopped", new Set<PersistentAction>(["start"])],
+  ["idle", new Set<PersistentAction>(["start"])],
+  ["starting", new Set<PersistentAction>(["stop"])],
+  ["running", new Set<PersistentAction>(["restart", "rebuild", "stop"])],
+  ["restarting", new Set<PersistentAction>(["restart", "rebuild", "stop"])],
+]);
+
+/** Returns the normalized lifecycle state used for display and action gating. */
+export function effectivePersistentState(
+  ps: Pick<PersistentSandboxStatus, "state" | "enabled">,
+): string {
+  const raw = (ps.state ?? "").trim().toLowerCase();
+  return raw || (ps.enabled ? "idle" : "stopped");
+}
+
+/** Reports whether `action` is valid for a persistent sandbox in its current state. */
+export function isPersistentActionAllowed(
+  ps: Pick<PersistentSandboxStatus, "state" | "enabled">,
+  action: PersistentAction,
+): boolean {
+  return (
+    ALLOWED_PERSISTENT_ACTIONS.get(effectivePersistentState(ps))?.has(action) ??
+    false
+  );
+}

@@ -196,7 +196,12 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
                       </div>
                     </form>
                   }
-                  <div class="msg-body" [gMarkdown]="doc.markdown"></div>
+                  <div
+                    class="canvas-markdown-wrap"
+                    data-testid="canvas-doc-markdown"
+                  >
+                    <div class="msg-body" [gMarkdown]="doc.markdown"></div>
+                  </div>
                 </div>
               }
             }
@@ -262,13 +267,18 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
                   </div>
                 </div>
                 @if (htmlView() === "preview") {
-                  <iframe
-                    class="canvas-iframe"
-                    data-testid="canvas-html-iframe"
-                    sandbox="allow-scripts"
-                    [attr.title]="mock.title"
-                    [srcdoc]="safeSrcdoc()"
-                  ></iframe>
+                  <div
+                    class="canvas-preview-wrap"
+                    data-testid="canvas-preview-wrap"
+                  >
+                    <iframe
+                      class="canvas-iframe"
+                      data-testid="canvas-html-iframe"
+                      sandbox="allow-scripts"
+                      [attr.title]="mock.title"
+                      [srcdoc]="safeSrcdoc()"
+                    ></iframe>
+                  </div>
                 } @else {
                   <pre class="canvas-source" data-testid="canvas-html-source">{{
                     mock.html
@@ -428,7 +438,12 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
                       </div>
                     </form>
                   } @else {
-                    <div class="msg-body" [gMarkdown]="memText()"></div>
+                    <div
+                      class="canvas-markdown-wrap"
+                      data-testid="canvas-memory-markdown"
+                    >
+                      <div class="msg-body" [gMarkdown]="memText()"></div>
+                    </div>
                   }
                 </div>
               }
