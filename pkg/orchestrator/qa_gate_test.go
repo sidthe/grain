@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/ai-on-gke/grain/pkg/agent"
+	"github.com/ai-on-gke/grain/pkg/github"
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/orchestrator"
 	"github.com/ai-on-gke/grain/pkg/qa"
@@ -703,5 +704,86 @@ func TestMaybeAutoDowngradeQARolloutTripsCircuitBreakerToZeroShadowMode(t *testi
 	afterReenable, err := store.GetConfig(ctx)
 	if err != nil || afterReenable.QA.RolloutPct != 25 || afterReenable.QA.RegimeID < 3 {
 		t.Fatalf("expected RolloutPct=25 in Regime>=3 after operator re-enable, got %+v (err=%v)", afterReenable.QA, err)
+	}
+}
+
+type countingGitHubClient struct {
+	github.Client
+	branchHeadCalls int
+}
+
+func (c *countingGitHubClient) GetBranchHead(owner, repo, branch string) (*github.BranchHead, error) {
+	c.branchHeadCalls++
+	return c.Client.GetBranchHead(owner, repo, branch)
+}
+
+func TestSweepStrandedQAStagesSkipsClosedUntreatedAndAlreadySweptTasks(t *testing.T) {
+	store, ctx := openStore(t)
+	enableTestQA(t, ctx, store, 100)
+	now := time.Date(2026, 11, 13, 21, 0, 0, 0, time.UTC)
+
+	sim, baseClient := newSim(t, "acme", "widgets", "main")
+	client := &countingGitHubClient{Client: baseClient}
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+
+	// 1. 10 closed tasks + 10 open untreated/control tasks must never hit GitHub GetBranchHead.
+	for i := 0; i < 10; i++ {
+		closedTask := filedTask(t, ctx, store, fmt.Sprintf("closed-%d", i), repo)
+		closedAt := now
+		if err := store.ObserveField(ctx, closedTask.ID, now, func(obs *model.Observation) {
+			obs.ClosedAt = &closedAt
+		}); err != nil {
+			t.Fatal(err)
+		}
+		_ = filedTask(t, ctx, store, fmt.Sprintf("untreated-%d", i), repo)
+	}
+
+	// 2. 1 open treatment task with a stranded staging branch promotes once when QA is disabled, then caches.
+	stranded := filedTask(t, ctx, store, "stranded-treat", repo)
+	if _, err := store.EnsureQAAssignment(ctx, model.QAAssignment{
+		RootOrigin:         model.ResolveQARootOrigin(stranded.WorkOrigin, stranded.ID),
+		Epoch:              1,
+		RegimeID:           1,
+		Arm:                model.QAArmTreatment,
+		FlowID:             model.QAFlowGoldenV1Minimal,
+		RolloutPctAtAssign: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	commitAndPushFile(t, sim.BareRepo, model.QAStageBranchName(stranded.ID), "pkg/a/a.go", "package a\n", "feat: staged")
+
+	// While QA is active, sweep makes 0 GitHub GetBranchHead calls.
+	if err := orchestrator.SweepStrandedQAStagesForTest(ctx, store, client, now); err != nil {
+		t.Fatal(err)
+	}
+	if client.branchHeadCalls != 0 {
+		t.Fatalf("expected 0 GetBranchHead calls while QA active, got %d", client.branchHeadCalls)
+	}
+
+	// Disable master switch -> sweep promotes the 1 stranded task and skips all 20 closed/untreated tasks.
+	if err := store.UpdateConfig(ctx, func(c *model.Config) error {
+		c.QA.Enabled = false
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := orchestrator.SweepStrandedQAStagesForTest(ctx, store, client, now); err != nil {
+		t.Fatal(err)
+	}
+	promotedCalls := client.branchHeadCalls
+	if promotedCalls == 0 || promotedCalls > 3 {
+		t.Fatalf("expected <= 3 GetBranchHead calls for the 1 stranded task (not 21+), got %d", promotedCalls)
+	}
+	head, err := baseClient.GetBranchHead(repo.Owner, repo.Name, stranded.BranchName())
+	if err != nil || head == nil {
+		t.Fatalf("expected stranded branch promoted to %s, got %v", stranded.BranchName(), err)
+	}
+
+	// Subsequent ticks make 0 additional GetBranchHead calls.
+	if err := orchestrator.SweepStrandedQAStagesForTest(ctx, store, client, now); err != nil {
+		t.Fatal(err)
+	}
+	if client.branchHeadCalls != promotedCalls {
+		t.Fatalf("expected 0 additional GetBranchHead calls on second sweep tick, got %d -> %d", promotedCalls, client.branchHeadCalls)
 	}
 }

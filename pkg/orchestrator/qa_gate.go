@@ -1338,6 +1338,9 @@ func PromoteStrandedQAStagesForExperiment(ctx context.Context, store *model.Stor
 		if t.Target == nil || !model.TaskEligibleForQAStaging(t) {
 			continue
 		}
+		if closed, cErr := taskClosed(ctx, store, t.ID); cErr != nil || closed {
+			continue
+		}
 		if !enrolledOrigins[model.ResolveQARootOrigin(t.WorkOrigin, t.ID)] {
 			continue
 		}

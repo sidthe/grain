@@ -3289,6 +3289,24 @@ func usageCappedWorkers(ctx context.Context, deps Deps, now time.Time) int {
 }
 
 
+var sweptInactiveQAStage sync.Map // key: fmt.Sprintf("%p:%s", store, taskID)
+
+func originEverEnforcedTreatment(ctx context.Context, store *model.Store, rootOrigin string) bool {
+	if enr, err := store.GetQAEnrollment(ctx, rootOrigin); err == nil && enr != nil {
+		switch enr.ArmID {
+		case "", "baseline", "excluded", model.QAArmControl:
+		default:
+			if enr.FlowHash != "" && enr.FlowHash != "control" && enr.FlowHash != "baseline" {
+				return true
+			}
+		}
+	}
+	if leg, err := store.EarliestQAAssignment(ctx, rootOrigin); err == nil && leg != nil && leg.Arm == model.QAArmTreatment {
+		return true
+	}
+	return false
+}
+
 func sweepStrandedQAStages(ctx context.Context, deps Deps, now time.Time) error {
 	if deps.Client == nil || deps.Store == nil {
 		return nil
@@ -3301,16 +3319,34 @@ func sweepStrandedQAStages(ctx context.Context, deps Deps, now time.Time) error 
 		if task.Target == nil || !model.TaskEligibleForQAStaging(task) {
 			continue
 		}
-		// If task is not Active treatment, check if it has a stranded staging branch
+		if closed, cErr := taskClosed(ctx, deps.Store, task.ID); cErr != nil || closed {
+			continue
+		}
+		root := model.ResolveQARootOrigin(task.WorkOrigin, task.ID)
+		if !originEverEnforcedTreatment(ctx, deps.Store, root) {
+			continue
+		}
+		sweepKey := fmt.Sprintf("%p:%s", deps.Store, task.ID)
 		assign, qaCfg, aErr := resolve.ActiveQAResolutionForTask(ctx, deps.Store, task.ID)
 		qaActive := aErr == nil && assign != nil && qaCfg.Enabled && assign.IsEnforcedTreatment()
-		if !qaActive {
-			// Fast check if stage exists
-			stageBranch := model.QAStageBranchName(task.ID)
-			exists, _ := targetBranchExists(deps.Client, *task.Target, stageBranch)
-			if exists {
-				PromoteStrandedQAStage(ctx, deps.Store, deps.Client, task, "Quality checks disabled or task no longer gated")
-			}
+		if qaActive {
+			sweptInactiveQAStage.Delete(sweepKey)
+			continue
+		}
+		if _, done := sweptInactiveQAStage.Load(sweepKey); done {
+			continue
+		}
+		stageBranch := model.QAStageBranchName(task.ID)
+		exists, bErr := targetBranchExists(deps.Client, *task.Target, stageBranch)
+		if bErr != nil {
+			continue
+		}
+		if !exists {
+			sweptInactiveQAStage.Store(sweepKey, struct{}{})
+			continue
+		}
+		if err := PromoteStrandedQAStage(ctx, deps.Store, deps.Client, task, "Quality checks disabled or task no longer gated"); err == nil {
+			sweptInactiveQAStage.Store(sweepKey, struct{}{})
 		}
 	}
 	return nil

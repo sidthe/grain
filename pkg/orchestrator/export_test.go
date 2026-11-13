@@ -458,6 +458,10 @@ func SalvageQAStageIfPresent(
 	return salvageQAStageIfPresent(ctx, store, client, task, now)
 }
 
+func SweepStrandedQAStagesForTest(ctx context.Context, store *model.Store, client github.Client, now time.Time) error {
+	return sweepStrandedQAStages(ctx, Deps{Store: store, Client: client}, now)
+}
+
 // SetCPUSamplerForTest swaps the /proc reader, clock and settle wait
 // behind HostSandboxes.Health's per-run CPU reading (hostCPUSampler).
 func (h *HostSandboxes) SetCPUSamplerForTest(read func(map[string]string) (map[string]time.Duration, error), now func() time.Time, sleep func(time.Duration)) {
