@@ -123,7 +123,7 @@ func TestExactTestsHodgesLehmannAndMSPRTJSONSafety(t *testing.T) {
 	sprt := metrics.NormalMixtureSPRT(
 		[]float64{200, 210, 205, 215, 220, 208, 212, 218, 204, 216, 211, 209, 214, 217, 213},
 		[]float64{100, 102, 98, 101, 99, 103, 100, 97, 102, 101, 99, 100, 102, 98, 101},
-		15.0,
+		15.0, 0.05,
 	)
 	if !sprt.Significant || sprt.PSeq >= 0.05 {
 		t.Fatalf("NormalMixtureSPRT = %+v, want Significant=true and PSeq < 0.05", sprt)
@@ -458,8 +458,8 @@ func TestComputeQASummaryEndToEndITTShadowAndCircuitBreaker(t *testing.T) {
 		Usages:      usages,
 		CIRuns:      ciRuns,
 	})
-	if !tripped.CircuitBreaker.ShouldAutoDowngrade || len(tripped.CircuitBreaker.Reasons) == 0 {
-		t.Fatalf("expected circuit breaker auto-downgrade on high NotHelpfulWilsonLB, got %+v", tripped.CircuitBreaker)
+	if tripped.CircuitBreaker.ShouldAutoDowngrade || len(tripped.CircuitBreaker.Reasons) == 0 {
+		t.Fatalf("expected circuit breaker to NOT auto-downgrade but notify on high NotHelpfulWilsonLB, got %+v", tripped.CircuitBreaker)
 	}
 }
 
@@ -484,7 +484,7 @@ func TestComputeQASummaryRepoIsolationNilPROpenedAtAndS4Cost(t *testing.T) {
 	if hlRes.TreatN != 2 || hlRes.CtrlN != 2 || math.IsNaN(hlRes.Shift) {
 		t.Fatalf("HodgesLehmannShift after NaN/Inf = %+v", hlRes)
 	}
-	msprtRes := metrics.NormalMixtureSPRT([]float64{10, math.Inf(1), 12, 11}, []float64{10, math.NaN(), 9, 11}, 0)
+	msprtRes := metrics.NormalMixtureSPRT([]float64{10, math.Inf(1), 12, 11}, []float64{10, math.NaN(), 9, 11}, 0, 0.05)
 	if msprtRes.N != 6 || math.IsNaN(msprtRes.LikelihoodRatio) {
 		t.Fatalf("NormalMixtureSPRT after NaN/Inf = %+v", msprtRes)
 	}
@@ -660,5 +660,62 @@ func TestComputeQASummaryRepoIsolationNilPROpenedAtAndS4Cost(t *testing.T) {
 	if math.Abs(allowedSum.CostCUPED.RawTreatMean-0.20) > 1e-6 || math.Abs(allowedSum.TokensCUPED.RawTreatMean-20_000) > 1e-6 {
 		t.Fatalf("expected Cost=$0.20 (coding $0.10 + review $0.05 + S4 $0.05) and Tokens=20000, got Cost=%+v Tokens=%+v",
 			allowedSum.CostCUPED, allowedSum.TokensCUPED)
+	}
+}
+
+func TestNormalMixtureSPRTAlphaAndUnmeasuredCost(t *testing.T) {
+	// Construct treatment vs control samples with LikelihoodRatio strictly between 20 and 100
+	// so alpha=0.05 (threshold 20) triggers Significant=true while alpha=0.01 (threshold 100) stays false.
+	treat := []float64{2.9, 1.1, 3.1, 1.3, 2.8, 1.4, 3.0, 1.2}
+	ctrl := []float64{1.2, 0.0, 1.4, 0.2, 1.1, 0.1, 1.3, 0.1}
+	res05 := metrics.NormalMixtureSPRT(treat, ctrl, 0.5, 0.05)
+	res01 := metrics.NormalMixtureSPRT(treat, ctrl, 0.5, 0.01)
+	if res05.LikelihoodRatio < 20 || res05.LikelihoodRatio >= 100 {
+		t.Fatalf("expected 20 <= LR < 100 for threshold separation, got LR=%v", res05.LikelihoodRatio)
+	}
+	if !res05.Significant {
+		t.Fatalf("expected Significant=true at alpha=0.05 for LR=%v", res05.LikelihoodRatio)
+	}
+	if res01.Significant {
+		t.Fatalf("expected Significant=false at alpha=0.01 for LR=%v", res01.LikelihoodRatio)
+	}
+
+	// Verify CostMeasured is false when token usage is positive (e.g. ambient login) but CostUSD == 0.
+	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	createdAt := now.Add(-20 * time.Minute)
+	mergedAt := now.Add(-5 * time.Minute)
+	repo := model.RepoRef{Owner: "acme", Name: "ambient"}
+	sum := metrics.ComputeQASummary(metrics.QASummaryInput{
+		Window: metrics.Window{Since: now.Add(-24 * time.Hour), Until: now.Add(time.Hour)},
+		Config: model.QAConfig{Enabled: true, FlowID: model.QAFlowGoldenV1Minimal, RolloutPct: 50, Epoch: 1, RegimeID: 1},
+		Assignments: []model.QAAssignment{
+			{RootOrigin: "task:t1", Epoch: 1, RegimeID: 1, Arm: model.QAArmTreatment, FlowID: model.QAFlowGoldenV1Minimal, AssignedAt: createdAt},
+			{RootOrigin: "task:c1", Epoch: 1, RegimeID: 1, Arm: model.QAArmControl, FlowID: model.QAFlowGoldenV1Minimal, AssignedAt: createdAt},
+		},
+		Tasks: []model.Task{
+			{ID: "t1", Title: "Treat", Target: &repo, WorkOrigin: "task:t1"},
+			{ID: "c1", Title: "Ctrl", Target: &repo, WorkOrigin: "task:c1"},
+		},
+		Timings: []model.TaskTiming{
+			{TaskID: "t1", CreatedAt: &createdAt, PrOpenedAt: &mergedAt, PrMergedAt: &mergedAt, Repo: repo.String()},
+			{TaskID: "c1", CreatedAt: &createdAt, PrOpenedAt: &mergedAt, PrMergedAt: &mergedAt, Repo: repo.String()},
+		},
+		Runs: []model.RunTiming{
+			{RunID: "rt1", TaskID: "t1", Attempt: 1, StartedAt: createdAt},
+			{RunID: "rc1", TaskID: "c1", Attempt: 1, StartedAt: createdAt},
+		},
+		Usages: []model.RunUsage{
+			{RunID: "rt1", TaskID: "t1", InputTokens: 50_000, OutputTokens: 10_000, CostUSD: 0},
+			{RunID: "rc1", TaskID: "c1", InputTokens: 40_000, OutputTokens: 8_000, CostUSD: 0},
+		},
+		CheckRuns: []model.QACheckRun{
+			{ID: 1, TaskID: "t1", Stage: "S4", CheckID: "s4-fresh-verifier", Arm: model.QAArmTreatment, Verdict: "pass", TokensIn: 5_000, TokensOut: 1_000, CreatedAt: mergedAt},
+		},
+	})
+	if sum.CostMeasured {
+		t.Fatalf("CostMeasured = true when all CostUSD == 0, want false (got CostCUPED=%+v)", sum.CostCUPED)
+	}
+	if sum.TokensCUPED.RawTreatMean <= 0 || sum.TokensCUPED.RawCtrlMean <= 0 {
+		t.Fatalf("expected positive TokensCUPED despite unmeasured cost, got %+v", sum.TokensCUPED)
 	}
 }

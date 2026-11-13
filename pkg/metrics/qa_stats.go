@@ -655,7 +655,7 @@ type MSPRTResult struct {
 
 // NormalMixtureSPRT computes Johari et al.'s normal-mixture sequential likelihood ratio Lambda_n
 // and anytime-valid sequential p-value p_seq = min(1, 1/Lambda_n) at alpha = 0.05.
-func NormalMixtureSPRT(treat, ctrl []float64, tau float64) MSPRTResult {
+func NormalMixtureSPRT(treat, ctrl []float64, tau float64, alpha float64) MSPRTResult {
 	tFinite := filterFinite(treat)
 	cFinite := filterFinite(ctrl)
 	n1, n2 := len(tFinite), len(cFinite)
@@ -690,7 +690,9 @@ func NormalMixtureSPRT(treat, ctrl []float64, tau float64) MSPRTResult {
 		lambda = 1e-12
 	}
 	pSeq := math.Min(1.0, 1.0/lambda)
-	const alpha = 0.05
+		if alpha <= 0 {
+		alpha = 0.05
+	}
 	logTerm := math.Max(0, -2.0*math.Log(alpha)-math.Log(ratio))
 	hw := math.Sqrt(((vN * (vN + tau2)) / tau2) * logTerm)
 

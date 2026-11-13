@@ -268,6 +268,8 @@ export interface QAShadowRecall {
   controlBlindEscapes: number;
   matchedBlindEscapes: number;
   pairedRecall: number;
+  matchedEscapes: number;
+  matchedRecall: number;
 }
 
 export interface QATwoByTwoStratum {
@@ -334,6 +336,7 @@ export interface QACircuitBreaker {
 }
 
 export interface QASummary {
+  costMeasured: boolean;
   since: string;
   until: string;
   windowSeconds: number;

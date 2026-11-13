@@ -578,6 +578,9 @@ func TestQASalvagePromotesDisabledQA(t *testing.T) {
 	promotedHead, err := client.GetBranchHead(repo.Owner, repo.Name, task.BranchName())
 	if err != nil || promotedHead == nil {
 		t.Fatalf("expected promoted PR branch at %s, got error %v", task.BranchName(), err)
+	}
+}
+
 func TestMaybeAutoDowngradeQARolloutTripsCircuitBreakerToZeroShadowMode(t *testing.T) {
 	store, ctx := openStore(t)
 	enableTestQA(t, ctx, store, 50)

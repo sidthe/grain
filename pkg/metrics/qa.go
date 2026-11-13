@@ -104,6 +104,8 @@ type QAShadowRecall struct {
 	ControlBlindEscapes int     `json:"controlBlindEscapes"`
 	MatchedBlindEscapes int     `json:"matchedBlindEscapes"`
 	PairedRecall        float64 `json:"pairedRecall"`
+	MatchedEscapes      int     `json:"matchedEscapes"`
+	MatchedRecall       float64 `json:"matchedRecall"`
 }
 
 // QACircuitBreaker reports sequential mSPRT safety status and whether an automatic rollout
@@ -120,6 +122,7 @@ type QACircuitBreaker struct {
 
 // QASummary is the complete single-instance A/B quality vs. overhead report served by GET /api/qa/summary.
 type QASummary struct {
+	CostMeasured         bool                 `json:"costMeasured"`
 	Since                time.Time            `json:"since"`
 	Until                time.Time            `json:"until"`
 	WindowSeconds        float64              `json:"windowSeconds"`
@@ -318,17 +321,7 @@ func ComputeQASummary(in QASummaryInput) QASummary {
 		if in.Window.Duration() <= 0 {
 			return true
 		}
-		if in.Window.holds(&assign.AssignedAt) {
-			return true
-		}
-		for _, t := range originTasks {
-			tm := timingByTask[t.ID]
-			if in.Window.holds(tm.CreatedAt) || in.Window.holds(tm.CompletedAt) ||
-				in.Window.holds(tm.PrOpenedAt) || in.Window.holds(tm.PrMergedAt) || in.Window.holds(tm.ClosedAt) {
-				return true
-			}
-		}
-		return false
+		return in.Window.holds(&assign.AssignedAt)
 	}
 
 	for _, assign := range in.Assignments {
@@ -532,6 +525,62 @@ func ComputeQASummary(in QASummaryInput) QASummary {
 						if shadowBlocked {
 							out.ShadowRecall.MatchedBlindEscapes++
 						}
+						
+						var shadowFindings []model.QAFinding
+						for _, cr := range checkRunsByTask[t.ID] {
+							if cr.Shadow && cr.Verdict == "fail" {
+								shadowFindings = append(shadowFindings, findingsByCheckRun[cr.ID]...)
+							}
+						}
+						var escapeFindings []model.QAFinding
+						for _, l := range t.Links {
+							switch l.Kind {
+							case model.LinkReviewFindings:
+								if rec, ok := model.ParseReviewFindingsRecord(l.Target); ok && rec.Gate != model.GateQA && rec.ReviewTask != "" {
+									for _, cr := range checkRunsByTask[rec.ReviewTask] {
+										escapeFindings = append(escapeFindings, findingsByCheckRun[cr.ID]...)
+									}
+								}
+							case model.LinkReviewQuestions, model.LinkRelayedReviewThread, model.LinkDraftReview:
+								rtID := strings.TrimSpace(l.Target)
+								if rtID != "" {
+									for _, cr := range checkRunsByTask[rtID] {
+										escapeFindings = append(escapeFindings, findingsByCheckRun[cr.ID]...)
+									}
+								}
+							}
+						}
+						
+						matchedAny := false
+						if len(escapeFindings) == 0 && (tm.FixTaskFiled || taskFirstCIFailed) && shadowBlocked {
+							// For non-review escapes where specific findings are absent but task escaped and shadow blocked,
+							// we consider it a match if shadow found something, but wait: the prompt says
+							// "Match shadow check findings against blind-review escape findings on the same PR by file + line within +-15 lines... 
+							// instead of mere PR co-occurrence!"
+							// So if there are no escape findings, it's NOT a match.
+						}
+						for _, ef := range escapeFindings {
+							for _, sf := range shadowFindings {
+								if sf.FilePath != "" && ef.FilePath != "" && sf.FilePath == ef.FilePath {
+									lineMatch := false
+									if sf.Line > 0 && ef.Line > 0 {
+										lineMatch = math.Abs(float64(sf.Line - ef.Line)) <= 15
+									} else {
+										lineMatch = true
+									}
+									if lineMatch {
+										matchedAny = true
+										break
+									}
+								}
+							}
+							if matchedAny {
+								break
+							}
+						}
+						if matchedAny {
+							out.ShadowRecall.MatchedEscapes++
+						}
 					}
 				}
 			}
@@ -577,13 +626,12 @@ func ComputeQASummary(in QASummaryInput) QASummary {
 		}
 
 		originBillableTokens := codingBillableTokens + s4Tokens
-		ratePerToken := 3.0 / 1_000_000.0
-		if codingCostUSD > 0 && codingBillableTokens > 0 {
-			ratePerToken = codingCostUSD / codingBillableTokens
-		}
-		originCostUSD := codingCostUSD + s4Tokens*ratePerToken
-		if codingCostUSD == 0 && codingBillableTokens > 0 {
-			originCostUSD += codingBillableTokens * ratePerToken
+		var originCostUSD float64
+		if codingCostUSD > 0 {
+			originCostUSD = codingCostUSD
+			if codingBillableTokens > 0 && s4Tokens > 0 {
+				originCostUSD += s4Tokens * (codingCostUSD / codingBillableTokens)
+			}
 		}
 
 		if originHeldByQA {
@@ -650,6 +698,7 @@ func ComputeQASummary(in QASummaryInput) QASummary {
 	}
 	if out.ShadowRecall.ControlBlindEscapes > 0 {
 		out.ShadowRecall.PairedRecall = cleanFloat(float64(out.ShadowRecall.MatchedBlindEscapes) / float64(out.ShadowRecall.ControlBlindEscapes))
+		out.ShadowRecall.MatchedRecall = cleanFloat(float64(out.ShadowRecall.MatchedEscapes) / float64(out.ShadowRecall.ControlBlindEscapes))
 	}
 
 	regimeIDs := make([]int, 0, len(strataByRegime))
@@ -675,8 +724,20 @@ func ComputeQASummary(in QASummaryInput) QASummary {
 		out.RelativeEscapeLift = cleanFloat((out.Control.BlindEscapeRate - out.Treatment.BlindEscapeRate) / out.Control.BlindEscapeRate)
 	}
 
-	out.CostCUPED = OnlineCUPED(costSamples)
+		
 	out.TokensCUPED = OnlineCUPED(tokenSamples)
+	var totalCost float64
+	for _, s := range costSamples {
+		totalCost += s.Y
+	}
+	if totalCost > 0 {
+		out.CostMeasured = true
+		out.CostCUPED = OnlineCUPED(costSamples)
+	} else {
+		out.CostMeasured = false
+		out.CostCUPED = OnlineCUPEDResult{} // Empty
+	}
+	
 	out.FastLaneTimeToPR = HodgesLehmannShift(fastT, fastC)
 	out.OverallTimeToPR = HodgesLehmannShift(overallPRT, overallPRC)
 	out.OriginTimeToLand = HodgesLehmannShift(landT, landC)
@@ -684,8 +745,8 @@ func ComputeQASummary(in QASummaryInput) QASummary {
 	out.Checks = summarizeCheckRules(in.CheckRuns, findingsByCheckRun, findingsByRule, scopeByRepo, matchesRepo, taskRepoByID, in.Window)
 
 	// Sequential mSPRT & automatic safety circuit-breaker evaluation.
-	fastMSPRT := NormalMixtureSPRT(fastT, fastC, 0)
-	escapeMSPRT := NormalMixtureSPRT(escapeBinaryT, escapeBinaryC, 0.20)
+	fastMSPRT := NormalMixtureSPRT(fastT, fastC, 0, 0.05)
+	escapeMSPRT := NormalMixtureSPRT(escapeBinaryT, escapeBinaryC, 0.20, 0.01)
 	cb := QACircuitBreaker{
 		MinSampleMet:         out.Treatment.AssignedOrigins >= MinTreatmentSampleForAutoDowngrade,
 		TreatmentSample:      out.Treatment.AssignedOrigins,
@@ -695,19 +756,23 @@ func ComputeQASummary(in QASummaryInput) QASummary {
 		BlindEscapeMSPRT:     escapeMSPRT,
 	}
 	if cb.MinSampleMet {
-		if out.FastLaneTimeToPR.RelativeShift > 0.15 && fastMSPRT.Significant && fastMSPRT.MeanDiff > 0 {
+		// Auto-downgrade ONLY on explicit-alpha (alpha = 0.01) one-sided mSPRT harm (blind escapes).
+		if escapeMSPRT.Significant && escapeMSPRT.MeanDiff > 0 {
 			cb.ShouldAutoDowngrade = true
+			cb.Reasons = append(cb.Reasons, "Blind escape rate regressed with sequential mSPRT p < 0.01")
+		}
+
+		// Heuristic findings/co-occurrence signals are notify-only.
+		if out.FastLaneTimeToPR.RelativeShift > 0.15 && fastMSPRT.Significant && fastMSPRT.MeanDiff > 0 {
 			cb.Reasons = append(cb.Reasons, "T0/T1 fast-lane median Time-to-PR regressed > +15% with sequential mSPRT p < 0.05")
 		}
 		if out.Treatment.PromptsMeasured >= 10 && out.Control.PromptsMeasured >= 10 &&
 			(out.Treatment.ThreadCutShare-out.Control.ThreadCutShare) > 0.05 {
-			cb.ShouldAutoDowngrade = true
 			cb.Reasons = append(cb.Reasons, "Treatment ThreadCut truncation rate exceeded Control by > +5.0 percentage points")
 		}
 		for _, chk := range out.Checks {
 			votes := chk.HelpfulVotes + chk.NotHelpfulVotes
 			if votes >= 5 && chk.NotHelpfulWilsonLB > 0.10 {
-				cb.ShouldAutoDowngrade = true
 				cb.Reasons = append(cb.Reasons, "Rule "+chk.RuleID+" human 'Not helpful' 95% Wilson lower bound exceeded 10%")
 			}
 		}
