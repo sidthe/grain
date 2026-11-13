@@ -1004,4 +1004,467 @@ describe("ProcessesPageComponent (D-9)", () => {
       root.querySelectorAll('[data-testid^="decl-repo-row-"]').length,
     ).toBe(2);
   });
+
+  it("triggers required and format field validations before schedule submission across targets and cadences", async () => {
+    const setInput = async (
+      root: HTMLElement,
+      harness: RouterTestingHarness,
+      testid: string,
+      value: string,
+      blur = false,
+    ) => {
+      const el = root.querySelector<HTMLInputElement | HTMLTextAreaElement>(
+        `[data-testid="${testid}"]`,
+      )!;
+      el.value = value;
+      el.dispatchEvent(new Event("input"));
+      if (blur) el.dispatchEvent(new Event("blur"));
+      await flush(harness);
+      return el;
+    };
+
+    const harness = await RouterTestingHarness.create("/processes/schedules");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    // 1. Open New schedule -> immediate submit triggers required Title validation and blocks POST
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="proc-new-schedule-btn"]',
+      )!
+      .click();
+    await flush(harness);
+
+    const saveBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="sched-save-btn"]',
+    )!;
+    expect(saveBtn.disabled).toBe(false);
+    saveBtn.click();
+    await flush(harness);
+
+    expect(api.calls.some((c) => c.route === "POST /api/schedules")).toBe(
+      false,
+    );
+    const titleInput = root.querySelector<HTMLInputElement>(
+      '[data-testid="sched-title-input"]',
+    )!;
+    expect(titleInput.getAttribute("aria-invalid")).toBe("true");
+    expect(
+      root.querySelector('[data-testid="sched-title-error"]')?.textContent,
+    ).toContain("Task title is required");
+    expect(document.activeElement).toBe(titleInput);
+
+    // Typing valid title clears Title error immediately
+    await setInput(root, harness, "sched-title-input", "Nightly check");
+    expect(titleInput.getAttribute("aria-invalid")).toBeNull();
+    expect(root.querySelector('[data-testid="sched-title-error"]')).toBeNull();
+
+    // 2. Repository required & owner/name format validation
+    await setInput(root, harness, "sched-repo-input", "", true);
+    expect(
+      root.querySelector('[data-testid="sched-repo-error"]')?.textContent,
+    ).toContain("Repository (owner/name) is required");
+    await setInput(root, harness, "sched-repo-input", "not-a-repo", true);
+    expect(
+      root.querySelector('[data-testid="sched-repo-error"]')?.textContent,
+    ).toContain("owner/name");
+    await setInput(root, harness, "sched-repo-input", "acme/widgets", true);
+    expect(root.querySelector('[data-testid="sched-repo-error"]')).toBeNull();
+
+    // 3. Suite target requires Base branch and valid branch syntax
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-target-suite"]')!
+      .click();
+    await flush(harness);
+    await setInput(root, harness, "sched-base-input", "");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(api.calls.some((c) => c.route === "POST /api/schedules")).toBe(
+      false,
+    );
+    expect(
+      root.querySelector('[data-testid="sched-base-error"]')?.textContent,
+    ).toContain("Base branch is required");
+    await setInput(root, harness, "sched-base-input", "bad..branch", true);
+    expect(
+      root.querySelector('[data-testid="sched-base-error"]')?.textContent,
+    ).toContain("valid git branch name");
+    await setInput(root, harness, "sched-base-input", "main", true);
+    expect(root.querySelector('[data-testid="sched-base-error"]')).toBeNull();
+
+    // Switch back to Inline prompt for cadence checks
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-target-prompt"]')!
+      .click();
+    await flush(harness);
+    await setInput(root, harness, "sched-title-input", "Cadence test");
+
+    // 4. Daily timeOfDay & timeZone validation
+    await setInput(root, harness, "sched-time-input", "25:99", true);
+    expect(
+      root.querySelector('[data-testid="sched-time-error"]')?.textContent,
+    ).toContain("HH:MM");
+    await setInput(root, harness, "sched-tz-input", "Mars/Olympus", true);
+    expect(
+      root.querySelector('[data-testid="sched-tz-error"]')?.textContent,
+    ).toContain("IANA time zone");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(api.calls.some((c) => c.route === "POST /api/schedules")).toBe(
+      false,
+    );
+    await setInput(root, harness, "sched-time-input", "09:30", true);
+    await setInput(root, harness, "sched-tz-input", "UTC", true);
+
+    // 5. everyNMinutes: no silent coercion on empty/0, enforces minimum 10
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="sched-kind-everyNMinutes"]',
+      )!
+      .click();
+    await flush(harness);
+    const minEl = await setInput(root, harness, "sched-every-min-input", "5");
+    expect(minEl.value).toBe("5");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-every-min-error"]')?.textContent,
+    ).toContain("between 10");
+    await setInput(root, harness, "sched-every-min-input", "", true);
+    expect(minEl.value).toBe("");
+    expect(
+      root.querySelector('[data-testid="sched-every-min-error"]')?.textContent,
+    ).toContain("required");
+    expect(api.calls.some((c) => c.route === "POST /api/schedules")).toBe(
+      false,
+    );
+
+    // 6. everyNHours validation
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="sched-kind-everyNHours"]',
+      )!
+      .click();
+    await flush(harness);
+    await setInput(root, harness, "sched-every-hr-input", "0", true);
+    expect(
+      root.querySelector('[data-testid="sched-every-hr-error"]')?.textContent,
+    ).toContain("between 1");
+
+    // 7. monthly dayOfMonth validation
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-kind-monthly"]')!
+      .click();
+    await flush(harness);
+    await setInput(root, harness, "sched-day-of-month-input", "32", true);
+    expect(
+      root.querySelector('[data-testid="sched-day-of-month-error"]')
+        ?.textContent,
+    ).toContain("between 1 and 31");
+
+    // 8. github_workflow_run requires Workflow name or file
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="sched-kind-github_workflow_run"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-trigger-workflow-error"]'),
+    ).toBeNull();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(api.calls.some((c) => c.route === "POST /api/schedules")).toBe(
+      false,
+    );
+    expect(
+      root.querySelector('[data-testid="sched-trigger-workflow-error"]')
+        ?.textContent,
+    ).toContain("Workflow name or file is required");
+
+    // 9. git_ref validates watched ref format (must start with refs/) and watched repo
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-kind-git_ref"]')!
+      .click();
+    await flush(harness);
+    await setInput(root, harness, "sched-git-ref-input", "main", true);
+    expect(
+      root.querySelector('[data-testid="sched-git-ref-error"]')?.textContent,
+    ).toContain("refs/");
+    await setInput(root, harness, "sched-git-ref-repo-input", "badrepo", true);
+    expect(
+      root.querySelector('[data-testid="sched-git-ref-repo-error"]')
+        ?.textContent,
+    ).toContain("owner/name");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(api.calls.some((c) => c.route === "POST /api/schedules")).toBe(
+      false,
+    );
+
+    // Fix git_ref fields -> submits POST /api/schedules cleanly
+    await setInput(root, harness, "sched-git-ref-repo-input", "");
+    await setInput(root, harness, "sched-git-ref-input", "refs/heads/main");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(api.calls.some((c) => c.route === "POST /api/schedules")).toBe(true);
+  });
+
+  it("resets all schedule editor form controls and pending validations on close and re-open", async () => {
+    api.schedules.push({
+      id: "sched-tmpl",
+      title: "Go upgrade",
+      description: "",
+      repo: "acme/widgets",
+      base: "main",
+      autoMerge: true,
+      templateId: "tmpl-deploy-1",
+      templateName: "Go upgrade",
+      capabilities: [],
+      recurrence: { kind: "daily", timeOfDay: "09:00", timeZone: "UTC" },
+      timeZone: "UTC",
+      overlap: "skip",
+      source: "deployment",
+      type: "template",
+      enabled: true,
+      nextRunAt: "2026-11-13T09:00:00Z",
+      createdAt: "2026-11-01T00:00:00Z",
+      revision: "rev-tmpl",
+    });
+    const basePost = api.post;
+    let failNextSave = true;
+    api.post = (
+      route: string,
+      params?: Record<string, unknown>,
+      body?: Record<string, unknown>,
+    ) => {
+      if (route === "POST /api/schedules" && failNextSave) {
+        failNextSave = false;
+        api.calls.push({ method: "POST", route, params, body });
+        return new Promise((_, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                Object.assign(new Error("simulated schedule error"), {
+                  status: 400,
+                  error: { error: "simulated schedule error" },
+                }),
+              ),
+            0,
+          ),
+        );
+      }
+      return basePost(route, params, body);
+    };
+
+    const harness = await RouterTestingHarness.create("/processes/schedules");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    // 1. Open Edit on sched-tmpl, clear repo -> blocked before PATCH (must not fall back to editing.repo)
+    root
+      .querySelector<HTMLElement>('[data-testid="sched-row-sched-tmpl"]')!
+      .click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-edit-btn"]')!
+      .click();
+    await flush(harness);
+    const repoInput = root.querySelector<HTMLInputElement>(
+      '[data-testid="sched-repo-input"]',
+    )!;
+    repoInput.value = "";
+    repoInput.dispatchEvent(new Event("input"));
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(api.calls.some((c) => c.route === "PATCH /api/schedules/{id}")).toBe(
+      false,
+    );
+    expect(
+      root.querySelector('[data-testid="sched-repo-error"]')?.textContent,
+    ).toContain("Repository (owner/name) is required");
+
+    // 2. Close via Cancel -> Reopen New schedule: must reset target, repo, errors, and submit POST (not PATCH)
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-cancel-btn"]')!
+      .click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="schedule-dialog"]')).toBeNull();
+
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="proc-new-schedule-btn"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="schedule-dialog"] h2')?.textContent,
+    ).toContain("New schedule or trigger");
+    expect(root.querySelector('[data-testid="sched-repo-error"]')).toBeNull();
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="sched-repo-input"]')!
+        .value,
+    ).toBe("acme/widgets");
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="sched-title-input"]')!
+        .value,
+    ).toBe("");
+
+    // Mutate form, switch to github_workflow_run, fail API save to populate sched-dialog-error, then close via scrim
+    const tIn = root.querySelector<HTMLInputElement>(
+      '[data-testid="sched-title-input"]',
+    )!;
+    tIn.value = "Stale draft";
+    tIn.dispatchEvent(new Event("input"));
+    const dIn = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="sched-desc-input"]',
+    )!;
+    dIn.value = "Stale prompt";
+    dIn.dispatchEvent(new Event("input"));
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="sched-kind-github_workflow_run"]',
+      )!
+      .click();
+    await flush(harness);
+    const wfIn = root.querySelector<HTMLInputElement>(
+      '[data-testid="sched-trigger-workflow-input"]',
+    )!;
+    wfIn.value = "StaleWF";
+    wfIn.dispatchEvent(new Event("input"));
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-dialog-error"]')?.textContent,
+    ).toContain("simulated schedule error");
+
+    // Close via scrim
+    root.querySelector<HTMLElement>(".scrim")!.click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="schedule-dialog"]')).toBeNull();
+    expect(root.querySelector('[data-testid="proc-action-error"]')).toBeNull();
+
+    // 3. Reopen New schedule -> all controls and errors completely reset
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="proc-new-schedule-btn"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="sched-dialog-error"]')).toBeNull();
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="sched-title-input"]')!
+        .value,
+    ).toBe("");
+    expect(
+      root.querySelector<HTMLTextAreaElement>(
+        '[data-testid="sched-desc-input"]',
+      )!.value,
+    ).toBe("");
+    expect(
+      root
+        .querySelector('[data-testid="sched-kind-daily"]')
+        ?.getAttribute("aria-pressed"),
+    ).toBe("true");
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="sched-kind-github_workflow_run"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLInputElement>(
+        '[data-testid="sched-trigger-workflow-input"]',
+      )!.value,
+    ).toBe("");
+
+    // Switch back to daily, fill valid title, and verify clean POST /api/schedules
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-kind-daily"]')!
+      .click();
+    await flush(harness);
+    const cleanTitle = root.querySelector<HTMLInputElement>(
+      '[data-testid="sched-title-input"]',
+    )!;
+    cleanTitle.value = "Fresh schedule";
+    cleanTitle.dispatchEvent(new Event("input"));
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+
+    const posts = api.calls.filter((c) => c.route === "POST /api/schedules");
+    expect(posts.length).toBe(2);
+    expect(posts[1].body).toMatchObject({
+      title: "Fresh schedule",
+      description: "",
+      repo: "acme/widgets",
+      base: "main",
+      recurrence: { kind: "daily", timeOfDay: "09:00", timeZone: "UTC" },
+    });
+
+    // 4. Edit sched-1, mutate title + clear workflow to trigger error, close via Escape, then reopen sched-gitref
+    root
+      .querySelector<HTMLElement>('[data-testid="sched-row-sched-1"]')!
+      .click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-edit-btn"]')!
+      .click();
+    await flush(harness);
+    const editTitle = root.querySelector<HTMLInputElement>(
+      '[data-testid="sched-title-input"]',
+    )!;
+    editTitle.value = "";
+    editTitle.dispatchEvent(new Event("input"));
+    editTitle.dispatchEvent(new Event("blur"));
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="sched-title-error"]'),
+    ).not.toBeNull();
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await flush(harness);
+    expect(root.querySelector('[data-testid="schedule-dialog"]')).toBeNull();
+
+    root
+      .querySelector<HTMLElement>('[data-testid="sched-row-sched-gitref"]')!
+      .click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-edit-btn"]')!
+      .click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="sched-title-error"]')).toBeNull();
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="sched-title-input"]')!
+        .value,
+    ).toBe("Sync upstream tag");
+    expect(
+      root.querySelector<HTMLInputElement>(
+        '[data-testid="sched-git-ref-input"]',
+      )!.value,
+    ).toBe("refs/tags/latest");
+  });
 });
