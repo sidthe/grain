@@ -447,3 +447,13 @@ func SessionTestRegistry(providers ...model.CapabilityProvider) *model.Capabilit
 	reg.RegisterDynamic(ui.AgentAPIDynamicProvider)
 	return reg
 }
+
+func SalvageQAStageIfPresent(
+	ctx context.Context,
+	store *model.Store,
+	client github.Client,
+	task model.Task,
+	now time.Time,
+) (handled bool, err error) {
+	return salvageQAStageIfPresent(ctx, store, client, task, now)
+}

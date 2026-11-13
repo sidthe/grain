@@ -224,6 +224,24 @@ controls (such as quality control PR rollout in `Settings -> Tasks`) live inside
 their section's `.s-card` with dependent fields disabled while off — never as
 persistent topbar or bottombar status badges.
 
+### Pre-PR quality checks
+
+Quality control stays inside existing destinations rather than adding new rail
+items or topbar chrome:
+
+- **Settings → Tasks:** opt-in rollout switch, flow package `<g-pill-select>`,
+  rollout percentage, and control shadow-measurement toggle inside `.s-card`.
+- **Processes → Quality checks (`/processes/quality`):** standard 30/70 split
+  listing built-in and `.grain/qa-flow.yml` flow packages on the left and stage
+  checks, path scopes, and isolation settings in `.proc-card` panels on the
+  right, with a `Configure rollout` link to `/settings/tasks`.
+- **Task Detail → Changes & CI:** a `.ci-runs-card` (`Pre-PR quality checks`)
+  shown above `CI checks & runs` only when quality control is active or
+  recorded on that task. Each check run uses `<g-status-icon>` inside
+  `.status-pill`, finding evidence expands on demand in `.ci-step-log`, and
+  `Helpful` / `Not helpful` `.filter-chip` toggles (`aria-pressed`) are shown
+  only when the viewer holds `tasks:write`.
+
 ### Breakpoints
 
 `< 600px` phone, `600–839px` compact, `840–1279px` medium, `≥ 1280px`

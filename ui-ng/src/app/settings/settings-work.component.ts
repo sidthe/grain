@@ -1056,11 +1056,11 @@ export class SettingsWorkComponent implements OnInit, OnChanges {
     const defaults: readonly PillOption[] = [
       {
         value: "golden-v1-minimal",
-        label: "golden-v1-minimal (S3 deterministic + S4 probe)",
+        label: "golden-v1-minimal (Recommended)",
       },
       {
         value: "deterministic-s3-only",
-        label: "deterministic-s3-only (local AST & vet only)",
+        label: "deterministic-s3-only (Zero-LLM Ablation)",
       },
       {
         value: "repo-custom",

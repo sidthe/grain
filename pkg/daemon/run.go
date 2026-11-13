@@ -29,6 +29,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ai-on-gke/grain/pkg/agent"
 	"github.com/ai-on-gke/grain/pkg/agent/codex"
 	"github.com/ai-on-gke/grain/pkg/capability/grainci"
 	"github.com/ai-on-gke/grain/pkg/capability/grainserver"
@@ -1429,6 +1430,64 @@ func runDaemon(ctx context.Context, cfg Config, store *model.Store, sandboxes or
 	// pull request through POST /api/tasks/{id}/pull-request reaches this
 	// same client, and so opens exactly the pull request this loop's own
 	// finish path would have opened for it.
+	qaProfiler := qa.NewProfiler(qa.DefaultPerfLogPath(cfg.DataDir))
+	orchestrator.SetLiveQARuntime(&orchestrator.QARuntime{
+		DataDir:  cfg.DataDir,
+		Profiler: qaProfiler,
+		ResolveRemote: func(ctx context.Context, repo model.RepoRef) (string, string, error) {
+			if store != nil {
+				if rc, err := store.GetRepoConfig(ctx, repo); err == nil && rc != nil && strings.TrimSpace(rc.CloneURL) != "" {
+					var tok string
+					if githubRESTClient != nil && githubRESTClient.Tokens != nil {
+						if tp := githubRESTClient.Tokens.TokenFor(repo.Owner, repo.Name); tp != nil {
+							tok = *tp
+						}
+					}
+					return strings.TrimSpace(rc.CloneURL), tok, nil
+				}
+			}
+			host := repo.GitHost()
+			if host == "" {
+				host = cfg.GithubHost
+			}
+			if host == "" {
+				host = "github.com"
+			}
+			scheme := "https"
+			if cfg.GithubInsecureHTTP {
+				scheme = "http"
+			}
+			var tok string
+			if githubRESTClient != nil && githubRESTClient.Tokens != nil {
+				if tp := githubRESTClient.Tokens.TokenFor(repo.Owner, repo.Name); tp != nil {
+					tok = *tp
+				}
+			}
+			return fmt.Sprintf("%s://%s/%s/%s.git", scheme, host, repo.Owner, repo.Name), tok, nil
+		},
+		VerifyS4: func(ctx context.Context, task model.Task, prompt string) (string, int64, int64, error) {
+			fw, err := buildFramework(ctx, orchestrator.AgentChoice{
+				Framework: task.AgentFramework,
+				Model:     task.Model,
+			})
+			if err != nil || fw == nil {
+				return "", 0, 0, fmt.Errorf("qa s4 framework unavailable: %w", err)
+			}
+			if held, ok := fw.(*BackendFramework); ok {
+				defer held.Release()
+			}
+			res, err := fw.Run(ctx, agent.RunConfig{
+				Prompt:   prompt,
+				NoTools:  true,
+				RunID:    fmt.Sprintf("qa-s4-%s-%d", task.ID, time.Now().UnixNano()),
+				MaxTurns: 2,
+			})
+			if err != nil || res == nil {
+				return "", 0, 0, err
+			}
+			return res.FinalText, res.Usage.InputTokens, res.Usage.OutputTokens, nil
+		},
+	})
 	LivePullRequests.Store(&PullRequestOpener{Store: store, Client: githubClient})
 
 	// The same publication for the same reason, one question narrower:
@@ -1853,7 +1912,7 @@ func runDaemon(ctx context.Context, cfg Config, store *model.Store, sandboxes or
 			// release-triggered automatic upgrade follows.
 			LatestRelease:      latestRelease(upgrader),
 			UpgradeDrainWindow: cfg.UpgradeDrainWindow,
-			QAProfiler:         qa.NewProfiler(qa.DefaultPerfLogPath(cfg.DataDir)),
+			QAProfiler:         qaProfiler,
 			// nil in every build a deployment runs (debug_clock.go).
 			ReleaseUpgradeClockOffset: DebugClockOffset,
 		},

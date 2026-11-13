@@ -1487,6 +1487,16 @@ const (
 	// LinkHumanSubmitted is consumed so the UI and merge gates know who
 	// approved which commit.
 	LinkHumanApproved LinkKind = "human-approved"
+	// LinkQAHold records that grain withdrew or withheld this task's auto-merge
+	// while a pre-PR quality verification gate (S4) is running or left unresolved
+	// findings after retry caps (-> the head SHA).
+	LinkQAHold LinkKind = "qa-hold"
+	// LinkQAS4Attempted records that the 1-round fresh-context S4 orthogonal
+	// verifier has already executed for this task (-> the staged head SHA).
+	LinkQAS4Attempted LinkKind = "qa-s4-attempted"
+	// LinkQASalvageRetried records that salvagePushedBranch already requeued
+	// one bounded repair turn for deterministic S3 findings (-> the head SHA).
+	LinkQASalvageRetried LinkKind = "qa-salvage-retried"
 	// LinkContinues records that this task carries on a conversation
 	// that ended on another one (-> that task's ID). One writer: a
 	// standing console session filed again after its own task was

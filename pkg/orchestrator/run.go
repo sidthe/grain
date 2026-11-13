@@ -16,6 +16,7 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -41,6 +42,7 @@ import (
 	"github.com/ai-on-gke/grain/pkg/dispatch"
 	"github.com/ai-on-gke/grain/pkg/mcp"
 	"github.com/ai-on-gke/grain/pkg/model"
+	"github.com/ai-on-gke/grain/pkg/qa"
 	"github.com/ai-on-gke/grain/pkg/runhost"
 	"github.com/ai-on-gke/grain/pkg/staterepo"
 )
@@ -393,6 +395,9 @@ func frameworkOpensPullRequests(framework agent.Framework) bool {
 func BuildPrompt(task model.Task, checkoutDir, sandboxRoot string, canOpenPullRequest bool,
 	maxRuntime time.Duration, history History, setup *SetupResult) string {
 	branch := task.BranchName()
+	if strings.TrimSpace(history.PushBranch) != "" {
+		branch = strings.TrimSpace(history.PushBranch)
+	}
 	task, history = applyTaskContext(task, history)
 	prompt := suspensionNoteSection(history)
 	if task.ChangeTarget != nil {
@@ -2581,6 +2586,11 @@ type History struct {
 	// (model.RepoConfig.PairedBranches), or nil for a repository that
 	// pairs fewer than two. See pairedBranchesSection.
 	PairedBranches []string
+	// PushBranch, when non-empty, overrides task.BranchName() in checkout and
+	// push instructions (for example grain-qa-stage/<task-id> on treatment-arm runs).
+	PushBranch string
+	// QASkillPrompt holds the compact coding-time quality contract injected on treatment-arm runs.
+	QASkillPrompt string
 	// UpstreamRepo is the upstream repository pull requests for task.Target
 	// open against when task.Target is a fork (model.RepoConfig.UpstreamRepo),
 	// or the zero RepoRef when pull requests open on task.Target itself.
@@ -3329,8 +3339,21 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	if err != nil {
 		return unprepared(err)
 	}
-	if _, err := resolveTaskQAAssignment(ctx, store, cfg, task, d.RunID, cfg.now()); err != nil {
+	qaAssignment, err := resolveTaskQAAssignment(ctx, store, cfg, task, d.RunID, cfg.now())
+	if err != nil {
 		return unprepared(err)
+	}
+	pushBranch := task.BranchName()
+	var qaSkillPrompt string
+	qaStopNudge := false
+	if qaAssignment.Arm == model.QAArmTreatment && model.TaskEligibleForQAStaging(task) {
+		if cfg.GitRemoteBase != "" {
+			pushBranch = model.QAStageBranchName(task.ID)
+		}
+		if flow, ok := qa.LookupFlow(qaAssignment.FlowID); ok {
+			qaSkillPrompt = flow.SkillPrompt()
+			qaStopNudge = flow.StopNudge
+		}
 	}
 
 	// Before the agent's first turn: a run whose sandbox never got its repo
@@ -3416,7 +3439,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 				defer srcWG.Done()
 				placeGrainSource(runCtx, task, cfg.GrainSourceDir, sandboxRoot, placer, tools, &srcOut, cfg.sandboxReused)
 			}()
-			prepared, checkoutErr = prepareCheckoutWithUpstream(runCtx, tools, cfg.GitRemoteBase, cloneURL, upstreamRepo, task, setupCommand, cfg.sandboxReused, notes, cfg.settingsRepo())
+			prepared, checkoutErr = prepareCheckoutWithBranch(runCtx, tools, cfg.GitRemoteBase, cloneURL, upstreamRepo, task, pushBranch, setupCommand, cfg.sandboxReused, notes, cfg.settingsRepo())
 			srcWG.Wait()
 			if checkoutErr == nil {
 				prepared.GrainSource = srcOut.GrainSource
@@ -3425,7 +3448,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 				prepared.GrainSourceCommits = srcOut.GrainSourceCommits
 			}
 		} else {
-			prepared, checkoutErr = prepareCheckoutWithUpstream(runCtx, tools, cfg.GitRemoteBase, cloneURL, upstreamRepo, task, setupCommand, cfg.sandboxReused, notes, cfg.settingsRepo())
+			prepared, checkoutErr = prepareCheckoutWithBranch(runCtx, tools, cfg.GitRemoteBase, cloneURL, upstreamRepo, task, pushBranch, setupCommand, cfg.sandboxReused, notes, cfg.settingsRepo())
 			if checkoutErr == nil {
 				placeGrainSource(runCtx, task, cfg.GrainSourceDir, sandboxRoot, placer, tools, &prepared, cfg.sandboxReused)
 			}
@@ -3454,6 +3477,8 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		SandboxReused:    cfg.sandboxReused,
 		SandboxReclaimed: cfg.sandboxReclaimed,
 		CommittedContext: prepared.Context,
+		PushBranch:       pushBranch,
+		QASkillPrompt:    qaSkillPrompt,
 	}
 	history.BaseIncident = baseIncidentNote(ctx, store, task)
 	history.Resumed = ResumedFrom(ctx, store, task, previous)
@@ -3778,6 +3803,22 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		if err := store.SetRunPrompt(ctx, d.RunID, prompt); err != nil {
 			log.Printf("orchestrator: run %s: recording the prompt it was given: %v", d.RunID, err)
 		}
+		if qaAssignment.Arm == model.QAArmTreatment && qaSkillPrompt != "" {
+			detailJSON, _ := json.Marshal(map[string]any{
+				"qaPromptBytes":  len(qaSkillPrompt),
+				"totalBytes":     len(prompt),
+				"flowId":         qaAssignment.FlowID,
+			})
+			_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
+				TaskID:     task.ID,
+				RunID:      d.RunID,
+				Stage:      "S1",
+				CheckID:    "skill-inject",
+				Arm:        model.QAArmTreatment,
+				Verdict:    "pass",
+				DetailJSON: string(detailJSON),
+			}, nil)
+		}
 
 		// And how big it came out. The conversation a prompt carries
 		// grows monotonically with the task -- every message replayed
@@ -3914,6 +3955,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			// tool budget (model.UsesToolBudget, DT-13).
 			ToolBudget:               model.UsesToolBudget(task),
 			ToolBudgetPipelineCursor: model.IsPipelineStewardFiring(task),
+			RequireOpenPullRequest:   qaStopNudge && frameworkOpensPullRequests(framework),
 			Grants:                   grants, GrainSourceDir: grainSourceDir, GrainSecretsDir: grainSecretsDir, GrainStateDir: grainStateDir,
 			// Which repositories a proposal this run makes may be filed
 			// against -- the half of propose_task's `repo` argument only
@@ -4665,6 +4707,10 @@ func prepareCapabilityPromptWithSkills(ctx context.Context, cc model.CapabilityC
 	if unifiedSkills != "" {
 		prompt += "\n\n" + unifiedSkills
 		dynamicSections = append(dynamicSections, unifiedSkills)
+	}
+	if strings.TrimSpace(history.QASkillPrompt) != "" {
+		prompt += "\n\n" + strings.TrimSpace(history.QASkillPrompt)
+		dynamicSections = append(dynamicSections, strings.TrimSpace(history.QASkillPrompt))
 	}
 	return appendSection(prompt, extension), dynamicSections, keptPassSections, nil
 }

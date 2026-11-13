@@ -855,6 +855,39 @@ var attributedRoutes = map[string]attributedRoute{
 		body:     `{"id":"ci:acme/widgets:publish"}`,
 		recorded: lastConfigAudit,
 	},
+	"POST /api/tasks/{id}/qa/findings/{finding}/feedback": {
+		setup: func(t *testing.T, client *ui.Client, _ sender) string {
+			t.Helper()
+			ctx := context.Background()
+			id := fileTask(true)(t, client, nil)
+			if _, err := client.Store.RecordQACheckRun(ctx, model.QACheckRun{
+				TaskID:  id,
+				Stage:   "S3",
+				CheckID: "golden:strict-config-decoder",
+				Arm:     model.QAArmTreatment,
+				Verdict: "fail",
+			}, []model.QAFinding{{
+				TaskID:   id,
+				Stage:    "S3",
+				RuleID:   "golden:strict-config-decoder",
+				Severity: "blocking",
+				Summary:  "missing KnownFields",
+			}}); err != nil {
+				t.Fatal(err)
+			}
+			return id
+		},
+		path:   "/api/tasks/{id}/qa/findings/1/feedback",
+		body:   `{"vote":1}`,
+		bareID: true,
+		recorded: func(t *testing.T, ctx context.Context, client *ui.Client, id, _ string) model.Principal {
+			findings, err := client.Store.ListQAFindingsForTask(ctx, id)
+			if err != nil || len(findings) == 0 {
+				t.Fatalf("qa findings for %s: %v, %v", id, findings, err)
+			}
+			return model.Principal{ID: findings[0].VotedBy}
+		},
+	},
 }
 
 // neverAttributedRoutes are non-GET routes that write nothing a person
@@ -897,6 +930,10 @@ var neverAttributedRoutes = map[string]bool{
 	"POST /api/registry/heartbeat":                       true,
 	"POST /api/settings/plan":                            true,
 	"POST /api/repos/plan":                               true,
+	// Daemon-internal S3 check telemetry plumbing from `grain mcpserver`
+	// (refused to agent principals; writes machine check-run metrics, not
+	// an operator action).
+	"POST /api/tasks/{id}/qa/check-runs": true,
 	// The MCP endpoints are transports: each tool they serve calls one of
 	// the routes here, and is attributed there. POST /api/mcp's
 	// grain_invoke dispatches the route through s.mux with the outer

@@ -418,6 +418,10 @@ var routeScopes = map[string]APIScope{
 	"PATCH /api/access/principals/{entry}":                                 "access:write",
 	"DELETE /api/access/principals/{entry}":                                "access:write",
 	"GET /api/access/history":                                              "access:read",
+	"GET /api/qa/flows":                                                    "settings:read",
+	"GET /api/tasks/{id}/qa":                                               "tasks:read",
+	"POST /api/tasks/{id}/qa/check-runs":                                   "internal",
+	"POST /api/tasks/{id}/qa/findings/{finding}/feedback":                  "internal",
 	"POST /api/mcp":                                                        "internal",
 	"POST /mcp":                                                            "internal",
 }

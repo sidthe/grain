@@ -1133,6 +1133,40 @@ func (c *HTTPClient) OpenChange(ctx context.Context, id string, req OpenChangeRe
 	return status, nil
 }
 
+// TaskQA reads id's sticky QA assignment, pre-PR check runs, and findings (GET /api/tasks/{id}/qa).
+func (c *HTTPClient) TaskQA(ctx context.Context, id string) (TaskQAResponse, error) {
+	var out TaskQAResponse
+	if err := c.do(ctx, http.MethodGet, "/api/tasks/"+id+"/qa", nil, &out); err != nil {
+		return TaskQAResponse{}, err
+	}
+	return out, nil
+}
+
+// RecordTaskQACheckRuns persists in-sandbox S3 check runs and findings on the daemon (POST /api/tasks/{id}/qa/check-runs).
+func (c *HTTPClient) RecordTaskQACheckRuns(ctx context.Context, id string, entries []RecordQACheckRunEntry) error {
+	var resp map[string]any
+	return c.do(ctx, http.MethodPost, "/api/tasks/"+id+"/qa/check-runs", RecordQACheckRunsRequest{Entries: entries}, &resp)
+}
+
+// QAFlows lists built-in quality control flow packages and rules (GET /api/qa/flows).
+func (c *HTTPClient) QAFlows(ctx context.Context) (QAFlowsResponse, error) {
+	var out QAFlowsResponse
+	if err := c.do(ctx, http.MethodGet, "/api/qa/flows", nil, &out); err != nil {
+		return QAFlowsResponse{}, err
+	}
+	return out, nil
+}
+
+// VoteTaskQAFinding records helpful/not-helpful operator feedback on a QA finding.
+func (c *HTTPClient) VoteTaskQAFinding(ctx context.Context, taskID string, findingID int64, vote int) (VoteQAFindingResponse, error) {
+	var out VoteQAFindingResponse
+	path := fmt.Sprintf("/api/tasks/%s/qa/findings/%d/feedback", taskID, findingID)
+	if err := c.do(ctx, http.MethodPost, path, VoteQAFindingRequest{Vote: vote}, &out); err != nil {
+		return VoteQAFindingResponse{}, err
+	}
+	return out, nil
+}
+
 // RecreateSandbox is Client.RecreateSandbox over the wire: destroy the
 // sandbox of id's live run and build an empty one in its place.
 //

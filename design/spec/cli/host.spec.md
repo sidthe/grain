@@ -2145,7 +2145,7 @@ Serves the task UI on localhost over a throwaway store of fake tasks (SQLite by 
 
 ### 5.3 `grain mcpserver [flags]` {#CLI-45}
 
-Speaks MCP over stdin/stdout against the sandbox tools. A running daemon forks it, re-invoking its own binary, for each agent run.
+Speaks MCP over stdin/stdout against the sandbox tools. A running daemon forks it, re-invoking its own binary, for each agent run; `-no-tools` serves an empty registry with no sandbox, escape or daemon tools for single-round toolless verification.
 
 <!-- BEGIN GENERATED FLAGS: grain mcpserver -->
 | Flag | Type | Default | Env | Description |
@@ -2167,6 +2167,7 @@ Speaks MCP over stdin/stdout against the sandbox tools. A running daemon forks i
 | `-k8s-namespace` | string |  |  | namespace of -k8s-pod; empty is kubectl's own default |
 | `-k8s-pod` | value |  |  | name of a Kubernetes sandbox pod to run tools in, over kubectl exec (with -k8s-namespace and -workspace) |
 | `-mcp-surface` | value |  |  | which tools to serve: "control" (the sandbox tools, the run-ending and escalation tools and the model-only grants' tools; everything else is a grain CLI command inside the sandbox) or "full" (every tool, for a client that cannot shell out and for tests). Empty is control when a sandbox flag is set, full otherwise (design/design/sandbox-first-agent-surface.design.md §6) |
+| `-no-tools` | bool |  |  | serve an empty MCP registry with no sandbox, escape, or daemon tools |
 | `-pr-base` | string |  |  | branch -pr-branch merges into, which base_branch_status reads CI for so a run can tell a failure its own change caused from one it inherited (model.Task's own Base). Unset -- what an ordinary task has -- that tool reads -pr-repo's default branch instead, which is the base such a task really has. |
 | `-pr-base-incident` | string |  |  | notice of an active incident on the base branch, if any |
 | `-pr-branch` | string |  |  | branch within -pr-repo pull_request_status and wait_for_checks report on -- this run's own branch, and the only one they can ever read (required with -pr-repo) |

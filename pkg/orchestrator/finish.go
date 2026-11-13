@@ -435,7 +435,7 @@ func processResultFrom(ctx context.Context, store *model.Store, reach *gitproxy.
 	if !staleBranch && !inPlace {
 		pushedCommit := true
 		if preRunBranchSHA != "" && client != nil && task.Target != nil {
-			if head, herr := client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, task.BranchName()); herr == nil && head != nil {
+			if head, herr := effectiveTaskPushHead(ctx, store, client, task); herr == nil && head != nil {
 				pushedCommit = head.SHA != preRunBranchSHA
 			}
 		}
@@ -797,7 +797,7 @@ func branchUnmovedSinceWithStore(ctx context.Context, store *model.Store, client
 	if sha == "" || client == nil || task.Target == nil {
 		return false, nil
 	}
-	head, err := client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, task.BranchName())
+	head, err := effectiveTaskPushHead(ctx, store, client, task)
 	if err != nil {
 		return false, fmt.Errorf("orchestrator: reading %s's branch head: %w", task.ID, err)
 	}
@@ -891,6 +891,11 @@ func salvagePushedBranch(ctx context.Context, store *model.Store, client github.
 		// (recordReviewerHead is this review's ending instead).
 		return false, nil
 	}
+	if !reviewCommentsOnly(task) {
+		if qaHandled, qaErr := salvageQAStageIfPresent(ctx, store, client, task, now); qaErr != nil || qaHandled {
+			return true, qaErr
+		}
+	}
 	pushed, err := targetBranchExists(client, *task.Target, task.BranchName())
 	if err != nil {
 		return false, fmt.Errorf("orchestrator: checking %s's branch: %w", task.ID, err)
@@ -967,6 +972,9 @@ func salvagePushedBranch(ctx context.Context, store *model.Store, client github.
 			}
 		}
 		return true, err
+	}
+	if assign, qaCfg, aErr := store.ActiveQAAssignmentForTask(ctx, task.ID); aErr == nil && qaCfg.Enabled && assign != nil && assign.Arm == model.QAArmControl && qaCfg.ShadowOnControlEnabled() {
+		maybeRunControlShadowS3(store, client, task, assign.FlowID)
 	}
 	return true, noteOrphanedIfClosed(ctx, store, client, task.ID, now)
 }
