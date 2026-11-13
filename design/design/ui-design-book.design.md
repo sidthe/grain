@@ -241,12 +241,7 @@ items or topbar chrome:
   `.status-pill`, finding evidence expands on demand in `.ci-step-log`, and
   `Helpful` / `Not helpful` `.filter-chip` toggles (`aria-pressed`) are shown
   only when the viewer holds `tasks:write`.
-- **Telemetry (`/telemetry`):** two `.ops-card` panels inside `.ops-grid-2`
-  (`Quality Control Rollout (A/B)` and `Pre-PR Check Latency & Catch Rate`),
-  gated by `deployment:read` (`GET /api/qa/summary`) and narrowed by the page's
-  window and repository controls. When quality control is off and no epoch
-  assignments exist, both cards collapse to a single muted guidance line with
-  direct links to `/settings/tasks` and `/processes/quality`.
+- **Telemetry (`/telemetry`):** Two tabs (`Overview` | `Quality checks`) using the standard WAI-ARIA `.tab-strip` pattern. The `Overview` tab shows operational throughput cards and a compact Quality checks digest card. The `Quality checks` tab shows rollout results and check health (gated by `deployment:read`), with the header window control replaced by a read-only epoch chip to explain origins are grouped by enrollment time.
 
 ### Breakpoints
 

@@ -16,6 +16,7 @@ import { DOCUMENT } from "@angular/common";
 import {
   ChangeDetectionStrategy,
   Component,
+  DestroyRef,
   ElementRef,
   type OnInit,
   ViewEncapsulation,
@@ -34,6 +35,12 @@ import { errorText } from "../sessions/session-helpers";
 import { ActorChipComponent } from "../shared/actor-chip.component";
 import { StatusIconComponent } from "../shared/status-icon.component";
 import { TipDirective } from "../shared/tip.directive";
+import { TelemetryQualityComponent } from "./quality-checks.component";
+import {
+  armVerdict,
+  experimentPeriodLabel,
+  experimentScope,
+} from "./quality-verdict";
 import {
   type ClusterStats,
   type MetricsReport,
@@ -45,13 +52,9 @@ import {
   buildAlphabeticalContributors,
   buildThroughputGeometry,
   bucketRangeLabel,
-  formatCheckDurationMs,
   formatCompactNum,
   formatDurationSec,
   formatPct,
-  formatSignedDurationSec,
-  formatSignedPctPoints,
-  formatSignedRelPct,
 } from "./telemetry.models";
 
 const WINDOWS: readonly { id: MetricsWindow; label: string }[] = [
@@ -68,9 +71,22 @@ const SPACE_PERIODS: readonly { id: string; label: string }[] = [
 
 const BUDGET_WINDOWS: readonly string[] = ["5h", "24h", "168h"];
 
+export type TelemetryTab = "overview" | "quality";
+
+const TABS: readonly { id: TelemetryTab; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "quality", label: "Quality checks" },
+];
+
 @Component({
   selector: "g-telemetry-page",
-  imports: [RouterLink, TipDirective, StatusIconComponent, ActorChipComponent],
+  imports: [
+    RouterLink,
+    TipDirective,
+    StatusIconComponent,
+    ActorChipComponent,
+    TelemetryQualityComponent,
+  ],
   encapsulation: ViewEncapsulation.None,
   styleUrls: ["../shared/ops-surface.css", "./telemetry-page.component.css"],
   changeDetection: ChangeDetectionStrategy.OnPush,
@@ -95,10 +111,21 @@ const BUDGET_WINDOWS: readonly string[] = ["5h", "24h", "168h"];
             >
               Telemetry
             </h1>
-            <span class="status-pill neutral">
-              <g-status-icon tone="neutral" kind="progress" />
-              {{ window() }} window
-            </span>
+            @if (qualityPeriod(); as period) {
+              <span
+                class="status-pill neutral"
+                data-testid="telemetry-period-chip"
+                [gTip]="'Origins are grouped by enrollment time so outcomes aren\\'t biased by completion speed.'"
+              >
+                <g-status-icon tone="neutral" kind="progress" />
+                {{ period }}
+              </span>
+            } @else {
+              <span class="status-pill neutral">
+                <g-status-icon tone="neutral" kind="progress" />
+                {{ window() }} window
+              </span>
+            }
           </div>
           <div class="headline-actions">
             <button
@@ -113,8 +140,13 @@ const BUDGET_WINDOWS: readonly string[] = ["5h", "24h", "168h"];
           </div>
         </div>
         <p class="view-subtitle">
-          Delivery throughput, cycle-time stages, CI and merge-queue health,
-          token budgets, and alphabetical team activity.
+          @if (tab() === "quality") {
+            Whether pre-PR quality checks change outcomes: each work tree runs
+            with the checks or without them, and the results compare the two.
+          } @else {
+            Delivery throughput, cycle-time stages, CI and merge-queue health,
+            token budgets, and alphabetical team activity.
+          }
         </p>
 
         <div
@@ -122,20 +154,31 @@ const BUDGET_WINDOWS: readonly string[] = ["5h", "24h", "168h"];
           role="toolbar"
           aria-label="Telemetry window and scope"
         >
-          <div class="segmented" role="group" aria-label="Time window">
-            @for (w of windows; track w.id) {
-              <button
-                type="button"
-                [attr.aria-pressed]="window() === w.id"
-                [attr.data-testid]="'telemetry-window-' + w.id"
-                (click)="pickWindow(w.id)"
-              >
-                {{ w.label }}
-              </button>
-            }
-          </div>
+          @if (!qualityPeriod()) {
+            <div class="segmented" role="group" aria-label="Time window">
+              @for (w of windows; track w.id) {
+                <button
+                  type="button"
+                  [attr.aria-pressed]="window() === w.id"
+                  [attr.data-testid]="'telemetry-window-' + w.id"
+                  (click)="pickWindow(w.id)"
+                >
+                  {{ w.label }}
+                </button>
+              }
+            </div>
+          }
 
           <div class="pop-wrap">
+            @if (tab() === "quality") {
+              <span
+                class="status-pill neutral"
+                gTip="Quality check rollouts and experiments are evaluated across their configured scope"
+                data-testid="telemetry-repo-readonly"
+              >
+                All repositories
+              </span>
+            } @else {
             <button
               #repoTrigger
               type="button"
@@ -205,82 +248,86 @@ const BUDGET_WINDOWS: readonly string[] = ["5h", "24h", "168h"];
                 }
               </ul>
             }
+            }
           </div>
 
-          <div class="pop-wrap">
-            <button
-              #authorTrigger
-              type="button"
-              class="pop-trigger"
-              [class.is-active]="!!selectedAuthor()"
-              data-testid="telemetry-author-trigger"
-              aria-haspopup="listbox"
-              [attr.aria-expanded]="openMenu() === 'author'"
-              aria-controls="telemetry-author-menu"
-              (click)="toggleMenu('author', $event)"
-              (keydown)="onMenuTriggerKeydown('author', $event)"
-            >
-              <span>{{
-                selectedAuthor()
-                  ? "Author: " + selectedAuthor()
-                  : "All contributors"
-              }}</span>
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                aria-hidden="true"
+          @if (tab() === "overview") {
+            <div class="pop-wrap">
+              <button
+                #authorTrigger
+                type="button"
+                class="pop-trigger"
+                [class.is-active]="!!selectedAuthor()"
+                data-testid="telemetry-author-trigger"
+                aria-haspopup="listbox"
+                [attr.aria-expanded]="openMenu() === 'author'"
+                aria-controls="telemetry-author-menu"
+                (click)="toggleMenu('author', $event)"
+                (keydown)="onMenuTriggerKeydown('author', $event)"
               >
-                <path d="M7 10l5 5 5-5z" fill="currentColor" />
-              </svg>
-            </button>
-            @if (openMenu() === "author") {
-              <ul
-                #authorListbox
-                class="pop-menu"
-                id="telemetry-author-menu"
-                role="listbox"
-                tabindex="-1"
-                aria-label="Filter by contributor"
-                data-testid="telemetry-author-menu"
-                (keydown)="onListboxKeydown('author', $event)"
-              >
-                <li role="none">
-                  <button
-                    type="button"
-                    class="pop-item"
-                    role="option"
-                    [attr.aria-selected]="!selectedAuthor()"
-                    (click)="pickAuthor('')"
-                  >
-                    <span>All contributors</span>
-                    @if (!selectedAuthor()) {
-                      <span aria-hidden="true">✓</span>
-                    }
-                  </button>
-                </li>
-                @for (a of authorOptions(); track a) {
+                <span>{{
+                  selectedAuthor()
+                    ? "Author: " + selectedAuthor()
+                    : "All contributors"
+                }}</span>
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                >
+                  <path d="M7 10l5 5 5-5z" fill="currentColor" />
+                </svg>
+              </button>
+              @if (openMenu() === "author") {
+                <ul
+                  #authorListbox
+                  class="pop-menu"
+                  id="telemetry-author-menu"
+                  role="listbox"
+                  tabindex="-1"
+                  aria-label="Filter by contributor"
+                  data-testid="telemetry-author-menu"
+                  (keydown)="onListboxKeydown('author', $event)"
+                >
                   <li role="none">
                     <button
                       type="button"
                       class="pop-item"
                       role="option"
-                      [attr.aria-selected]="selectedAuthor() === a"
-                      (click)="pickAuthor(a)"
+                      [attr.aria-selected]="!selectedAuthor()"
+                      (click)="pickAuthor('')"
                     >
-                      <span>{{ a }}</span>
-                      @if (selectedAuthor() === a) {
+                      <span>All contributors</span>
+                      @if (!selectedAuthor()) {
                         <span aria-hidden="true">✓</span>
                       }
                     </button>
                   </li>
-                }
-              </ul>
-            }
-          </div>
+                  @for (a of authorOptions(); track a) {
+                    <li role="none">
+                      <button
+                        type="button"
+                        class="pop-item"
+                        role="option"
+                        [attr.aria-selected]="selectedAuthor() === a"
+                        (click)="pickAuthor(a)"
+                      >
+                        <span>{{ a }}</span>
+                        @if (selectedAuthor() === a) {
+                          <span aria-hidden="true">✓</span>
+                        }
+                      </button>
+                    </li>
+                  }
+                </ul>
+              }
+            </div>
+          }
 
           @if (
-            (selectedRepo() && canReadAllReposMetrics()) || selectedAuthor()
+            (selectedRepo() && canReadAllReposMetrics()) ||
+            (selectedAuthor() && tab() === "overview")
           ) {
             <button
               type="button"
@@ -292,1470 +339,1178 @@ const BUDGET_WINDOWS: readonly string[] = ["5h", "24h", "168h"];
             </button>
           }
         </div>
+
+        <div
+          class="tab-strip"
+          role="tablist"
+          aria-label="Telemetry views"
+          data-testid="telemetry-tabs"
+        >
+          @for (t of tabs; track t.id) {
+            <button
+              type="button"
+              role="tab"
+              class="tab-link tel-tab-btn"
+              [id]="'telemetry-tab-' + t.id"
+              [attr.aria-selected]="tab() === t.id"
+              [attr.aria-controls]="
+                tab() === t.id ? 'telemetry-panel-' + t.id : null
+              "
+              [attr.tabindex]="tab() === t.id ? 0 : -1"
+              [attr.data-testid]="'telemetry-tab-' + t.id"
+              (click)="pickTab(t.id)"
+              (keydown)="onTabKeydown($event, t.id)"
+            >
+              @if (t.id === 'quality' && qaDigest()?.state === 'halted') {
+                <g-status-icon tone="error" kind="error" />
+              }
+              {{ t.label }}
+            </button>
+          }
+        </div>
       </div>
 
-      @if (loadError(); as err) {
-        <p
-          class="banner banner-error"
-          role="alert"
-          data-testid="telemetry-error"
+      @if (tab() === "quality") {
+        <div
+          class="ops-scroll"
+          role="tabpanel"
+          id="telemetry-panel-quality"
+          aria-labelledby="telemetry-tab-quality"
+          data-testid="telemetry-panel-quality"
         >
-          {{ err }}
-        </p>
-      }
-
-      @if (!canReadMetrics()) {
-        <p class="empty-state" data-testid="telemetry-denied">
-          {{ deniedMetricsReason(selectedRepo()) }}
-        </p>
+          <g-telemetry-quality
+            [summary]="qaSummary()"
+            [error]="qaError()"
+            [deniedReason]="qaDeniedReason()"
+            [windowId]="window()"
+            [repo]="selectedRepo()"
+            (retry)="loadQaSummary()"
+          />
+        </div>
       } @else {
-        <div class="ops-scroll">
-          <!-- Headline KPI Cards -->
-          <div class="ops-kpi-grid" data-testid="telemetry-kpis">
-            <article class="ops-kpi-card" data-testid="kpi-merged">
-              <div class="ops-kpi-top">
-                <span class="ops-kpi-label">Merged &amp; Completed</span>
-                <span class="status-pill healthy">
-                  <g-status-icon tone="healthy" kind="merged" />
-                  {{ fmtNum(report()?.merges?.landedPerDay ?? 0) }}/d
-                </span>
-              </div>
-              <div class="ops-kpi-value tabular">
-                {{ report()?.merges?.landed ?? 0 }} merged
-              </div>
-              <div class="ops-kpi-sub tabular">
-                {{ report()?.throughput?.tasksCompleted ?? 0 }} tasks completed
-                · {{ report()?.throughput?.tasksFiled ?? 0 }} filed
-              </div>
-            </article>
+        @if (loadError(); as err) {
+          <p
+            class="banner banner-error"
+            role="alert"
+            data-testid="telemetry-error"
+          >
+            {{ err }}
+          </p>
+        }
 
-            <article class="ops-kpi-card" data-testid="kpi-cycle">
-              <div class="ops-kpi-top">
-                <span class="ops-kpi-label">Median Cycle Time</span>
-                <span class="status-pill neutral">
-                  <g-status-icon tone="neutral" kind="progress" />
-                  p50
-                </span>
-              </div>
-              <div class="ops-kpi-value tabular">
-                {{ fmtDur(medianCycleSeconds()) }}
-              </div>
-              <div class="ops-kpi-sub tabular">
-                Queue → merge p50:
-                {{ fmtDur(report()?.merges?.completedToLanded?.p50Seconds) }}
-              </div>
-            </article>
-
-            <article class="ops-kpi-card" data-testid="kpi-ci">
-              <div class="ops-kpi-top">
-                <span class="ops-kpi-label">CI Pass Rate &amp; Faults</span>
-                <span
-                  [class]="
-                    infraFaultCount() > 0
-                      ? 'status-pill blast'
-                      : 'status-pill healthy'
-                  "
-                >
-                  <g-status-icon
-                    [tone]="infraFaultCount() > 0 ? 'blast' : 'healthy'"
-                    [kind]="infraFaultCount() > 0 ? 'warning' : 'healthy'"
-                  />
-                  {{ infraFaultCount() }} infra faults
-                </span>
-              </div>
-              <div class="ops-kpi-value tabular">{{ ciPassRateLabel() }}</div>
-              <div class="ops-kpi-sub tabular">
-                {{ report()?.checks?.greenRuns ?? 0 }} green runs · Cache hit
-                {{ fmtPct(report()?.ciQueueing?.cacheHitShare) }}
-              </div>
-            </article>
-
-            <article class="ops-kpi-card" data-testid="kpi-merge-queue">
-              <div class="ops-kpi-top">
-                <span class="ops-kpi-label">Merge Queue Health</span>
-                <span
-                  [class]="
-                    (report()?.merges?.baseHolds?.open ?? 0) > 0
-                      ? 'status-pill error'
-                      : 'status-pill healthy'
-                  "
-                >
-                  <g-status-icon
-                    [tone]="
-                      (report()?.merges?.baseHolds?.open ?? 0) > 0
-                        ? 'error'
-                        : 'healthy'
-                    "
-                    [kind]="
-                      (report()?.merges?.baseHolds?.open ?? 0) > 0
-                        ? 'blocked'
-                        : 'healthy'
-                    "
-                  />
-                  {{
-                    (report()?.merges?.baseHolds?.open ?? 0) > 0
-                      ? (report()?.merges?.baseHolds?.open ?? 0) + " base hold"
-                      : "Clear"
-                  }}
-                </span>
-              </div>
-              <div class="ops-kpi-value tabular">
-                {{ fmtPct(report()?.merges?.batches?.firstTryRate) }}
-              </div>
-              <div class="ops-kpi-sub tabular">
-                {{ report()?.merges?.batches?.passed ?? 0 }}/{{
-                  report()?.merges?.batches?.batches ?? 0
-                }}
-                batches · {{ report()?.merges?.batches?.saved ?? 0 }} CI suites
-                saved
-              </div>
-            </article>
-
-            <article class="ops-kpi-card" data-testid="kpi-agents">
-              <div class="ops-kpi-top">
-                <span class="ops-kpi-label">Active Agents &amp; Capacity</span>
-                <span class="status-pill setup">
-                  <g-status-icon tone="setup" kind="working" />
-                  {{ fmtPct(report()?.runs?.utilization) }} util
-                </span>
-              </div>
-              <div class="ops-kpi-value tabular">
-                {{ report()?.runs?.live ?? feed.runningCount() }} /
-                {{ report()?.runs?.maxConcurrent ?? 0 }}
-              </div>
-              <div class="ops-kpi-sub tabular">
-                {{ succeededRunsCount() }} succeeded turns ·
-                {{ (report()?.runs?.attemptsPerCompletion ?? 0).toFixed(1) }}
-                attempts/task
-              </div>
-            </article>
-          </div>
-
-          <!-- Primary SVG Charts Grid -->
-          <div class="ops-grid-2">
-            <!-- Chart 1: Throughput & Merges Over Time -->
-            <article class="ops-card" data-testid="card-throughput">
-              <div class="ops-card-head">
-                <div>
-                  <h2 class="ops-card-title">Throughput &amp; Merges</h2>
-                  <p class="ops-card-sub">
-                    Tasks filed, completed, and pull requests landed across the
-                    {{ window() }} window
-                  </p>
-                </div>
-                <div class="tel-legend">
-                  <span class="tel-legend-item">
-                    <span class="tel-swatch is-filed"></span>Filed
-                  </span>
-                  <span class="tel-legend-item">
-                    <span class="tel-swatch is-primary"></span>Completed
-                  </span>
-                  <span class="tel-legend-item">
-                    <span class="tel-swatch is-tertiary"></span>Merged
+        @if (!canReadMetrics()) {
+          <p
+            class="empty-state"
+            role="tabpanel"
+            id="telemetry-panel-overview"
+            aria-labelledby="telemetry-tab-overview"
+            data-testid="telemetry-denied"
+          >
+            {{ deniedMetricsReason(selectedRepo()) }}
+          </p>
+        } @else {
+          <div
+            class="ops-scroll"
+            role="tabpanel"
+            id="telemetry-panel-overview"
+            aria-labelledby="telemetry-tab-overview"
+            data-testid="telemetry-panel-overview"
+          >
+            <!-- Headline KPI Cards -->
+            <div class="ops-kpi-grid" data-testid="telemetry-kpis">
+              <article class="ops-kpi-card" data-testid="kpi-merged">
+                <div class="ops-kpi-top">
+                  <span class="ops-kpi-label">Merged &amp; Completed</span>
+                  <span class="status-pill healthy">
+                    <g-status-icon tone="healthy" kind="merged" />
+                    {{ fmtNum(report()?.merges?.landedPerDay ?? 0) }}/d
                   </span>
                 </div>
-              </div>
+                <div class="ops-kpi-value tabular">
+                  {{ report()?.merges?.landed ?? 0 }} merged
+                </div>
+                <div class="ops-kpi-sub tabular">
+                  {{ report()?.throughput?.tasksCompleted ?? 0 }} tasks
+                  completed · {{ report()?.throughput?.tasksFiled ?? 0 }} filed
+                </div>
+              </article>
 
-              @let geo = throughputGeo();
-              @if (geo.bars.length === 0) {
-                <p class="muted" style="margin: 8px 0">
-                  No bucketed throughput samples recorded in this window yet.
-                </p>
-              } @else {
-                <div class="tel-chart-wrap" (mouseleave)="tpHover.set(null)">
-                  <svg
-                    class="tel-chart-svg"
-                    viewBox="0 0 520 148"
-                    role="img"
-                    tabindex="0"
-                    [attr.aria-label]="
-                      'Throughput and merges chart over ' +
-                      window() +
-                      ', peak ' +
-                      geo.maxVal +
-                      ' per slice. Use the left and right arrow keys to read each slice.'
+              <article class="ops-kpi-card" data-testid="kpi-cycle">
+                <div class="ops-kpi-top">
+                  <span class="ops-kpi-label">Median Cycle Time</span>
+                  <span class="status-pill neutral">
+                    <g-status-icon tone="neutral" kind="progress" />
+                    p50
+                  </span>
+                </div>
+                <div class="ops-kpi-value tabular">
+                  {{ fmtDur(medianCycleSeconds()) }}
+                </div>
+                <div class="ops-kpi-sub tabular">
+                  Queue → merge p50:
+                  {{ fmtDur(report()?.merges?.completedToLanded?.p50Seconds) }}
+                </div>
+              </article>
+
+              <article class="ops-kpi-card" data-testid="kpi-ci">
+                <div class="ops-kpi-top">
+                  <span class="ops-kpi-label">CI Pass Rate &amp; Faults</span>
+                  <span
+                    [class]="
+                      infraFaultCount() > 0
+                        ? 'status-pill blast'
+                        : 'status-pill healthy'
                     "
-                    data-testid="chart-throughput"
-                    (keydown)="onThroughputKey($event, geo.bars.length)"
-                    (blur)="tpHover.set(null)"
                   >
-                    <line
-                      x1="0"
-                      y1="10"
-                      x2="520"
-                      y2="10"
-                      class="tel-grid-line"
+                    <g-status-icon
+                      [tone]="infraFaultCount() > 0 ? 'blast' : 'healthy'"
+                      [kind]="infraFaultCount() > 0 ? 'warning' : 'healthy'"
                     />
-                    <line
-                      x1="0"
-                      y1="70"
-                      x2="520"
-                      y2="70"
-                      class="tel-grid-line"
+                    {{ infraFaultCount() }} infra faults
+                  </span>
+                </div>
+                <div class="ops-kpi-value tabular">{{ ciPassRateLabel() }}</div>
+                <div class="ops-kpi-sub tabular">
+                  {{ report()?.checks?.greenRuns ?? 0 }} green runs · Cache hit
+                  {{ fmtPct(report()?.ciQueueing?.cacheHitShare) }}
+                </div>
+              </article>
+
+              <article class="ops-kpi-card" data-testid="kpi-merge-queue">
+                <div class="ops-kpi-top">
+                  <span class="ops-kpi-label">Merge Queue Health</span>
+                  <span
+                    [class]="
+                      (report()?.merges?.baseHolds?.open ?? 0) > 0
+                        ? 'status-pill error'
+                        : 'status-pill healthy'
+                    "
+                  >
+                    <g-status-icon
+                      [tone]="
+                        (report()?.merges?.baseHolds?.open ?? 0) > 0
+                          ? 'error'
+                          : 'healthy'
+                      "
+                      [kind]="
+                        (report()?.merges?.baseHolds?.open ?? 0) > 0
+                          ? 'blocked'
+                          : 'healthy'
+                      "
                     />
-                    <line
-                      x1="0"
-                      y1="130"
-                      x2="520"
-                      y2="130"
-                      class="tel-grid-line"
-                    />
-                    <text x="2" y="8" class="tel-axis-label">
-                      {{ geo.maxVal }}
-                    </text>
-
-                    @if (tpHover() !== null && geo.bars[tpHover()!]; as hb) {
-                      <rect
-                        class="tel-hover-band"
-                        [attr.x]="hb.slotX"
-                        y="4"
-                        [attr.width]="hb.slotW"
-                        height="126"
-                        rx="4"
-                      />
-                    }
-                    @for (b of geo.bars; track b.index) {
-                      <g
-                        [class.is-dim]="
-                          tpHover() !== null && tpHover() !== b.index
-                        "
-                      >
-                        <rect
-                          class="tel-bar-filed"
-                          [attr.x]="b.x"
-                          [attr.y]="b.filedY"
-                          [attr.width]="b.width"
-                          [attr.height]="b.filedH"
-                          rx="3"
-                        />
-                        <rect
-                          class="tel-bar-completed"
-                          [attr.x]="b.x"
-                          [attr.y]="b.completedY"
-                          [attr.width]="b.width"
-                          [attr.height]="b.completedH"
-                          rx="3"
-                        />
-                      </g>
-                    }
-                    @if (geo.mergeArea) {
-                      <path class="tel-merge-area" [attr.d]="geo.mergeArea" />
-                    }
-                    @if (geo.mergeLine) {
-                      <polyline
-                        class="tel-merge-line"
-                        [attr.points]="geo.mergeLine"
-                      />
-                    }
-                    @for (b of geo.bars; track b.index) {
-                      <circle
-                        class="tel-merge-dot"
-                        [class.is-active]="tpHover() === b.index"
-                        [attr.cx]="b.mergeX"
-                        [attr.cy]="b.mergeY"
-                        [attr.r]="tpHover() === b.index ? 4.5 : 3"
-                      />
-                    }
-                    @for (t of geo.ticks; track t.x) {
-                      <text
-                        class="tel-axis-label"
-                        text-anchor="middle"
-                        [attr.x]="t.x"
-                        y="145"
-                      >
-                        {{ t.label }}
-                      </text>
-                    }
-                    <!-- Hit areas last, so they sit on top of everything. -->
-                    @for (b of geo.bars; track b.index) {
-                      <rect
-                        class="tel-hit"
-                        [attr.x]="b.slotX"
-                        y="0"
-                        [attr.width]="b.slotW"
-                        height="132"
-                        [attr.data-testid]="'tp-hit-' + b.index"
-                        (mouseenter)="tpHover.set(b.index)"
-                      />
-                    }
-                  </svg>
-                  @if (tpHover() !== null && geo.bars[tpHover()!]; as hb) {
-                    <div
-                      class="tel-tip"
-                      role="status"
-                      data-testid="tp-tip"
-                      [class.is-left]="hb.mergeX > 300"
-                      [style.left.%]="
-                        ((hb.mergeX > 300 ? hb.slotX : hb.slotX + hb.slotW) /
-                          520) *
-                        100
-                      "
-                    >
-                      <div class="tel-tip-when">
-                        {{ rangeLabel(hb.since, hb.until) }}
-                      </div>
-                      <div class="tel-tip-row">
-                        <span class="tel-swatch is-filed"></span>Filed
-                        <strong class="tabular">{{ hb.filed }}</strong>
-                      </div>
-                      <div class="tel-tip-row">
-                        <span class="tel-swatch is-primary"></span>Completed
-                        <strong class="tabular">{{ hb.completed }}</strong>
-                      </div>
-                      <div class="tel-tip-row">
-                        <span class="tel-swatch is-tertiary"></span>Merged
-                        <strong class="tabular">{{ hb.landed }}</strong>
-                      </div>
-                      <div class="tel-tip-row is-muted">
-                        Runs finished
-                        <strong class="tabular">{{ hb.runsFinished }}</strong>
-                      </div>
-                    </div>
-                  }
-                </div>
-              }
-            </article>
-
-            <!-- Chart 2: Cycle-Time Stages (p50 -> p90) -->
-            <article class="ops-card" data-testid="card-latency">
-              <div class="ops-card-head">
-                <div>
-                  <h2 class="ops-card-title">Cycle-Time Stages</h2>
-                  <p class="ops-card-sub">
-                    Median (solid) and p90 tail (tonal) wall-clock duration per
-                    lifecycle stage
-                  </p>
-                </div>
-              </div>
-
-              @if (latencyRows().length === 0) {
-                <p class="muted" style="margin: 8px 0">
-                  No completed stage timings in this window.
-                </p>
-              } @else {
-                <div
-                  class="tel-stage-list"
-                  role="img"
-                  aria-label="Cycle-time stage median and p90 bars"
-                  data-testid="chart-latency"
-                >
-                  @for (s of latencyRows(); track s.stage) {
-                    <div class="tel-stage-row" [gTip]="s.description">
-                      <span class="tel-stage-name">{{
-                        s.label || s.stage
-                      }}</span>
-                      <svg
-                        width="100%"
-                        height="14"
-                        viewBox="0 0 200 14"
-                        preserveAspectRatio="none"
-                        aria-hidden="true"
-                      >
-                        <rect
-                          x="0"
-                          y="3"
-                          width="200"
-                          height="8"
-                          rx="4"
-                          fill="var(--md-sys-color-surface-container-highest)"
-                        />
-                        <rect
-                          x="0"
-                          y="3"
-                          [attr.width]="s.p90Pct * 2"
-                          height="8"
-                          rx="4"
-                          fill="var(--md-sys-color-secondary-container)"
-                        />
-                        <rect
-                          x="0"
-                          y="3"
-                          [attr.width]="s.p50Pct * 2"
-                          height="8"
-                          rx="4"
-                          fill="var(--md-sys-color-primary)"
-                        />
-                      </svg>
-                      <span class="tel-stage-nums tabular">
-                        p50 {{ fmtDur(s.p50Seconds) }} · p90
-                        {{ fmtDur(s.p90Seconds) }} (n={{ s.n }})
-                      </span>
-                    </div>
-                  }
-                </div>
-              }
-            </article>
-
-            <!-- Chart 3: Run Outcomes & Agent Templates -->
-            <article class="ops-card" data-testid="card-outcomes">
-              <div class="ops-card-head">
-                <div>
-                  <h2 class="ops-card-title">
-                    Run Outcomes &amp; Agent Templates
-                  </h2>
-                  <p class="ops-card-sub">
-                    Attempt conclusions and template wake efficiency
-                  </p>
-                </div>
-              </div>
-
-              @if (outcomeRows().length === 0) {
-                <p class="muted" style="margin: 8px 0">
-                  No finished agent runs in this window.
-                </p>
-              } @else {
-                <svg
-                  class="tel-stacked-svg"
-                  viewBox="0 0 400 16"
-                  preserveAspectRatio="none"
-                  role="img"
-                  aria-label="Stacked run outcome shares"
-                  data-testid="chart-outcomes"
-                >
-                  @for (o of outcomeRows(); track o.key) {
-                    <rect
-                      [attr.x]="o.offsetPct * 4"
-                      y="0"
-                      [attr.width]="o.widthPct * 4"
-                      height="16"
-                      [attr.fill]="o.color"
-                      [attr.opacity]="
-                        outcomeHover() && outcomeHover() !== o.key ? 0.35 : 1
-                      "
-                      style="cursor: pointer"
-                      (mouseenter)="outcomeHover.set(o.key)"
-                      (mouseleave)="outcomeHover.set(null)"
-                    >
-                      <title>
-                        {{ o.key }}: {{ o.count }} ({{ fmtPct(o.share) }})
-                      </title>
-                    </rect>
-                  }
-                </svg>
-                <div class="tel-legend">
-                  @for (o of outcomeRows(); track o.key) {
-                    <span
-                      class="tel-legend-item tabular"
-                      [class.is-active]="outcomeHover() === o.key"
-                      [class.is-dim]="
-                        outcomeHover() && outcomeHover() !== o.key
-                      "
-                      style="cursor: pointer"
-                      (mouseenter)="outcomeHover.set(o.key)"
-                      (mouseleave)="outcomeHover.set(null)"
-                    >
-                      <span
-                        class="tel-swatch"
-                        [style.background]="o.color"
-                      ></span>
-                      {{ o.key }}: <strong>{{ o.count }}</strong> ({{
-                        fmtPct(o.share)
-                      }})
-                    </span>
-                  }
-                </div>
-              }
-
-              @if ((report()?.agents?.templates?.length ?? 0) > 0) {
-                <div
-                  class="ops-table-wrap"
-                  tabindex="0"
-                  role="region"
-                  aria-label="Agent template wake efficiency"
-                >
-                  <table class="ops-table">
-                    <thead>
-                      <tr>
-                        <th scope="col">Template</th>
-                        <th scope="col">Wakes</th>
-                        <th scope="col">Calls p50 / p95</th>
-                        <th scope="col">Uncited rate</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      @for (
-                        tpl of report()?.agents?.templates ?? [];
-                        track tpl.templateId
-                      ) {
-                        <tr>
-                          <td class="tabular">{{ tpl.templateId }}</td>
-                          <td class="tabular">{{ tpl.wakes }}</td>
-                          <td class="tabular">
-                            {{ tpl.callsP50 }} / {{ tpl.callsP95 }}
-                          </td>
-                          <td class="tabular">
-                            {{ fmtPct(tpl.report?.uncitedRate) }}
-                          </td>
-                        </tr>
-                      }
-                    </tbody>
-                  </table>
-                </div>
-              }
-            </article>
-
-            <!-- Chart 4: Top Tools & CI Queue Wait Causes -->
-            <article class="ops-card" data-testid="card-tools">
-              <div class="ops-card-head">
-                <div>
-                  <h2 class="ops-card-title">
-                    Top Tools &amp; CI Queue Causes
-                  </h2>
-                  <p class="ops-card-sub">
-                    {{ fmtNum(report()?.tools?.calls ?? 0) }} tool calls ({{
-                      fmtPct(report()?.tools?.erroredShare)
+                    {{
+                      (report()?.merges?.baseHolds?.open ?? 0) > 0
+                        ? (report()?.merges?.baseHolds?.open ?? 0) +
+                          " base hold"
+                        : "Clear"
                     }}
-                    errored) · CI queued share
-                    {{ fmtPct(report()?.ciQueueing?.queuedShare) }}
-                  </p>
+                  </span>
                 </div>
-              </div>
-
-              @if (toolRows().length === 0 && queueCauseRows().length === 0) {
-                <p class="muted" style="margin: 8px 0">
-                  No tool census or CI queue delays recorded in this window.
-                </p>
-              } @else {
-                <div class="tel-stage-list" data-testid="chart-tools">
-                  @for (t of toolRows(); track t.name) {
-                    <div class="tel-stage-row">
-                      <span class="tel-stage-name tabular">{{ t.name }}</span>
-                      <svg
-                        width="100%"
-                        height="12"
-                        viewBox="0 0 200 12"
-                        preserveAspectRatio="none"
-                        aria-hidden="true"
-                      >
-                        <rect
-                          x="0"
-                          y="2"
-                          width="200"
-                          height="8"
-                          rx="4"
-                          fill="var(--md-sys-color-surface-container-highest)"
-                        />
-                        <rect
-                          x="0"
-                          y="2"
-                          [attr.width]="t.pct * 2"
-                          height="8"
-                          rx="4"
-                          fill="var(--md-sys-color-secondary)"
-                        />
-                      </svg>
-                      <span class="tel-stage-nums tabular">
-                        {{ fmtNum(t.calls) }} calls ·
-                        {{ fmtPct(t.errorRate) }} err
-                      </span>
-                    </div>
-                  }
-                  @for (c of queueCauseRows(); track c.cause) {
-                    <div class="tel-stage-row" [gTip]="c.reason || ''">
-                      <span class="tel-stage-name">CI wait: {{ c.cause }}</span>
-                      <div class="meter-track">
-                        <div
-                          class="meter-fill is-warn"
-                          [style.width.%]="c.share * 100"
-                        ></div>
-                      </div>
-                      <span class="tel-stage-nums tabular">
-                        {{ fmtPct(c.share) }} · {{ fmtDur(c.queuedSeconds) }}
-                      </span>
-                    </div>
-                  }
+                <div class="ops-kpi-value tabular">
+                  {{ fmtPct(report()?.merges?.batches?.firstTryRate) }}
                 </div>
-              }
-            </article>
+                <div class="ops-kpi-sub tabular">
+                  {{ report()?.merges?.batches?.passed ?? 0 }}/{{
+                    report()?.merges?.batches?.batches ?? 0
+                  }}
+                  batches · {{ report()?.merges?.batches?.saved ?? 0 }} CI
+                  suites saved
+                </div>
+              </article>
 
-            @if (canReadQaSummary() && qaSummary(); as qa) {
-              <!-- Card 5: Quality Control Rollout (A/B) -->
-              <article class="ops-card" data-testid="card-qa-rollout">
+              <article class="ops-kpi-card" data-testid="kpi-agents">
+                <div class="ops-kpi-top">
+                  <span class="ops-kpi-label"
+                    >Active Agents &amp; Capacity</span
+                  >
+                  <span class="status-pill setup">
+                    <g-status-icon tone="setup" kind="working" />
+                    {{ fmtPct(report()?.runs?.utilization) }} util
+                  </span>
+                </div>
+                <div class="ops-kpi-value tabular">
+                  {{ report()?.runs?.live ?? feed.runningCount() }} /
+                  {{ report()?.runs?.maxConcurrent ?? 0 }}
+                </div>
+                <div class="ops-kpi-sub tabular">
+                  {{ succeededRunsCount() }} succeeded turns ·
+                  {{ (report()?.runs?.attemptsPerCompletion ?? 0).toFixed(1) }}
+                  attempts/task
+                </div>
+              </article>
+            </div>
+
+            <!-- Primary SVG Charts Grid -->
+            <div class="ops-grid-2">
+              <!-- Chart 1: Throughput & Merges Over Time -->
+              <article class="ops-card" data-testid="card-throughput">
                 <div class="ops-card-head">
-                  <div style="flex: 1 1 220px; min-width: 0">
-                    <h2 class="ops-card-title">
-                      Quality Control Rollout (A/B)
-                    </h2>
+                  <div>
+                    <h2 class="ops-card-title">Throughput &amp; Merges</h2>
                     <p class="ops-card-sub">
-                      @if (
-                        qa.enabled ||
-                        qa.treatment.assignedOrigins +
-                          qa.control.assignedOrigins >
-                          0
-                      ) {
-                        <span class="tabular">
-                          Epoch {{ qa.epoch }} · Regime {{ qa.regimeId }} ·
-                          {{ qa.treatment.assignedOrigins }} treatment /
-                          {{ qa.control.assignedOrigins }} control workstreams
-                          ({{ qa.treatment.prsOpened }} /
-                          {{ qa.control.prsOpened }} PRs)
-                        </span>
-                      } @else {
-                        Single-instance WorkOrigin A/B comparison across pre-PR
-                        checks and blind post-PR review
-                      }
+                      Tasks filed, completed, and pull requests landed across
+                      the
+                      {{ window() }} window
                     </p>
                   </div>
-                  <div class="headline-actions">
-                    @if (
-                      qa.circuitBreaker.shouldAutoDowngrade ||
-                      (qa.enabled && qa.rolloutPct === 0 && qa.regimeId > 1)
-                    ) {
-                      <span
-                        class="status-pill blast tabular"
-                        data-testid="qa-rollout-pill"
-                      >
-                        <g-status-icon tone="blast" kind="warning" />
-                        0% shadow-only · {{ qa.flowId }}
-                      </span>
-                    } @else if (qa.enabled) {
-                      <span
-                        class="status-pill healthy tabular"
-                        data-testid="qa-rollout-pill"
-                      >
-                        <g-status-icon tone="healthy" kind="healthy" />
-                        {{ qa.rolloutPct }}% · {{ qa.flowId }}
-                      </span>
-                    } @else {
-                      <span
-                        class="status-pill neutral"
-                        data-testid="qa-rollout-pill"
-                      >
-                        <g-status-icon tone="neutral" kind="idle" />
-                        Off
-                      </span>
-                    }
-                    <a
-                      class="btn-tonal"
-                      routerLink="/settings/tasks"
-                      data-testid="qa-configure-link"
-                    >
-                      Configure
-                    </a>
+                  <div class="tel-legend">
+                    <span class="tel-legend-item">
+                      <span class="tel-swatch is-filed"></span>Filed
+                    </span>
+                    <span class="tel-legend-item">
+                      <span class="tel-swatch is-primary"></span>Completed
+                    </span>
+                    <span class="tel-legend-item">
+                      <span class="tel-swatch is-tertiary"></span>Merged
+                    </span>
                   </div>
                 </div>
 
-                @if ((qa.circuitBreaker.reasons?.length ?? 0) > 0) {
+                @let geo = throughputGeo();
+                @if (geo.bars.length === 0) {
+                  <p class="muted" style="margin: 8px 0">
+                    No bucketed throughput samples recorded in this window yet.
+                  </p>
+                } @else {
+                  <div class="tel-chart-wrap" (mouseleave)="tpHover.set(null)">
+                    <svg
+                      class="tel-chart-svg"
+                      viewBox="0 0 520 148"
+                      role="img"
+                      tabindex="0"
+                      [attr.aria-label]="
+                        'Throughput and merges chart over ' +
+                        window() +
+                        ', peak ' +
+                        geo.maxVal +
+                        ' per slice. Use the left and right arrow keys to read each slice.'
+                      "
+                      data-testid="chart-throughput"
+                      (keydown)="onThroughputKey($event, geo.bars.length)"
+                      (blur)="tpHover.set(null)"
+                    >
+                      <line
+                        x1="0"
+                        y1="10"
+                        x2="520"
+                        y2="10"
+                        class="tel-grid-line"
+                      />
+                      <line
+                        x1="0"
+                        y1="70"
+                        x2="520"
+                        y2="70"
+                        class="tel-grid-line"
+                      />
+                      <line
+                        x1="0"
+                        y1="130"
+                        x2="520"
+                        y2="130"
+                        class="tel-grid-line"
+                      />
+                      <text x="2" y="8" class="tel-axis-label">
+                        {{ geo.maxVal }}
+                      </text>
+
+                      @if (tpHover() !== null && geo.bars[tpHover()!]; as hb) {
+                        <rect
+                          class="tel-hover-band"
+                          [attr.x]="hb.slotX"
+                          y="4"
+                          [attr.width]="hb.slotW"
+                          height="126"
+                          rx="4"
+                        />
+                      }
+                      @for (b of geo.bars; track b.index) {
+                        <g
+                          [class.is-dim]="
+                            tpHover() !== null && tpHover() !== b.index
+                          "
+                        >
+                          <rect
+                            class="tel-bar-filed"
+                            [attr.x]="b.x"
+                            [attr.y]="b.filedY"
+                            [attr.width]="b.width"
+                            [attr.height]="b.filedH"
+                            rx="3"
+                          />
+                          <rect
+                            class="tel-bar-completed"
+                            [attr.x]="b.x"
+                            [attr.y]="b.completedY"
+                            [attr.width]="b.width"
+                            [attr.height]="b.completedH"
+                            rx="3"
+                          />
+                        </g>
+                      }
+                      @if (geo.mergeArea) {
+                        <path class="tel-merge-area" [attr.d]="geo.mergeArea" />
+                      }
+                      @if (geo.mergeLine) {
+                        <polyline
+                          class="tel-merge-line"
+                          [attr.points]="geo.mergeLine"
+                        />
+                      }
+                      @for (b of geo.bars; track b.index) {
+                        <circle
+                          class="tel-merge-dot"
+                          [class.is-active]="tpHover() === b.index"
+                          [attr.cx]="b.mergeX"
+                          [attr.cy]="b.mergeY"
+                          [attr.r]="tpHover() === b.index ? 4.5 : 3"
+                        />
+                      }
+                      @for (t of geo.ticks; track t.x) {
+                        <text
+                          class="tel-axis-label"
+                          text-anchor="middle"
+                          [attr.x]="t.x"
+                          y="145"
+                        >
+                          {{ t.label }}
+                        </text>
+                      }
+                      <!-- Hit areas last, so they sit on top of everything. -->
+                      @for (b of geo.bars; track b.index) {
+                        <rect
+                          class="tel-hit"
+                          [attr.x]="b.slotX"
+                          y="0"
+                          [attr.width]="b.slotW"
+                          height="132"
+                          [attr.data-testid]="'tp-hit-' + b.index"
+                          (mouseenter)="tpHover.set(b.index)"
+                        />
+                      }
+                    </svg>
+                    @if (tpHover() !== null && geo.bars[tpHover()!]; as hb) {
+                      <div
+                        class="tel-tip"
+                        role="status"
+                        data-testid="tp-tip"
+                        [class.is-left]="hb.mergeX > 300"
+                        [style.left.%]="
+                          ((hb.mergeX > 300 ? hb.slotX : hb.slotX + hb.slotW) /
+                            520) *
+                          100
+                        "
+                      >
+                        <div class="tel-tip-when">
+                          {{ rangeLabel(hb.since, hb.until) }}
+                        </div>
+                        <div class="tel-tip-row">
+                          <span class="tel-swatch is-filed"></span>Filed
+                          <strong class="tabular">{{ hb.filed }}</strong>
+                        </div>
+                        <div class="tel-tip-row">
+                          <span class="tel-swatch is-primary"></span>Completed
+                          <strong class="tabular">{{ hb.completed }}</strong>
+                        </div>
+                        <div class="tel-tip-row">
+                          <span class="tel-swatch is-tertiary"></span>Merged
+                          <strong class="tabular">{{ hb.landed }}</strong>
+                        </div>
+                        <div class="tel-tip-row is-muted">
+                          Runs finished
+                          <strong class="tabular">{{ hb.runsFinished }}</strong>
+                        </div>
+                      </div>
+                    }
+                  </div>
+                }
+              </article>
+
+              <!-- Chart 2: Cycle-Time Stages (p50 -> p90) -->
+              <article class="ops-card" data-testid="card-latency">
+                <div class="ops-card-head">
+                  <div>
+                    <h2 class="ops-card-title">Cycle-Time Stages</h2>
+                    <p class="ops-card-sub">
+                      Median (solid) and p90 tail (tonal) wall-clock duration
+                      per lifecycle stage
+                    </p>
+                  </div>
+                </div>
+
+                @if (latencyRows().length === 0) {
+                  <p class="muted" style="margin: 8px 0">
+                    No completed stage timings in this window.
+                  </p>
+                } @else {
+                  <div
+                    class="tel-stage-list"
+                    role="img"
+                    aria-label="Cycle-time stage median and p90 bars"
+                    data-testid="chart-latency"
+                  >
+                    @for (s of latencyRows(); track s.stage) {
+                      <div class="tel-stage-row" [gTip]="s.description">
+                        <span class="tel-stage-name">{{
+                          s.label || s.stage
+                        }}</span>
+                        <svg
+                          width="100%"
+                          height="14"
+                          viewBox="0 0 200 14"
+                          preserveAspectRatio="none"
+                          aria-hidden="true"
+                        >
+                          <rect
+                            x="0"
+                            y="3"
+                            width="200"
+                            height="8"
+                            rx="4"
+                            fill="var(--md-sys-color-surface-container-highest)"
+                          />
+                          <rect
+                            x="0"
+                            y="3"
+                            [attr.width]="s.p90Pct * 2"
+                            height="8"
+                            rx="4"
+                            fill="var(--md-sys-color-secondary-container)"
+                          />
+                          <rect
+                            x="0"
+                            y="3"
+                            [attr.width]="s.p50Pct * 2"
+                            height="8"
+                            rx="4"
+                            fill="var(--md-sys-color-primary)"
+                          />
+                        </svg>
+                        <span class="tel-stage-nums tabular">
+                          p50 {{ fmtDur(s.p50Seconds) }} · p90
+                          {{ fmtDur(s.p90Seconds) }} (n={{ s.n }})
+                        </span>
+                      </div>
+                    }
+                  </div>
+                }
+              </article>
+
+              <!-- Chart 3: Run Outcomes & Agent Templates -->
+              <article class="ops-card" data-testid="card-outcomes">
+                <div class="ops-card-head">
+                  <div>
+                    <h2 class="ops-card-title">
+                      Run Outcomes &amp; Agent Templates
+                    </h2>
+                    <p class="ops-card-sub">
+                      Attempt conclusions and template wake efficiency
+                    </p>
+                  </div>
+                </div>
+
+                @if (outcomeRows().length === 0) {
+                  <p class="muted" style="margin: 8px 0">
+                    No finished agent runs in this window.
+                  </p>
+                } @else {
+                  <svg
+                    class="tel-stacked-svg"
+                    viewBox="0 0 400 16"
+                    preserveAspectRatio="none"
+                    role="img"
+                    aria-label="Stacked run outcome shares"
+                    data-testid="chart-outcomes"
+                  >
+                    @for (o of outcomeRows(); track o.key) {
+                      <rect
+                        [attr.x]="o.offsetPct * 4"
+                        y="0"
+                        [attr.width]="o.widthPct * 4"
+                        height="16"
+                        [attr.fill]="o.color"
+                        [attr.opacity]="
+                          outcomeHover() && outcomeHover() !== o.key ? 0.35 : 1
+                        "
+                        style="cursor: pointer"
+                        (mouseenter)="outcomeHover.set(o.key)"
+                        (mouseleave)="outcomeHover.set(null)"
+                      >
+                        <title>
+                          {{ o.key }}: {{ o.count }} ({{ fmtPct(o.share) }})
+                        </title>
+                      </rect>
+                    }
+                  </svg>
+                  <div class="tel-legend">
+                    @for (o of outcomeRows(); track o.key) {
+                      <span
+                        class="tel-legend-item tabular"
+                        [class.is-active]="outcomeHover() === o.key"
+                        [class.is-dim]="
+                          outcomeHover() && outcomeHover() !== o.key
+                        "
+                        style="cursor: pointer"
+                        (mouseenter)="outcomeHover.set(o.key)"
+                        (mouseleave)="outcomeHover.set(null)"
+                      >
+                        <span
+                          class="tel-swatch"
+                          [style.background]="o.color"
+                        ></span>
+                        {{ o.key }}: <strong>{{ o.count }}</strong> ({{
+                          fmtPct(o.share)
+                        }})
+                      </span>
+                    }
+                  </div>
+                }
+
+                @if ((report()?.agents?.templates?.length ?? 0) > 0) {
+                  <div
+                    class="ops-table-wrap"
+                    tabindex="0"
+                    role="region"
+                    aria-label="Agent template wake efficiency"
+                  >
+                    <table class="ops-table">
+                      <thead>
+                        <tr>
+                          <th scope="col">Template</th>
+                          <th scope="col">Wakes</th>
+                          <th scope="col">Calls p50 / p95</th>
+                          <th scope="col">Uncited rate</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        @for (
+                          tpl of report()?.agents?.templates ?? [];
+                          track tpl.templateId
+                        ) {
+                          <tr>
+                            <td class="tabular">{{ tpl.templateId }}</td>
+                            <td class="tabular">{{ tpl.wakes }}</td>
+                            <td class="tabular">
+                              {{ tpl.callsP50 }} / {{ tpl.callsP95 }}
+                            </td>
+                            <td class="tabular">
+                              {{ fmtPct(tpl.report?.uncitedRate) }}
+                            </td>
+                          </tr>
+                        }
+                      </tbody>
+                    </table>
+                  </div>
+                }
+              </article>
+
+              <!-- Chart 4: Top Tools & CI Queue Wait Causes -->
+              <article class="ops-card" data-testid="card-tools">
+                <div class="ops-card-head">
+                  <div>
+                    <h2 class="ops-card-title">
+                      Top Tools &amp; CI Queue Causes
+                    </h2>
+                    <p class="ops-card-sub">
+                      {{ fmtNum(report()?.tools?.calls ?? 0) }} tool calls ({{
+                        fmtPct(report()?.tools?.erroredShare)
+                      }}
+                      errored) · CI queued share
+                      {{ fmtPct(report()?.ciQueueing?.queuedShare) }}
+                    </p>
+                  </div>
+                </div>
+
+                @if (toolRows().length === 0 && queueCauseRows().length === 0) {
+                  <p class="muted" style="margin: 8px 0">
+                    No tool census or CI queue delays recorded in this window.
+                  </p>
+                } @else {
+                  <div class="tel-stage-list" data-testid="chart-tools">
+                    @for (t of toolRows(); track t.name) {
+                      <div class="tel-stage-row">
+                        <span class="tel-stage-name tabular">{{ t.name }}</span>
+                        <svg
+                          width="100%"
+                          height="12"
+                          viewBox="0 0 200 12"
+                          preserveAspectRatio="none"
+                          aria-hidden="true"
+                        >
+                          <rect
+                            x="0"
+                            y="2"
+                            width="200"
+                            height="8"
+                            rx="4"
+                            fill="var(--md-sys-color-surface-container-highest)"
+                          />
+                          <rect
+                            x="0"
+                            y="2"
+                            [attr.width]="t.pct * 2"
+                            height="8"
+                            rx="4"
+                            fill="var(--md-sys-color-secondary)"
+                          />
+                        </svg>
+                        <span class="tel-stage-nums tabular">
+                          {{ fmtNum(t.calls) }} calls ·
+                          {{ fmtPct(t.errorRate) }} err
+                        </span>
+                      </div>
+                    }
+                    @for (c of queueCauseRows(); track c.cause) {
+                      <div class="tel-stage-row" [gTip]="c.reason || ''">
+                        <span class="tel-stage-name"
+                          >CI wait: {{ c.cause }}</span
+                        >
+                        <div class="meter-track">
+                          <div
+                            class="meter-fill is-warn"
+                            [style.width.%]="c.share * 100"
+                          ></div>
+                        </div>
+                        <span class="tel-stage-nums tabular">
+                          {{ fmtPct(c.share) }} · {{ fmtDur(c.queuedSeconds) }}
+                        </span>
+                      </div>
+                    }
+                  </div>
+                }
+              </article>
+            </div>
+
+            @if (canReadQaSummary()) {
+              <article
+                class="ops-card tel-qa-digest"
+                data-testid="qa-digest"
+                aria-labelledby="tel-qa-digest-title"
+              >
+                <h2 class="ops-card-title" id="tel-qa-digest-title">
+                  Quality checks
+                </h2>
+                @if (qaDigest(); as d) {
+                  <span [class]="'status-pill ' + d.tone">
+                    <g-status-icon [tone]="d.tone" [kind]="d.kind" />
+                    {{ d.label }}
+                  </span>
+                  <p class="tel-qa-digest-text">{{ d.sentence }}</p>
+                } @else {
+                  <p class="tel-qa-digest-text muted">
+                    {{
+                      qaError()
+                        ? "Quality results could not be loaded."
+                        : "Loading quality results…"
+                    }}
+                  </p>
+                }
+                <button
+                  type="button"
+                  class="btn-text"
+                  data-testid="qa-digest-open"
+                  (click)="pickTab('quality')"
+                >
+                  View Quality checks →
+                </button>
+              </article>
+            }
+
+            <!-- Token Usage & Budget Caps (GET /api/usage, PUT /api/usage/settings) -->
+            <article class="ops-card" data-testid="telemetry-usage">
+              <div class="ops-card-head">
+                <div>
+                  <h2 class="ops-card-title">
+                    Token Usage, Cost &amp; Concurrency Budgets
+                  </h2>
+                  <p class="ops-card-sub">
+                    Per-connection and per-model token consumption, burn rate,
+                    and sustainable worker ceilings
+                  </p>
+                </div>
+                <div class="headline-actions">
+                  @if (usage(); as u) {
+                    <span class="status-pill neutral tabular">
+                      <g-status-icon tone="neutral" kind="progress" />
+                      Mode: {{ u.mode }} · {{ u.effectiveWorkers }}/{{
+                        u.maxWorkers
+                      }}
+                      workers
+                    </span>
+                  }
+                  <button
+                    type="button"
+                    class="btn-tonal"
+                    data-testid="usage-editor-toggle"
+                    [disabled]="!canWriteUsage()"
+                    [gTip]="
+                      canWriteUsage()
+                        ? 'Configure concurrency mode and connection token budgets'
+                        : access.deniedReason('PUT /api/usage/settings')
+                    "
+                    (click)="toggleUsageEditor()"
+                  >
+                    {{
+                      editingUsage()
+                        ? "Close budget editor"
+                        : "Configure budgets"
+                    }}
+                  </button>
+                </div>
+              </div>
+
+              @if (usage(); as u) {
+                @for (w of u.warnings ?? []; track w) {
                   <p
                     class="banner banner-error"
                     style="margin: 0"
                     role="status"
-                    data-testid="qa-circuit-breaker-banner"
                   >
-                    Safety guardrail tripped:
-                    {{ (qa.circuitBreaker.reasons ?? []).join(" · ") }}
+                    {{ w }}
                   </p>
                 }
-
-                @if (
-                  qa.treatment.assignedOrigins + qa.control.assignedOrigins ===
-                  0
-                ) {
-                  <p
-                    class="muted"
-                    style="margin: 4px 0"
-                    data-testid="qa-rollout-empty"
-                  >
-                    @if (qa.enabled) {
-                      Waiting for eligible tasks to dispatch under Epoch
-                      {{ qa.epoch }}.
-                    } @else {
-                      Quality control is off on this deployment. Enable a
-                      rollout in Settings → Tasks to compare treatment and
-                      control pull requests.
-                    }
-                  </p>
-                } @else {
-                  <div class="tel-legend tabular">
-                    <span
-                      >Escape Δ (CMH):
-                      <strong>{{
-                        fmtSignedPctPts(qa.blindEscapeCmh.riskDiff)
-                      }}</strong>
-                      (p={{ qa.blindEscapeCmh.pValue.toFixed(2) }})</span
-                    >
-                    <span
-                      >Online-CUPED cost Δ:
-                      <strong>{{
-                        fmtSignedRel(qa.costCuped.adjRelativeDelta)
-                      }}</strong>
-                      (VR {{ fmtPct(qa.costCuped.varianceReduction) }})</span
-                    >
-                    <span
-                      >Fast-lane T0/T1 shift:
-                      <strong>{{
-                        fmtSignedSec(qa.fastLaneTimeToPrSeconds.shift)
-                      }}</strong></span
+                <div class="ops-kpi-grid">
+                  <div class="ops-kpi-card">
+                    <span class="ops-kpi-label">Billable Tokens</span>
+                    <span class="ops-kpi-value tabular">{{
+                      fmtNum(u.rollup.billable)
+                    }}</span>
+                    <span class="ops-kpi-sub tabular"
+                      >{{ u.rollup.runs }} recorded runs</span
                     >
                   </div>
-
-                  <div class="tel-stage-list" data-testid="chart-qa-rollout">
-                    <div
-                      class="tel-stage-row"
-                      [gTip]="
-                        'Blind every-pr.yml / first-push CI escapes + held QA PRs (' +
-                        qa.treatment.heldByQaGate +
-                        ' held); tonal bar shows Control baseline'
-                      "
+                  <div class="ops-kpi-card">
+                    <span class="ops-kpi-label">Input / Output</span>
+                    <span class="ops-kpi-value tabular"
+                      >{{ fmtNum(u.rollup.inputTokens) }} /
+                      {{ fmtNum(u.rollup.outputTokens) }}</span
                     >
-                      <span class="tel-stage-name">Blind escape rate</span>
-                      <svg
-                        width="100%"
-                        height="14"
-                        viewBox="0 0 200 14"
-                        preserveAspectRatio="none"
-                        aria-hidden="true"
-                      >
-                        <rect
-                          x="0"
-                          y="3"
-                          width="200"
-                          height="8"
-                          rx="4"
-                          fill="var(--md-sys-color-surface-container-highest)"
-                        />
-                        <rect
-                          x="0"
-                          y="3"
-                          [attr.width]="
-                            Math.min(100, qa.control.blindEscapeRate * 100) * 2
-                          "
-                          height="8"
-                          rx="4"
-                          fill="var(--md-sys-color-secondary-container)"
-                        />
-                        <rect
-                          x="0"
-                          y="3"
-                          [attr.width]="
-                            Math.min(100, qa.treatment.blindEscapeRate * 100) *
-                            2
-                          "
-                          height="8"
-                          rx="4"
-                          [attr.fill]="
-                            qa.treatment.blindEscapeRate <=
-                            qa.control.blindEscapeRate
-                              ? 'var(--md-sys-color-tertiary)'
-                              : 'var(--md-sys-color-warning)'
-                          "
-                        />
-                      </svg>
-                      <span class="tel-stage-nums tabular">
-                        {{ fmtPct(qa.treatment.blindEscapeRate) }} vs
-                        {{ fmtPct(qa.control.blindEscapeRate) }}
-                      </span>
-                    </div>
-
-                    <div
-                      class="tel-stage-row"
-                      gTip="First-push Grain CI green rate (treatment solid vs control tonal)"
+                    <span class="ops-kpi-sub tabular">
+                      Cache read {{ fmtNum(u.rollup.cacheReadTokens) }} · write
+                      {{ fmtNum(u.rollup.cacheWriteTokens) }}
+                    </span>
+                  </div>
+                  <div class="ops-kpi-card">
+                    <span class="ops-kpi-label">Burn Rate</span>
+                    <span class="ops-kpi-value tabular"
+                      >{{ fmtNum(u.rollup.burnPerHour) }}/hr</span
                     >
-                      <span class="tel-stage-name">First-push CI green</span>
-                      <svg
-                        width="100%"
-                        height="14"
-                        viewBox="0 0 200 14"
-                        preserveAspectRatio="none"
-                        aria-hidden="true"
-                      >
-                        <rect
-                          x="0"
-                          y="3"
-                          width="200"
-                          height="8"
-                          rx="4"
-                          fill="var(--md-sys-color-surface-container-highest)"
-                        />
-                        <rect
-                          x="0"
-                          y="3"
-                          [attr.width]="
-                            Math.min(
-                              100,
-                              qa.control.firstPushCiGreenRate * 100
-                            ) * 2
-                          "
-                          height="8"
-                          rx="4"
-                          fill="var(--md-sys-color-secondary-container)"
-                        />
-                        <rect
-                          x="0"
-                          y="3"
-                          [attr.width]="
-                            Math.min(
-                              100,
-                              qa.treatment.firstPushCiGreenRate * 100
-                            ) * 2
-                          "
-                          height="8"
-                          rx="4"
-                          fill="var(--md-sys-color-tertiary)"
-                        />
-                      </svg>
-                      <span class="tel-stage-nums tabular">
-                        {{ fmtPct(qa.treatment.firstPushCiGreenRate) }} vs
-                        {{ fmtPct(qa.control.firstPushCiGreenRate) }}
-                      </span>
-                    </div>
+                    <span class="ops-kpi-sub tabular">
+                      @if (u.rollup.costUsd) {
+                        \${{ u.rollup.costUsd.toFixed(2) }} est. spend
+                      } @else {
+                        Subscription / unpriced connections
+                      }
+                    </span>
+                  </div>
+                </div>
 
-                    <div
-                      class="tel-stage-row"
-                      gTip="7-day post-merge follow-up repair churn (treatment solid vs control tonal)"
-                    >
-                      <span class="tel-stage-name">7d post-merge churn</span>
-                      <svg
-                        width="100%"
-                        height="14"
-                        viewBox="0 0 200 14"
-                        preserveAspectRatio="none"
-                        aria-hidden="true"
-                      >
-                        <rect
-                          x="0"
-                          y="3"
-                          width="200"
-                          height="8"
-                          rx="4"
-                          fill="var(--md-sys-color-surface-container-highest)"
-                        />
-                        <rect
-                          x="0"
-                          y="3"
-                          [attr.width]="
-                            Math.min(
-                              100,
-                              qa.control.postMergeChurn7dRate * 100
-                            ) * 2
-                          "
-                          height="8"
-                          rx="4"
-                          fill="var(--md-sys-color-secondary-container)"
-                        />
-                        <rect
-                          x="0"
-                          y="3"
-                          [attr.width]="
-                            Math.min(
-                              100,
-                              qa.treatment.postMergeChurn7dRate * 100
-                            ) * 2
-                          "
-                          height="8"
-                          rx="4"
-                          [attr.fill]="
-                            qa.treatment.postMergeChurn7dRate <=
-                            qa.control.postMergeChurn7dRate
-                              ? 'var(--md-sys-color-tertiary)'
-                              : 'var(--md-sys-color-warning)'
-                          "
-                        />
-                      </svg>
-                      <span class="tel-stage-nums tabular">
-                        {{ fmtPct(qa.treatment.postMergeChurn7dRate) }} vs
-                        {{ fmtPct(qa.control.postMergeChurn7dRate) }}
-                      </span>
-                    </div>
-
-                    <div
-                      class="tel-stage-row"
-                      gTip="Injected QA skill share of total prompt bytes and context ThreadCut rate"
-                    >
-                      <span class="tel-stage-name">Prompt QA share</span>
-                      <div class="meter-track">
+                @if (editingUsage() && canWriteUsage()) {
+                  <div
+                    class="tel-budget-editor"
+                    data-testid="usage-budget-editor"
+                  >
+                    <div class="tel-budget-controls">
+                      <div class="tel-field-group">
+                        <span>Concurrency mode</span>
                         <div
-                          class="meter-fill"
-                          [style.width.%]="
-                            Math.min(
-                              100,
-                              qa.treatment.qaSkillPromptByteShare * 100
+                          class="segmented"
+                          role="group"
+                          aria-label="Usage concurrency mode"
+                        >
+                          @for (m of ["advisory", "auto", "off"]; track m) {
+                            <button
+                              type="button"
+                              [attr.aria-pressed]="draftMode() === m"
+                              [attr.data-testid]="'usage-mode-' + m"
+                              (click)="draftMode.set(m)"
+                            >
+                              {{ m }}
+                            </button>
+                          }
+                        </div>
+                      </div>
+                      <label class="tel-field-group">
+                        <span>Min workers</span>
+                        <input
+                          type="number"
+                          min="1"
+                          class="ops-input tabular"
+                          style="width: 96px"
+                          data-testid="usage-min-workers"
+                          [value]="draftMinWorkers()"
+                          (input)="
+                            draftMinWorkers.set(+$any($event.target).value || 1)
+                          "
+                        />
+                      </label>
+                      <label class="tel-field-group">
+                        <span>Retention (days)</span>
+                        <input
+                          type="number"
+                          min="1"
+                          class="ops-input tabular"
+                          style="width: 110px"
+                          data-testid="usage-retention-days"
+                          [value]="draftRetentionDays()"
+                          (input)="
+                            draftRetentionDays.set(
+                              +$any($event.target).value || 30
                             )
                           "
-                        ></div>
-                      </div>
-                      <span class="tel-stage-nums tabular">
-                        {{ fmtPct(qa.treatment.qaSkillPromptByteShare) }} · cut
-                        {{ fmtPct(qa.treatment.threadCutShare) }}
-                      </span>
-                    </div>
-                  </div>
-                }
-              </article>
-
-              <!-- Card 6: Pre-PR Check Latency & Catch Rate -->
-              <article class="ops-card" data-testid="card-qa-checks">
-                <div class="ops-card-head">
-                  <div style="flex: 1 1 220px; min-width: 0">
-                    <h2 class="ops-card-title">
-                      Pre-PR Check Latency &amp; Catch Rate
-                    </h2>
-                    <p class="ops-card-sub">
-                      Deterministic S3 rules and T2/T3 S4 verification across
-                      enforced and control-shadow runs
-                    </p>
-                  </div>
-                  <div class="headline-actions">
-                    @if (qa.shadowRecall.controlTasksChecked > 0) {
-                      <span
-                        class="status-pill neutral tabular"
-                        data-testid="qa-shadow-recall-pill"
-                        [gTip]="
-                          qa.shadowRecall.controlBlindEscapes > 0
-                            ? 'Paired deterministic S3 recall on Control PRs with blind post-PR escapes'
-                            : 'Deterministic S3 shadow catch rate across uncontaminated Control PRs'
-                        "
-                      >
-                        <g-status-icon tone="neutral" kind="progress" />
-                        @if (qa.shadowRecall.controlBlindEscapes > 0) {
-                          Shadow recall
-                          {{ fmtPct(qa.shadowRecall.pairedRecall) }} ({{
-                            qa.shadowRecall.matchedBlindEscapes
-                          }}/{{ qa.shadowRecall.controlBlindEscapes }})
-                        } @else {
-                          Shadow catch
-                          {{ fmtPct(qa.shadowRecall.shadowCatchRate) }} ({{
-                            qa.shadowRecall.shadowWouldBlock
-                          }}/{{ qa.shadowRecall.controlTasksChecked }})
-                        }
-                      </span>
-                    }
-                    <a
-                      class="btn-tonal"
-                      routerLink="/processes/quality"
-                      data-testid="qa-rules-link"
-                    >
-                      Rules
-                    </a>
-                  </div>
-                </div>
-
-                @if (qa.checks.length === 0) {
-                  <p
-                    class="muted"
-                    style="margin: 4px 0"
-                    data-testid="qa-checks-empty"
-                  >
-                    No pre-PR quality check runs recorded in this window.
-                  </p>
-                } @else {
-                  <div
-                    class="tel-qa-check-list"
-                    role="list"
-                    aria-label="Pre-PR quality check latency and catch rate"
-                    data-testid="qa-checks-table"
-                  >
-                    @for (r of qa.checks; track r.stage + ":" + r.ruleId) {
-                      <div class="tel-qa-check-row" role="listitem">
-                        <div class="tel-qa-check-top">
-                          <span
-                            class="tel-qa-check-name"
-                            [gTip]="r.ruleId + ' (' + r.stage + ')'"
-                          >
-                            <strong class="tabular">{{ r.ruleId }}</strong>
-                            <span class="muted tabular"> · {{ r.stage }}</span>
-                          </span>
-                          <span class="tabular" style="white-space: nowrap">
-                            Catch {{ fmtPct(r.catchRate) }} ({{ r.failCount }})
-                          </span>
-                        </div>
-                        <div class="tel-qa-check-meta tabular">
-                          <span>
-                            {{ r.enforcedRuns }} enf
-                            @if (r.shadowRuns > 0) {
-                              · {{ r.shadowRuns }} shd
-                            }
-                          </span>
-                          <span>
-                            {{ fmtCheckMs(r.p50DurationMs) }} /
-                            {{ fmtCheckMs(r.p95DurationMs) }}
-                          </span>
-                          <span>
-                            +{{ r.helpfulVotes }} / −{{ r.notHelpfulVotes }}
-                          </span>
-                        </div>
-                      </div>
-                    }
-                  </div>
-                }
-              </article>
-            }
-          </div>
-
-          <!-- Token Usage & Budget Caps (GET /api/usage, PUT /api/usage/settings) -->
-          <article class="ops-card" data-testid="telemetry-usage">
-            <div class="ops-card-head">
-              <div>
-                <h2 class="ops-card-title">
-                  Token Usage, Cost &amp; Concurrency Budgets
-                </h2>
-                <p class="ops-card-sub">
-                  Per-connection and per-model token consumption, burn rate, and
-                  sustainable worker ceilings
-                </p>
-              </div>
-              <div class="headline-actions">
-                @if (usage(); as u) {
-                  <span class="status-pill neutral tabular">
-                    <g-status-icon tone="neutral" kind="progress" />
-                    Mode: {{ u.mode }} · {{ u.effectiveWorkers }}/{{
-                      u.maxWorkers
-                    }}
-                    workers
-                  </span>
-                }
-                <button
-                  type="button"
-                  class="btn-tonal"
-                  data-testid="usage-editor-toggle"
-                  [disabled]="!canWriteUsage()"
-                  [gTip]="
-                    canWriteUsage()
-                      ? 'Configure concurrency mode and connection token budgets'
-                      : access.deniedReason('PUT /api/usage/settings')
-                  "
-                  (click)="toggleUsageEditor()"
-                >
-                  {{
-                    editingUsage() ? "Close budget editor" : "Configure budgets"
-                  }}
-                </button>
-              </div>
-            </div>
-
-            @if (usage(); as u) {
-              @for (w of u.warnings ?? []; track w) {
-                <p class="banner banner-error" style="margin: 0" role="status">
-                  {{ w }}
-                </p>
-              }
-              <div class="ops-kpi-grid">
-                <div class="ops-kpi-card">
-                  <span class="ops-kpi-label">Billable Tokens</span>
-                  <span class="ops-kpi-value tabular">{{
-                    fmtNum(u.rollup.billable)
-                  }}</span>
-                  <span class="ops-kpi-sub tabular"
-                    >{{ u.rollup.runs }} recorded runs</span
-                  >
-                </div>
-                <div class="ops-kpi-card">
-                  <span class="ops-kpi-label">Input / Output</span>
-                  <span class="ops-kpi-value tabular"
-                    >{{ fmtNum(u.rollup.inputTokens) }} /
-                    {{ fmtNum(u.rollup.outputTokens) }}</span
-                  >
-                  <span class="ops-kpi-sub tabular">
-                    Cache read {{ fmtNum(u.rollup.cacheReadTokens) }} · write
-                    {{ fmtNum(u.rollup.cacheWriteTokens) }}
-                  </span>
-                </div>
-                <div class="ops-kpi-card">
-                  <span class="ops-kpi-label">Burn Rate</span>
-                  <span class="ops-kpi-value tabular"
-                    >{{ fmtNum(u.rollup.burnPerHour) }}/hr</span
-                  >
-                  <span class="ops-kpi-sub tabular">
-                    @if (u.rollup.costUsd) {
-                      \${{ u.rollup.costUsd.toFixed(2) }} est. spend
-                    } @else {
-                      Subscription / unpriced connections
-                    }
-                  </span>
-                </div>
-              </div>
-
-              @if (editingUsage() && canWriteUsage()) {
-                <div
-                  class="tel-budget-editor"
-                  data-testid="usage-budget-editor"
-                >
-                  <div class="tel-budget-controls">
-                    <div class="tel-field-group">
-                      <span>Concurrency mode</span>
-                      <div
-                        class="segmented"
-                        role="group"
-                        aria-label="Usage concurrency mode"
-                      >
-                        @for (m of ["advisory", "auto", "off"]; track m) {
-                          <button
-                            type="button"
-                            [attr.aria-pressed]="draftMode() === m"
-                            [attr.data-testid]="'usage-mode-' + m"
-                            (click)="draftMode.set(m)"
-                          >
-                            {{ m }}
-                          </button>
-                        }
-                      </div>
-                    </div>
-                    <label class="tel-field-group">
-                      <span>Min workers</span>
-                      <input
-                        type="number"
-                        min="1"
-                        class="ops-input tabular"
-                        style="width: 96px"
-                        data-testid="usage-min-workers"
-                        [value]="draftMinWorkers()"
-                        (input)="
-                          draftMinWorkers.set(+$any($event.target).value || 1)
-                        "
-                      />
-                    </label>
-                    <label class="tel-field-group">
-                      <span>Retention (days)</span>
-                      <input
-                        type="number"
-                        min="1"
-                        class="ops-input tabular"
-                        style="width: 110px"
-                        data-testid="usage-retention-days"
-                        [value]="draftRetentionDays()"
-                        (input)="
-                          draftRetentionDays.set(
-                            +$any($event.target).value || 30
-                          )
-                        "
-                      />
-                    </label>
-                    <button
-                      type="button"
-                      class="btn-tonal"
-                      data-testid="usage-add-budget"
-                      (click)="addBudgetRow()"
-                    >
-                      + Add budget cap
-                    </button>
-                  </div>
-
-                  @for (b of draftBudgets(); track $index; let idx = $index) {
-                    <div class="tel-budget-row" data-testid="usage-budget-row">
-                      <input
-                        type="text"
-                        class="ops-input tabular"
-                        placeholder="Connection ID (e.g. claude-main)"
-                        aria-label="Budget connection ID"
-                        [attr.data-testid]="'budget-conn-' + idx"
-                        [value]="b.connection"
-                        (input)="
-                          patchBudget(idx, {
-                            connection: $any($event.target).value,
-                          })
-                        "
-                      />
-                      <input
-                        type="text"
-                        class="ops-input tabular"
-                        placeholder="Model (blank = whole connection)"
-                        aria-label="Budget model filter"
-                        [value]="b.model || ''"
-                        (input)="
-                          patchBudget(idx, {
-                            model: $any($event.target).value,
-                          })
-                        "
-                      />
-                      <input
-                        type="number"
-                        min="1"
-                        class="ops-input tabular"
-                        placeholder="Tokens"
-                        aria-label="Budget token limit"
-                        [attr.data-testid]="'budget-tokens-' + idx"
-                        [value]="b.tokens"
-                        (input)="
-                          patchBudget(idx, {
-                            tokens: +$any($event.target).value || 0,
-                          })
-                        "
-                      />
-                      <div class="segmented" role="group" aria-label="Window">
-                        @for (bw of budgetWindows; track bw) {
-                          <button
-                            type="button"
-                            [attr.aria-pressed]="b.window === bw"
-                            (click)="patchBudget(idx, { window: bw })"
-                          >
-                            {{ bw }}
-                          </button>
-                        }
-                      </div>
+                        />
+                      </label>
                       <button
                         type="button"
-                        class="btn-text danger"
-                        [attr.aria-label]="'Remove budget row ' + (idx + 1)"
-                        (click)="removeBudgetRow(idx)"
+                        class="btn-tonal"
+                        data-testid="usage-add-budget"
+                        (click)="addBudgetRow()"
                       >
-                        Remove
+                        + Add budget cap
                       </button>
                     </div>
-                  }
 
-                  @if (usageError(); as uerr) {
-                    <p
-                      class="banner banner-error"
-                      style="margin: 0"
-                      role="alert"
-                    >
-                      {{ uerr }}
-                    </p>
-                  }
+                    @for (b of draftBudgets(); track $index; let idx = $index) {
+                      <div
+                        class="tel-budget-row"
+                        data-testid="usage-budget-row"
+                      >
+                        <input
+                          type="text"
+                          class="ops-input tabular"
+                          placeholder="Connection ID (e.g. claude-main)"
+                          aria-label="Budget connection ID"
+                          [attr.data-testid]="'budget-conn-' + idx"
+                          [value]="b.connection"
+                          (input)="
+                            patchBudget(idx, {
+                              connection: $any($event.target).value,
+                            })
+                          "
+                        />
+                        <input
+                          type="text"
+                          class="ops-input tabular"
+                          placeholder="Model (blank = whole connection)"
+                          aria-label="Budget model filter"
+                          [value]="b.model || ''"
+                          (input)="
+                            patchBudget(idx, {
+                              model: $any($event.target).value,
+                            })
+                          "
+                        />
+                        <input
+                          type="number"
+                          min="1"
+                          class="ops-input tabular"
+                          placeholder="Tokens"
+                          aria-label="Budget token limit"
+                          [attr.data-testid]="'budget-tokens-' + idx"
+                          [value]="b.tokens"
+                          (input)="
+                            patchBudget(idx, {
+                              tokens: +$any($event.target).value || 0,
+                            })
+                          "
+                        />
+                        <div class="segmented" role="group" aria-label="Window">
+                          @for (bw of budgetWindows; track bw) {
+                            <button
+                              type="button"
+                              [attr.aria-pressed]="b.window === bw"
+                              (click)="patchBudget(idx, { window: bw })"
+                            >
+                              {{ bw }}
+                            </button>
+                          }
+                        </div>
+                        <button
+                          type="button"
+                          class="btn-text danger"
+                          [attr.aria-label]="'Remove budget row ' + (idx + 1)"
+                          (click)="removeBudgetRow(idx)"
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    }
 
-                  <div
-                    class="headline-actions"
-                    style="justify-content: flex-end"
-                  >
-                    <button
-                      type="button"
-                      class="btn-text"
-                      (click)="editingUsage.set(false)"
+                    @if (usageError(); as uerr) {
+                      <p
+                        class="banner banner-error"
+                        style="margin: 0"
+                        role="alert"
+                      >
+                        {{ uerr }}
+                      </p>
+                    }
+
+                    <div
+                      class="headline-actions"
+                      style="justify-content: flex-end"
                     >
-                      Cancel
-                    </button>
-                    <button
-                      type="button"
-                      class="btn-primary"
-                      data-testid="usage-save"
-                      [disabled]="savingUsage()"
-                      (click)="saveUsageSettings()"
-                    >
-                      {{ savingUsage() ? "Saving…" : "Save budgets" }}
-                    </button>
+                      <button
+                        type="button"
+                        class="btn-text"
+                        (click)="editingUsage.set(false)"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        class="btn-primary"
+                        data-testid="usage-save"
+                        [disabled]="savingUsage()"
+                        (click)="saveUsageSettings()"
+                      >
+                        {{ savingUsage() ? "Saving…" : "Save budgets" }}
+                      </button>
+                    </div>
                   </div>
-                </div>
-              }
+                }
 
-              @if (u.scopes.length > 0) {
-                <div
-                  class="ops-table-wrap"
-                  tabindex="0"
-                  role="region"
-                  aria-label="Token usage by connection"
-                >
-                  <table class="ops-table" data-testid="usage-scopes-table">
-                    <thead>
-                      <tr>
-                        <th scope="col">Connection / Model</th>
-                        <th scope="col">Runs</th>
-                        <th scope="col">Input / Output</th>
-                        <th scope="col">Cached (R/W)</th>
-                        <th scope="col">Window Usage &amp; Cap</th>
-                        <th scope="col">Burn / hr</th>
-                        <th scope="col">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      @for (
-                        s of u.scopes;
-                        track s.connection + ":" + (s.model || "*")
-                      ) {
+                @if (u.scopes.length > 0) {
+                  <div
+                    class="ops-table-wrap"
+                    tabindex="0"
+                    role="region"
+                    aria-label="Token usage by connection"
+                  >
+                    <table class="ops-table" data-testid="usage-scopes-table">
+                      <thead>
                         <tr>
-                          <td>
-                            <strong class="tabular">{{
-                              s.connectionName || s.connection
-                            }}</strong>
-                            @if (s.model) {
+                          <th scope="col">Connection / Model</th>
+                          <th scope="col">Runs</th>
+                          <th scope="col">Input / Output</th>
+                          <th scope="col">Cached (R/W)</th>
+                          <th scope="col">Window Usage &amp; Cap</th>
+                          <th scope="col">Burn / hr</th>
+                          <th scope="col">Status</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        @for (
+                          s of u.scopes;
+                          track s.connection + ":" + (s.model || "*")
+                        ) {
+                          <tr>
+                            <td>
+                              <strong class="tabular">{{
+                                s.connectionName || s.connection
+                              }}</strong>
+                              @if (s.model) {
+                                <span class="muted tabular">
+                                  · {{ s.model }}</span
+                                >
+                              }
+                            </td>
+                            <td class="tabular">{{ s.runs }}</td>
+                            <td class="tabular">
+                              {{ fmtNum(s.inputTokens) }} /
+                              {{ fmtNum(s.outputTokens) }}
+                            </td>
+                            <td class="tabular">
+                              {{ fmtNum(s.cacheReadTokens) }} /
+                              {{ fmtNum(s.cacheWriteTokens) }}
+                            </td>
+                            <td style="min-width: 170px">
+                              <div class="tabular" style="font-size: 12px">
+                                {{ fmtNum(s.used) }}
+                                @if (s.limit) {
+                                  / {{ fmtNum(s.limit) }} ({{ s.limitSource }})
+                                } @else {
+                                  ({{ s.window }})
+                                }
+                              </div>
+                              @if (s.limit) {
+                                <div
+                                  class="meter-track"
+                                  style="margin-top: 4px"
+                                >
+                                  <div
+                                    [class]="
+                                      s.used / s.limit >= 0.9
+                                        ? 'meter-fill is-error'
+                                        : s.used / s.limit >= 0.75
+                                          ? 'meter-fill is-warn'
+                                          : 'meter-fill is-healthy'
+                                    "
+                                    [style.width.%]="
+                                      Math.min(100, (s.used / s.limit) * 100)
+                                    "
+                                  ></div>
+                                </div>
+                              }
+                            </td>
+                            <td class="tabular">{{ fmtNum(s.burnPerHour) }}</td>
+                            <td>
+                              @if (s.pausedUntil) {
+                                <span class="status-pill error">
+                                  <g-status-icon tone="error" kind="blocked" />
+                                  Paused
+                                </span>
+                              } @else {
+                                <span class="status-pill healthy">
+                                  <g-status-icon
+                                    tone="healthy"
+                                    kind="healthy"
+                                  />
+                                  Active
+                                </span>
+                              }
+                            </td>
+                          </tr>
+                        }
+                      </tbody>
+                    </table>
+                  </div>
+                }
+              } @else {
+                <p class="muted" style="margin: 0">
+                  Token usage is unavailable or not yet recorded on this
+                  deployment.
+                </p>
+              }
+            </article>
+
+            <!-- Team Engagement & Shipped Summary (SPACE Guardrail: Alphabetical, NEVER Ranked) -->
+            <article class="ops-card" data-testid="telemetry-team-space">
+              <div class="ops-card-head">
+                <div>
+                  <h2 class="ops-card-title">
+                    Team Collaboration &amp; Shipped Summary
+                  </h2>
+                  <p class="ops-card-sub">
+                    SPACE guardrail: team-level delivery and contributor
+                    context, listed strictly alphabetically (A–Z) and never
+                    leaderboard-ranked.
+                  </p>
+                </div>
+                <div class="headline-actions">
+                  <span
+                    class="status-pill healthy"
+                    data-testid="space-guardrail-pill"
+                  >
+                    <g-status-icon tone="healthy" kind="healthy" />
+                    Alphabetical · Non-ranked
+                  </span>
+                  @if (canReadReleaseNotes()) {
+                    <div
+                      class="segmented"
+                      role="group"
+                      aria-label="Rollup period"
+                    >
+                      @for (p of spacePeriods; track p.id) {
+                        <button
+                          type="button"
+                          [attr.aria-pressed]="spacePeriod() === p.id"
+                          [attr.data-testid]="'space-period-' + p.id"
+                          (click)="pickSpacePeriod(p.id)"
+                        >
+                          {{ p.label }}
+                        </button>
+                      }
+                    </div>
+                  }
+                </div>
+              </div>
+
+              @if (clusterStats(); as cs) {
+                <div class="tel-legend tabular">
+                  <span
+                    >Period: <strong>{{ cs.period }}</strong></span
+                  >
+                  <span
+                    >PRs merged:
+                    <strong>{{ cs.pullRequestsMerged }}</strong></span
+                  >
+                  <span
+                    >Lines:
+                    <strong
+                      >+{{ fmtNum(cs.linesAdded) }} / −{{
+                        fmtNum(cs.linesDeleted)
+                      }}</strong
+                    ></span
+                  >
+                  <span
+                    >Agent time:
+                    <strong>{{ cs.agentHours.toFixed(1) }}h</strong></span
+                  >
+                </div>
+
+                @if ((cs.directions?.length ?? 0) > 0) {
+                  <div>
+                    <h3 class="section-title">Active Work tree Directions</h3>
+                    <ul class="tel-dir-list">
+                      @for (dir of cs.directions ?? []; track dir.taskId) {
+                        <li class="tel-dir-item">
+                          <span>
+                            <a
+                              class="row-title"
+                              [routerLink]="['/task', dir.taskId]"
+                              >#{{ dir.taskId }}
+                              {{ dir.title || "Work tree root" }}</a
+                            >
+                            @if (dir.repo) {
                               <span class="muted tabular">
-                                · {{ s.model }}</span
+                                · {{ dir.repo }}</span
                               >
                             }
-                          </td>
-                          <td class="tabular">{{ s.runs }}</td>
-                          <td class="tabular">
-                            {{ fmtNum(s.inputTokens) }} /
-                            {{ fmtNum(s.outputTokens) }}
-                          </td>
-                          <td class="tabular">
-                            {{ fmtNum(s.cacheReadTokens) }} /
-                            {{ fmtNum(s.cacheWriteTokens) }}
-                          </td>
-                          <td style="min-width: 170px">
-                            <div class="tabular" style="font-size: 12px">
-                              {{ fmtNum(s.used) }}
-                              @if (s.limit) {
-                                / {{ fmtNum(s.limit) }} ({{ s.limitSource }})
-                              } @else {
-                                ({{ s.window }})
-                              }
-                            </div>
-                            @if (s.limit) {
-                              <div class="meter-track" style="margin-top: 4px">
-                                <div
-                                  [class]="
-                                    s.used / s.limit >= 0.9
-                                      ? 'meter-fill is-error'
-                                      : s.used / s.limit >= 0.75
-                                        ? 'meter-fill is-warn'
-                                        : 'meter-fill is-healthy'
-                                  "
-                                  [style.width.%]="
-                                    Math.min(100, (s.used / s.limit) * 100)
-                                  "
-                                ></div>
-                              </div>
-                            }
-                          </td>
-                          <td class="tabular">{{ fmtNum(s.burnPerHour) }}</td>
-                          <td>
-                            @if (s.pausedUntil) {
-                              <span class="status-pill error">
-                                <g-status-icon tone="error" kind="blocked" />
-                                Paused
-                              </span>
-                            } @else {
-                              <span class="status-pill healthy">
-                                <g-status-icon tone="healthy" kind="healthy" />
-                                Active
-                              </span>
-                            }
-                          </td>
-                        </tr>
+                          </span>
+                          <span class="tabular muted">
+                            {{ dir.pullRequestsMerged }} merged ·
+                            {{ dir.tasksCompleted }} completed
+                          </span>
+                        </li>
                       }
-                    </tbody>
-                  </table>
-                </div>
+                    </ul>
+                  </div>
+                }
               }
-            } @else {
-              <p class="muted" style="margin: 0">
-                Token usage is unavailable or not yet recorded on this
-                deployment.
-              </p>
-            }
-          </article>
 
-          <!-- Team Engagement & Shipped Summary (SPACE Guardrail: Alphabetical, NEVER Ranked) -->
-          <article class="ops-card" data-testid="telemetry-team-space">
-            <div class="ops-card-head">
               <div>
-                <h2 class="ops-card-title">
-                  Team Collaboration &amp; Shipped Summary
-                </h2>
-                <p class="ops-card-sub">
-                  SPACE guardrail: team-level delivery and contributor context,
-                  listed strictly alphabetically (A–Z) and never
-                  leaderboard-ranked.
-                </p>
-              </div>
-              <div class="headline-actions">
-                <span
-                  class="status-pill healthy"
-                  data-testid="space-guardrail-pill"
-                >
-                  <g-status-icon tone="healthy" kind="healthy" />
-                  Alphabetical · Non-ranked
-                </span>
-                @if (canReadReleaseNotes()) {
-                  <div
-                    class="segmented"
-                    role="group"
-                    aria-label="Rollup period"
-                  >
-                    @for (p of spacePeriods; track p.id) {
-                      <button
-                        type="button"
-                        [attr.aria-pressed]="spacePeriod() === p.id"
-                        [attr.data-testid]="'space-period-' + p.id"
-                        (click)="pickSpacePeriod(p.id)"
-                      >
-                        {{ p.label }}
-                      </button>
+                <h3 class="section-title">
+                  Contributors &amp; Actors (Alphabetical A–Z)
+                </h3>
+                @if (alphabeticalActors().length === 0) {
+                  <p class="muted" style="margin: 0">
+                    No contributor records in the current view.
+                  </p>
+                } @else {
+                  <div class="tel-space-grid" data-testid="space-actors-grid">
+                    @for (actor of alphabeticalActors(); track actor.id) {
+                      <div class="tel-space-card" data-testid="space-actor-row">
+                        <g-actor-chip
+                          [label]="actor.label"
+                          [kind]="actor.kind"
+                        />
+                        <div class="tel-space-meta tabular">
+                          @if (actor.workstreams > 0) {
+                            <span
+                              >{{ actor.workstreams }}
+                              {{
+                                actor.workstreams === 1
+                                  ? "work tree"
+                                  : "work trees"
+                              }}</span
+                            >
+                          }
+                          @if (actor.activeTasks > 0) {
+                            <span>{{ actor.activeTasks }} open tasks</span>
+                          }
+                          @if (actor.repos.length > 0) {
+                            <span>{{ actor.repos.join(", ") }}</span>
+                          }
+                        </div>
+                      </div>
                     }
                   </div>
                 }
               </div>
-            </div>
-
-            @if (clusterStats(); as cs) {
-              <div class="tel-legend tabular">
-                <span
-                  >Period: <strong>{{ cs.period }}</strong></span
-                >
-                <span
-                  >PRs merged:
-                  <strong>{{ cs.pullRequestsMerged }}</strong></span
-                >
-                <span
-                  >Lines:
-                  <strong
-                    >+{{ fmtNum(cs.linesAdded) }} / −{{
-                      fmtNum(cs.linesDeleted)
-                    }}</strong
-                  ></span
-                >
-                <span
-                  >Agent time:
-                  <strong>{{ cs.agentHours.toFixed(1) }}h</strong></span
-                >
-              </div>
-
-              @if ((cs.directions?.length ?? 0) > 0) {
-                <div>
-                  <h3 class="section-title">Active Workstream Directions</h3>
-                  <ul class="tel-dir-list">
-                    @for (dir of cs.directions ?? []; track dir.taskId) {
-                      <li class="tel-dir-item">
-                        <span>
-                          <a
-                            class="row-title"
-                            [routerLink]="['/task', dir.taskId]"
-                            >#{{ dir.taskId }}
-                            {{ dir.title || "Workstream root" }}</a
-                          >
-                          @if (dir.repo) {
-                            <span class="muted tabular"> · {{ dir.repo }}</span>
-                          }
-                        </span>
-                        <span class="tabular muted">
-                          {{ dir.pullRequestsMerged }} merged ·
-                          {{ dir.tasksCompleted }} completed
-                        </span>
-                      </li>
-                    }
-                  </ul>
-                </div>
-              }
-            }
-
-            <div>
-              <h3 class="section-title">
-                Contributors &amp; Actors (Alphabetical A–Z)
-              </h3>
-              @if (alphabeticalActors().length === 0) {
-                <p class="muted" style="margin: 0">
-                  No contributor records in the current view.
-                </p>
-              } @else {
-                <div class="tel-space-grid" data-testid="space-actors-grid">
-                  @for (actor of alphabeticalActors(); track actor.id) {
-                    <div class="tel-space-card" data-testid="space-actor-row">
-                      <g-actor-chip [label]="actor.label" [kind]="actor.kind" />
-                      <div class="tel-space-meta tabular">
-                        @if (actor.workstreams > 0) {
-                          <span
-                            >{{ actor.workstreams }}
-                            {{
-                              actor.workstreams === 1
-                                ? "workstream"
-                                : "workstreams"
-                            }}</span
-                          >
-                        }
-                        @if (actor.activeTasks > 0) {
-                          <span>{{ actor.activeTasks }} open tasks</span>
-                        }
-                        @if (actor.repos.length > 0) {
-                          <span>{{ actor.repos.join(", ") }}</span>
-                        }
-                      </div>
-                    </div>
-                  }
-                </div>
-              }
-            </div>
-          </article>
-        </div>
+            </article>
+          </div>
+        }
       }
     </section>
   `,
@@ -1769,6 +1524,8 @@ export class TelemetryPageComponent implements OnInit {
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
   private readonly doc = inject(DOCUMENT);
+  private readonly destroyRef = inject(DestroyRef);
+  protected readonly tabs = TABS;
 
   private readonly repoTrigger =
     viewChild<ElementRef<HTMLButtonElement>>("repoTrigger");
@@ -1783,13 +1540,10 @@ export class TelemetryPageComponent implements OnInit {
   protected readonly windows = WINDOWS;
   protected readonly spacePeriods = SPACE_PERIODS;
   protected readonly budgetWindows = BUDGET_WINDOWS;
+  protected readonly tab = signal<TelemetryTab>("overview");
   protected readonly fmtDur = formatDurationSec;
-  protected readonly fmtCheckMs = formatCheckDurationMs;
   protected readonly fmtNum = formatCompactNum;
   protected readonly fmtPct = formatPct;
-  protected readonly fmtSignedPctPts = formatSignedPctPoints;
-  protected readonly fmtSignedRel = formatSignedRelPct;
-  protected readonly fmtSignedSec = formatSignedDurationSec;
 
   protected readonly window = signal<MetricsWindow>("7d");
   protected readonly selectedRepo = signal<string>("");
@@ -1801,6 +1555,7 @@ export class TelemetryPageComponent implements OnInit {
   protected readonly loadError = signal<string | null>(null);
   protected readonly report = signal<MetricsReport | null>(null);
   protected readonly qaSummary = signal<QASummary | null>(null);
+  protected readonly qaError = signal<string | null>(null);
   protected readonly usage = signal<UsageResponse | null>(null);
   protected readonly clusterStats = signal<ClusterStats | null>(null);
   protected readonly releaseNotes = signal<ReleaseNote[]>([]);
@@ -1846,6 +1601,46 @@ export class TelemetryPageComponent implements OnInit {
       );
     }
     return this.access.can("GET /api/qa/summary", repo);
+  });
+
+  protected readonly qaDeniedReason = computed<string | null>(() => {
+    if (this.canReadQaSummary()) return null;
+    const repo = this.selectedRepo();
+    if (!repo && this.isMetricsRepoLimited()) {
+      return this.deniedMetricsReason("");
+    }
+    return this.access.deniedReason("GET /api/qa/summary", repo || undefined);
+  });
+
+  /** Read-only period label when results are experiment-scoped. */
+  protected readonly qualityPeriod = computed<string | null>(() => {
+    if (this.tab() !== "quality") return null;
+    const e = experimentScope(this.qaSummary());
+    return e ? experimentPeriodLabel(e) : `Legacy epoch lookback: ${this.window()}`;
+  });
+
+  /** One-line Overview digest; reuses the Quality tab's verdict wording. */
+  protected readonly qaDigest = computed(() => {
+    const qa = this.qaSummary();
+    if (!qa) return null;
+    const assigned =
+      (qa.treatment?.assignedOrigins ?? 0) + (qa.control?.assignedOrigins ?? 0);
+    if (!qa.enabled && assigned === 0) {
+      return {
+        tone: "neutral",
+        kind: "idle",
+        label: "Off",
+        sentence: "Quality checks are off on this deployment.",
+      };
+    }
+    const v = armVerdict(qa);
+    return {
+      tone: v.tone,
+      kind: v.kind,
+      state: v.state,
+      label: `${v.arm} · ${v.label}`,
+      sentence: v.sentence,
+    };
   });
 
   protected deniedMetricsReason(repo: string): string {
@@ -2035,6 +1830,13 @@ export class TelemetryPageComponent implements OnInit {
 
   ngOnInit(): void {
     const qp = this.route.snapshot.queryParamMap;
+    this.tab.set(parseTab(qp.get("tab")));
+    // Back / forward between tabs: follow ?tab= without refetching.
+    const sub = this.route.queryParamMap.subscribe((m) => {
+      const t = parseTab(m.get("tab"));
+      if (t !== this.tab()) this.tab.set(t);
+    });
+    this.destroyRef.onDestroy(() => sub.unsubscribe());
     const w = qp.get("window");
     if (w === "24h" || w === "7d" || w === "30d") {
       this.window.set(w);
@@ -2106,6 +1908,10 @@ export class TelemetryPageComponent implements OnInit {
     const params = new URLSearchParams();
     params.set("window", this.window());
     if (this.selectedRepo()) params.append("repo", this.selectedRepo());
+    // Drop the previous result so the tab never shows numbers for another
+    // window or repository while the new ones load.
+    this.qaSummary.set(null);
+    this.qaError.set(null);
     try {
       const qa = await this.api.get<QASummary>(
         "GET /api/qa/summary",
@@ -2114,9 +1920,10 @@ export class TelemetryPageComponent implements OnInit {
       );
       if (seq !== this.qaSeq) return;
       this.qaSummary.set(qa);
-    } catch {
+    } catch (err) {
       if (seq === this.qaSeq) {
         this.qaSummary.set(null);
+        this.qaError.set(errorText(err));
       }
     }
   }
@@ -2214,6 +2021,34 @@ export class TelemetryPageComponent implements OnInit {
     this.syncUrl();
     void this.loadMetrics();
     void this.loadQaSummary();
+  }
+
+  protected pickTab(t: TelemetryTab): void {
+    this.openMenu.set(null);
+    if (this.tab() === t) return;
+    this.tab.set(t);
+    // Push history so Back returns to the previous tab.
+    void this.router.navigate([], {
+      relativeTo: this.route,
+      queryParams: { tab: t === "overview" ? null : t },
+      queryParamsHandling: "merge",
+    });
+  }
+
+  protected onTabKeydown(ev: KeyboardEvent, current: TelemetryTab): void {
+    const idx = this.tabs.findIndex((t) => t.id === current);
+    if (idx < 0) return;
+    let next = -1;
+    if (ev.key === "ArrowRight") next = (idx + 1) % this.tabs.length;
+    else if (ev.key === "ArrowLeft") {
+      next = (idx - 1 + this.tabs.length) % this.tabs.length;
+    } else if (ev.key === "Home") next = 0;
+    else if (ev.key === "End") next = this.tabs.length - 1;
+    if (next < 0) return;
+    ev.preventDefault();
+    const id = this.tabs[next].id;
+    this.pickTab(id);
+    this.doc.getElementById(`telemetry-tab-${id}`)?.focus();
   }
 
   protected pickSpacePeriod(p: string): void {
@@ -2396,4 +2231,8 @@ export class TelemetryPageComponent implements OnInit {
       this.savingUsage.set(false);
     }
   }
+}
+
+function parseTab(v: string | null): TelemetryTab {
+  return v === "quality" ? "quality" : "overview";
 }

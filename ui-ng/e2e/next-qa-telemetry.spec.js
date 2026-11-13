@@ -62,8 +62,23 @@ test("Telemetry QA rollout (A/B) and Pre-PR check latency cards render calmly in
   }
 
   await expect(page.getByTestId("telemetry-page")).toBeVisible();
+
+  // Verify Overview operational cards and QA digest card are visible
+  await expect(page.getByTestId("telemetry-kpis")).toBeVisible();
+  await expect(page.getByTestId("card-throughput")).toBeVisible();
+  await expect(page.getByTestId("card-latency")).toBeVisible();
+  await expect(page.getByTestId("card-outcomes")).toBeVisible();
+  await expect(page.getByTestId("card-tools")).toBeVisible();
+  await expect(page.getByTestId("telemetry-usage")).toBeVisible();
+  const digestCard = page.getByTestId("qa-digest");
+  await expect(digestCard).toBeVisible();
+  await expect(digestCard).toContainText("Quality checks");
+  await expect(page.getByTestId("qa-digest-open")).toBeVisible();
+
+  // Click the digest card's link to enter ?tab=quality
+  await page.getByTestId("qa-digest-open").click();
+
   await expect(page.getByTestId("card-qa-rollout")).toBeVisible();
-  await expect(page.getByTestId("card-qa-checks")).toBeVisible();
   await expect(page.getByTestId("qa-rollout-pill")).toContainText("Off");
 
   await page.getByTestId("card-qa-rollout").scrollIntoViewIfNeeded();
