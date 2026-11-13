@@ -167,7 +167,8 @@ export class ProcessesStore {
       return;
     }
     try {
-      const s = await this.api.get<Record<string, unknown>>("GET /api/settings");
+      const s =
+        await this.api.get<Record<string, unknown>>("GET /api/settings");
       if (this.activeCount > 0 && s) {
         this.qaRollout.set({
           enabled: !!s["qaEnabled"],

@@ -1089,9 +1089,7 @@ describe("ProcessesPageComponent (D-9)", () => {
     expect(goldenRow.textContent).toContain("Active (50%)");
     expect(detRow.textContent).toContain("Available");
 
-    const inspTitle = root.querySelector(
-      '[data-testid="qa-flow-insp-title"]',
-    )!;
+    const inspTitle = root.querySelector('[data-testid="qa-flow-insp-title"]')!;
     const detailCard = root.querySelector(
       '[data-testid="qa-flow-detail-card"]',
     )!;
