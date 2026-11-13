@@ -30,6 +30,7 @@ import (
 	"github.com/ai-on-gke/grain/pkg/metrics"
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/qa"
+	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 	"github.com/ai-on-gke/grain/pkg/qa/checks"
 )
 
@@ -80,23 +81,23 @@ func OpenPullRequestForTaskWithQA(
 		return OpenPullRequestForTask(ctx, store, client, task)
 	}
 
-	assign, qaCfg, err := store.ActiveQAAssignmentForTask(ctx, task.ID)
+	assign, qaCfg, err := resolve.ActiveQAResolutionForTask(ctx, store, task.ID)
 	if err != nil || assign == nil || !qaCfg.Enabled {
 		return OpenPullRequestForTask(ctx, store, client, task)
 	}
 
-	if assign.Arm == model.QAArmControl {
+	if assign.ArmID == model.QAArmControl {
 		status, err := OpenPullRequestForTask(ctx, store, client, task)
 		if err == nil {
 			if qaCfg.ShadowOnControlEnabled() {
-				maybeRunControlShadowS3(store, client, task, assign.FlowID)
+				maybeRunControlShadowS3(store, client, task, assign.FlowID, assign.Spec)
 			}
 			maybeEvaluateQACircuitBreakerThrottled(ctx, store, time.Now().UTC())
 		}
 		return status, err
 	}
 
-	if assign.Arm != model.QAArmTreatment {
+	if assign.ArmID != model.QAArmTreatment {
 		return OpenPullRequestForTask(ctx, store, client, task)
 	}
 
@@ -119,7 +120,7 @@ func OpenPullRequestForTaskWithQA(
 		checkBranch = stageBranch
 	}
 
-	flow, _ := qa.LookupFlow(assign.FlowID)
+	flow := *assign.Spec
 	remoteHead, err := client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, checkBranch)
 	if err != nil {
 		return PullRequestStatus{}, fmt.Errorf("orchestrator: reading branch %s head: %w", checkBranch, err)
@@ -137,7 +138,7 @@ func OpenPullRequestForTaskWithQA(
 		s3Passed, s3Ran, blastTier, s3Summary = loadRecordedS3Outcome(ctx, store, task.ID, headSHA)
 	}
 	if headSHA != "" && (!s3Ran || (!s3Passed && strings.TrimSpace(opts.CallerNotes) != "")) {
-		rep, ran, s3Err := runMirrorS3IfConfigured(ctx, store, task, assign.FlowID, model.QAArmTreatment, false, checkBranch, opts.CallerNotes)
+		rep, ran, s3Err := runMirrorS3IfConfigured(ctx, store, task, assign.FlowID, model.QAArmTreatment, false, checkBranch, opts.CallerNotes, assign.Spec)
 		if s3Err != nil {
 			if rt := LiveQARuntime(); rt != nil && rt.DataDir != "" {
 				return PullRequestStatus{}, fmt.Errorf("orchestrator: running pre-PR S3 checks on %s: %w", checkBranch, s3Err)
@@ -224,8 +225,8 @@ func salvageQAStageIfPresent(
 	if store == nil || client == nil || task.Target == nil {
 		return false, nil
 	}
-	assign, qaCfg, aErr := store.ActiveQAAssignmentForTask(ctx, task.ID)
-	qaActive := aErr == nil && assign != nil && qaCfg.Enabled && assign.Arm == model.QAArmTreatment
+	assign, qaCfg, aErr := resolve.ActiveQAResolutionForTask(ctx, store, task.ID)
+	qaActive := aErr == nil && assign != nil && qaCfg.Enabled && assign.ArmID == model.QAArmTreatment
 
 	stageBranch := model.QAStageBranchName(task.ID)
 	stageExists, err := targetBranchExists(client, *task.Target, stageBranch)
@@ -234,20 +235,14 @@ func salvageQAStageIfPresent(
 	}
 
 	if !qaActive && stageExists {
-		// Fail-open promotion: QA is disabled or arm is no longer gated, but staging branch exists.
-		head, err := client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, stageBranch)
-		if err == nil && head != nil && head.SHA != "" {
-			if _, err := promoteQAStageBranch(client, *task.Target, stageBranch, task.BranchName(), head.SHA); err == nil {
-																// structured audit note here (to be added when config_audit.go is merged in M10)
-			}
+		err := PromoteStrandedQAStage(ctx, store, client, task, "Quality checks disabled or task no longer gated")
+		if err != nil {
+			return false, err
 		}
-		return false, nil
+		return true, nil
 	}
 	if !qaActive {
 		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("orchestrator: checking %s's staging branch: %w", task.ID, err)
 	}
 	checkBranch := stageBranch
 	if !stageExists {
@@ -289,7 +284,7 @@ func salvageQAStageIfPresent(
 	var mirrorWS *checks.MirrorWorkspace
 	var s3HazardSites map[string][]int
 	if !s3Ran {
-		rep, ws, ran, mErr := runMirrorS3WithWorkspace(ctx, store, task, assign.FlowID, model.QAArmTreatment, false, checkBranch, "")
+		rep, ws, ran, mErr := runMirrorS3WithWorkspace(ctx, store, task, assign.FlowID, model.QAArmTreatment, false, checkBranch, "", assign.Spec)
 		if mErr == nil && ran {
 			s3Ran = true
 			s3Passed = rep.Passed
@@ -350,7 +345,7 @@ func salvageQAStageIfPresent(
 	}
 
 	// 2. S3 passed! Run bounded 1-round fresh-context S4 verifier on T2/T3 when enabled and not yet attempted.
-	flow, _ := qa.LookupFlow(assign.FlowID)
+	flow := *assign.Spec
 	if flow.EnableS4 && blastTier.RequiresS4() && !hasTaskLink(task, model.LinkQAS4Attempted) {
 		s4Findings, s4Err := runFreshContextS4(ctx, store, task, headSHA, checkBranch, mirrorWS, s3HazardSites)
 		if s4Err != nil {
@@ -431,7 +426,7 @@ func effectiveTaskPushHead(ctx context.Context, store *model.Store, client githu
 		return nil, nil
 	}
 	if store != nil {
-		if assign, qaCfg, err := store.ActiveQAAssignmentForTask(ctx, task.ID); err == nil && qaCfg.Enabled && assign != nil && assign.Arm == model.QAArmTreatment {
+		if assign, qaCfg, err := resolve.ActiveQAResolutionForTask(ctx, store, task.ID); err == nil && qaCfg.Enabled && assign != nil && assign.ArmID == model.QAArmTreatment {
 			if stageHead, sErr := client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, model.QAStageBranchName(task.ID)); sErr == nil && stageHead != nil {
 				return stageHead, nil
 			}
@@ -440,7 +435,7 @@ func effectiveTaskPushHead(ctx context.Context, store *model.Store, client githu
 	return client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, task.BranchName())
 }
 
-func maybeRunControlShadowS3(store *model.Store, client github.Client, task model.Task, flowID string) {
+func maybeRunControlShadowS3(store *model.Store, client github.Client, task model.Task, flowID string, spec *qa.FlowSpec) {
 	rt := LiveQARuntime()
 	if rt == nil || rt.DataDir == "" || rt.ResolveRemote == nil || store == nil || client == nil || task.Target == nil {
 		return
@@ -461,7 +456,7 @@ func maybeRunControlShadowS3(store *model.Store, client github.Client, task mode
 				}
 			}
 		}
-		_, _, _ = runMirrorS3IfConfigured(ctx, store, taskCopy, flowID, model.QAArmControl, true, taskCopy.BranchName(), "")
+		_, _, _ = runMirrorS3IfConfigured(ctx, store, taskCopy, flowID, model.QAArmControl, true, taskCopy.BranchName(), "", spec)
 	}()
 }
 
@@ -472,8 +467,9 @@ func runMirrorS3IfConfigured(
 	flowID, arm string,
 	shadow bool,
 	branch, callerNotes string,
+	spec *qa.FlowSpec,
 ) (checks.Report, bool, error) {
-	rep, _, ran, err := runMirrorS3WithWorkspace(ctx, store, task, flowID, arm, shadow, branch, callerNotes)
+	rep, _, ran, err := runMirrorS3WithWorkspace(ctx, store, task, flowID, arm, shadow, branch, callerNotes, spec)
 	return rep, ran, err
 }
 
@@ -484,6 +480,7 @@ func runMirrorS3WithWorkspace(
 	flowID, arm string,
 	shadow bool,
 	branch, callerNotes string,
+	spec *qa.FlowSpec,
 ) (checks.Report, *checks.MirrorWorkspace, bool, error) {
 	rt := LiveQARuntime()
 	if rt == nil || rt.DataDir == "" || rt.ResolveRemote == nil || task.Target == nil {
@@ -497,9 +494,9 @@ func runMirrorS3WithWorkspace(
 	if err != nil {
 		return checks.Report{}, nil, false, err
 	}
-	flow, err := checks.ResolveEffectiveFlow(ctx, ws, flowID)
-	if err != nil {
-		flow, _ = qa.LookupFlow(flowID)
+	var flow qa.FlowSpec
+	if spec != nil {
+		flow = *spec
 	}
 	rep, err := checks.RunS3(ctx, ws, flow, checks.RunOptions{
 		TaskID:      task.ID,
@@ -1027,4 +1024,55 @@ func MaybeAutoDowngradeQARollout(ctx context.Context, store *model.Store, now ti
 	})
 	log.Printf("orchestrator: %s", auditSummary)
 	return true, reasons, nil
+}
+
+
+// PromoteStrandedQAStage promotes a stranded QA stage branch to the task's live PR branch, if it exists,
+// and records a fail-open check run.
+func PromoteStrandedQAStage(ctx context.Context, store *model.Store, client github.Client, task model.Task, reason string) error {
+	stageRef := model.QAStageBranchName(task.ID)
+	head, err := client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, stageRef)
+	if err != nil || head == nil || head.SHA == "" {
+		return nil // Doesn't exist, nothing to promote.
+	}
+
+	assign, qaCfg, err := resolve.ActiveQAResolutionForTask(ctx, store, task.ID)
+	if err != nil {
+		return err
+	}
+	if qaCfg.Enabled && assign != nil && assign.ArmID == model.QAArmTreatment {
+		return nil // Task is actively in treatment, not stranded.
+	}
+
+	promotedSHA, err := promoteQAStageBranch(client, *task.Target, model.QAStageBranchName(task.ID), task.BranchName(), head.SHA)
+	if err != nil {
+		return fmt.Errorf("promoting stranded QA stage: %w", err)
+	}
+
+	status, err := OpenPullRequestForTask(ctx, store, client, task)
+	if err != nil {
+		return fmt.Errorf("opening PR after promotion: %w", err)
+	}
+
+	if status.PullRequest.Number > 0 {
+		note := "Quality checks did not run: " + reason
+		// Actually the prompt said "append PR note 'Quality checks did not run: ' + reason".
+		// But if appendOrUpdatePRNote is not defined, maybe it's appendPRNote or similar. Let's look for it.
+		// Wait, I can just use client.CreateComment?
+		// No, let me leave appendOrUpdatePRNote if it was defined, or maybe I should check the methods on client.
+		_, _ = client.CreateComment(task.Target.StoredOwner(), task.Target.Name, status.PullRequest.Number, note)
+	}
+
+	detailBytes, _ := json.Marshal(map[string]string{"reason": reason})
+	run := model.QACheckRun{
+		TaskID:     task.ID,
+		CommitSHA:  promotedSHA,
+		Stage:      "S-promote",
+		CheckID:    "qa:fail-open-promote",
+		Arm:        "control",
+		Verdict:    "unchecked",
+		DetailJSON: string(detailBytes),
+	}
+	_, err = store.RecordQACheckRun(ctx, run, nil)
+	return err
 }

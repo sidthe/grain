@@ -52,6 +52,9 @@ const (
 	QAStageBranchPrefix = "grain-qa-stage/"
 )
 
+// ActiveQAResolution is a callback to avoid import cycles when reading the current QA arm for a task.
+var ActiveQAResolution func(ctx context.Context, store *Store, taskID string) (string, error)
+
 // QAStageBranchName returns the isolated staging branch ref name for taskID.
 func QAStageBranchName(taskID string) string {
 	return QAStageBranchPrefix + strings.TrimSpace(taskID)
@@ -714,3 +717,47 @@ func (s *Store) CIRunOutcomes(ctx context.Context) ([]CIRunOutcome, error) {
 	}
 	return out, rows.Err()
 }
+
+func (s *Store) OriginHasPriorRuns(ctx context.Context, rootOrigin string, excludeRunID string) (bool, error) {
+	var count int
+	query := "SELECT 1 FROM `task` t JOIN `task_run` r ON t.`id` = r.`task_id` WHERE t.`origin_ref` = ? AND r.`id` != ? LIMIT 1"
+	err := s.db.QueryRowContext(ctx, query, rootOrigin, excludeRunID).Scan(&count)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) EarliestQAAssignment(ctx context.Context, rootOrigin string) (*QAAssignment, error) {
+	var a QAAssignment
+	err := s.db.QueryRowContext(ctx,
+		"SELECT `root_origin`, `epoch`, `regime_id`, `arm`, `flow_id`, `rollout_pct_at_assign`, `complexity_tier`, `assigned_at` "+
+			"FROM `task_qa_assignment` WHERE `root_origin` = ? ORDER BY `assigned_at` ASC LIMIT 1", rootOrigin,
+	).Scan(
+		&a.RootOrigin, &a.Epoch, &a.RegimeID, &a.Arm, &a.FlowID,
+		&a.RolloutPctAtAssign, &a.ComplexityTier, &a.AssignedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	a.AssignedAt = a.AssignedAt.UTC()
+	return &a, nil
+}
+
+func (s *Store) ConfigQA(ctx context.Context) (QAConfig, error) {
+	var rawQA sql.NullString
+	if err := s.db.QueryRowContext(ctx, "SELECT `qa` FROM `grain_config` WHERE `id` = 1").Scan(&rawQA); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return QAConfig{}, nil
+		}
+		return QAConfig{}, err
+	}
+	return DecodeQAConfig(rawQA.String)
+}
+

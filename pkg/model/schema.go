@@ -679,7 +679,25 @@ import "strconv"
 // 146 adds `grain_config`.`qa` (model.Config.QA): the deployment-wide quality
 // control engine and single-instance PR rollout configuration, stored as JSON
 // and defaulting to empty (engine off).
-const SchemaVersion = 146
+// 147 adds `qa_flow_version` to track quality-control execution flow snapshots,
+// and indexes `task(origin_ref)` to quickly find prior runs of an origin.
+const SchemaVersion = 147
+
+const qaFlowVersionTable = `CREATE TABLE IF NOT EXISTS ` + "`qa_flow_version`" + ` (
+  ` + "`hash`" + `          TEXT     NOT NULL PRIMARY KEY,
+  ` + "`key`" + `           TEXT     NOT NULL,
+  ` + "`version`" + `       INTEGER  NOT NULL,
+  ` + "`parent_hash`" + `   TEXT     NOT NULL DEFAULT '',
+  ` + "`label`" + `         TEXT     NOT NULL,
+  ` + "`summary`" + `       TEXT     NOT NULL,
+  ` + "`spec_json`" + `     TEXT     NOT NULL,
+  ` + "`source_yaml`" + `   TEXT     NOT NULL,
+  ` + "`qa_engine_rev`" + ` INTEGER  NOT NULL,
+  ` + "`created_by`" + `    TEXT     NOT NULL,
+  ` + "`created_at`" + `    DATETIME NOT NULL,
+  ` + "`retired_at`" + `    DATETIME NULL,
+  UNIQUE (` + "`key`" + `, ` + "`version`" + `)
+)`
 
 const taskQAAssignmentTable = `CREATE TABLE IF NOT EXISTS ` + "`task_qa_assignment`" + ` (
   ` + "`root_origin`" + `           TEXT     NOT NULL,
@@ -4599,6 +4617,8 @@ var Tables = []string{
 	`CREATE INDEX IF NOT EXISTS ` + "`task_qa_check_run_task`" + ` ON ` + "`task_qa_check_run`" + ` (` + "`task_id`" + `, ` + "`id`" + `)`,
 	taskQAFindingTable,
 	`CREATE INDEX IF NOT EXISTS ` + "`task_qa_finding_task`" + ` ON ` + "`task_qa_finding`" + ` (` + "`task_id`" + `, ` + "`id`" + `)`,
+	qaFlowVersionTable,
+	`CREATE INDEX IF NOT EXISTS ` + "`task_origin_ref`" + ` ON ` + "`task`" + ` (` + "`origin_ref`" + `)`,
 }
 
 // Views is the derivations, each a (name, DDL) pair so Init can drop and

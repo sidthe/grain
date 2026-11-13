@@ -71,7 +71,7 @@ var hostSpecSubcommands = map[string][]string{
 		"rename", "update", "revoke", "delete", "delete-revoked", "rekey", "register", "install", "set-owner"},
 	"init": {"workstation"},
 	"pr":   {"adopt", "review", "status", "submit"},
-	"qa":   {"status", "enable", "disable"},
+	"qa":   {"status", "enable", "disable", "flow list", "flow show", "flow fork", "flow validate", "flow publish", "flow retire"},
 	"hub": {"status", "list", "directory", "route", "show", "create", "register", "unregister",
 		"update", "scopes", "rotate-credential", "upgrade", "resize", "delete", "restore", "stop", "start", "transfer", "accept-transfer",
 		"delegating-apps list", "delegating-apps create", "delegating-apps disable", "delegating-apps enable",

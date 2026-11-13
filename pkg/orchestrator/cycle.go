@@ -15,6 +15,7 @@
 package orchestrator
 
 import (
+	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 	"context"
 	"errors"
 	"fmt"
@@ -767,6 +768,7 @@ func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
 	// and there is at most one of them per process.
 	started := time.Now()
 	timing := CycleTiming{Start: now}
+	_ = sweepStrandedQAStages(ctx, deps, now)
 	commitsBefore := uint64(0)
 	if deps.Store != nil {
 		commitsBefore = deps.Store.CommitCount()
@@ -3284,4 +3286,32 @@ func usageCappedWorkers(ctx context.Context, deps Deps, now time.Time) int {
 		n = 1
 	}
 	return n
+}
+
+
+func sweepStrandedQAStages(ctx context.Context, deps Deps, now time.Time) error {
+	if deps.Client == nil || deps.Store == nil {
+		return nil
+	}
+	tasks, err := deps.Store.ListTasks(ctx)
+	if err != nil {
+		return err
+	}
+	for _, task := range tasks {
+		if task.Target == nil || !model.TaskEligibleForQAStaging(task) {
+			continue
+		}
+		// If task is not Active treatment, check if it has a stranded staging branch
+		assign, qaCfg, aErr := resolve.ActiveQAResolutionForTask(ctx, deps.Store, task.ID)
+		qaActive := aErr == nil && assign != nil && qaCfg.Enabled && assign.ArmID == model.QAArmTreatment
+		if !qaActive {
+			// Fast check if stage exists
+			stageBranch := model.QAStageBranchName(task.ID)
+			exists, _ := targetBranchExists(deps.Client, *task.Target, stageBranch)
+			if exists {
+				PromoteStrandedQAStage(ctx, deps.Store, deps.Client, task, "Quality checks disabled or task no longer gated")
+			}
+		}
+	}
+	return nil
 }

@@ -1065,6 +1065,29 @@ var Migrations = []Migration{
 			"ALTER TABLE `grain_config` ADD COLUMN `qa` TEXT NOT NULL DEFAULT ''",
 		},
 	},
+	{
+		Version:     147,
+		Description: "add qa_flow_version to track quality-control execution flow snapshots and task_origin_ref index",
+		Statements: []string{
+			"CREATE TABLE IF NOT EXISTS `qa_flow_version` (" +
+				"`hash` TEXT NOT NULL," +
+				"`key` TEXT NOT NULL," +
+				"`version` INTEGER NOT NULL," +
+				"`parent_hash` TEXT NOT NULL DEFAULT ''," +
+				"`label` TEXT NOT NULL," +
+				"`summary` TEXT NOT NULL," +
+				"`spec_json` TEXT NOT NULL," +
+				"`source_yaml` TEXT NOT NULL," +
+				"`qa_engine_rev` INTEGER NOT NULL," +
+				"`created_by` TEXT NOT NULL," +
+				"`created_at` DATETIME NOT NULL," +
+				"`retired_at` DATETIME NULL," +
+				"PRIMARY KEY (`hash`)," +
+				"UNIQUE (`key`, `version`)" +
+				")",
+			"CREATE INDEX IF NOT EXISTS `task_origin_ref` ON `task` (`origin_ref`)",
+		},
+	},
 }
 
 // schema99AutoUpgradeReleaseTable is auto_upgrade_release as schema 99

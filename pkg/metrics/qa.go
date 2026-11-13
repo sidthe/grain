@@ -156,11 +156,7 @@ type QASummary struct {
 func ComputeQASummary(in QASummaryInput) QASummary {
 	epoch := in.Config.EpochOrDefault()
 	flowID := in.Config.FlowIDOrDefault()
-	flow, _ := qa.LookupFlow(flowID)
-	skillByteLen := 0
-	if flow.InjectSkill {
-		skillByteLen = len(flow.SkillPrompt())
-	}
+	skillByteLen := skillPromptLen(in.Config)
 
 	repoAllow := map[string]bool{}
 	for _, r := range in.Scope.Repos {
@@ -1026,4 +1022,12 @@ func percentileInt64(sorted []int64, q float64) int64 {
 		idx = len(sorted) - 1
 	}
 	return sorted[idx]
+}
+
+func skillPromptLen(c model.QAConfig) int {
+	flow, ok := qa.LookupFlow(c.FlowIDOrDefault())
+	if !ok || !flow.InjectSkill {
+		return 0
+	}
+	return len(flow.SkillPrompt())
 }

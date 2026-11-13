@@ -42,7 +42,6 @@ import (
 	"github.com/ai-on-gke/grain/pkg/dispatch"
 	"github.com/ai-on-gke/grain/pkg/mcp"
 	"github.com/ai-on-gke/grain/pkg/model"
-	"github.com/ai-on-gke/grain/pkg/qa"
 	"github.com/ai-on-gke/grain/pkg/runhost"
 	"github.com/ai-on-gke/grain/pkg/staterepo"
 )
@@ -3346,13 +3345,13 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	pushBranch := task.BranchName()
 	var qaSkillPrompt string
 	qaStopNudge := false
-	if qaAssignment.Arm == model.QAArmTreatment && model.TaskEligibleForQAStaging(task) {
+	if qaAssignment.ArmID == model.QAArmTreatment && model.TaskEligibleForQAStaging(task) {
 		if cfg.GitRemoteBase != "" {
 			pushBranch = model.QAStageBranchName(task.ID)
 		}
-		if flow, ok := qa.LookupFlow(qaAssignment.FlowID); ok {
-			qaSkillPrompt = flow.SkillPrompt()
-			qaStopNudge = flow.StopNudge
+		if qaAssignment.Spec != nil {
+			qaSkillPrompt = qaAssignment.Spec.SkillPrompt()
+			qaStopNudge = qaAssignment.Spec.StopNudge
 		}
 	}
 
@@ -3803,7 +3802,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		if err := store.SetRunPrompt(ctx, d.RunID, prompt); err != nil {
 			log.Printf("orchestrator: run %s: recording the prompt it was given: %v", d.RunID, err)
 		}
-		if qaAssignment.Arm == model.QAArmTreatment && qaSkillPrompt != "" {
+		if qaAssignment.ArmID == model.QAArmTreatment && qaSkillPrompt != "" {
 			detailJSON, _ := json.Marshal(map[string]any{
 				"qaPromptBytes":  len(qaSkillPrompt),
 				"totalBytes":     len(prompt),
