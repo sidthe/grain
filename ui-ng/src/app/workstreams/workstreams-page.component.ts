@@ -100,6 +100,9 @@ const SORT_OPTIONS: readonly PillOption[] = [
   { value: "new", label: "Newest" },
 ];
 
+const INTERACTIVE_TARGET_SELECTOR =
+  'a, button, summary, [role="button"], [role="link"], [role="menuitem"], [role="option"], [role="tab"], [role="switch"], [role="separator"], [data-ws-row-trigger]';
+
 function loadSavedView(): WsView {
   try {
     return localStorage.getItem(WS_VIEW_STORAGE_KEY) === "cards"
@@ -929,12 +932,18 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
     this.openStream(key);
   }
 
+  private consumeKey(ev: Event): void {
+    ev.preventDefault();
+    ev.stopPropagation();
+  }
+
   // pickKey handles Enter or Space on the focused card or row itself,
   // consuming the key so Space does not scroll and page shortcuts do not
   // fire alongside it.
   protected pickKey(ev: Event, key: string): void {
     if (ev.target !== ev.currentTarget) return;
-    ev.preventDefault();
+    this.consumeKey(ev);
+    if ((ev as KeyboardEvent).repeat) return;
     this.openStream(key);
   }
 
@@ -1072,38 +1081,36 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
     if (ev.metaKey || ev.ctrlKey || ev.altKey || ev.repeat) return;
     if (document.querySelector('[aria-modal="true"]')) return;
     const letters = this.keyboard.enabled();
+    let action: (() => void) | null = null;
     if (letters && ev.key === "v") {
-      ev.preventDefault();
-      this.setView(this.activeView() === "list" ? "cards" : "list");
+      action = () =>
+        this.setView(this.activeView() === "list" ? "cards" : "list");
     } else if (letters && ev.key === "/") {
-      ev.preventDefault();
-      this.searchEl()?.nativeElement.focus();
+      action = () => this.searchEl()?.nativeElement.focus();
     } else if (letters && ev.key === "p") {
-      ev.preventDefault();
-      this.setScope("people");
+      action = () => this.setScope("people");
     } else if (letters && ev.key === "s") {
-      ev.preventDefault();
-      this.setScope("system");
+      action = () => this.setScope("system");
     } else if (letters && ev.key === "a" && !ev.shiftKey) {
-      ev.preventDefault();
-      this.setScope("all");
+      action = () => this.setScope("all");
     } else if ((letters && ev.key === "j") || ev.key === "ArrowDown") {
-      ev.preventDefault();
-      this.stepStreamFocus(1);
+      action = () => this.stepStreamFocus(1);
     } else if ((letters && ev.key === "k") || ev.key === "ArrowUp") {
-      ev.preventDefault();
-      this.stepStreamFocus(-1);
+      action = () => this.stepStreamFocus(-1);
     } else if (ev.key === "Enter") {
       const sel = this.selectedKey();
       const target = ev.target as Element | null;
       if (
         sel &&
         this.filtered().visible.some((s) => s.key === sel) &&
-        !target?.closest?.("a, button, [data-ws-row-trigger]")
+        !target?.closest?.(INTERACTIVE_TARGET_SELECTOR)
       ) {
-        ev.preventDefault();
-        this.openStream(sel);
+        action = () => this.openStream(sel);
       }
+    }
+    if (action) {
+      this.consumeKey(ev);
+      action();
     }
   }
 }
