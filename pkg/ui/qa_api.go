@@ -16,6 +16,7 @@ package ui
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ai-on-gke/grain/pkg/metrics"
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/qa"
 )
@@ -70,6 +72,148 @@ type VoteQAFindingResponse struct {
 
 func (s *Server) handleGetQAFlows(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, QAFlowsResponse{Flows: qa.BuiltInFlows()})
+}
+
+// QASummaryRequest specifies the span and repository scope for GET /api/qa/summary.
+type QASummaryRequest struct {
+	Window time.Duration
+	Since  time.Time
+	Until  time.Time
+	Repos  []string
+}
+
+func (r QASummaryRequest) span(now time.Time) metrics.Window {
+	if !r.Since.IsZero() {
+		until := r.Until
+		if until.IsZero() {
+			until = now
+		}
+		return metrics.Window{Since: r.Since, Until: until}
+	}
+	window := r.Window
+	if window <= 0 {
+		window = DefaultMetricsWindow
+	}
+	until := r.Until
+	if until.IsZero() {
+		until = now
+	}
+	return metrics.Window{Since: until.Add(-window), Until: until}
+}
+
+// QASummary computes the single-instance A/B quality control rollout summary over req.
+func (c *Client) QASummary(ctx context.Context, req QASummaryRequest) (metrics.QASummary, error) {
+	if c == nil || c.Store == nil {
+		return metrics.QASummary{}, errors.New("store is not available")
+	}
+	win := req.span(c.now())
+	cfg, err := c.Store.GetConfig(ctx)
+	if err != nil {
+		return metrics.QASummary{}, fmt.Errorf("reading deployment settings: %w", err)
+	}
+	var qaCfg model.QAConfig
+	if cfg != nil {
+		qaCfg = cfg.QA
+	}
+	assignments, err := c.Store.ListQAAssignments(ctx)
+	if err != nil {
+		return metrics.QASummary{}, fmt.Errorf("reading qa assignments: %w", err)
+	}
+	checkRuns, err := c.Store.ListAllQACheckRuns(ctx)
+	if err != nil {
+		return metrics.QASummary{}, fmt.Errorf("reading qa check runs: %w", err)
+	}
+	findings, err := c.Store.ListAllQAFindings(ctx)
+	if err != nil {
+		return metrics.QASummary{}, fmt.Errorf("reading qa findings: %w", err)
+	}
+	tasks, err := c.Store.ListTasks(ctx)
+	if err != nil {
+		return metrics.QASummary{}, fmt.Errorf("reading tasks: %w", err)
+	}
+	timings, err := c.Store.TaskTimings(ctx)
+	if err != nil {
+		return metrics.QASummary{}, fmt.Errorf("reading task timings: %w", err)
+	}
+	runs, err := c.Store.RunTimings(ctx)
+	if err != nil {
+		return metrics.QASummary{}, fmt.Errorf("reading run timings: %w", err)
+	}
+	prompts, err := c.Store.RunPrompts(ctx)
+	if err != nil {
+		return metrics.QASummary{}, fmt.Errorf("reading run prompts: %w", err)
+	}
+	usages, err := c.Store.RunUsagesSince(ctx, time.Time{})
+	if err != nil {
+		return metrics.QASummary{}, fmt.Errorf("reading run usages: %w", err)
+	}
+	ciRuns, err := c.Store.CIRunOutcomes(ctx)
+	if err != nil {
+		return metrics.QASummary{}, fmt.Errorf("reading ci run outcomes: %w", err)
+	}
+	return metrics.ComputeQASummary(metrics.QASummaryInput{
+		Window:      win,
+		Scope:       metrics.Scope{Repos: req.Repos},
+		Config:      qaCfg,
+		Assignments: assignments,
+		CheckRuns:   checkRuns,
+		Findings:    findings,
+		Tasks:       tasks,
+		Timings:     timings,
+		Runs:        runs,
+		Prompts:     prompts,
+		Usages:      usages,
+		CIRuns:      ciRuns,
+	}), nil
+}
+
+func (s *Server) handleGetQASummary(w http.ResponseWriter, r *http.Request) {
+	if s.tasks == nil || s.tasks.Store == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("store is not available"))
+		return
+	}
+	query := r.URL.Query()
+	window, err := ParseMetricsWindow(query.Get("window"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	since, err := ParseMetricsMoment(query.Get("since"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	until, err := ParseMetricsMoment(query.Get("until"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var repos []string
+	for _, raw := range query["repo"] {
+		for _, part := range strings.Split(raw, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			canonical, cErr := s.agentCanonicalRepo(part)
+			if cErr != nil {
+				writeError(w, http.StatusBadRequest, cErr)
+				return
+			}
+			repos = append(repos, canonical)
+		}
+	}
+	summary, err := s.tasks.QASummary(r.Context(), QASummaryRequest{
+		Window: window,
+		Since:  since,
+		Until:  until,
+		Repos:  repos,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, summary)
 }
 
 func (s *Server) handleGetTaskQA(w http.ResponseWriter, r *http.Request) {

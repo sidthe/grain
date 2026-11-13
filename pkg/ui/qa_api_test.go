@@ -214,4 +214,70 @@ func TestQAFlowsTaskQAAndFeedbackEndpoints(t *testing.T) {
 	if closedQA.Enabled {
 		t.Fatalf("expected closed unassigned task 102 to report Enabled=false, got %+v", closedQA)
 	}
+
+	// 8. GET /api/qa/summary aggregates arm metrics, check latency/votes, ?repo= scoping, validation, and repo-limited RBAC.
+	summaryAll, err := client.QASummary(ctx, "7d", nil)
+	if err != nil {
+		t.Fatalf("QASummary(7d): %v", err)
+	}
+	if !summaryAll.Enabled || summaryAll.RolloutPct != 50 || summaryAll.Treatment.AssignedOrigins != 1 || summaryAll.Control.AssignedOrigins != 1 {
+		t.Fatalf("unexpected QASummary(all): %+v", summaryAll)
+	}
+	if len(summaryAll.Checks) != 1 || summaryAll.Checks[0].RuleID != qa.RuleStrictConfigDecoder || summaryAll.Checks[0].NotHelpfulVotes != 1 {
+		t.Fatalf("unexpected QASummary checks: %+v", summaryAll.Checks)
+	}
+
+	summaryOtherRepo, err := client.QASummary(ctx, "7d", []string{"acme/unrelated"})
+	if err != nil {
+		t.Fatalf("QASummary(acme/unrelated): %v", err)
+	}
+	if summaryOtherRepo.Treatment.AssignedOrigins != 0 || summaryOtherRepo.Control.AssignedOrigins != 0 || len(summaryOtherRepo.Checks) != 0 {
+		t.Fatalf("expected 0 assigned origins and 0 checks on acme/unrelated, got %+v", summaryOtherRepo)
+	}
+
+	if _, err := client.QASummary(ctx, "bad-window", nil); err == nil {
+		t.Fatal("expected QASummary(bad-window) to return 400 error")
+	}
+
+	// Repo-limited deployment:read task may read acme/kernel, must be refused deployment-wide and on acme/other.
+	otherRepo := model.RepoRef{Owner: "acme", Name: "other"}
+	if err := store.PutTask(ctx, model.Task{
+		ID:     "104",
+		Title:  "Repo-limited reader",
+		Body:   "Reads metrics on acme/kernel only",
+		Target: &repo,
+		Grants: []model.Grant{
+			{Capability: model.APIGrantString("deployment:read", "acme/kernel")},
+		},
+	}); err != nil {
+		t.Fatalf("PutTask 104: %v", err)
+	}
+	doActingGet := func(rawQuery string) int {
+		u := ts.URL + "/api/qa/summary"
+		if rawQuery != "" {
+			u += "?" + rawQuery
+		}
+		r, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Header.Set("Authorization", "Bearer "+tok)
+		r.Header.Set(ui.ActingTaskHeader, "104")
+		resp, err := http.DefaultClient.Do(r)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	_ = otherRepo
+	if code := doActingGet("repo=acme/kernel"); code != http.StatusOK {
+		t.Fatalf("repo-limited deployment:read on allowed repo got %d, want 200", code)
+	}
+	if code := doActingGet(""); code != http.StatusForbidden {
+		t.Fatalf("repo-limited deployment:read without ?repo= got %d, want 403", code)
+	}
+	if code := doActingGet("repo=acme/kernel,acme/other"); code != http.StatusForbidden {
+		t.Fatalf("repo-limited deployment:read with disallowed second repo got %d, want 403", code)
+	}
 }

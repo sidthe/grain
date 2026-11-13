@@ -580,3 +580,128 @@ func TestQASalvagePromotesDisabledQA(t *testing.T) {
 		t.Fatalf("expected promoted PR branch at %s, got error %v", task.BranchName(), err)
 	}
 }
+
+func TestMaybeAutoDowngradeQARolloutTripsCircuitBreakerToZeroShadowMode(t *testing.T) {
+	store, ctx := openStore(t)
+	enableTestQA(t, ctx, store, 50)
+	now := time.Date(2026, 11, 12, 18, 0, 0, 0, time.UTC)
+
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	// Below MinTreatmentSampleForAutoDowngrade (15), circuit breaker must be a no-op.
+	downgraded, reasons, err := orchestrator.MaybeAutoDowngradeQARollout(ctx, store, now)
+	if err != nil || downgraded || len(reasons) != 0 {
+		t.Fatalf("below sample floor: got (%v, %v, %v), want (false, nil, nil)", downgraded, reasons, err)
+	}
+
+	// Seed 16 Treatment WorkOrigins and cast 14 Not-Helpful (-1) operator votes on a noisy rule
+	// (Wilson 95% LB > 0.35), verifying automatic downgrade to 0% shadow-only + config_audit trail.
+	for i := 0; i < 16; i++ {
+		tk := filedTask(t, ctx, store, fmt.Sprintf("cb-%02d", i), repo)
+		origin := fmt.Sprintf("ws:cb-%02d", i)
+		if err := store.UpdateTask(ctx, tk.ID, func(task *model.Task) error {
+			task.WorkOrigin = model.WorkOrigin(origin)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.EnsureQAAssignment(ctx, model.QAAssignment{
+			RootOrigin:         origin,
+			Epoch:              1,
+			RegimeID:           1,
+			Arm:                model.QAArmTreatment,
+			FlowID:             model.QAFlowDeterministicS3Only,
+			RolloutPctAtAssign: 50,
+			AssignedAt:         now.Add(-10 * time.Minute),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		var findings []model.QAFinding
+		if i < 14 {
+			findings = []model.QAFinding{{
+				TaskID:    tk.ID,
+				Stage:     "S3",
+				RuleID:    "noisy-rule",
+				Severity:  "error",
+				FilePath:  "pkg/foo.go",
+				Line:      10,
+				Summary:   "synthetic false positive",
+				CreatedAt: now.Add(-5 * time.Minute),
+			}}
+		}
+		if _, err := store.RecordQACheckRun(ctx, model.QACheckRun{
+			TaskID:    tk.ID,
+			RunID:     fmt.Sprintf("run-%02d", i),
+			CommitSHA: fmt.Sprintf("deadbeef%02d", i),
+			Stage:     "S3",
+			CheckID:   "noisy-rule",
+			Arm:       model.QAArmTreatment,
+			Shadow:    false,
+			Verdict:   "fail",
+			CreatedAt: now.Add(-5 * time.Minute),
+		}, findings); err != nil {
+			t.Fatal(err)
+		}
+	}
+	allFindings, err := store.ListAllQAFindings(ctx)
+	if err != nil || len(allFindings) != 14 {
+		t.Fatalf("ListAllQAFindings = (%d, %v), want 14", len(allFindings), err)
+	}
+	for _, f := range allFindings {
+		if err := store.VoteQAFinding(ctx, f.ID, -1, "operator@example.com", now.Add(-time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	downgraded, reasons, err = orchestrator.MaybeAutoDowngradeQARollout(ctx, store, now)
+	if err != nil {
+		t.Fatalf("MaybeAutoDowngradeQARollout error: %v", err)
+	}
+	if !downgraded || len(reasons) == 0 {
+		t.Fatalf("expected auto-downgrade with reasons, got (%v, %v)", downgraded, reasons)
+	}
+
+	cfg, err := store.GetConfig(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.QA.Enabled || cfg.QA.RolloutPct != 0 || !cfg.QA.ShadowOnControlEnabled() || cfg.QA.RegimeID < 2 {
+		t.Fatalf("post-downgrade QAConfig = %+v, want Enabled=true RolloutPct=0 ShadowOnControl=true RegimeID>=2", cfg.QA)
+	}
+	audits, err := store.ConfigAuditOfSurface(ctx, "settings", 5)
+	if err != nil || len(audits) == 0 || !strings.Contains(audits[0].Summary, "auto-downgraded quality control rollout") {
+		t.Fatalf("expected config_audit entry for auto-downgrade, got %+v (err=%v)", audits, err)
+	}
+
+	// Idempotent second call once RolloutPct == 0.
+	downgraded2, _, err := orchestrator.MaybeAutoDowngradeQARollout(ctx, store, now)
+	if err != nil || downgraded2 {
+		t.Fatalf("second MaybeAutoDowngradeQARollout = (%v, %v), want (false, nil)", downgraded2, err)
+	}
+
+	// Re-enabling rollout in a new regime (Regime 3 at 25%) within Epoch 1 must NOT be immediately
+	// re-tripped by Regime 1's historical votes before Regime 3 accumulates its own 15 Treatment origins.
+	if err := store.UpdateConfig(ctx, func(c *model.Config) error {
+		nextQA, advErr := model.AdvanceQAConfig(c.QA, model.QAConfig{
+			Enabled:         true,
+			FlowID:          model.QAFlowGoldenV1Minimal,
+			RolloutPct:      25,
+			ShadowOnControl: model.BoolPtr(true),
+			Epoch:           c.QA.EpochOrDefault(),
+		})
+		if advErr != nil {
+			return advErr
+		}
+		c.QA = nextQA
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	downgraded3, _, err := orchestrator.MaybeAutoDowngradeQARollout(ctx, store, now.Add(time.Minute))
+	if err != nil || downgraded3 {
+		t.Fatalf("fresh Regime 3 was prematurely re-downgraded by Regime 1 history: (%v, %v)", downgraded3, err)
+	}
+	afterReenable, err := store.GetConfig(ctx)
+	if err != nil || afterReenable.QA.RolloutPct != 25 || afterReenable.QA.RegimeID < 3 {
+		t.Fatalf("expected RolloutPct=25 in Regime>=3 after operator re-enable, got %+v (err=%v)", afterReenable.QA, err)
+	}
+}

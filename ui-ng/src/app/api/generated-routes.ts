@@ -132,6 +132,7 @@ export const ROUTE_SCOPES = {
   "GET /api/pipeline/changes": "tasks:read",
   "GET /api/pull-requests/status": "ci:read",
   "GET /api/qa/flows": "settings:read",
+  "GET /api/qa/summary": "deployment:read",
   "GET /api/refs/{ref}/summary": "tasks:read",
   "GET /api/registry": "settings:read",
   "GET /api/registry/status": "deployment:read",

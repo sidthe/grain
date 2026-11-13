@@ -1171,6 +1171,7 @@ var agentAPISingleReadRoutes = map[string]bool{
 	"GET /api/registry":                                              true,
 	"GET /api/registry/status":                                       true,
 	"GET /api/qa/flows":                                              true,
+	"GET /api/qa/summary":                                            true,
 	"GET /api/release-approval-key":                                  true,
 	"GET /api/release-notes/stats":                                   true,
 	"GET /api/release-notes/versions/{version}":                      true,

@@ -241,6 +241,12 @@ items or topbar chrome:
   `.status-pill`, finding evidence expands on demand in `.ci-step-log`, and
   `Helpful` / `Not helpful` `.filter-chip` toggles (`aria-pressed`) are shown
   only when the viewer holds `tasks:write`.
+- **Telemetry (`/telemetry`):** two `.ops-card` panels inside `.ops-grid-2`
+  (`Quality Control Rollout (A/B)` and `Pre-PR Check Latency & Catch Rate`),
+  gated by `deployment:read` (`GET /api/qa/summary`) and narrowed by the page's
+  window and repository controls. When quality control is off and no epoch
+  assignments exist, both cards collapse to a single muted guidance line with
+  direct links to `/settings/tasks` and `/processes/quality`.
 
 ### Breakpoints
 

@@ -888,6 +888,9 @@ func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
 			timing.DispatchWait = wait
 		}
 	}
+	if deps.Store != nil && deps.Config.QA.Enabled && deps.Config.QA.RolloutPct > 0 && ctx.Err() == nil {
+		maybeEvaluateQACircuitBreakerThrottled(ctx, deps.Store, now)
+	}
 	return errors.Join(errs...)
 }
 
