@@ -438,6 +438,304 @@ describe("WorkstreamsPageComponent", () => {
     fixture.detectChanges();
     expect(el.querySelector('[data-testid="ws-show-tree"]')).toBeNull();
   });
+
+  it("exposes tabindex=0, aria-labelledby, and selection state on list rows and cards", async () => {
+    api.open = [
+      t("10", { title: "Alpha stream", state: "running" }),
+      t("11", {
+        title: "Alpha child",
+        state: "queued",
+        origin: "task:10",
+        generatedFrom: "10",
+      }),
+      t("20", { title: "Beta stream", state: "running" }),
+      t("21", {
+        title: "Beta child",
+        state: "queued",
+        origin: "task:20",
+        generatedFrom: "20",
+      }),
+    ];
+
+    const { fixture, router } = await mount("/workstreams");
+    const el = fixture.nativeElement as HTMLElement;
+
+    const row10 = el.querySelector<HTMLElement>(
+      '[data-testid="ws-row-task:10"]',
+    )!;
+    const row20 = el.querySelector<HTMLElement>(
+      '[data-testid="ws-row-task:20"]',
+    )!;
+    expect(row10.getAttribute("tabindex")).toBe("0");
+    expect(row20.getAttribute("tabindex")).toBe("0");
+    expect(row10.getAttribute("aria-labelledby")).toBe("ws-row-title-task:10");
+    expect(row10.classList).not.toContain("is-selected");
+    expect(row10.hasAttribute("aria-current")).toBe(false);
+
+    await router.navigateByUrl("/workstreams?selected=task:20");
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(row20.classList).toContain("is-selected");
+    expect(row20.getAttribute("aria-current")).toBe("true");
+    expect(row10.classList).not.toContain("is-selected");
+    expect(row10.hasAttribute("aria-current")).toBe(false);
+
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="ws-view-cards"]',
+    )!.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const card10 = el.querySelector<HTMLElement>(
+      '[data-testid="ws-card-task:10"]',
+    )!;
+    const card20 = el.querySelector<HTMLElement>(
+      '[data-testid="ws-card-task:20"]',
+    )!;
+    expect(card10.getAttribute("tabindex")).toBe("0");
+    expect(card20.getAttribute("tabindex")).toBe("0");
+    expect(card20.getAttribute("aria-labelledby")).toBe(
+      "ws-card-title-task:20",
+    );
+    expect(card20.classList).toContain("is-selected");
+    expect(card20.getAttribute("aria-current")).toBe("true");
+    expect(card10.classList).not.toContain("is-selected");
+    expect(card10.hasAttribute("aria-current")).toBe(false);
+
+    await router.navigateByUrl("/workstreams?view=cards&selected=task:10");
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(card10.classList).toContain("is-selected");
+    expect(card10.getAttribute("aria-current")).toBe("true");
+    expect(card20.classList).not.toContain("is-selected");
+    expect(card20.hasAttribute("aria-current")).toBe(false);
+  });
+
+  it("steps list and card selection with j/k and arrows, clears with Escape, and opens once on Enter or Space", async () => {
+    api.open = [
+      t("10", { title: "Alpha stream", state: "running" }),
+      t("11", {
+        title: "Alpha child",
+        state: "queued",
+        origin: "task:10",
+        generatedFrom: "10",
+      }),
+      t("20", { title: "Beta stream", state: "running" }),
+      t("21", {
+        title: "Beta child",
+        state: "queued",
+        origin: "task:20",
+        generatedFrom: "20",
+      }),
+    ];
+
+    const { fixture, router } = await mount("/workstreams");
+    const el = fixture.nativeElement as HTMLElement;
+    const navSpy = vi.spyOn(router, "navigate").mockResolvedValue(true);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "j",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    fixture.detectChanges();
+    const row10 = el.querySelector<HTMLElement>(
+      '[data-testid="ws-row-task:10"]',
+    )!;
+    const row20 = el.querySelector<HTMLElement>(
+      '[data-testid="ws-row-task:20"]',
+    )!;
+    expect(document.activeElement).toBe(row10);
+    expect(row10.classList).toContain("is-selected");
+    expect(row10.getAttribute("aria-current")).toBe("true");
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    fixture.detectChanges();
+    expect(document.activeElement).toBe(row20);
+    expect(row20.classList).toContain("is-selected");
+    expect(row20.getAttribute("aria-current")).toBe("true");
+    expect(row10.classList).not.toContain("is-selected");
+    expect(row10.hasAttribute("aria-current")).toBe(false);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "k",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    fixture.detectChanges();
+    expect(document.activeElement).toBe(row10);
+    expect(row10.classList).toContain("is-selected");
+
+    const enterEv = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    row10.dispatchEvent(enterEv);
+    expect(enterEv.defaultPrevented).toBe(true);
+    expect(navSpy).toHaveBeenCalledTimes(1);
+    expect(navSpy).toHaveBeenLastCalledWith(["/workstreams", "task:10"], {
+      queryParams: { node: null },
+      queryParamsHandling: "merge",
+    });
+
+    const spaceEv = new KeyboardEvent("keydown", {
+      key: " ",
+      bubbles: true,
+      cancelable: true,
+    });
+    row10.dispatchEvent(spaceEv);
+    expect(spaceEv.defaultPrevented).toBe(true);
+    expect(navSpy).toHaveBeenCalledTimes(2);
+
+    // Non-cancelable synthetic Enter on row still does not double-navigate.
+    row10.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+    expect(navSpy).toHaveBeenCalledTimes(3);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    fixture.detectChanges();
+    expect(row10.classList).not.toContain("is-selected");
+    expect(row10.hasAttribute("aria-current")).toBe(false);
+
+    // Same keyboard selection and activation in Cards view.
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="ws-view-cards"]',
+    )!.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    navSpy.mockClear();
+
+    const card10 = el.querySelector<HTMLElement>(
+      '[data-testid="ws-card-task:10"]',
+    )!;
+    const card20 = el.querySelector<HTMLElement>(
+      '[data-testid="ws-card-task:20"]',
+    )!;
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowDown",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    fixture.detectChanges();
+    expect(document.activeElement).toBe(card10);
+    expect(card10.classList).toContain("is-selected");
+    expect(card10.getAttribute("aria-current")).toBe("true");
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "j",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    fixture.detectChanges();
+    expect(document.activeElement).toBe(card20);
+    expect(card20.classList).toContain("is-selected");
+    expect(card20.getAttribute("aria-current")).toBe("true");
+
+    card20.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    card20.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: " ",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(navSpy).toHaveBeenCalledTimes(2);
+    expect(navSpy).toHaveBeenLastCalledWith(["/workstreams", "task:20"], {
+      queryParams: { node: null },
+      queryParamsHandling: "merge",
+    });
+  });
+
+  it("selects on card body click and keeps the viewed stream selected when returning from detail", async () => {
+    api.open = [
+      t("10", { title: "Alpha stream", state: "running" }),
+      t("11", {
+        title: "Alpha child",
+        state: "queued",
+        origin: "task:10",
+        generatedFrom: "10",
+      }),
+      t("20", { title: "Beta stream", state: "running" }),
+      t("21", {
+        title: "Beta child",
+        state: "queued",
+        origin: "task:20",
+        generatedFrom: "20",
+      }),
+    ];
+
+    const { fixture, router } = await mount("/workstreams?view=cards");
+    const el = fixture.nativeElement as HTMLElement;
+    const card20 = el.querySelector<HTMLElement>(
+      '[data-testid="ws-card-task:20"]',
+    )!;
+    const navSpy = vi.spyOn(router, "navigate").mockResolvedValue(true);
+
+    card20.querySelector<HTMLElement>(".ws-cfoot")!.click();
+    fixture.detectChanges();
+    expect(card20.classList).toContain("is-selected");
+    expect(card20.getAttribute("aria-current")).toBe("true");
+    expect(navSpy).toHaveBeenCalledWith(["/workstreams", "task:20"], {
+      queryParams: { node: null },
+      queryParamsHandling: "merge",
+    });
+
+    navSpy.mockRestore();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="ws-view-cards"]',
+    )!.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    await router.navigateByUrl("/workstreams/task:20");
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    el.querySelector<HTMLButtonElement>('[data-testid="ws-back"]')!.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    await new Promise((r) => setTimeout(r, 0));
+    fixture.detectChanges();
+
+    const backCard20 = el.querySelector<HTMLElement>(
+      '[data-testid="ws-card-task:20"]',
+    )!;
+    const backCard10 = el.querySelector<HTMLElement>(
+      '[data-testid="ws-card-task:10"]',
+    )!;
+    expect(backCard20.classList).toContain("is-selected");
+    expect(backCard20.getAttribute("aria-current")).toBe("true");
+    expect(backCard10.classList).not.toContain("is-selected");
+    expect(backCard10.hasAttribute("aria-current")).toBe(false);
+  });
 });
 
 describe("Workstreams detail embedded task pane", () => {

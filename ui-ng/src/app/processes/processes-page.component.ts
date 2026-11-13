@@ -121,6 +121,172 @@ const CADENCE_KINDS: readonly { id: string; label: string }[] = [
 type SchedFilter = "all" | "active" | "paused" | "triggers" | "suppressed";
 type TmplFilter = "all" | "deployment" | "declared" | "system";
 type SuitesPaneView = "suites" | "runs";
+type SchedFieldKey =
+  | "templateId"
+  | "suiteId"
+  | "title"
+  | "repo"
+  | "base"
+  | "everyNMinutes"
+  | "everyNHours"
+  | "timeOfDay"
+  | "timeZone"
+  | "dayOfMonth"
+  | "triggerWorkflow"
+  | "gitRefRepo"
+  | "gitRef";
+
+const MIN_EVERY_N_MINUTES = 10;
+const MAX_EVERY_N_HOURS = 366 * 24;
+const MAX_EVERY_N_MINUTES = MAX_EVERY_N_HOURS * 60;
+const BRANCH_NAME_SAFE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+const MAX_BRANCH_NAME_LEN = 244;
+
+const SCHED_FIELD_ORDER: readonly SchedFieldKey[] = [
+  "templateId",
+  "suiteId",
+  "title",
+  "repo",
+  "base",
+  "everyNMinutes",
+  "everyNHours",
+  "timeOfDay",
+  "timeZone",
+  "dayOfMonth",
+  "triggerWorkflow",
+  "gitRefRepo",
+  "gitRef",
+];
+
+const SCHED_TARGET_FIELDS: readonly SchedFieldKey[] = [
+  "templateId",
+  "suiteId",
+  "title",
+  "base",
+];
+
+const SCHED_CADENCE_FIELDS: readonly SchedFieldKey[] = [
+  "everyNMinutes",
+  "everyNHours",
+  "timeOfDay",
+  "timeZone",
+  "dayOfMonth",
+  "triggerWorkflow",
+  "gitRefRepo",
+  "gitRef",
+];
+
+const SCHED_FIELD_TESTIDS: Record<SchedFieldKey, string> = {
+  templateId: "sched-template-picker",
+  suiteId: "sched-suite-picker",
+  title: "sched-title-input",
+  repo: "sched-repo-input",
+  base: "sched-base-input",
+  everyNMinutes: "sched-every-min-input",
+  everyNHours: "sched-every-hr-input",
+  timeOfDay: "sched-time-input",
+  timeZone: "sched-tz-input",
+  dayOfMonth: "sched-day-of-month-input",
+  triggerWorkflow: "sched-trigger-workflow-input",
+  gitRefRepo: "sched-git-ref-repo-input",
+  gitRef: "sched-git-ref-input",
+};
+
+function validRepoSegment(s: string): boolean {
+  if (!s || s === "." || s === "..") return false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    const code = s.charCodeAt(i);
+    if (code <= 0x20 || code === 0x7f) return false;
+    if ("/\\:?#@[]%~^".includes(ch)) return false;
+  }
+  return true;
+}
+
+function isValidRepoSpec(raw: string): boolean {
+  let spec = raw.trim();
+  if (!spec) return false;
+  let hostGiven = false;
+  const at = spec.indexOf("@");
+  if (at >= 0 && !spec.includes("://")) {
+    const colon = spec.indexOf(":", at);
+    if (colon >= 0) {
+      hostGiven = true;
+      spec = spec.slice(colon + 1);
+    }
+  }
+  const scheme = spec.indexOf("://");
+  if (scheme >= 0) {
+    spec = spec.slice(scheme + 3);
+    const slash = spec.indexOf("/");
+    spec = slash >= 0 ? spec.slice(slash + 1) : "";
+    hostGiven = true;
+  }
+  spec = spec.replace(/^\/+|\/+$/g, "");
+  if (spec.endsWith(".git")) spec = spec.slice(0, -4);
+  spec = spec.replace(/^\/+|\/+$/g, "");
+  if (!hostGiven) {
+    const slash = spec.indexOf("/");
+    if (slash >= 0) {
+      const first = spec.slice(0, slash);
+      if (first.includes(".") || first.includes(":")) {
+        hostGiven = true;
+        spec = spec.slice(slash + 1);
+      }
+    }
+  }
+  const slash = spec.indexOf("/");
+  if (slash < 0) return false;
+  return (
+    validRepoSegment(spec.slice(0, slash)) &&
+    validRepoSegment(spec.slice(slash + 1))
+  );
+}
+
+function isValidBranchName(raw: string): boolean {
+  if (!raw || raw.length > MAX_BRANCH_NAME_LEN) return false;
+  if (!BRANCH_NAME_SAFE.test(raw)) return false;
+  if (
+    raw.includes("..") ||
+    raw.includes("//") ||
+    raw.endsWith("/") ||
+    raw.endsWith(".")
+  ) {
+    return false;
+  }
+  return raw
+    .split("/")
+    .every((part) => !part.startsWith(".") && !part.endsWith(".lock"));
+}
+
+function isValidTimeOfDay(raw: string): boolean {
+  return /^([01]?\d|2[0-3]):[0-5]\d$/.test(raw.trim());
+}
+
+function isValidTimeZone(raw: string): boolean {
+  const tz = raw.trim();
+  if (!tz || tz === "UTC") return true;
+  if (tz === "Local") return false;
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function parseStrictInt(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const n = Number(trimmed);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+function isValidGitRef(raw: string): boolean {
+  const ref = raw.trim();
+  if (!ref.startsWith("refs/") || ref.length <= "refs/".length) return false;
+  return !(/[\s^~:?*[\\]/.test(ref) || ref.includes("..") || ref.endsWith("/"));
+}
 
 @Component({
   selector: "g-processes-page",
@@ -1545,7 +1711,8 @@ type SuitesPaneView = "suites" | "runs";
         (click)="closeScheduleDialog()"
       ></div>
       <div
-        class="g-dialog is-drawer"
+        #schedDialogEl
+        class="g-dialog is-drawer proc-dialog"
         role="dialog"
         aria-modal="true"
         aria-labelledby="sched-dialog-title"
@@ -1557,415 +1724,746 @@ type SuitesPaneView = "suites" | "runs";
           {{ editingSchedule() ? "Edit schedule" : "New schedule or trigger" }}
         </h2>
 
-        @if (editingSchedule()?.system) {
-          <p
-            class="banner banner-info"
-            style="margin: 8px 0 0"
-            data-testid="sched-system-banner"
-          >
-            Built-in Grain schedule — target and prompt are managed by Grain;
-            cadence and overlap policy can be customized.
-          </p>
-        } @else {
-          <div class="field">
-            <span>Firing target</span>
-            <div
-              class="segmented"
-              role="group"
-              aria-label="Schedule target kind"
+        <form (submit)="onScheduleFormSubmit($event)" novalidate>
+          @if (editingSchedule()?.system) {
+            <p
+              class="banner banner-info"
+              style="margin: 8px 0 0"
+              data-testid="sched-system-banner"
             >
-              <button
-                type="button"
-                data-testid="sched-target-prompt"
-                [disabled]="!!editingSchedule()?.suiteId"
-                [attr.aria-pressed]="schedTargetKind() === 'prompt'"
-                (click)="setSchedTargetKind('prompt')"
-              >
-                Inline prompt
-              </button>
-              <button
-                type="button"
-                data-testid="sched-target-template"
-                [disabled]="!!editingSchedule()?.suiteId"
-                [attr.aria-pressed]="schedTargetKind() === 'template'"
-                (click)="setSchedTargetKind('template')"
-              >
-                Template
-              </button>
-              <button
-                type="button"
-                data-testid="sched-target-suite"
-                [disabled]="
-                  editingSchedule() !== null && !editingSchedule()?.suiteId
-                "
-                [attr.aria-pressed]="schedTargetKind() === 'suite'"
-                (click)="setSchedTargetKind('suite')"
-              >
-                Suite
-              </button>
-            </div>
-          </div>
-
-          @if (schedTargetKind() === "template") {
-            <div class="field">
-              <span>Template</span>
-              <div class="pill-dropdown">
-                <button
-                  type="button"
-                  class="pill-trigger"
-                  data-testid="sched-template-picker"
-                  aria-haspopup="listbox"
-                  [attr.aria-expanded]="openPicker() === 'schedTmpl'"
-                  (click)="togglePicker('schedTmpl', $event)"
-                >
-                  <span>{{
-                    templateNameById(sDraftTemplateId()) || "Choose template…"
-                  }}</span>
-                  <span aria-hidden="true">▾</span>
-                </button>
-                @if (openPicker() === "schedTmpl") {
-                  <ul class="pop-menu" role="listbox" aria-label="Templates">
-                    @for (t of schedulableTemplates(); track t.id) {
-                      <li role="none">
-                        <button
-                          type="button"
-                          role="option"
-                          [attr.aria-selected]="sDraftTemplateId() === t.id"
-                          (click)="
-                            sDraftTemplateId.set(t.id); openPicker.set(null)
-                          "
-                        >
-                          {{ t.name || t.title }}
-                        </button>
-                      </li>
-                    }
-                  </ul>
-                }
-              </div>
-            </div>
-          } @else if (schedTargetKind() === "suite") {
-            <div class="field">
-              <span>Suite</span>
-              <div class="pill-dropdown">
-                <button
-                  type="button"
-                  class="pill-trigger"
-                  data-testid="sched-suite-picker"
-                  aria-haspopup="listbox"
-                  [attr.aria-expanded]="openPicker() === 'schedSuite'"
-                  (click)="togglePicker('schedSuite', $event)"
-                >
-                  <span>{{
-                    suiteNameById(sDraftSuiteId()) || "Choose suite…"
-                  }}</span>
-                  <span aria-hidden="true">▾</span>
-                </button>
-                @if (openPicker() === "schedSuite") {
-                  <ul class="pop-menu" role="listbox" aria-label="Suites">
-                    @for (st of store.suites(); track st.id) {
-                      <li role="none">
-                        <button
-                          type="button"
-                          role="option"
-                          [attr.aria-selected]="sDraftSuiteId() === st.id"
-                          (click)="
-                            sDraftSuiteId.set(st.id); openPicker.set(null)
-                          "
-                        >
-                          {{ st.name }}
-                        </button>
-                      </li>
-                    }
-                  </ul>
-                }
-              </div>
-            </div>
+              Built-in Grain schedule — target and prompt are managed by Grain;
+              cadence and overlap policy can be customized.
+            </p>
           } @else {
-            <label class="field">
-              <span>Task title</span>
-              <input
-                type="text"
-                data-testid="sched-title-input"
-                placeholder="Nightly dependency audit"
-                [value]="sDraftTitle()"
-                (input)="sDraftTitle.set($any($event.target).value)"
-              />
-            </label>
-            <label class="field">
-              <span>Task prompt</span>
-              <textarea
-                rows="3"
-                data-testid="sched-desc-input"
-                placeholder="Check outdated packages and open a PR if needed."
-                [value]="sDraftDesc()"
-                (input)="sDraftDesc.set($any($event.target).value)"
-              ></textarea>
-            </label>
-          }
-
-          <div class="proc-field-grid">
             <div class="field">
-              <span>Repository (owner/name)</span>
-              @if (store.knownRepos().length > 0) {
-                <g-pill-select
-                  [options]="schedRepoOptions()"
-                  [value]="
-                    store.knownRepos().includes(sDraftRepo())
-                      ? sDraftRepo()
-                      : ''
-                  "
-                  ariaLabel="Schedule repository"
-                  align="left"
-                  testid="sched-repo-select"
-                  (valueChange)="$event && sDraftRepo.set($event)"
-                />
-              }
-              <input
-                type="text"
-                aria-label="Repository (owner/name)"
-                data-testid="sched-repo-input"
-                placeholder="acme/widgets"
-                [value]="sDraftRepo()"
-                (input)="sDraftRepo.set($any($event.target).value)"
-              />
-            </div>
-            <label class="field">
-              <span>Base branch</span>
-              <input
-                type="text"
-                data-testid="sched-base-input"
-                placeholder="Default branch"
-                [value]="sDraftBase()"
-                (input)="sDraftBase.set($any($event.target).value)"
-              />
-            </label>
-          </div>
-        }
-
-        <div class="field">
-          <span>Cadence / Event trigger</span>
-          <div class="filter-strip" style="margin-top: 4px">
-            @for (ck of cadenceKinds; track ck.id) {
-              <button
-                type="button"
-                class="filter-chip"
-                [attr.aria-pressed]="sDraftKind() === ck.id"
-                [attr.data-testid]="'sched-kind-' + ck.id"
-                (click)="sDraftKind.set(ck.id)"
+              <span>Firing target</span>
+              <div
+                class="segmented"
+                role="group"
+                aria-label="Schedule target kind"
               >
-                {{ ck.label }}
-              </button>
-            }
-          </div>
-        </div>
+                <button
+                  type="button"
+                  data-testid="sched-target-prompt"
+                  [disabled]="!!editingSchedule()?.suiteId"
+                  [attr.aria-pressed]="schedTargetKind() === 'prompt'"
+                  (click)="setSchedTargetKind('prompt')"
+                >
+                  Inline prompt
+                </button>
+                <button
+                  type="button"
+                  data-testid="sched-target-template"
+                  [disabled]="!!editingSchedule()?.suiteId"
+                  [attr.aria-pressed]="schedTargetKind() === 'template'"
+                  (click)="setSchedTargetKind('template')"
+                >
+                  Template
+                </button>
+                <button
+                  type="button"
+                  data-testid="sched-target-suite"
+                  [disabled]="
+                    editingSchedule() !== null && !editingSchedule()?.suiteId
+                  "
+                  [attr.aria-pressed]="schedTargetKind() === 'suite'"
+                  (click)="setSchedTargetKind('suite')"
+                >
+                  Suite
+                </button>
+              </div>
+            </div>
 
-        <div class="proc-field-grid">
-          @if (sDraftKind() === "everyNMinutes") {
-            <label class="field">
-              <span>Every N minutes</span>
-              <input
-                type="number"
-                min="5"
-                [value]="sDraftEveryMin()"
-                (input)="sDraftEveryMin.set(+$any($event.target).value || 15)"
-              />
-            </label>
-          } @else if (sDraftKind() === "everyNHours") {
-            <label class="field">
-              <span>Every N hours</span>
-              <input
-                type="number"
-                min="1"
-                [value]="sDraftEveryHr()"
-                (input)="sDraftEveryHr.set(+$any($event.target).value || 1)"
-              />
-            </label>
-          } @else if (
-            sDraftKind() === "daily" ||
-            sDraftKind() === "weekly" ||
-            sDraftKind() === "monthly"
-          ) {
-            <label class="field">
-              <span>Time of day (HH:MM)</span>
-              <input
-                type="text"
-                placeholder="09:00"
-                [value]="sDraftTime()"
-                (input)="sDraftTime.set($any($event.target).value)"
-              />
-            </label>
-            <label class="field">
-              <span>Time zone (IANA)</span>
-              <input
-                type="text"
-                placeholder="UTC"
-                [value]="sDraftTz()"
-                (input)="sDraftTz.set($any($event.target).value)"
-              />
-            </label>
-            @if (sDraftKind() === "weekly") {
+            @if (schedTargetKind() === "template") {
               <div class="field">
-                <span>Weekday</span>
+                <span>
+                  Template
+                  <span class="proc-req-mark" aria-hidden="true">*</span>
+                </span>
                 <div class="pill-dropdown">
                   <button
                     type="button"
                     class="pill-trigger"
+                    [class.is-invalid]="!!schedVisibleError('templateId')"
+                    data-testid="sched-template-picker"
                     aria-haspopup="listbox"
-                    [attr.aria-expanded]="openPicker() === 'weekday'"
-                    (click)="togglePicker('weekday', $event)"
+                    [attr.aria-expanded]="openPicker() === 'schedTmpl'"
+                    [attr.aria-describedby]="
+                      schedVisibleError('templateId')
+                        ? 'sched-template-error'
+                        : null
+                    "
+                    (click)="togglePicker('schedTmpl', $event)"
                   >
-                    <span>{{ sDraftWeekday() }}</span>
+                    <span>{{
+                      templateNameById(sDraftTemplateId()) ||
+                        (editingSchedule()?.templateId === sDraftTemplateId()
+                          ? editingSchedule()?.templateName
+                          : "") ||
+                        "Choose template…"
+                    }}</span>
                     <span aria-hidden="true">▾</span>
                   </button>
-                  @if (openPicker() === "weekday") {
-                    <ul class="pop-menu" role="listbox" aria-label="Weekday">
-                      @for (wd of weekdays; track wd) {
+                  @if (openPicker() === "schedTmpl") {
+                    <ul class="pop-menu" role="listbox" aria-label="Templates">
+                      @for (t of schedulableTemplates(); track t.id) {
                         <li role="none">
                           <button
                             type="button"
                             role="option"
-                            [attr.aria-selected]="sDraftWeekday() === wd"
-                            (click)="
-                              sDraftWeekday.set(wd); openPicker.set(null)
-                            "
+                            [attr.aria-selected]="sDraftTemplateId() === t.id"
+                            (click)="selectSchedTemplate(t.id)"
                           >
-                            {{ wd }}
+                            {{ t.name || t.title }}
                           </button>
                         </li>
                       }
                     </ul>
                   }
                 </div>
+                @if (schedVisibleError("templateId"); as err) {
+                  <small
+                    id="sched-template-error"
+                    class="proc-field-error"
+                    role="alert"
+                    data-testid="sched-template-error"
+                    >{{ err }}</small
+                  >
+                }
               </div>
-            }
-            @if (sDraftKind() === "monthly") {
+            } @else if (schedTargetKind() === "suite") {
+              <div class="field">
+                <span>
+                  Suite
+                  <span class="proc-req-mark" aria-hidden="true">*</span>
+                </span>
+                <div class="pill-dropdown">
+                  <button
+                    type="button"
+                    class="pill-trigger"
+                    [class.is-invalid]="!!schedVisibleError('suiteId')"
+                    data-testid="sched-suite-picker"
+                    aria-haspopup="listbox"
+                    [attr.aria-expanded]="openPicker() === 'schedSuite'"
+                    [attr.aria-describedby]="
+                      schedVisibleError('suiteId') ? 'sched-suite-error' : null
+                    "
+                    (click)="togglePicker('schedSuite', $event)"
+                  >
+                    <span>{{
+                      suiteNameById(sDraftSuiteId()) ||
+                        (editingSchedule()?.suiteId === sDraftSuiteId()
+                          ? editingSchedule()?.suiteName
+                          : "") ||
+                        "Choose suite…"
+                    }}</span>
+                    <span aria-hidden="true">▾</span>
+                  </button>
+                  @if (openPicker() === "schedSuite") {
+                    <ul class="pop-menu" role="listbox" aria-label="Suites">
+                      @for (st of store.suites(); track st.id) {
+                        <li role="none">
+                          <button
+                            type="button"
+                            role="option"
+                            [attr.aria-selected]="sDraftSuiteId() === st.id"
+                            (click)="selectSchedSuite(st.id)"
+                          >
+                            {{ st.name }}
+                          </button>
+                        </li>
+                      }
+                    </ul>
+                  }
+                </div>
+                @if (schedVisibleError("suiteId"); as err) {
+                  <small
+                    id="sched-suite-error"
+                    class="proc-field-error"
+                    role="alert"
+                    data-testid="sched-suite-error"
+                    >{{ err }}</small
+                  >
+                }
+              </div>
+            } @else {
               <label class="field">
-                <span>Day of month (1–28)</span>
+                <span>
+                  Task title
+                  <span class="proc-req-mark" aria-hidden="true">*</span>
+                </span>
+                <input
+                  type="text"
+                  required
+                  aria-required="true"
+                  data-testid="sched-title-input"
+                  placeholder="Nightly dependency audit"
+                  [attr.aria-invalid]="
+                    schedVisibleError('title') ? 'true' : null
+                  "
+                  [attr.aria-describedby]="
+                    schedVisibleError('title') ? 'sched-title-error' : null
+                  "
+                  [value]="sDraftTitle()"
+                  (input)="
+                    onSchedFieldInput('title', $any($event.target).value)
+                  "
+                  (blur)="markSchedTouched('title')"
+                />
+                @if (schedVisibleError("title"); as err) {
+                  <small
+                    id="sched-title-error"
+                    class="proc-field-error"
+                    role="alert"
+                    data-testid="sched-title-error"
+                    >{{ err }}</small
+                  >
+                }
+              </label>
+              <label class="field">
+                <span>Task prompt</span>
+                <textarea
+                  rows="3"
+                  data-testid="sched-desc-input"
+                  placeholder="Check outdated packages and open a PR if needed."
+                  [value]="sDraftDesc()"
+                  (input)="sDraftDesc.set($any($event.target).value)"
+                ></textarea>
+              </label>
+            }
+
+            <div class="proc-field-grid">
+              <div class="field">
+                <span>
+                  Repository (owner/name)
+                  @if (isSchedRepoRequired()) {
+                    <span class="proc-req-mark" aria-hidden="true">*</span>
+                  }
+                </span>
+                @if (store.knownRepos().length > 0) {
+                  <g-pill-select
+                    [options]="schedRepoOptions()"
+                    [value]="
+                      store.knownRepos().includes(sDraftRepo())
+                        ? sDraftRepo()
+                        : ''
+                    "
+                    ariaLabel="Schedule repository"
+                    align="left"
+                    testid="sched-repo-select"
+                    (valueChange)="onSchedRepoSelect($event)"
+                  />
+                }
+                <input
+                  type="text"
+                  aria-label="Repository (owner/name)"
+                  [attr.aria-required]="isSchedRepoRequired() ? 'true' : null"
+                  [attr.aria-invalid]="
+                    schedVisibleError('repo') ? 'true' : null
+                  "
+                  [attr.aria-describedby]="
+                    schedVisibleError('repo') ? 'sched-repo-error' : null
+                  "
+                  data-testid="sched-repo-input"
+                  placeholder="acme/widgets"
+                  [value]="sDraftRepo()"
+                  (input)="onSchedFieldInput('repo', $any($event.target).value)"
+                  (blur)="markSchedTouched('repo')"
+                />
+                @if (schedVisibleError("repo"); as err) {
+                  <small
+                    id="sched-repo-error"
+                    class="proc-field-error"
+                    role="alert"
+                    data-testid="sched-repo-error"
+                    >{{ err }}</small
+                  >
+                }
+              </div>
+              <label class="field">
+                <span>
+                  Base branch
+                  @if (schedTargetKind() === "suite") {
+                    <span class="proc-req-mark" aria-hidden="true">*</span>
+                  }
+                </span>
+                <input
+                  type="text"
+                  data-testid="sched-base-input"
+                  placeholder="Default branch"
+                  [attr.aria-required]="
+                    schedTargetKind() === 'suite' ? 'true' : null
+                  "
+                  [attr.aria-invalid]="
+                    schedVisibleError('base') ? 'true' : null
+                  "
+                  [attr.aria-describedby]="
+                    schedVisibleError('base') ? 'sched-base-error' : null
+                  "
+                  [value]="sDraftBase()"
+                  (input)="onSchedFieldInput('base', $any($event.target).value)"
+                  (blur)="markSchedTouched('base')"
+                />
+                @if (schedVisibleError("base"); as err) {
+                  <small
+                    id="sched-base-error"
+                    class="proc-field-error"
+                    role="alert"
+                    data-testid="sched-base-error"
+                    >{{ err }}</small
+                  >
+                }
+              </label>
+            </div>
+          }
+
+          <div class="field">
+            <span>Cadence / Event trigger</span>
+            <div class="filter-strip" style="margin-top: 4px">
+              @for (ck of cadenceKinds; track ck.id) {
+                <button
+                  type="button"
+                  class="filter-chip"
+                  [attr.aria-pressed]="sDraftKind() === ck.id"
+                  [attr.data-testid]="'sched-kind-' + ck.id"
+                  (click)="setSchedKind(ck.id)"
+                >
+                  {{ ck.label }}
+                </button>
+              }
+            </div>
+          </div>
+
+          <div class="proc-field-grid">
+            @if (sDraftKind() === "everyNMinutes") {
+              <label class="field">
+                <span>
+                  Every N minutes
+                  <span class="proc-req-mark" aria-hidden="true">*</span>
+                </span>
+                <input
+                  type="number"
+                  min="10"
+                  max="527040"
+                  step="1"
+                  required
+                  aria-required="true"
+                  data-testid="sched-every-min-input"
+                  [attr.aria-invalid]="
+                    schedVisibleError('everyNMinutes') ? 'true' : null
+                  "
+                  [attr.aria-describedby]="
+                    schedVisibleError('everyNMinutes')
+                      ? 'sched-every-min-error'
+                      : null
+                  "
+                  [value]="sDraftEveryMin()"
+                  (input)="
+                    onSchedFieldInput(
+                      'everyNMinutes',
+                      $any($event.target).value
+                    )
+                  "
+                  (blur)="markSchedTouched('everyNMinutes')"
+                />
+                @if (schedVisibleError("everyNMinutes"); as err) {
+                  <small
+                    id="sched-every-min-error"
+                    class="proc-field-error"
+                    role="alert"
+                    data-testid="sched-every-min-error"
+                    >{{ err }}</small
+                  >
+                }
+              </label>
+            } @else if (sDraftKind() === "everyNHours") {
+              <label class="field">
+                <span>
+                  Every N hours
+                  <span class="proc-req-mark" aria-hidden="true">*</span>
+                </span>
                 <input
                   type="number"
                   min="1"
-                  max="28"
-                  [value]="sDraftDayOfMonth()"
+                  max="8784"
+                  step="1"
+                  required
+                  aria-required="true"
+                  data-testid="sched-every-hr-input"
+                  [attr.aria-invalid]="
+                    schedVisibleError('everyNHours') ? 'true' : null
+                  "
+                  [attr.aria-describedby]="
+                    schedVisibleError('everyNHours')
+                      ? 'sched-every-hr-error'
+                      : null
+                  "
+                  [value]="sDraftEveryHr()"
                   (input)="
-                    sDraftDayOfMonth.set(+$any($event.target).value || 1)
+                    onSchedFieldInput('everyNHours', $any($event.target).value)
+                  "
+                  (blur)="markSchedTouched('everyNHours')"
+                />
+                @if (schedVisibleError("everyNHours"); as err) {
+                  <small
+                    id="sched-every-hr-error"
+                    class="proc-field-error"
+                    role="alert"
+                    data-testid="sched-every-hr-error"
+                    >{{ err }}</small
+                  >
+                }
+              </label>
+            } @else if (
+              sDraftKind() === "daily" ||
+              sDraftKind() === "weekly" ||
+              sDraftKind() === "monthly"
+            ) {
+              <label class="field">
+                <span>
+                  Time of day (HH:MM)
+                  <span class="proc-req-mark" aria-hidden="true">*</span>
+                </span>
+                <input
+                  type="text"
+                  required
+                  aria-required="true"
+                  data-testid="sched-time-input"
+                  placeholder="09:00"
+                  [attr.aria-invalid]="
+                    schedVisibleError('timeOfDay') ? 'true' : null
+                  "
+                  [attr.aria-describedby]="
+                    schedVisibleError('timeOfDay') ? 'sched-time-error' : null
+                  "
+                  [value]="sDraftTime()"
+                  (input)="
+                    onSchedFieldInput('timeOfDay', $any($event.target).value)
+                  "
+                  (blur)="markSchedTouched('timeOfDay')"
+                />
+                @if (schedVisibleError("timeOfDay"); as err) {
+                  <small
+                    id="sched-time-error"
+                    class="proc-field-error"
+                    role="alert"
+                    data-testid="sched-time-error"
+                    >{{ err }}</small
+                  >
+                }
+              </label>
+              <label class="field">
+                <span>Time zone (IANA)</span>
+                <input
+                  type="text"
+                  data-testid="sched-tz-input"
+                  placeholder="UTC"
+                  [attr.aria-invalid]="
+                    schedVisibleError('timeZone') ? 'true' : null
+                  "
+                  [attr.aria-describedby]="
+                    schedVisibleError('timeZone') ? 'sched-tz-error' : null
+                  "
+                  [value]="sDraftTz()"
+                  (input)="
+                    onSchedFieldInput('timeZone', $any($event.target).value)
+                  "
+                  (blur)="markSchedTouched('timeZone')"
+                />
+                @if (schedVisibleError("timeZone"); as err) {
+                  <small
+                    id="sched-tz-error"
+                    class="proc-field-error"
+                    role="alert"
+                    data-testid="sched-tz-error"
+                    >{{ err }}</small
+                  >
+                }
+              </label>
+              @if (sDraftKind() === "weekly") {
+                <div class="field">
+                  <span>Weekday</span>
+                  <div class="pill-dropdown">
+                    <button
+                      type="button"
+                      class="pill-trigger"
+                      data-testid="sched-weekday-picker"
+                      aria-haspopup="listbox"
+                      [attr.aria-expanded]="openPicker() === 'weekday'"
+                      (click)="togglePicker('weekday', $event)"
+                    >
+                      <span>{{ sDraftWeekday() }}</span>
+                      <span aria-hidden="true">▾</span>
+                    </button>
+                    @if (openPicker() === "weekday") {
+                      <ul class="pop-menu" role="listbox" aria-label="Weekday">
+                        @for (wd of weekdays; track wd) {
+                          <li role="none">
+                            <button
+                              type="button"
+                              role="option"
+                              [attr.aria-selected]="sDraftWeekday() === wd"
+                              (click)="
+                                sDraftWeekday.set(wd); openPicker.set(null)
+                              "
+                            >
+                              {{ wd }}
+                            </button>
+                          </li>
+                        }
+                      </ul>
+                    }
+                  </div>
+                </div>
+              }
+              @if (sDraftKind() === "monthly") {
+                <label class="field">
+                  <span>
+                    Day of month (1–31)
+                    <span class="proc-req-mark" aria-hidden="true">*</span>
+                  </span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="31"
+                    step="1"
+                    required
+                    aria-required="true"
+                    data-testid="sched-day-of-month-input"
+                    [attr.aria-invalid]="
+                      schedVisibleError('dayOfMonth') ? 'true' : null
+                    "
+                    [attr.aria-describedby]="
+                      schedVisibleError('dayOfMonth')
+                        ? 'sched-day-of-month-error'
+                        : null
+                    "
+                    [value]="sDraftDayOfMonth()"
+                    (input)="
+                      onSchedFieldInput('dayOfMonth', $any($event.target).value)
+                    "
+                    (blur)="markSchedTouched('dayOfMonth')"
+                  />
+                  @if (schedVisibleError("dayOfMonth"); as err) {
+                    <small
+                      id="sched-day-of-month-error"
+                      class="proc-field-error"
+                      role="alert"
+                      data-testid="sched-day-of-month-error"
+                      >{{ err }}</small
+                    >
+                  }
+                </label>
+              }
+            } @else if (sDraftKind() === "github_workflow_run") {
+              <label class="field">
+                <span>
+                  Workflow name or file
+                  <span class="proc-req-mark" aria-hidden="true">*</span>
+                </span>
+                <input
+                  type="text"
+                  required
+                  aria-required="true"
+                  data-testid="sched-trigger-workflow-input"
+                  placeholder="CI"
+                  [attr.aria-invalid]="
+                    schedVisibleError('triggerWorkflow') ? 'true' : null
+                  "
+                  [attr.aria-describedby]="
+                    schedVisibleError('triggerWorkflow')
+                      ? 'sched-trigger-workflow-error'
+                      : null
+                  "
+                  [value]="sDraftTriggerWorkflow()"
+                  (input)="
+                    onSchedFieldInput(
+                      'triggerWorkflow',
+                      $any($event.target).value
+                    )
+                  "
+                  (blur)="markSchedTouched('triggerWorkflow')"
+                />
+                @if (schedVisibleError("triggerWorkflow"); as err) {
+                  <small
+                    id="sched-trigger-workflow-error"
+                    class="proc-field-error"
+                    role="alert"
+                    data-testid="sched-trigger-workflow-error"
+                    >{{ err }}</small
+                  >
+                }
+              </label>
+              <label class="field">
+                <span>Conclusion filter</span>
+                <input
+                  type="text"
+                  data-testid="sched-trigger-conclusion-input"
+                  placeholder="failure"
+                  [value]="sDraftTriggerConclusion()"
+                  (input)="
+                    sDraftTriggerConclusion.set($any($event.target).value)
                   "
                 />
               </label>
+              <label class="field">
+                <span>Branch filter (optional)</span>
+                <input
+                  type="text"
+                  data-testid="sched-trigger-branch-input"
+                  placeholder="main"
+                  [value]="sDraftTriggerBranch()"
+                  (input)="sDraftTriggerBranch.set($any($event.target).value)"
+                />
+              </label>
+            } @else if (sDraftKind() === "git_ref") {
+              <label class="field">
+                <span>
+                  Watched git repository
+                  @if (!sDraftRepo().trim() || editingSchedule()?.system) {
+                    <span class="proc-req-mark" aria-hidden="true">*</span>
+                  }
+                </span>
+                <input
+                  type="text"
+                  data-testid="sched-git-ref-repo-input"
+                  [placeholder]="sDraftRepo() || 'acme/widgets'"
+                  [attr.aria-required]="
+                    !sDraftRepo().trim() || editingSchedule()?.system
+                      ? 'true'
+                      : null
+                  "
+                  [attr.aria-invalid]="
+                    schedVisibleError('gitRefRepo') ? 'true' : null
+                  "
+                  [attr.aria-describedby]="
+                    schedVisibleError('gitRefRepo')
+                      ? 'sched-git-ref-repo-error'
+                      : null
+                  "
+                  [value]="sDraftGitRefRepo()"
+                  (input)="
+                    onSchedFieldInput('gitRefRepo', $any($event.target).value)
+                  "
+                  (blur)="markSchedTouched('gitRefRepo')"
+                />
+                @if (schedVisibleError("gitRefRepo"); as err) {
+                  <small
+                    id="sched-git-ref-repo-error"
+                    class="proc-field-error"
+                    role="alert"
+                    data-testid="sched-git-ref-repo-error"
+                    >{{ err }}</small
+                  >
+                }
+              </label>
+              <label class="field">
+                <span>
+                  Watched git ref / branch
+                  <span class="proc-req-mark" aria-hidden="true">*</span>
+                </span>
+                <input
+                  type="text"
+                  required
+                  aria-required="true"
+                  data-testid="sched-git-ref-input"
+                  placeholder="refs/heads/main"
+                  [attr.aria-invalid]="
+                    schedVisibleError('gitRef') ? 'true' : null
+                  "
+                  [attr.aria-describedby]="
+                    schedVisibleError('gitRef') ? 'sched-git-ref-error' : null
+                  "
+                  [value]="sDraftGitRef()"
+                  (input)="
+                    onSchedFieldInput('gitRef', $any($event.target).value)
+                  "
+                  (blur)="markSchedTouched('gitRef')"
+                />
+                @if (schedVisibleError("gitRef"); as err) {
+                  <small
+                    id="sched-git-ref-error"
+                    class="proc-field-error"
+                    role="alert"
+                    data-testid="sched-git-ref-error"
+                    >{{ err }}</small
+                  >
+                }
+              </label>
             }
-          } @else if (sDraftKind() === "github_workflow_run") {
-            <label class="field">
-              <span>Workflow name or file</span>
-              <input
-                type="text"
-                data-testid="sched-trigger-workflow-input"
-                placeholder="CI"
-                [value]="sDraftTriggerWorkflow()"
-                (input)="sDraftTriggerWorkflow.set($any($event.target).value)"
-              />
-            </label>
-            <label class="field">
-              <span>Conclusion filter</span>
-              <input
-                type="text"
-                data-testid="sched-trigger-conclusion-input"
-                placeholder="failure"
-                [value]="sDraftTriggerConclusion()"
-                (input)="sDraftTriggerConclusion.set($any($event.target).value)"
-              />
-            </label>
-            <label class="field">
-              <span>Branch filter (optional)</span>
-              <input
-                type="text"
-                data-testid="sched-trigger-branch-input"
-                placeholder="main"
-                [value]="sDraftTriggerBranch()"
-                (input)="sDraftTriggerBranch.set($any($event.target).value)"
-              />
-            </label>
-          } @else if (sDraftKind() === "git_ref") {
-            <label class="field">
-              <span>Watched git repository</span>
-              <input
-                type="text"
-                data-testid="sched-git-ref-repo-input"
-                [placeholder]="sDraftRepo() || 'acme/widgets'"
-                [value]="sDraftGitRefRepo()"
-                (input)="sDraftGitRefRepo.set($any($event.target).value)"
-              />
-            </label>
-            <label class="field">
-              <span>Watched git ref / branch</span>
-              <input
-                type="text"
-                data-testid="sched-git-ref-input"
-                placeholder="refs/heads/main"
-                [value]="sDraftGitRef()"
-                (input)="sDraftGitRef.set($any($event.target).value)"
-              />
-            </label>
-          }
-        </div>
-
-        <div class="field">
-          <span>Overlap policy</span>
-          <div class="segmented" role="group" aria-label="Overlap policy">
-            <button
-              type="button"
-              [attr.aria-pressed]="sDraftOverlap() === 'skip'"
-              (click)="sDraftOverlap.set('skip')"
-            >
-              Skip while open
-            </button>
-            <button
-              type="button"
-              [attr.aria-pressed]="sDraftOverlap() === 'allow'"
-              (click)="sDraftOverlap.set('allow')"
-            >
-              Allow overlap
-            </button>
           </div>
-        </div>
 
-        @if (!editingSchedule()?.system) {
-          <div style="margin-top: 12px">
-            <button
-              type="button"
-              class="btn-tonal"
-              data-testid="sched-preview-composition-btn"
-              (click)="previewScheduleDraft()"
-            >
-              Preview composition
-            </button>
-          </div>
-          @if (draftSchedComposition(); as dc) {
-            <div style="margin-top: 10px">
-              <g-composition-view
-                [composition]="dc"
-                heading="Draft composition preview"
-              />
+          <div class="field">
+            <span>Overlap policy</span>
+            <div class="segmented" role="group" aria-label="Overlap policy">
+              <button
+                type="button"
+                [attr.aria-pressed]="sDraftOverlap() === 'skip'"
+                (click)="sDraftOverlap.set('skip')"
+              >
+                Skip while open
+              </button>
+              <button
+                type="button"
+                [attr.aria-pressed]="sDraftOverlap() === 'allow'"
+                (click)="sDraftOverlap.set('allow')"
+              >
+                Allow overlap
+              </button>
             </div>
-          }
-        }
+          </div>
 
-        <div class="dialog-actions">
-          <button
-            type="button"
-            class="btn-text"
-            (click)="closeScheduleDialog()"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            class="btn-primary"
-            data-testid="sched-save-btn"
-            [disabled]="submitting() || !canSaveSchedule()"
-            (click)="saveScheduleDialog()"
-          >
-            {{ submitting() ? "Saving…" : "Save schedule" }}
-          </button>
-        </div>
+          @if (!editingSchedule()?.system) {
+            <div style="margin-top: 12px">
+              <button
+                type="button"
+                class="btn-tonal"
+                data-testid="sched-preview-composition-btn"
+                (click)="previewScheduleDraft()"
+              >
+                Preview composition
+              </button>
+            </div>
+            @if (draftSchedComposition(); as dc) {
+              <div style="margin-top: 10px">
+                <g-composition-view
+                  [composition]="dc"
+                  heading="Draft composition preview"
+                />
+              </div>
+            }
+          }
+
+          @if (schedSubmitError(); as err) {
+            <p
+              class="banner banner-error proc-dialog-error"
+              role="alert"
+              data-testid="sched-dialog-error"
+            >
+              {{ err }}
+            </p>
+          }
+
+          <div class="dialog-actions">
+            <button
+              type="button"
+              class="btn-text"
+              data-testid="sched-cancel-btn"
+              (click)="closeScheduleDialog()"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              class="btn-primary"
+              data-testid="sched-save-btn"
+              [disabled]="submitting() || !canAccessScheduleSave()"
+              [gTip]="scheduleSaveDeniedReason()"
+            >
+              {{ submitting() ? "Saving…" : "Save schedule" }}
+            </button>
+          </div>
+        </form>
       </div>
     }
 
@@ -2662,6 +3160,9 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly confirming = signal<ConfirmRequest | null>(null);
 
   // Schedule dialog state
+  private schedDialogGen = 0;
+  private readonly schedDialogEl =
+    viewChild<ElementRef<HTMLElement>>("schedDialogEl");
   protected readonly schedDialogOpen = signal(false);
   protected readonly editingSchedule = signal<Schedule | null>(null);
   protected readonly schedTargetKind = signal<"prompt" | "template" | "suite">(
@@ -2678,11 +3179,11 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   ]);
   protected readonly sDraftBase = signal("main");
   protected readonly sDraftKind = signal("daily");
-  protected readonly sDraftEveryMin = signal(15);
-  protected readonly sDraftEveryHr = signal(6);
+  protected readonly sDraftEveryMin = signal("15");
+  protected readonly sDraftEveryHr = signal("6");
   protected readonly sDraftTime = signal("09:00");
   protected readonly sDraftWeekday = signal("monday");
-  protected readonly sDraftDayOfMonth = signal(1);
+  protected readonly sDraftDayOfMonth = signal("1");
   protected readonly sDraftTz = signal("UTC");
   protected readonly sDraftTriggerWorkflow = signal("");
   protected readonly sDraftTriggerConclusion = signal("failure");
@@ -2691,6 +3192,134 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly sDraftGitRef = signal("refs/heads/main");
   protected readonly sDraftOverlap = signal("skip");
   protected readonly draftSchedComposition = signal<Composition | null>(null);
+  protected readonly schedTouched = signal<Set<SchedFieldKey>>(new Set());
+  protected readonly schedSubmitted = signal(false);
+  protected readonly schedSubmitError = signal<string | null>(null);
+
+  protected readonly isSchedRepoRequired = computed(() => {
+    if (this.editingSchedule()?.system) return false;
+    if (this.schedTargetKind() !== "template") return true;
+    const chosenTmpl = this.store
+      .templates()
+      .find((t) => t.id === this.sDraftTemplateId());
+    return !chosenTmpl?.repo;
+  });
+
+  protected readonly schedFieldErrors = computed<
+    Partial<Record<SchedFieldKey, string>>
+  >(() => {
+    const errors: Partial<Record<SchedFieldKey, string>> = {};
+    const editing = this.editingSchedule();
+    const tk = this.schedTargetKind();
+
+    if (!editing?.system) {
+      if (tk === "template") {
+        if (!this.sDraftTemplateId().trim()) {
+          errors.templateId = "Template is required.";
+        }
+      } else if (tk === "suite") {
+        if (!this.sDraftSuiteId().trim()) {
+          errors.suiteId = "Suite is required.";
+        }
+      } else if (!this.sDraftTitle().trim()) {
+        errors.title = "Task title is required.";
+      }
+
+      const repo = this.sDraftRepo().trim();
+      if (!repo && this.isSchedRepoRequired()) {
+        errors.repo = "Repository (owner/name) is required.";
+      } else if (repo && !isValidRepoSpec(repo)) {
+        errors.repo = "Enter repository as owner/name (e.g. acme/widgets).";
+      }
+
+      const base = this.sDraftBase().trim();
+      if (tk === "suite" && !base) {
+        errors.base = "Base branch is required for suite schedules.";
+      } else if (base && !isValidBranchName(base)) {
+        errors.base =
+          "Enter a valid git branch name (letters, digits, '.', '_', '-' and '/').";
+      }
+    }
+
+    const kind = this.sDraftKind();
+    if (kind === "everyNMinutes") {
+      const raw = this.sDraftEveryMin().trim();
+      if (!raw) {
+        errors.everyNMinutes = "Interval in minutes is required.";
+      } else {
+        const n = parseStrictInt(raw);
+        if (n === null || n < MIN_EVERY_N_MINUTES || n > MAX_EVERY_N_MINUTES) {
+          errors.everyNMinutes = `Enter a whole number between ${MIN_EVERY_N_MINUTES} and ${MAX_EVERY_N_MINUTES} minutes.`;
+        }
+      }
+    } else if (kind === "everyNHours") {
+      const raw = this.sDraftEveryHr().trim();
+      if (!raw) {
+        errors.everyNHours = "Interval in hours is required.";
+      } else {
+        const n = parseStrictInt(raw);
+        if (n === null || n < 1 || n > MAX_EVERY_N_HOURS) {
+          errors.everyNHours = `Enter a whole number between 1 and ${MAX_EVERY_N_HOURS} hours.`;
+        }
+      }
+    } else if (kind === "daily" || kind === "weekly" || kind === "monthly") {
+      const time = this.sDraftTime().trim();
+      if (!time) {
+        errors.timeOfDay = "Time of day (HH:MM) is required.";
+      } else if (!isValidTimeOfDay(time)) {
+        errors.timeOfDay =
+          "Enter a valid 24-hour time in HH:MM format (e.g. 09:00).";
+      }
+
+      const tz = this.sDraftTz().trim();
+      if (tz && !isValidTimeZone(tz)) {
+        errors.timeZone =
+          "Enter a valid IANA time zone (e.g. UTC or America/New_York).";
+      }
+
+      if (kind === "monthly") {
+        const raw = this.sDraftDayOfMonth().trim();
+        if (!raw) {
+          errors.dayOfMonth = "Day of month is required.";
+        } else {
+          const n = parseStrictInt(raw);
+          if (n === null || n < 1 || n > 31) {
+            errors.dayOfMonth = "Enter a whole day between 1 and 31.";
+          }
+        }
+      }
+    } else if (kind === "github_workflow_run") {
+      if (!this.sDraftTriggerWorkflow().trim()) {
+        errors.triggerWorkflow = "Workflow name or file is required.";
+      }
+    } else if (kind === "git_ref") {
+      const watchedRepo = this.sDraftGitRefRepo().trim();
+      const fallbackRepo = editing?.system ? "" : this.sDraftRepo().trim();
+      if (!watchedRepo && !fallbackRepo) {
+        errors.gitRefRepo = "Watched git repository (owner/name) is required.";
+      } else if (watchedRepo && !isValidRepoSpec(watchedRepo)) {
+        errors.gitRefRepo =
+          "Enter watched repository as owner/name (e.g. acme/widgets).";
+      } else if (
+        !watchedRepo &&
+        fallbackRepo &&
+        !isValidRepoSpec(fallbackRepo)
+      ) {
+        errors.gitRefRepo =
+          "Enter watched repository as owner/name (Schedule repository is invalid).";
+      }
+
+      const ref = this.sDraftGitRef().trim();
+      if (!ref) {
+        errors.gitRef = "Watched git ref is required.";
+      } else if (!isValidGitRef(ref)) {
+        errors.gitRef =
+          "Enter a full git ref starting with refs/ (e.g. refs/heads/main).";
+      }
+    }
+
+    return errors;
+  });
 
   // Launch template dialog state
   protected readonly launchDialogOpen = signal(false);
@@ -3178,7 +3807,8 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   // --- Schedule actions & dialog ---
 
   protected closeScheduleDialog(): void {
-    this.openPicker.set(null);
+    this.schedDialogGen++;
+    this.resetScheduleDialogState();
     this.schedDialogOpen.set(false);
   }
 
@@ -3246,6 +3876,154 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     });
   }
 
+  private resetScheduleDialogState(): void {
+    this.openPicker.set(null);
+    this.submitting.set(false);
+    this.editingSchedule.set(null);
+    this.schedTargetKind.set("prompt");
+    this.sDraftTitle.set("");
+    this.sDraftDesc.set("");
+    this.sDraftTemplateId.set("");
+    this.sDraftSuiteId.set("");
+    this.sDraftRepo.set("");
+    this.sDraftBase.set("main");
+    this.sDraftKind.set("daily");
+    this.sDraftEveryMin.set("15");
+    this.sDraftEveryHr.set("6");
+    this.sDraftTime.set("09:00");
+    this.sDraftWeekday.set("monday");
+    this.sDraftDayOfMonth.set("1");
+    this.sDraftTz.set("UTC");
+    this.sDraftTriggerWorkflow.set("");
+    this.sDraftTriggerConclusion.set("failure");
+    this.sDraftTriggerBranch.set("");
+    this.sDraftGitRefRepo.set("");
+    this.sDraftGitRef.set("refs/heads/main");
+    this.sDraftOverlap.set("skip");
+    this.draftSchedComposition.set(null);
+    this.schedTouched.set(new Set());
+    this.schedSubmitted.set(false);
+    this.schedSubmitError.set(null);
+    this.store.actionError.set(null);
+  }
+
+  protected schedVisibleError(field: SchedFieldKey): string | null {
+    if (!this.schedSubmitted() && !this.schedTouched().has(field)) {
+      return null;
+    }
+    return this.schedFieldErrors()[field] ?? null;
+  }
+
+  protected markSchedTouched(field: SchedFieldKey): void {
+    this.schedTouched.update((prev) => {
+      if (prev.has(field)) return prev;
+      const next = new Set(prev);
+      next.add(field);
+      return next;
+    });
+  }
+
+  private markAllVisibleSchedTouched(): void {
+    const visible = new Set<SchedFieldKey>();
+    const editing = this.editingSchedule();
+    if (!editing?.system) {
+      const tk = this.schedTargetKind();
+      if (tk === "template") visible.add("templateId");
+      else if (tk === "suite") visible.add("suiteId");
+      else visible.add("title");
+      visible.add("repo");
+      visible.add("base");
+    }
+    const kind = this.sDraftKind();
+    if (kind === "everyNMinutes") {
+      visible.add("everyNMinutes");
+    } else if (kind === "everyNHours") {
+      visible.add("everyNHours");
+    } else if (kind === "daily" || kind === "weekly" || kind === "monthly") {
+      visible.add("timeOfDay");
+      visible.add("timeZone");
+      if (kind === "monthly") visible.add("dayOfMonth");
+    } else if (kind === "github_workflow_run") {
+      visible.add("triggerWorkflow");
+    } else if (kind === "git_ref") {
+      visible.add("gitRefRepo");
+      visible.add("gitRef");
+    }
+    this.schedTouched.set(visible);
+  }
+
+  protected onSchedFieldInput(field: SchedFieldKey, value: string): void {
+    this.schedSubmitError.set(null);
+    switch (field) {
+      case "title":
+        this.sDraftTitle.set(value);
+        break;
+      case "repo":
+        this.sDraftRepo.set(value);
+        break;
+      case "base":
+        this.sDraftBase.set(value);
+        break;
+      case "everyNMinutes":
+        this.sDraftEveryMin.set(value);
+        break;
+      case "everyNHours":
+        this.sDraftEveryHr.set(value);
+        break;
+      case "timeOfDay":
+        this.sDraftTime.set(value);
+        break;
+      case "timeZone":
+        this.sDraftTz.set(value);
+        break;
+      case "dayOfMonth":
+        this.sDraftDayOfMonth.set(value);
+        break;
+      case "triggerWorkflow":
+        this.sDraftTriggerWorkflow.set(value);
+        break;
+      case "gitRefRepo":
+        this.sDraftGitRefRepo.set(value);
+        break;
+      case "gitRef":
+        this.sDraftGitRef.set(value);
+        break;
+    }
+  }
+
+  protected onSchedRepoSelect(value: string): void {
+    if (!value) return;
+    this.schedSubmitError.set(null);
+    this.sDraftRepo.set(value);
+    this.markSchedTouched("repo");
+  }
+
+  protected selectSchedTemplate(id: string): void {
+    this.schedSubmitError.set(null);
+    this.sDraftTemplateId.set(id);
+    this.openPicker.set(null);
+    this.markSchedTouched("templateId");
+  }
+
+  protected selectSchedSuite(id: string): void {
+    this.schedSubmitError.set(null);
+    this.sDraftSuiteId.set(id);
+    this.openPicker.set(null);
+    this.markSchedTouched("suiteId");
+  }
+
+  protected setSchedKind(kind: string): void {
+    if (this.sDraftKind() === kind) return;
+    this.sDraftKind.set(kind);
+    this.schedSubmitError.set(null);
+    this.schedSubmitted.set(false);
+    this.schedTouched.update((prev) => {
+      const next = new Set(prev);
+      for (const k of SCHED_CADENCE_FIELDS) next.delete(k);
+      return next;
+    });
+  }
+
   protected setSchedTargetKind(k: "prompt" | "template" | "suite"): void {
     const editing = this.editingSchedule();
     if (editing) {
@@ -3253,7 +4031,16 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       if (editing.suiteId && k !== "suite") return;
       if (!editing.suiteId && k === "suite") return;
     }
-    this.schedTargetKind.set(k);
+    if (this.schedTargetKind() !== k) {
+      this.schedTargetKind.set(k);
+      this.schedSubmitError.set(null);
+      this.schedSubmitted.set(false);
+      this.schedTouched.update((prev) => {
+        const next = new Set(prev);
+        for (const f of SCHED_TARGET_FIELDS) next.delete(f);
+        return next;
+      });
+    }
     if (k === "template" && !this.sDraftTemplateId()) {
       this.sDraftTemplateId.set(this.schedulableTemplates()[0]?.id ?? "");
     }
@@ -3263,10 +4050,12 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   protected openScheduleDialog(existing: Schedule | null): void {
-    this.openPicker.set(null);
+    this.schedDialogGen++;
+    this.resetScheduleDialogState();
     this.editingSchedule.set(existing);
-    this.draftSchedComposition.set(null);
     if (existing) {
+      const rec = existing.recurrence;
+      const kind = rec?.kind || "daily";
       this.schedTargetKind.set(
         existing.suiteId
           ? "suite"
@@ -3280,59 +4069,49 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       this.sDraftSuiteId.set(existing.suiteId || "");
       this.sDraftRepo.set(existing.repo || "");
       this.sDraftBase.set(existing.base ?? "");
-      this.sDraftKind.set(existing.recurrence?.kind || "daily");
-      this.sDraftEveryMin.set(existing.recurrence?.everyNMinutes || 15);
-      this.sDraftEveryHr.set(existing.recurrence?.everyNHours || 6);
-      this.sDraftTime.set(existing.recurrence?.timeOfDay || "09:00");
-      this.sDraftWeekday.set(existing.recurrence?.weekday || "monday");
-      this.sDraftDayOfMonth.set(existing.recurrence?.dayOfMonth || 1);
-      this.sDraftTz.set(
-        existing.timeZone || existing.recurrence?.timeZone || "UTC",
+      this.sDraftKind.set(kind);
+      this.sDraftEveryMin.set(
+        kind === "everyNMinutes" && rec?.everyNMinutes != null
+          ? String(rec.everyNMinutes)
+          : String(rec?.everyNMinutes || 15),
       );
-      this.sDraftTriggerWorkflow.set(
-        existing.recurrence?.githubWorkflowRun?.workflow ?? "",
+      this.sDraftEveryHr.set(
+        kind === "everyNHours" && rec?.everyNHours != null
+          ? String(rec.everyNHours)
+          : String(rec?.everyNHours || 6),
       );
+      this.sDraftTime.set(rec?.timeOfDay || "09:00");
+      this.sDraftWeekday.set(rec?.weekday || "monday");
+      this.sDraftDayOfMonth.set(
+        kind === "monthly" && rec?.dayOfMonth != null
+          ? String(rec.dayOfMonth)
+          : String(rec?.dayOfMonth || 1),
+      );
+      this.sDraftTz.set(existing.timeZone || rec?.timeZone || "UTC");
+      this.sDraftTriggerWorkflow.set(rec?.githubWorkflowRun?.workflow ?? "");
       this.sDraftTriggerConclusion.set(
-        (existing.recurrence?.githubWorkflowRun?.conclusions ?? []).join(", "),
+        (rec?.githubWorkflowRun?.conclusions ?? []).join(", "),
       );
       this.sDraftTriggerBranch.set(
-        (existing.recurrence?.githubWorkflowRun?.branches ?? []).join(", "),
+        (rec?.githubWorkflowRun?.branches ?? []).join(", "),
       );
-      this.sDraftGitRefRepo.set(existing.recurrence?.gitRef?.repo ?? "");
-      this.sDraftGitRef.set(
-        existing.recurrence?.gitRef?.ref ?? "refs/heads/main",
-      );
+      this.sDraftGitRefRepo.set(rec?.gitRef?.repo ?? "");
+      this.sDraftGitRef.set(rec?.gitRef?.ref ?? "refs/heads/main");
       this.sDraftOverlap.set(existing.overlap || "skip");
     } else {
-      this.schedTargetKind.set("prompt");
-      this.sDraftTitle.set("");
-      this.sDraftDesc.set("");
-      this.sDraftTemplateId.set("");
-      this.sDraftSuiteId.set("");
       this.sDraftRepo.set(this.store.knownRepos()[0] || "");
-      this.sDraftBase.set("main");
-      this.sDraftKind.set("daily");
-      this.sDraftEveryMin.set(15);
-      this.sDraftEveryHr.set(6);
-      this.sDraftTime.set("09:00");
-      this.sDraftWeekday.set("monday");
-      this.sDraftDayOfMonth.set(1);
-      this.sDraftTz.set("UTC");
-      this.sDraftTriggerWorkflow.set("");
-      this.sDraftTriggerConclusion.set("failure");
-      this.sDraftTriggerBranch.set("");
-      this.sDraftGitRefRepo.set("");
-      this.sDraftGitRef.set("refs/heads/main");
-      this.sDraftOverlap.set("skip");
     }
     this.schedDialogOpen.set(true);
   }
 
-  protected canSaveSchedule(): boolean {
+  private scheduleAccessTarget(): {
+    route: "POST /api/schedules" | "PATCH /api/schedules/{id}";
+    repo: string | undefined;
+  } {
     const editing = this.editingSchedule();
     const route = editing ? "PATCH /api/schedules/{id}" : "POST /api/schedules";
     if (editing?.system) {
-      return this.access.can(route, editing.repo || undefined);
+      return { route, repo: editing.repo || undefined };
     }
     const tk = this.schedTargetKind();
     const chosenTmpl =
@@ -3340,29 +4119,57 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
         ? this.store.templates().find((t) => t.id === this.sDraftTemplateId())
         : null;
     const targetRepo =
-      this.sDraftRepo().trim() || chosenTmpl?.repo || editing?.repo || "";
-    if (!this.access.can(route, targetRepo || undefined)) return false;
-    if (tk === "suite") {
-      return Boolean(
-        this.sDraftSuiteId() &&
-        this.sDraftRepo().trim() &&
-        this.sDraftBase().trim(),
-      );
-    }
-    if (tk === "template") {
-      return Boolean(this.sDraftTemplateId() && targetRepo);
-    }
-    return Boolean(this.sDraftTitle().trim() && this.sDraftRepo().trim());
+      this.sDraftRepo().trim() ||
+      (tk === "template" ? chosenTmpl?.repo || "" : "");
+    return { route, repo: targetRepo || undefined };
   }
 
-  private buildRecurrenceDraft(): Recurrence {
+  protected canAccessScheduleSave(): boolean {
+    const { route, repo } = this.scheduleAccessTarget();
+    return this.access.can(route, repo);
+  }
+
+  protected scheduleSaveDeniedReason(): string {
+    const { route, repo } = this.scheduleAccessTarget();
+    return this.access.deniedReason(route, repo);
+  }
+
+  protected canSaveSchedule(): boolean {
+    return (
+      this.canAccessScheduleSave() &&
+      Object.keys(this.schedFieldErrors()).length === 0
+    );
+  }
+
+  private focusSchedField(field: SchedFieldKey): void {
+    const testid = SCHED_FIELD_TESTIDS[field];
+    queueMicrotask(() => {
+      const dlg = this.schedDialogEl()?.nativeElement;
+      if (!dlg?.isConnected) return;
+      dlg.querySelector<HTMLElement>(`[data-testid="${testid}"]`)?.focus();
+    });
+  }
+
+  private buildRecurrenceDraft(forPreview = false): Recurrence {
     const kind = this.sDraftKind();
     const tz = this.sDraftTz().trim() || undefined;
     switch (kind) {
-      case "everyNMinutes":
-        return { kind, everyNMinutes: this.sDraftEveryMin(), timeZone: tz };
-      case "everyNHours":
-        return { kind, everyNHours: this.sDraftEveryHr(), timeZone: tz };
+      case "everyNMinutes": {
+        const parsed = parseStrictInt(this.sDraftEveryMin());
+        return {
+          kind,
+          everyNMinutes: forPreview ? (parsed ?? 15) : (parsed ?? 0),
+          timeZone: tz,
+        };
+      }
+      case "everyNHours": {
+        const parsed = parseStrictInt(this.sDraftEveryHr());
+        return {
+          kind,
+          everyNHours: forPreview ? (parsed ?? 6) : (parsed ?? 0),
+          timeZone: tz,
+        };
+      }
       case "daily":
         return { kind, timeOfDay: this.sDraftTime().trim(), timeZone: tz };
       case "weekly":
@@ -3372,13 +4179,15 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
           weekday: this.sDraftWeekday(),
           timeZone: tz,
         };
-      case "monthly":
+      case "monthly": {
+        const parsed = parseStrictInt(this.sDraftDayOfMonth());
         return {
           kind,
           timeOfDay: this.sDraftTime().trim(),
-          dayOfMonth: this.sDraftDayOfMonth(),
+          dayOfMonth: forPreview ? (parsed ?? 1) : (parsed ?? 0),
           timeZone: tz,
         };
+      }
       case "github_workflow_run": {
         const concls = this.sDraftTriggerConclusion()
           .split(",")
@@ -3410,12 +4219,14 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     }
   }
 
-  private buildScheduleCreatePayload(): CreateScheduleRequest {
+  private buildScheduleCreatePayload(
+    forPreview = false,
+  ): CreateScheduleRequest {
     const tk = this.schedTargetKind();
     const baseReq: CreateScheduleRequest = {
       repo: this.sDraftRepo().trim(),
       base: this.sDraftBase().trim() || undefined,
-      recurrence: this.buildRecurrenceDraft(),
+      recurrence: this.buildRecurrenceDraft(forPreview),
       timeZone: this.sDraftTz().trim() || undefined,
       overlap: this.sDraftOverlap(),
     };
@@ -3434,10 +4245,12 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   private buildScheduleUpdatePayload(editing: Schedule): UpdateScheduleRequest {
+    const tzTrimmed = this.sDraftTz().trim();
+    const timeZone = tzTrimmed || (editing.timeZone ? "" : undefined);
     if (editing.system) {
       return {
         recurrence: this.buildRecurrenceDraft(),
-        timeZone: this.sDraftTz().trim() || undefined,
+        timeZone,
         overlap: this.sDraftOverlap(),
         revision: editing.revision,
       };
@@ -3447,7 +4260,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       repo: this.sDraftRepo().trim(),
       base: this.sDraftBase().trim(),
       recurrence: this.buildRecurrenceDraft(),
-      timeZone: this.sDraftTz().trim() || undefined,
+      timeZone,
       overlap: this.sDraftOverlap(),
       revision: editing.revision,
     };
@@ -3466,18 +4279,40 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   protected async previewScheduleDraft(): Promise<void> {
+    const gen = this.schedDialogGen;
+    this.schedSubmitError.set(null);
     try {
       const comp = await this.store.previewDraftSchedule(
-        this.buildScheduleCreatePayload(),
+        this.buildScheduleCreatePayload(true),
       );
-      this.draftSchedComposition.set(comp);
+      if (gen === this.schedDialogGen) {
+        this.draftSchedComposition.set(comp);
+      }
     } catch (err) {
-      this.store.actionError.set(errorText(err));
+      if (gen === this.schedDialogGen) {
+        this.schedSubmitError.set(errorText(err));
+      }
     }
   }
 
+  protected onScheduleFormSubmit(ev: Event): void {
+    ev.preventDefault();
+    void this.saveScheduleDialog();
+  }
+
   protected async saveScheduleDialog(): Promise<void> {
-    if (this.submitting() || !this.canSaveSchedule()) return;
+    if (this.submitting()) return;
+    this.schedSubmitError.set(null);
+    this.schedSubmitted.set(true);
+    this.markAllVisibleSchedTouched();
+    if (!this.canAccessScheduleSave()) return;
+    const errs = this.schedFieldErrors();
+    const firstInvalid = SCHED_FIELD_ORDER.find((k) => Boolean(errs[k]));
+    if (firstInvalid) {
+      this.focusSchedField(firstInvalid);
+      return;
+    }
+    const gen = this.schedDialogGen;
     this.submitting.set(true);
     try {
       const editing = this.editingSchedule();
@@ -3486,20 +4321,26 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
           editing.id,
           this.buildScheduleUpdatePayload(editing),
         );
+        if (gen !== this.schedDialogGen) return;
         this.selectSchedule(saved.id, false);
         this.snackbar.show("Schedule updated.");
       } else {
         const created = await this.store.createSchedule(
           this.buildScheduleCreatePayload(),
         );
+        if (gen !== this.schedDialogGen) return;
         this.selectSchedule(created.id, false);
         this.snackbar.show("Schedule created.");
       }
       this.closeScheduleDialog();
     } catch (err) {
-      this.store.actionError.set(errorText(err));
+      if (gen === this.schedDialogGen) {
+        this.schedSubmitError.set(errorText(err));
+      }
     } finally {
-      this.submitting.set(false);
+      if (gen === this.schedDialogGen) {
+        this.submitting.set(false);
+      }
     }
   }
 
