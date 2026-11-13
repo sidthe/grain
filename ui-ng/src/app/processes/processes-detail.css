@@ -177,6 +177,26 @@
   width: min(680px, calc(100vw - 32px));
 }
 
+.proc-dialog input[aria-invalid="true"],
+.proc-dialog textarea[aria-invalid="true"],
+.proc-dialog .pill-trigger.is-invalid {
+  border-color: var(--md-sys-color-error);
+}
+
+.proc-field-error {
+  color: var(--md-sys-color-error);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.proc-req-mark {
+  color: var(--md-sys-color-error);
+}
+
+.proc-dialog-error {
+  margin: 14px 0 0;
+}
+
 .proc-field-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));

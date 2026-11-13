@@ -19,7 +19,11 @@ import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import type { GrainConfig } from "../api/models";
 import { AccessService } from "../services/access.service";
-import { FleetPageComponent } from "./fleet-page.component";
+import {
+  FleetPageComponent,
+  isPersistentActionAllowed,
+  persistentSandboxState,
+} from "./fleet-page.component";
 import {
   type ActionsCacheState,
   type AgentPauseResponse,
@@ -28,6 +32,7 @@ import {
   type LogLinesResponse,
   type LogSourcesResponse,
   type PackageCacheState,
+  type PersistentAction,
   type PersistentSandboxStatus,
   type PipelinePauseStatus,
   type SandboxHealthResponse,
@@ -726,5 +731,194 @@ describe("FleetPageComponent", () => {
     expect(
       root.querySelector('[data-testid="logs-viewer"]')?.textContent,
     ).toContain("certificate renewed");
+  });
+
+  it("gates persistent sandbox start, restart, rebuild, and stop actions by ps.state, busy state, and RBAC", async () => {
+    const base: Omit<PersistentSandboxStatus, "name" | "state" | "enabled"> = {
+      repo: "acme/web",
+      ref: "main",
+      command: "npm run preview",
+      restarts: 0,
+    };
+    const api = new FakeFleetApi();
+    api.persistentBody = [
+      { ...base, name: "sb-running", state: "running", enabled: true },
+      { ...base, name: "sb-restarting", state: "restarting", enabled: true },
+      { ...base, name: "sb-starting", state: "starting", enabled: true },
+      { ...base, name: "sb-stopping", state: "stopping", enabled: true },
+      { ...base, name: "sb-stopped", state: "stopped", enabled: false },
+      { ...base, name: "sb-idle", state: "idle", enabled: true },
+      { ...base, name: "sb-empty-enabled", state: "", enabled: true },
+      { ...base, name: "sb-empty-disabled", state: "", enabled: false },
+    ];
+
+    let resolveStop: (() => void) | null = null;
+    const origPost = api.post;
+    api.post = (route, params, body, query) => {
+      if (
+        route === "POST /api/persistent-sandboxes/{name}/{action}" &&
+        (params as { name: string; action: string }).name === "sb-running" &&
+        (params as { name: string; action: string }).action === "stop"
+      ) {
+        api.calls.push({ method: "POST", route, params, body, query });
+        return new Promise((resolve) => {
+          resolveStop = () => {
+            const target = api.persistentBody.find(
+              (s) => s.name === "sb-running",
+            );
+            if (target) target.state = "stopped";
+            resolve({ ok: true });
+          };
+        });
+      }
+      return origPost(route, params, body, query);
+    };
+
+    const { fixture, root } = await setup(api);
+
+    const btn = (name: string, action: PersistentAction) =>
+      root.querySelector<HTMLButtonElement>(
+        `[data-testid="persistent-${action}-${name}"]`,
+      )!;
+    const disabledMap = (name: string) => ({
+      start: btn(name, "start").disabled,
+      restart: btn(name, "restart").disabled,
+      rebuild: btn(name, "rebuild").disabled,
+      stop: btn(name, "stop").disabled,
+    });
+
+    expect(disabledMap("sb-running")).toEqual({
+      start: true,
+      restart: false,
+      rebuild: false,
+      stop: false,
+    });
+    expect(disabledMap("sb-restarting")).toEqual({
+      start: true,
+      restart: false,
+      rebuild: false,
+      stop: false,
+    });
+    expect(disabledMap("sb-starting")).toEqual({
+      start: true,
+      restart: true,
+      rebuild: true,
+      stop: false,
+    });
+    expect(disabledMap("sb-stopping")).toEqual({
+      start: true,
+      restart: true,
+      rebuild: true,
+      stop: true,
+    });
+    expect(disabledMap("sb-stopped")).toEqual({
+      start: false,
+      restart: true,
+      rebuild: true,
+      stop: true,
+    });
+    expect(disabledMap("sb-idle")).toEqual({
+      start: false,
+      restart: true,
+      rebuild: true,
+      stop: true,
+    });
+    expect(disabledMap("sb-empty-enabled")).toEqual({
+      start: false,
+      restart: true,
+      rebuild: true,
+      stop: true,
+    });
+    expect(disabledMap("sb-empty-disabled")).toEqual({
+      start: false,
+      restart: true,
+      rebuild: true,
+      stop: true,
+    });
+
+    // Helper checks for case-insensitivity and fallback.
+    expect(persistentSandboxState({ state: " Running ", enabled: false })).toBe(
+      "running",
+    );
+    expect(persistentSandboxState({ state: "", enabled: true })).toBe("idle");
+    expect(
+      isPersistentActionAllowed({ state: "failed", enabled: true }, "stop"),
+    ).toBe(false);
+    expect(
+      isPersistentActionAllowed({ state: "failed", enabled: true }, "start"),
+    ).toBe(true);
+
+    // Clicking disabled invalid actions triggers no POST.
+    btn("sb-stopped", "stop").click();
+    btn("sb-idle", "stop").click();
+    btn("sb-stopped", "restart").click();
+    btn("sb-stopped", "rebuild").click();
+    btn("sb-running", "start").click();
+    btn("sb-starting", "restart").click();
+    await settle(fixture);
+    expect(
+      api.calls.filter(
+        (c) => c.route === "POST /api/persistent-sandboxes/{name}/{action}",
+      ),
+    ).toHaveLength(0);
+
+    // Clicking valid Stop on sb-running disables all actions on sb-running while in flight,
+    // then updates button gating when refreshed state becomes stopped.
+    btn("sb-running", "stop").click();
+    fixture.detectChanges();
+    expect(disabledMap("sb-running")).toEqual({
+      start: true,
+      restart: true,
+      rebuild: true,
+      stop: true,
+    });
+    expect(disabledMap("sb-stopped")).toEqual({
+      start: false,
+      restart: true,
+      rebuild: true,
+      stop: true,
+    });
+
+    resolveStop!();
+    await settle(fixture);
+    expect(
+      api.calls.filter(
+        (c) =>
+          c.route === "POST /api/persistent-sandboxes/{name}/{action}" &&
+          (c.params as { name: string; action: string }).name ===
+            "sb-running" &&
+          (c.params as { name: string; action: string }).action === "stop",
+      ),
+    ).toHaveLength(1);
+    expect(disabledMap("sb-running")).toEqual({
+      start: false,
+      restart: true,
+      rebuild: true,
+      stop: true,
+    });
+
+    // Missing deployment:restart RBAC disables even state-valid actions.
+    TestBed.inject(AccessService).setConfig({
+      access: {
+        role: "viewer",
+        roles: ["viewer"],
+        full: false,
+        scopes: ["sandboxes:read"],
+      },
+    });
+    fixture.detectChanges();
+    await settle(fixture);
+    expect(disabledMap("sb-stopped")).toEqual({
+      start: true,
+      restart: true,
+      rebuild: true,
+      stop: true,
+    });
+    expect(disabledMap("sb-restarting")).toEqual({
+      start: true,
+      restart: true,
+      rebuild: true,
+      stop: true,
+    });
   });
 });
