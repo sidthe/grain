@@ -26,6 +26,7 @@ import {
   type MemoryDocument,
   buildMemoryScopes,
   highlightSyntaxHtml,
+  isMemoryRepoDirPrefix,
   parseGrepOutput,
   repoFromMemoryFsPath,
 } from "./context.models";
@@ -571,7 +572,27 @@ describe("ContextPageComponent", () => {
     expect(scopes.map((s) => s.repo)).toEqual(["", "acme/api", "acme/web"]);
     expect(repoFromMemoryFsPath("repos/acme/api/notes.md")).toBe("acme/api");
     expect(repoFromMemoryFsPath("repos/acme/api.md")).toBe("acme/api");
+    expect(
+      repoFromMemoryFsPath(
+        "repos/git.forge.example/experimental/grain/MEMORY.md",
+      ),
+    ).toBe("git.forge.example/experimental/grain");
+    expect(
+      repoFromMemoryFsPath("repos/git.forge.example/experimental"),
+    ).toBeUndefined();
+    expect(repoFromMemoryFsPath("repos/acme/../global.md")).toBeUndefined();
     expect(repoFromMemoryFsPath("memory.md")).toBeUndefined();
+    expect(isMemoryRepoDirPrefix("", ["acme/api"])).toBe(true);
+    expect(isMemoryRepoDirPrefix("repos", ["acme/api"])).toBe(true);
+    expect(isMemoryRepoDirPrefix("repos/acme", ["acme/api"])).toBe(true);
+    expect(isMemoryRepoDirPrefix("repos/secret", ["acme/api"])).toBe(false);
+    expect(isMemoryRepoDirPrefix("global", ["acme/api"])).toBe(false);
+    expect(isMemoryRepoDirPrefix("global/sub", ["acme/api"])).toBe(false);
+    expect(
+      isMemoryRepoDirPrefix("repos/git.forge.example/experimental", [
+        "git.forge.example/experimental/grain",
+      ]),
+    ).toBe(true);
 
     const hits = parseGrepOutput(
       "a.md:4:hello\n[truncated at match limit (50 matches)]\n[truncated: walked 100 entries]\n",
@@ -610,5 +631,202 @@ describe("ContextPageComponent", () => {
     expect(
       root.querySelector('[data-testid="scope-row-acme/web"]'),
     ).not.toBeNull();
+  });
+
+  it("blocks deployment-wide memory:// dirs, root grep, and config:// bypasses when memory:read has repoLimits", async () => {
+    const api = new FakeContextApi();
+    api.fsDirs[""] = {
+      scheme: "memory",
+      path: "",
+      entries: [
+        { name: "global", type: "dir" },
+        { name: "repos", type: "dir" },
+        { name: "global.md", type: "file", size: 24 },
+      ],
+    };
+    api.configBody = {
+      version: "v3.5.0-test",
+      targetRepos: ["acme/api", "acme/web"],
+      access: {
+        role: "repo-dev",
+        roles: ["repo-dev"],
+        full: false,
+        // Even with unrestricted settings:read in scopes, repo-limited
+        // memory:read must hide config:// so state-repo memory cannot leak.
+        scopes: ["memory:read", "memory:write", "settings:read"],
+        repoLimits: {
+          "memory:read": ["acme/api"],
+          "memory:write": ["acme/api"],
+        },
+      },
+    };
+
+    const { fixture, root } = await setup(api);
+
+    // Switch to Namespace tab.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-tab-namespace"]',
+      )!
+      .click();
+    await settle(fixture);
+
+    // config:// tab must be hidden when memory:read is repo-limited.
+    expect(root.querySelector('[data-testid="fs-scheme-config"]')).toBeNull();
+    expect(
+      api.calls.some((c) => c.route === "GET /api/fs/config/{path...}"),
+    ).toBe(false);
+
+    // Clicking deployment-wide directory "global" or file "global.md" must be blocked.
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="fs-entry-global"]')!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="fs-entry-global.md"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls.some(
+        (c) =>
+          c.route === "GET /api/fs/memory/{path...}" &&
+          ((c.params as { path?: string })?.path === "global" ||
+            (c.params as { path?: string })?.path === "global.md"),
+      ),
+    ).toBe(false);
+
+    // Grepping from memory:// root must only query permitted repo subtrees, never "" or global.
+    const grepInput = root.querySelector<HTMLInputElement>(
+      '[data-testid="fs-grep-input"]',
+    )!;
+    grepInput.value = "strict";
+    grepInput.dispatchEvent(new Event("input"));
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="fs-grep-btn"]')!
+      .click();
+    await settle(fixture);
+
+    const grepCalls = api.calls.filter(
+      (c) => c.method === "GET_TEXT" && c.query?.includes("grep="),
+    );
+    expect(grepCalls.length).toBe(1);
+    expect((grepCalls[0].params as { path?: string })?.path).toBe(
+      "repos/acme/api",
+    );
+    expect(
+      api.calls.some(
+        (c) =>
+          c.method === "GET_TEXT" &&
+          c.query?.includes("grep=") &&
+          ((c.params as { path?: string })?.path === "" ||
+            (c.params as { path?: string })?.path === "global"),
+      ),
+    ).toBe(false);
+  });
+
+  it("enforces deployment-wide memory write repoLimits across standing instructions, + New pack, documents, and scope switches", async () => {
+    const api = new FakeContextApi();
+    api.configBody = {
+      version: "v3.5.0-test",
+      targetRepos: ["acme/api", "acme/web"],
+      access: {
+        role: "docs-reader-api-writer",
+        roles: ["docs-reader-api-writer"],
+        full: false,
+        scopes: ["memory:read", "memory:write", "settings:read"],
+        repoLimits: {
+          "memory:write": ["acme/api"],
+          "settings:read": ["acme/api"],
+        },
+      },
+    };
+
+    const { fixture, root } = await setup(api);
+
+    // Select deployment scope (allowed because memory:read is unlimited).
+    const depBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="context-scope-deployment"]',
+    )!;
+    expect(depBtn.disabled).toBe(false);
+    depBtn.click();
+    await settle(fixture);
+
+    expect(
+      root.querySelector<HTMLTextAreaElement>(
+        '[data-testid="memory-textarea"]',
+      )!.readOnly,
+    ).toBe(true);
+    expect(
+      root.querySelector('[data-testid="memory-write-denied"]')?.textContent,
+    ).toContain("cannot modify deployment-wide memory");
+    expect(root.querySelector('[data-testid="memory-save-btn"]')).toBeNull();
+
+    // Switch to Documents tab on deployment scope: + New pack disabled & deployment doc is read-only.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-tab-documents"]',
+      )!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
+        .disabled,
+    ).toBe(true);
+
+    root
+      .querySelector<HTMLElement>(
+        '[data-testid="doc-row-db-migrations"] button',
+      )!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="doc-summary-input"]')!
+        .readOnly,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLTextAreaElement>('[data-testid="doc-text-input"]')!
+        .readOnly,
+    ).toBe(true);
+    expect(root.querySelector('[data-testid="doc-save-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-delete-btn"]')).toBeNull();
+
+    // Switch to acme/api, open writable doc, then switch back to deployment scope -> must stay non-writable.
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="context-repo-trigger"]')!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-repo-opt-acme/api"]',
+      )!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
+        .disabled,
+    ).toBe(false);
+    root
+      .querySelector<HTMLElement>('[data-testid="doc-row-auth-tokens"] button')!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="doc-save-btn"]')).not.toBeNull();
+
+    // Switch back to deployment scope -> stale selectedDocRepo must be cleared.
+    depBtn.click();
+    await settle(fixture);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
+        .disabled,
+    ).toBe(true);
+
+    // Namespace config:// must also be hidden because settings:read has repoLimits.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-tab-namespace"]',
+      )!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="fs-scheme-config"]')).toBeNull();
   });
 });
