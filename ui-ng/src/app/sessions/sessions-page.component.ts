@@ -344,7 +344,7 @@ export function clock(iso: string | undefined, now = new Date()): string {
               @for (g of grants(); track g) {
                 <span class="cap-held" data-testid="cap-held">{{ g }}</span>
               }
-              @if (apiGrants() > 0 && !settingsOpen()) {
+              @if (apiGrants() > 0 && !settingsOpen() && canEditCaps()) {
                 <button
                   type="button"
                   class="btn-text"
@@ -589,6 +589,7 @@ export function clock(iso: string | undefined, now = new Date()): string {
                   @if (c.attachments?.length && row.session.taskId) {
                     <g-attachment-list
                       [taskId]="row.session.taskId"
+                      [repo]="selectedRepo() || undefined"
                       [attachments]="c.attachments"
                     />
                   }
@@ -698,7 +699,7 @@ export function clock(iso: string | undefined, now = new Date()): string {
             >
               <g-session-canvas
                 [sessionTaskId]="row.session.taskId"
-                [repo]="store.selectedDetail()?.repo"
+                [repo]="selectedRepo() || undefined"
                 [comments]="comments()"
                 [requestedTab]="canvasTab()"
                 [requestedArtifactId]="canvasArtifactId()"
@@ -881,27 +882,28 @@ export class SessionsPageComponent implements OnInit, OnDestroy {
   private readonly composer =
     viewChild<ElementRef<HTMLTextAreaElement>>("composer");
 
-  protected readonly canWrite = computed(() =>
-    this.access.can(
-      "POST /api/tasks/{id}/comments",
-      this.store.selectedDetail()?.repo || undefined,
-    ),
+  protected readonly selectedRepo = computed(() =>
+    (
+      this.store.selectedDetail()?.repo ||
+      this.store.selected()?.task?.repo ||
+      ""
+    ).trim(),
   );
-  protected readonly canStop = computed(() =>
-    this.access.can("POST /api/console-sessions/{id}/cancel"),
+
+  protected readonly canWrite = computed(() => {
+    const repo = this.selectedRepo();
+    return repo
+      ? this.access.can("POST /api/tasks/{id}/comments", repo)
+      : this.access.canGlobalScope("tasks:write");
+  });
+  private readonly canWriteSessions = computed(() =>
+    this.access.canGlobalScope("sessions:write"),
   );
-  protected readonly canRestart = computed(() =>
-    this.access.can("POST /api/console-sessions/{id}/restart"),
-  );
-  protected readonly canEditCaps = computed(() =>
-    this.access.can("PUT /api/console-sessions/{id}"),
-  );
-  protected readonly canDelete = computed(() =>
-    this.access.can("DELETE /api/console-sessions/{id}"),
-  );
-  protected readonly canCreate = computed(() =>
-    this.access.can("POST /api/console-sessions"),
-  );
+  protected readonly canStop = this.canWriteSessions;
+  protected readonly canRestart = this.canWriteSessions;
+  protected readonly canEditCaps = this.canWriteSessions;
+  protected readonly canDelete = this.canWriteSessions;
+  protected readonly canCreate = this.canWriteSessions;
   protected readonly comments = computed<Comment[]>(
     () => this.store.selectedDetail()?.comments ?? [],
   );
