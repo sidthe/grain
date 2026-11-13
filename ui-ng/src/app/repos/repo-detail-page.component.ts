@@ -39,6 +39,7 @@ import {
   type PillOption,
   PillSelectComponent,
 } from "../shared/pill-select.component";
+import { StatusIconComponent } from "../shared/status-icon.component";
 
 export type RepoTabId =
   | "overview"
@@ -186,9 +187,124 @@ interface PendingReleaseRow {
   soakReady?: boolean;
 }
 
+type OwnershipState = "" | "on" | "off";
+
+interface RepoWorkDeclaration {
+  repo?: string;
+  path: string;
+}
+
+interface RepoWorkItem {
+  item: string;
+  kind: string;
+  title?: string;
+  override: OwnershipState;
+  runs: boolean;
+  paused?: boolean;
+  declaration?: RepoWorkDeclaration;
+}
+
+interface RepoWorkOwnershipResponse {
+  repo?: string;
+  default: OwnershipState;
+  defaultRuns: boolean;
+  items: RepoWorkItem[];
+}
+
+const OWNERSHIP_OPTIONS: readonly {
+  key: string;
+  state: OwnershipState;
+  label: string;
+  ariaSuffix: string;
+}[] = [
+  { key: "on", state: "on", label: "On", ariaSuffix: "on" },
+  { key: "off", state: "off", label: "Off", ariaSuffix: "off" },
+  {
+    key: "unset",
+    state: "",
+    label: "Say nothing",
+    ariaSuffix: "say nothing",
+  },
+];
+
+function parseOwnershipState(raw: unknown): OwnershipState | null {
+  if (typeof raw !== "string") return null;
+  const clean = raw.trim().toLowerCase();
+  if (clean === "" || clean === "on" || clean === "off") {
+    return clean;
+  }
+  return null;
+}
+
+function validateWorkItemId(raw: string): { id: string; error: string | null } {
+  const id = raw.trim();
+  if (!id) {
+    return { id: "", error: "item: a work item id cannot be empty" };
+  }
+  if (/[=,]/.test(id)) {
+    return {
+      id: "",
+      error: `item: work item "${id}" holds ',' or '=', which the override list separates on`,
+    };
+  }
+  return { id, error: null };
+}
+
+function normalizeWorkOwnership(raw: unknown): RepoWorkOwnershipResponse {
+  const rec =
+    raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const def = parseOwnershipState(rec["default"]) ?? "";
+  const defaultRuns =
+    typeof rec["defaultRuns"] === "boolean"
+      ? rec["defaultRuns"]
+      : def !== "off";
+  const rawItems = Array.isArray(rec["items"]) ? rec["items"] : [];
+  const items: RepoWorkItem[] = [];
+  for (const entry of rawItems) {
+    if (!entry || typeof entry !== "object") continue;
+    const it = entry as Record<string, unknown>;
+    const item = typeof it["item"] === "string" ? it["item"] : "";
+    if (!item) continue;
+    const override = parseOwnershipState(it["override"]) ?? "";
+    const rawDecl = it["declaration"];
+    const declaration =
+      rawDecl &&
+      typeof rawDecl === "object" &&
+      typeof (rawDecl as Record<string, unknown>)["path"] === "string"
+        ? {
+            repo:
+              typeof (rawDecl as Record<string, unknown>)["repo"] === "string"
+                ? ((rawDecl as Record<string, unknown>)["repo"] as string)
+                : undefined,
+            path: (rawDecl as Record<string, unknown>)["path"] as string,
+          }
+        : undefined;
+    items.push({
+      item,
+      kind: typeof it["kind"] === "string" ? it["kind"] : "",
+      title: typeof it["title"] === "string" ? it["title"] : undefined,
+      override,
+      runs: Boolean(it["runs"]),
+      paused: Boolean(it["paused"]),
+      ...(declaration ? { declaration } : {}),
+    });
+  }
+  return {
+    repo: typeof rec["repo"] === "string" ? rec["repo"] : undefined,
+    default: def,
+    defaultRuns,
+    items,
+  };
+}
+
 @Component({
   selector: "g-repo-detail-page",
-  imports: [RouterLink, PillSelectComponent, ConfirmDialogComponent],
+  imports: [
+    RouterLink,
+    PillSelectComponent,
+    ConfirmDialogComponent,
+    StatusIconComponent,
+  ],
   encapsulation: ViewEncapsulation.None,
   styleUrls: [
     "../shared/work-surface.css",
@@ -247,7 +363,11 @@ interface PendingReleaseRow {
           </nav>
 
           @if (configRepoOnly()) {
-            <div class="s-banner readonly" data-testid="repo-readonly-banner">
+            <div
+              class="s-banner readonly"
+              id="repo-config-readonly-banner"
+              data-testid="repo-readonly-banner"
+            >
               Repository configuration is managed in the config repository;
               operational actions (branches, issue import, and releases) remain
               available according to your role.
@@ -884,6 +1004,336 @@ interface PendingReleaseRow {
               }
 
               @case ("releases") {
+                <div class="s-card" data-testid="card-repo-work-ownership">
+                  <div class="s-card-head">
+                    <div>
+                      <h2 class="s-card-title">Work ownership</h2>
+                      <p class="s-card-desc">
+                        Choose whether this deployment runs {{ repoSlug() }}'s
+                        standing automated work and per-item overrides.
+                      </p>
+                    </div>
+                  </div>
+
+                  @if (
+                    !access.can(
+                      "GET /api/repos/{owner}/{name}/work-ownership",
+                      repoSlug()
+                    )
+                  ) {
+                    <div
+                      class="s-banner readonly"
+                      data-testid="work-ownership-read-denied"
+                    >
+                      {{
+                        access.deniedReason(
+                          "GET /api/repos/{owner}/{name}/work-ownership",
+                          repoSlug()
+                        )
+                      }}
+                    </div>
+                  } @else if (workOwnershipError()) {
+                    <div
+                      class="s-banner error"
+                      role="alert"
+                      data-testid="work-ownership-error-banner"
+                    >
+                      <span>{{ workOwnershipError() }}</span>
+                      <button
+                        type="button"
+                        class="btn-tonal s-btn-sm"
+                        data-testid="retry-work-ownership-btn"
+                        (click)="loadWorkOwnership(true)"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  } @else if (workOwnershipData() === null) {
+                    <p class="s-hint" data-testid="work-ownership-loading">
+                      Loading work ownership…
+                    </p>
+                  } @else {
+                    @if (workOwnershipData(); as work) {
+                      <div class="repo-wo-body">
+                        <div class="s-toggle-row">
+                          <div class="s-toggle-copy">
+                            <span
+                              class="s-toggle-name"
+                              data-testid="work-ownership-switch-label"
+                            >
+                              Standing work on this deployment:
+                              {{ work.defaultRuns ? "on" : "off" }}
+                            </span>
+                            @if (
+                              !access.can(
+                                "PUT /api/repos/{owner}/{name}/work-ownership",
+                                repoSlug()
+                              )
+                            ) {
+                              <span
+                                class="s-hint"
+                                id="repo-work-ownership-denied-reason"
+                                data-testid="work-ownership-write-denied"
+                              >
+                                {{
+                                  access.deniedReason(
+                                    "PUT /api/repos/{owner}/{name}/work-ownership",
+                                    repoSlug()
+                                  )
+                                }}
+                              </span>
+                            }
+                          </div>
+                          <button
+                            type="button"
+                            class="g-switch"
+                            role="switch"
+                            data-testid="switch-work-ownership-default"
+                            aria-label="Standing work on this deployment"
+                            [attr.aria-checked]="work.defaultRuns"
+                            [attr.aria-describedby]="workOwnershipDescribedBy()"
+                            [disabled]="
+                              !canWriteWorkOwnership() || workOwnershipSaving()
+                            "
+                            (click)="
+                              setWorkOwnershipDefault(
+                                work.defaultRuns ? 'off' : 'on'
+                              )
+                            "
+                          ></button>
+                        </div>
+
+                        <div class="repo-wo-copy">
+                          <p class="repo-wo-note">
+                            Covers: this repository's schedules (declared, set
+                            up here, and workflow crons), its release, the
+                            base-branch check, post-merge jobs, automatic ports,
+                            and the triage and repair tasks grain files on its
+                            own.
+                          </p>
+                          <p class="repo-wo-note">
+                            Does not cover: tasks people file by hand against
+                            this repository, their pull requests' CI, the merge
+                            queue for them, and the repair of those pull
+                            requests — those run either way.
+                          </p>
+                        </div>
+
+                        <p class="repo-wo-note">
+                          Whether <em>this</em> deployment is the one running
+                          this repository's standing work, as against another
+                          deployment watching the same repository. The
+                          repository declares that the work exists; this says
+                          who does it. Saying nothing is its own answer, and a
+                          different one from saying no: an item that says
+                          nothing follows the default and moves with it, and one
+                          that says off stays off when the default is turned
+                          back on — and one that says on runs while the default
+                          is off.
+                        </p>
+
+                        <div
+                          class="repo-wo-row is-default"
+                          data-testid="work-ownership-default-row"
+                        >
+                          <span class="repo-wo-row-main">
+                            <span class="repo-wo-item-title"
+                              >Repository default:</span
+                            >
+                            <span
+                              [class]="
+                                'status-pill ' + saidPillTone(work.default)
+                              "
+                            >
+                              <g-status-icon
+                                [tone]="saidPillTone(work.default)"
+                                [kind]="saidPillKind(work.default)"
+                              />
+                              {{ saidLabel(work.default) }}
+                            </span>
+                            <span
+                              [class]="
+                                'status-pill repo-wo-resolved ' +
+                                (work.defaultRuns ? 'is-runs' : 'is-off')
+                              "
+                            >
+                              <g-status-icon
+                                [tone]="
+                                  work.defaultRuns ? 'healthy' : 'neutral'
+                                "
+                                [kind]="
+                                  work.defaultRuns ? 'healthy' : 'neutral'
+                                "
+                              />
+                              {{
+                                work.defaultRuns
+                                  ? "Runs this repository's work"
+                                  : "Does not run this repository's work"
+                              }}
+                            </span>
+                          </span>
+                          <div
+                            class="segmented repo-wo-segmented"
+                            role="group"
+                            aria-label="Repository default ownership"
+                          >
+                            @for (opt of ownershipOptions; track opt.key) {
+                              <button
+                                type="button"
+                                [attr.data-testid]="
+                                  'work-ownership-default-' + opt.key
+                                "
+                                [attr.aria-label]="
+                                  'the repository default: ' + opt.ariaSuffix
+                                "
+                                [attr.aria-pressed]="work.default === opt.state"
+                                [attr.aria-describedby]="
+                                  workOwnershipDescribedBy()
+                                "
+                                [disabled]="
+                                  !canWriteWorkOwnership() ||
+                                  workOwnershipSaving()
+                                "
+                                (click)="setWorkOwnershipDefault(opt.state)"
+                              >
+                                {{ opt.label }}
+                              </button>
+                            }
+                          </div>
+                        </div>
+
+                        @if (work.items.length === 0) {
+                          <p class="s-hint" data-testid="work-ownership-empty">
+                            No work items: this repository declares no schedules
+                            here, none fires into it, and nothing has been said
+                            about one.
+                          </p>
+                        } @else {
+                          <div
+                            class="repo-wo-list"
+                            data-testid="work-ownership-items"
+                          >
+                            @for (item of work.items; track item.item) {
+                              @let label = workItemLabel(item);
+                              <div
+                                class="repo-wo-row"
+                                [attr.data-testid]="
+                                  'work-ownership-item-' + item.item
+                                "
+                              >
+                                <span class="repo-wo-row-main">
+                                  <span
+                                    [class]="
+                                      'status-pill repo-wo-resolved ' +
+                                      (item.runs ? 'is-runs' : 'is-off')
+                                    "
+                                  >
+                                    <g-status-icon
+                                      [tone]="item.runs ? 'healthy' : 'neutral'"
+                                      [kind]="item.runs ? 'healthy' : 'neutral'"
+                                    />
+                                    {{ item.runs ? "Runs" : "Not run" }}
+                                  </span>
+                                  <span class="repo-wo-item-title">{{
+                                    label
+                                  }}</span>
+                                  <span
+                                    [class]="
+                                      'status-pill ' +
+                                      saidPillTone(item.override)
+                                    "
+                                  >
+                                    <g-status-icon
+                                      [tone]="saidPillTone(item.override)"
+                                      [kind]="saidPillKind(item.override)"
+                                    />
+                                    {{ saidLabel(item.override) }}
+                                  </span>
+                                  @if (item.title && item.title !== item.item) {
+                                    <code class="repo-decl-code">{{
+                                      item.item
+                                    }}</code>
+                                  }
+                                  @if (item.paused) {
+                                    <span class="status-pill quiet">
+                                      <g-status-icon
+                                        tone="blast"
+                                        kind="warning"
+                                      />
+                                      Paused on its own row
+                                    </span>
+                                  }
+                                  @if (item.declaration; as decl) {
+                                    <span class="repo-wo-meta"
+                                      >declared in {{ decl.path }}</span
+                                    >
+                                  }
+                                  @if (item.kind === "unknown") {
+                                    <span class="repo-wo-meta"
+                                      >nothing here has this id — a decision
+                                      left behind by whatever it named</span
+                                    >
+                                  }
+                                </span>
+                                <div
+                                  class="segmented repo-wo-segmented"
+                                  role="group"
+                                  [attr.aria-label]="label + ' ownership'"
+                                >
+                                  @for (
+                                    opt of ownershipOptions;
+                                    track opt.key
+                                  ) {
+                                    <button
+                                      type="button"
+                                      [attr.data-testid]="
+                                        'work-ownership-item-' +
+                                        item.item +
+                                        '-' +
+                                        opt.key
+                                      "
+                                      [attr.aria-label]="
+                                        label + ': ' + opt.ariaSuffix
+                                      "
+                                      [attr.aria-pressed]="
+                                        item.override === opt.state
+                                      "
+                                      [attr.aria-describedby]="
+                                        workOwnershipDescribedBy()
+                                      "
+                                      [disabled]="
+                                        !canWriteWorkOwnership() ||
+                                        workOwnershipSaving()
+                                      "
+                                      (click)="
+                                        setWorkItemOwnership(
+                                          item.item,
+                                          opt.state
+                                        )
+                                      "
+                                    >
+                                      {{ opt.label }}
+                                    </button>
+                                  }
+                                </div>
+                              </div>
+                            }
+                          </div>
+                        }
+
+                        <p class="repo-wo-caption">
+                          Grain resolves this before every piece of standing
+                          work it starts here. A skipped schedule says so on its
+                          own status and moves on to its next occurrence, so
+                          turning the work back on does not release a backlog of
+                          catch-up firings. The deployment's own configuration
+                          repository is checked whatever this says.
+                        </p>
+                      </div>
+                    }
+                  }
+                </div>
+
                 <div class="s-card" data-testid="card-repo-release-settings">
                   <div class="s-card-head">
                     <div>
@@ -1754,6 +2204,8 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   protected readonly pendingReleases = signal<PendingReleaseRow[]>([]);
   protected readonly newReleaseName = signal("");
 
+  protected readonly ownershipOptions = OWNERSHIP_OPTIONS;
+
   protected readonly declarationsData = signal<RepoDeclarationsResponse | null>(
     null,
   );
@@ -1761,9 +2213,19 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   protected readonly declarationsSaving = signal(false);
   protected readonly declarationsError = signal<string | null>(null);
 
+  protected readonly workOwnershipData =
+    signal<RepoWorkOwnershipResponse | null>(null);
+  protected readonly workOwnershipLoading = signal(false);
+  protected readonly workOwnershipSaving = signal(false);
+  protected readonly workOwnershipError = signal<string | null>(null);
+
   private subs: Subscription[] = [];
   private loadedRepoSlug = "";
   private declarationsInFlightRepo = "";
+  private workOwnershipInFlightRepo = "";
+  private workOwnershipReadSeq = 0;
+  private workOwnershipSaveSeq = 0;
+  private lastWorkOwnershipError: string | null = null;
 
   private readonly normalizedRouteParts = computed(() => {
     const rawHost = this.routeHost() || this.host() || "";
@@ -1874,6 +2336,53 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     );
   }
 
+  protected canWriteWorkOwnership(): boolean {
+    if (this.configRepoOnly() || !this.hasValidRepo()) return false;
+    return this.access.can(
+      "PUT /api/repos/{owner}/{name}/work-ownership",
+      this.repoSlug(),
+    );
+  }
+
+  protected workOwnershipDescribedBy(): string | null {
+    const ids: string[] = [];
+    if (this.configRepoOnly()) {
+      ids.push("repo-config-readonly-banner");
+    }
+    if (
+      this.hasValidRepo() &&
+      !this.access.can(
+        "PUT /api/repos/{owner}/{name}/work-ownership",
+        this.repoSlug(),
+      )
+    ) {
+      ids.push("repo-work-ownership-denied-reason");
+    }
+    return ids.length ? ids.join(" ") : null;
+  }
+
+  protected workItemLabel(item: RepoWorkItem): string {
+    return item.title || item.item;
+  }
+
+  protected saidLabel(said: OwnershipState): string {
+    if (said === "on") return "On, set here";
+    if (said === "off") return "Off, set here";
+    return "Nobody has said";
+  }
+
+  protected saidPillTone(said: OwnershipState): string {
+    if (said === "on") return "healthy";
+    if (said === "off") return "error";
+    return "neutral";
+  }
+
+  protected saidPillKind(said: OwnershipState): string {
+    if (said === "on") return "healthy";
+    if (said === "off") return "error";
+    return "neutral";
+  }
+
   protected canSaveRepoAgents(): boolean {
     if (this.configRepoOnly() || !this.hasValidRepo()) return false;
     const repo = this.repoSlug();
@@ -1935,6 +2444,14 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   private resetRepoState(): void {
     this.declarationsData.set(null);
     this.declarationsError.set(null);
+    this.workOwnershipData.set(null);
+    this.workOwnershipError.set(null);
+    this.workOwnershipLoading.set(false);
+    this.workOwnershipSaving.set(false);
+    this.workOwnershipInFlightRepo = "";
+    this.workOwnershipReadSeq++;
+    this.workOwnershipSaveSeq++;
+    this.clearWorkOwnershipSaveError();
     this.workflows.set([]);
     this.branches.set([]);
     this.releases.set([]);
@@ -2212,37 +2729,98 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   private async loadReleasesTab(): Promise<void> {
     const p = this.params();
     const repo = this.repoSlug();
-    if (this.access.can("GET /api/repos/{owner}/{name}/release", repo)) {
-      try {
-        const relCfg = await this.api.get<Record<string, unknown>>(
-          "GET /api/repos/{owner}/{name}/release",
-          p,
-        );
-        this.applyReleaseSettings(relCfg);
-      } catch {
-        // Non-fatal
-      }
-    }
-    if (this.access.can("GET /api/repos/{owner}/{name}/releases", repo)) {
-      try {
-        const list = await this.api.get<
-          ReleaseRow[] | { releases?: ReleaseRow[]; items?: ReleaseRow[] }
-        >("GET /api/repos/{owner}/{name}/releases", p);
-        const rows = Array.isArray(list)
-          ? list
-          : (list?.releases ?? list?.items ?? []);
-        this.releases.set(rows);
-        const current = this.selectedRelease();
-        const target =
-          rows.find((r) => r.name === current)?.name ?? rows[0]?.name ?? "";
-        this.selectedRelease.set(target);
-        if (target) {
-          await this.loadCandidatesFor(target);
-        } else {
-          this.candidates.set([]);
+    const ownershipTask = this.loadWorkOwnership();
+    const releaseCfgTask = (async () => {
+      if (this.access.can("GET /api/repos/{owner}/{name}/release", repo)) {
+        try {
+          const relCfg = await this.api.get<Record<string, unknown>>(
+            "GET /api/repos/{owner}/{name}/release",
+            p,
+          );
+          this.applyReleaseSettings(relCfg);
+        } catch {
+          // Non-fatal
         }
-      } catch {
-        // Non-fatal
+      }
+    })();
+    const releasesListTask = (async () => {
+      if (this.access.can("GET /api/repos/{owner}/{name}/releases", repo)) {
+        try {
+          const list = await this.api.get<
+            ReleaseRow[] | { releases?: ReleaseRow[]; items?: ReleaseRow[] }
+          >("GET /api/repos/{owner}/{name}/releases", p);
+          const rows = Array.isArray(list)
+            ? list
+            : (list?.releases ?? list?.items ?? []);
+          this.releases.set(rows);
+          const current = this.selectedRelease();
+          const target =
+            rows.find((r) => r.name === current)?.name ?? rows[0]?.name ?? "";
+          this.selectedRelease.set(target);
+          if (target) {
+            await this.loadCandidatesFor(target);
+          } else {
+            this.candidates.set([]);
+          }
+        } catch {
+          // Non-fatal
+        }
+      }
+    })();
+    await Promise.all([ownershipTask, releaseCfgTask, releasesListTask]);
+  }
+
+  protected async loadWorkOwnership(force = false): Promise<void> {
+    if (!this.hasValidRepo()) return;
+    const expectedRepo = this.repoSlug();
+    if (
+      !this.access.can(
+        "GET /api/repos/{owner}/{name}/work-ownership",
+        expectedRepo,
+      )
+    ) {
+      return;
+    }
+    if (
+      !force &&
+      this.workOwnershipLoading() &&
+      this.workOwnershipInFlightRepo === expectedRepo
+    ) {
+      return;
+    }
+    const readSeq = ++this.workOwnershipReadSeq;
+    this.workOwnershipInFlightRepo = expectedRepo;
+    this.workOwnershipLoading.set(true);
+    this.workOwnershipError.set(null);
+    try {
+      const res = await this.api.get<unknown>(
+        "GET /api/repos/{owner}/{name}/work-ownership",
+        this.params(),
+      );
+      if (
+        this.repoSlug() !== expectedRepo ||
+        readSeq !== this.workOwnershipReadSeq
+      ) {
+        return;
+      }
+      const normalized = normalizeWorkOwnership(res);
+      this.workOwnershipData.set(normalized);
+      this.syncReleaseEnabledFromOwnership(normalized);
+      this.clearWorkOwnershipSaveError();
+    } catch (err) {
+      if (
+        this.repoSlug() === expectedRepo &&
+        readSeq === this.workOwnershipReadSeq
+      ) {
+        this.workOwnershipError.set(errText(err));
+      }
+    } finally {
+      if (
+        this.workOwnershipInFlightRepo === expectedRepo &&
+        readSeq === this.workOwnershipReadSeq
+      ) {
+        this.workOwnershipInFlightRepo = "";
+        this.workOwnershipLoading.set(false);
       }
     }
   }
@@ -2622,6 +3200,7 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
         this.applyReleaseSettings(res);
       }
       this.snackbar.show("Release settings saved");
+      await this.loadWorkOwnership(true);
     } catch (err) {
       this.error.set(errText(err));
     }
@@ -3037,5 +3616,115 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     } finally {
       this.declarationsSaving.set(false);
     }
+  }
+
+  protected async setWorkOwnershipDefault(state: string): Promise<void> {
+    if (!this.canWriteWorkOwnership() || this.workOwnershipSaving()) return;
+    const parsed = parseOwnershipState(state);
+    if (parsed === null) {
+      this.recordWorkOwnershipSaveError(
+        `default: "${state}" is not an ownership setting ("on", "off" or empty)`,
+      );
+      return;
+    }
+    const label = parsed === "" ? "say nothing" : parsed;
+    await this.saveWorkOwnership(
+      { default: parsed },
+      `Updated repository work ownership default (${label})`,
+    );
+  }
+
+  protected async setWorkItemOwnership(
+    item: string,
+    state: string,
+  ): Promise<void> {
+    if (!this.canWriteWorkOwnership() || this.workOwnershipSaving()) return;
+    const checked = validateWorkItemId(item);
+    if (checked.error) {
+      this.recordWorkOwnershipSaveError(checked.error);
+      return;
+    }
+    const parsed = parseOwnershipState(state);
+    if (parsed === null) {
+      this.recordWorkOwnershipSaveError(
+        `state: "${state}" is not an ownership setting ("on", "off" or empty)`,
+      );
+      return;
+    }
+    const label = parsed === "" ? "say nothing" : parsed;
+    await this.saveWorkOwnership(
+      { item: checked.id, state: parsed },
+      `Updated work ownership for ${checked.id} (${label})`,
+    );
+  }
+
+  private async saveWorkOwnership(
+    body: { default: OwnershipState } | { item: string; state: OwnershipState },
+    successNote: string,
+  ): Promise<void> {
+    if (!this.canWriteWorkOwnership() || this.workOwnershipSaving()) return;
+    const expectedRepo = this.repoSlug();
+    const token = ++this.workOwnershipSaveSeq;
+    // Supersede any older in-flight GET so stale reads cannot overwrite this save.
+    this.workOwnershipReadSeq++;
+    this.clearWorkOwnershipSaveError();
+    this.workOwnershipSaving.set(true);
+    try {
+      const res = await this.api.put<unknown>(
+        "PUT /api/repos/{owner}/{name}/work-ownership",
+        this.params(),
+        body,
+      );
+      if (
+        this.repoSlug() !== expectedRepo ||
+        token !== this.workOwnershipSaveSeq
+      ) {
+        return;
+      }
+      if (res && typeof res === "object" && "defaultRuns" in res) {
+        const normalized = normalizeWorkOwnership(res);
+        this.workOwnershipData.set(normalized);
+        this.workOwnershipError.set(null);
+        this.syncReleaseEnabledFromOwnership(normalized);
+      } else {
+        await this.loadWorkOwnership(true);
+      }
+      this.snackbar.show(successNote);
+    } catch (err) {
+      if (
+        this.repoSlug() === expectedRepo &&
+        token === this.workOwnershipSaveSeq
+      ) {
+        this.recordWorkOwnershipSaveError(errText(err));
+      }
+    } finally {
+      if (this.workOwnershipSaveSeq === token) {
+        this.workOwnershipSaving.set(false);
+      }
+    }
+  }
+
+  private syncReleaseEnabledFromOwnership(
+    work: RepoWorkOwnershipResponse,
+  ): void {
+    const releaseRow = work.items.find((i) => i.item === "release");
+    if (releaseRow) {
+      this.releaseEnabled.set(Boolean(releaseRow.runs));
+    }
+  }
+
+  private recordWorkOwnershipSaveError(msg: string): void {
+    this.lastWorkOwnershipError = msg;
+    this.error.set(msg);
+  }
+
+  private clearWorkOwnershipSaveError(): void {
+    if (
+      this.lastWorkOwnershipError !== null &&
+      this.error() === this.lastWorkOwnershipError
+    ) {
+      this.error.set(null);
+    }
+    this.lastWorkOwnershipError = null;
   }
 }
