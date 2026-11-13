@@ -69,101 +69,105 @@ function recordDeleteRequests(
   });
 }
 
-test("prompts for optional reason on CI run cancel", async ({ page }) => {
-  const {
-    ids: [runWithReason, runWithoutReason],
-    restore,
-  } = await setupGrainCIRuns(page, 2);
+test(
+  "prompts for optional reason on CI run cancel",
+  { tag: ["@desktop"] },
+  async ({ page }) => {
+    const {
+      ids: [runWithReason, runWithoutReason],
+      restore,
+    } = await setupGrainCIRuns(page, 2);
 
-  try {
-    const deletePayloads: { url: string; postData: string | null }[] = [];
-    recordDeleteRequests(page, deletePayloads);
-    expect(deletePayloads).toEqual([]);
+    try {
+      const deletePayloads: { url: string; postData: string | null }[] = [];
+      recordDeleteRequests(page, deletePayloads);
+      expect(deletePayloads).toEqual([]);
 
-    // 1. Open active run and dismiss via Cancel and Escape (no DELETE sent)
-    await page.goto(`ci/runs/${runWithReason}`);
-    const cancelBtn = page.getByRole("button", { name: "Cancel run" });
-    await expect(cancelBtn).toBeVisible();
-    await cancelBtn.click();
+      // 1. Open active run and dismiss via Cancel and Escape (no DELETE sent)
+      await page.goto(`ci/runs/${runWithReason}`);
+      const cancelBtn = page.getByRole("button", { name: "Cancel run" });
+      await expect(cancelBtn).toBeVisible();
+      await cancelBtn.click();
 
-    const dialog = page.getByRole("dialog", { name: "Cancel CI run?" });
-    await expect(dialog).toBeVisible();
-    const reasonInput = dialog.getByRole("textbox", {
-      name: /Reason \(optional\)/i,
-    });
-    await expect(reasonInput).toBeFocused();
-    await reasonInput.fill("draft that should reset");
+      const dialog = page.getByRole("dialog", { name: "Cancel CI run?" });
+      await expect(dialog).toBeVisible();
+      const reasonInput = dialog.getByRole("textbox", {
+        name: /Reason \(optional\)/i,
+      });
+      await expect(reasonInput).toBeFocused();
+      await reasonInput.fill("draft that should reset");
 
-    await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
-    await expect(dialog).toBeHidden();
-    expect(deletePayloads).toEqual([]);
-    await expect(cancelBtn).toBeFocused();
+      await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+      await expect(dialog).toBeHidden();
+      expect(deletePayloads).toEqual([]);
+      await expect(cancelBtn).toBeFocused();
 
-    // Reopen: draft cleared; Escape dismisses without DELETE
-    await cancelBtn.click();
-    await expect(reasonInput).toHaveValue("");
-    await page.keyboard.press("Escape");
-    await expect(dialog).toBeHidden();
-    expect(deletePayloads).toEqual([]);
+      // Reopen: draft cleared; Escape dismisses without DELETE
+      await cancelBtn.click();
+      await expect(reasonInput).toHaveValue("");
+      await page.keyboard.press("Escape");
+      await expect(dialog).toBeHidden();
+      expect(deletePayloads).toEqual([]);
 
-    // 2. Submit with an optional reason
-    await cancelBtn.click();
-    await reasonInput.fill("  wrong branch, retrying on main  ");
-    const deleteRespPromise = page.waitForResponse(
-      (res) =>
-        res.request().method() === "DELETE" &&
-        res.url().endsWith(`/api/ci/runs/${runWithReason}`),
-    );
-    await dialog.getByRole("button", { name: "Cancel run" }).click();
-    const deleteResp = await deleteRespPromise;
-    expect(deleteResp.status()).toBe(202);
-    await expect(dialog).toBeHidden();
+      // 2. Submit with an optional reason
+      await cancelBtn.click();
+      await reasonInput.fill("  wrong branch, retrying on main  ");
+      const deleteRespPromise = page.waitForResponse(
+        (res) =>
+          res.request().method() === "DELETE" &&
+          res.url().endsWith(`/api/ci/runs/${runWithReason}`),
+      );
+      await dialog.getByRole("button", { name: "Cancel run" }).click();
+      const deleteResp = await deleteRespPromise;
+      expect(deleteResp.status()).toBe(202);
+      await expect(dialog).toBeHidden();
 
-    expect(deletePayloads).toHaveLength(1);
-    expect(JSON.parse(deletePayloads[0].postData ?? "null")).toEqual({
-      reason: "wrong branch, retrying on main",
-    });
+      expect(deletePayloads).toHaveLength(1);
+      expect(JSON.parse(deletePayloads[0].postData ?? "null")).toEqual({
+        reason: "wrong branch, retrying on main",
+      });
 
-    await expect(page.getByTestId("ci-detail-status")).toContainText(
-      "Cancelled",
-    );
-    await expect(page.getByTestId("ci-cancel-reason")).toContainText(
-      "Cancel note: wrong branch, retrying on main",
-    );
-    await expect(page.getByRole("button", { name: "Cancel run" })).toHaveCount(
-      0,
-    );
+      await expect(page.getByTestId("ci-detail-status")).toContainText(
+        "Cancelled",
+      );
+      await expect(page.getByTestId("ci-cancel-reason")).toContainText(
+        "Cancel note: wrong branch, retrying on main",
+      );
+      await expect(
+        page.getByRole("button", { name: "Cancel run" }),
+      ).toHaveCount(0);
 
-    // Persists across reload
-    await page.reload();
-    await expect(page.getByTestId("ci-cancel-reason")).toContainText(
-      "Cancel note: wrong branch, retrying on main",
-    );
+      // Persists across reload
+      await page.reload();
+      await expect(page.getByTestId("ci-cancel-reason")).toContainText(
+        "Cancel note: wrong branch, retrying on main",
+      );
 
-    // 3. Submit without a reason (optional in the strongest sense)
-    await page.goto(`ci/runs/${runWithoutReason}`);
-    await page.getByRole("button", { name: "Cancel run" }).click();
-    await expect(dialog).toBeVisible();
-    const secondDeletePromise = page.waitForResponse(
-      (res) =>
-        res.request().method() === "DELETE" &&
-        res.url().endsWith(`/api/ci/runs/${runWithoutReason}`),
-    );
-    await dialog.getByRole("button", { name: "Cancel run" }).click();
-    const secondResp = await secondDeletePromise;
-    expect(secondResp.status()).toBe(202);
-    await expect(dialog).toBeHidden();
+      // 3. Submit without a reason (optional in the strongest sense)
+      await page.goto(`ci/runs/${runWithoutReason}`);
+      await page.getByRole("button", { name: "Cancel run" }).click();
+      await expect(dialog).toBeVisible();
+      const secondDeletePromise = page.waitForResponse(
+        (res) =>
+          res.request().method() === "DELETE" &&
+          res.url().endsWith(`/api/ci/runs/${runWithoutReason}`),
+      );
+      await dialog.getByRole("button", { name: "Cancel run" }).click();
+      const secondResp = await secondDeletePromise;
+      expect(secondResp.status()).toBe(202);
+      await expect(dialog).toBeHidden();
 
-    expect(deletePayloads).toHaveLength(2);
-    expect(deletePayloads[1].postData).toBeNull();
-    await expect(page.getByTestId("ci-detail-status")).toContainText(
-      "Cancelled",
-    );
-    await expect(page.getByTestId("ci-cancel-reason")).toHaveCount(0);
-  } finally {
-    await restore();
-  }
-});
+      expect(deletePayloads).toHaveLength(2);
+      expect(deletePayloads[1].postData).toBeNull();
+      await expect(page.getByTestId("ci-detail-status")).toContainText(
+        "Cancelled",
+      );
+      await expect(page.getByTestId("ci-cancel-reason")).toHaveCount(0);
+    } finally {
+      await restore();
+    }
+  },
+);
 
 test(
   "cancel CI run dialog fits viewport with zero overflow and zero axe violations across sizes and themes",
