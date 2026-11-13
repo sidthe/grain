@@ -448,7 +448,7 @@ export function clock(iso: string | undefined, now = new Date()): string {
                   </label>
                   <label class="session-setting-field">
                     <span>Visible to team / members</span>
-                    <div style="display: flex; gap: 6px">
+                    <div class="session-team-row">
                       <input
                         type="text"
                         data-testid="session-team-input"
@@ -584,7 +584,9 @@ export function clock(iso: string | undefined, now = new Date()): string {
                       time(c.createdAt)
                     }}</time>
                   </span>
-                  <div class="msg-body" [gMarkdown]="c.body"></div>
+                  <div class="sessions-msg-wrap">
+                    <div class="msg-body" [gMarkdown]="c.body"></div>
+                  </div>
                   @if (c.attachments?.length && row.session.taskId) {
                     <g-attachment-list
                       [taskId]="row.session.taskId"
@@ -630,7 +632,9 @@ export function clock(iso: string | undefined, now = new Date()): string {
                     <span class="msg-meta">
                       <span class="status-pill setup">Live turn</span>
                     </span>
-                    <div class="msg-body" [gMarkdown]="tr"></div>
+                    <div class="sessions-msg-wrap">
+                      <div class="msg-body" [gMarkdown]="tr"></div>
+                    </div>
                   </article>
                 }
               }
@@ -691,14 +695,19 @@ export function clock(iso: string | undefined, now = new Date()): string {
 
         @defer (when canvasOpen()) {
           @if (canvasOpen() && store.selected(); as row) {
-            <g-session-canvas
-              [sessionTaskId]="row.session.taskId"
-              [repo]="store.selectedDetail()?.repo"
-              [comments]="comments()"
-              [requestedTab]="canvasTab()"
-              [requestedArtifactId]="canvasArtifactId()"
-              (closed)="canvasOpen.set(false)"
-            />
+            <div
+              class="sessions-canvas-wrap"
+              data-testid="sessions-canvas-wrap"
+            >
+              <g-session-canvas
+                [sessionTaskId]="row.session.taskId"
+                [repo]="store.selectedDetail()?.repo"
+                [comments]="comments()"
+                [requestedTab]="canvasTab()"
+                [requestedArtifactId]="canvasArtifactId()"
+                (closed)="canvasOpen.set(false)"
+              />
+            </div>
           }
         }
       </div>
@@ -985,11 +994,19 @@ export class SessionsPageComponent implements OnInit, OnDestroy {
 
   private lastCount = 0;
   private lastSession = "";
+  private hasSeenRoute = false;
+  private lastRouteId: string | undefined;
 
   constructor() {
     effect(() => {
-      const id = this.id() || DIRECTOR_ID;
+      const routeId = this.id();
+      const id = routeId || DIRECTOR_ID;
       untracked(() => {
+        if (this.hasSeenRoute && routeId !== this.lastRouteId) {
+          this.canvasOpen.set(false);
+        }
+        this.hasSeenRoute = true;
+        this.lastRouteId = routeId;
         this.store.select(id);
         this.freshOpen.set(false);
         this.settingsOpen.set(false);
