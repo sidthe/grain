@@ -576,3 +576,263 @@ export function isOpenTaskState(state: string): boolean {
     s === "paused"
   );
 }
+
+export type SchedTargetKind = "prompt" | "template" | "suite";
+
+export type SchedFieldKey =
+  | "templateId"
+  | "suiteId"
+  | "title"
+  | "repo"
+  | "base"
+  | "everyNMinutes"
+  | "everyNHours"
+  | "timeOfDay"
+  | "timeZone"
+  | "dayOfMonth"
+  | "triggerWorkflow"
+  | "gitRefRepo"
+  | "gitRef";
+
+export interface ScheduleDraftSnapshot {
+  system: boolean;
+  targetKind: SchedTargetKind;
+  templateId: string;
+  boundTemplateRepo: string;
+  suiteId: string;
+  title: string;
+  repo: string;
+  base: string;
+  kind: string;
+  everyNMinutes: string;
+  everyNHours: string;
+  timeOfDay: string;
+  timeZone: string;
+  dayOfMonth: string;
+  triggerWorkflow: string;
+  gitRefRepo: string;
+  gitRef: string;
+  badNumberInputs?: Partial<
+    Record<"everyNMinutes" | "everyNHours" | "dayOfMonth", boolean>
+  >;
+}
+
+const BRANCH_NAME_SAFE_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+
+function hasControlOrSpace(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i);
+    if (code <= 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
+function isValidRepoSegment(seg: string): boolean {
+  if (!seg || seg === "." || seg === ".." || hasControlOrSpace(seg)) {
+    return false;
+  }
+  return !/[\\/:?#[\]%~^@]/.test(seg);
+}
+
+export function isValidRepoRef(raw: string): boolean {
+  const trimmed = raw.trim();
+  if (!trimmed) return false;
+  const parts = trimmed.split("/");
+  if (parts.length === 2) {
+    return isValidRepoSegment(parts[0]) && isValidRepoSegment(parts[1]);
+  }
+  if (parts.length === 3) {
+    const [host, owner, name] = parts;
+    if (!host || (!host.includes(".") && !host.includes(":"))) return false;
+    if (hasControlOrSpace(host) || /[\\/?#@]/.test(host)) return false;
+    return isValidRepoSegment(owner) && isValidRepoSegment(name);
+  }
+  return false;
+}
+
+export function isValidBranchName(raw: string): boolean {
+  const name = raw.trim();
+  if (!name) return false;
+  if (new TextEncoder().encode(name).length > 244) return false;
+  if (!BRANCH_NAME_SAFE_RE.test(name)) return false;
+  if (
+    name.includes("..") ||
+    name.includes("//") ||
+    name.endsWith("/") ||
+    name.endsWith(".")
+  ) {
+    return false;
+  }
+  for (const part of name.split("/")) {
+    if (part.startsWith(".") || part.endsWith(".lock")) return false;
+  }
+  return true;
+}
+
+export function isValidTimeOfDay(raw: string): boolean {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(raw.trim());
+  if (!m) return false;
+  const h = Number(m[1]);
+  const min = Number(m[2]);
+  return h >= 0 && h <= 23 && min >= 0 && min <= 59;
+}
+
+export function isValidIanaTimeZone(raw: string): boolean {
+  const tz = raw.trim();
+  if (!tz) return true;
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function isValidGitRef(raw: string): boolean {
+  const ref = raw.trim();
+  if (!ref.startsWith("refs/") || ref.length <= "refs/".length) return false;
+  if (/[\s^~:?*[\\]/.test(ref) || ref.includes("..") || ref.endsWith("/")) {
+    return false;
+  }
+  return true;
+}
+
+function validateIntegerRange(
+  raw: string,
+  badInput: boolean | undefined,
+  min: number,
+  max: number,
+  label: string,
+): string | null {
+  if (badInput) {
+    return `Enter a valid whole number between ${min} and ${max}.`;
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return `${label} is required.`;
+  }
+  if (!/^\d+$/.test(trimmed)) {
+    return `Enter a whole number between ${min} and ${max}.`;
+  }
+  const n = Number(trimmed);
+  if (!Number.isSafeInteger(n) || n < min) {
+    return `${label} must be at least ${min}.`;
+  }
+  if (n > max) {
+    return `${label} must be at most ${max}.`;
+  }
+  return null;
+}
+
+export function validateScheduleDraft(
+  d: ScheduleDraftSnapshot,
+): Partial<Record<SchedFieldKey, string>> {
+  const errors: Partial<Record<SchedFieldKey, string>> = {};
+  if (!d.system) {
+    if (d.targetKind === "template") {
+      if (!d.templateId.trim()) {
+        errors.templateId = "Select a template.";
+      }
+    } else if (d.targetKind === "suite") {
+      if (!d.suiteId.trim()) {
+        errors.suiteId = "Select a suite.";
+      }
+    } else if (!d.title.trim()) {
+      errors.title = "Task title is required.";
+    }
+
+    const repo = d.repo.trim();
+    const bound =
+      d.targetKind === "template" && Boolean(d.boundTemplateRepo.trim());
+    if (!repo) {
+      if (!bound) {
+        errors.repo = "Repository (owner/name) is required.";
+      }
+    } else if (!isValidRepoRef(repo)) {
+      errors.repo = "Use owner/name (or host/owner/name).";
+    }
+
+    const base = d.base.trim();
+    if (d.targetKind === "suite" && !base) {
+      errors.base = "Base branch is required for suite schedules.";
+    } else if (base && !isValidBranchName(base)) {
+      errors.base =
+        "Use a valid git branch name (no spaces, '..', '//', or trailing '/').";
+    }
+  }
+
+  switch (d.kind) {
+    case "everyNMinutes": {
+      const err = validateIntegerRange(
+        d.everyNMinutes,
+        d.badNumberInputs?.everyNMinutes,
+        10,
+        527040,
+        "Interval in minutes",
+      );
+      if (err) errors.everyNMinutes = err;
+      break;
+    }
+    case "everyNHours": {
+      const err = validateIntegerRange(
+        d.everyNHours,
+        d.badNumberInputs?.everyNHours,
+        1,
+        8784,
+        "Interval in hours",
+      );
+      if (err) errors.everyNHours = err;
+      break;
+    }
+    case "daily":
+    case "weekly":
+    case "monthly": {
+      if (!d.timeOfDay.trim()) {
+        errors.timeOfDay = "Time of day (HH:MM) is required.";
+      } else if (!isValidTimeOfDay(d.timeOfDay)) {
+        errors.timeOfDay = "Use 24-hour HH:MM format (00:00–23:59).";
+      }
+      if (d.timeZone.trim() && !isValidIanaTimeZone(d.timeZone)) {
+        errors.timeZone =
+          "Enter a valid IANA time zone (e.g. UTC, America/New_York).";
+      }
+      if (d.kind === "monthly") {
+        const err = validateIntegerRange(
+          d.dayOfMonth,
+          d.badNumberInputs?.dayOfMonth,
+          1,
+          28,
+          "Day of month",
+        );
+        if (err) errors.dayOfMonth = err;
+      }
+      break;
+    }
+    case "github_workflow_run": {
+      if (!d.triggerWorkflow.trim()) {
+        errors.triggerWorkflow = "Workflow name or file is required.";
+      }
+      break;
+    }
+    case "git_ref": {
+      const refRepo = d.gitRefRepo.trim();
+      const fallbackRepo =
+        d.repo.trim() ||
+        (d.targetKind === "template" ? d.boundTemplateRepo.trim() : "");
+      if (!refRepo && !fallbackRepo) {
+        errors.gitRefRepo = "Watched git repository is required.";
+      } else if (refRepo && !isValidRepoRef(refRepo)) {
+        errors.gitRefRepo = "Use owner/name (or host/owner/name).";
+      }
+      const ref = d.gitRef.trim();
+      if (!ref) {
+        errors.gitRef = "Watched git ref is required.";
+      } else if (!isValidGitRef(ref)) {
+        errors.gitRef =
+          "Use a full git ref starting with refs/ (e.g. refs/heads/main).";
+      }
+      break;
+    }
+  }
+  return errors;
+}
