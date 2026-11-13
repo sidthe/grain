@@ -39,9 +39,16 @@ import {
   type PillOption,
   PillSelectComponent,
 } from "../shared/pill-select.component";
+import { TipDirective } from "../shared/tip.directive";
 
 export type RepoTabId =
-  "overview" | "ci" | "merge-queue" | "agents" | "branches" | "releases";
+  | "overview"
+  | "ci"
+  | "merge-queue"
+  | "agents"
+  | "branches"
+  | "releases"
+  | "declarations";
 
 const REPO_TABS: readonly { id: RepoTabId; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -50,6 +57,7 @@ const REPO_TABS: readonly { id: RepoTabId; label: string }[] = [
   { id: "agents", label: "Agents & Grants" },
   { id: "branches", label: "Branches" },
   { id: "releases", label: "Releases" },
+  { id: "declarations", label: "Declarations" },
 ];
 
 function isRepoTabId(val: string | null | undefined): val is RepoTabId {
@@ -109,9 +117,77 @@ interface PendingReleaseRow {
   soakReady?: boolean;
 }
 
+interface DeclaredPushRefRow {
+  ref?: string;
+  pattern?: string;
+  force?: boolean;
+  delete?: boolean;
+}
+
+interface DeclaredPushRow {
+  repo?: string;
+  path: string;
+  commit?: string;
+  refs?: DeclaredPushRefRow[];
+}
+
+interface RepoDeclarationsStatusRow {
+  commit?: string;
+  checkedAt?: string;
+  syncedAt?: string;
+  error?: string;
+  templates?: string[];
+  suites?: string[];
+  schedules?: string[];
+  triggers?: string[];
+  pushes?: DeclaredPushRow[];
+  mergeRules?: string;
+  warnings?: string[];
+}
+
+interface RepoPortDirectionRow {
+  from: string;
+  to: string;
+  paired?: boolean;
+  operatorTypes?: string[];
+  declaredTypes?: string[];
+  types?: string[];
+}
+
+interface RepoDeclarationsData {
+  declarations?: boolean;
+  declarationsStatus?: RepoDeclarationsStatusRow | null;
+  pairedBranches?: string[];
+  portBranches?: string[];
+  declaredPortBranches?: string[];
+  portDirections?: RepoPortDirectionRow[];
+  portWarnings?: string[];
+}
+
+function declaredSummaryText(status: RepoDeclarationsStatusRow): string {
+  return (
+    `${(status.templates ?? []).length} template(s), ` +
+    `${(status.suites ?? []).length} suite(s), ` +
+    `${(status.schedules ?? []).length} schedule(s), ` +
+    `${(status.triggers ?? []).length} trigger(s)` +
+    (status.mergeRules ? `, merge rules in ${status.mergeRules}` : "")
+  );
+}
+
+function formatDeclaredPushRef(r: DeclaredPushRefRow): string {
+  const name = r.ref ?? r.pattern ?? "";
+  const flags = [r.force && "force", r.delete && "delete"].filter(Boolean);
+  return flags.length ? `${name} (${flags.join(", ")})` : name;
+}
+
 @Component({
   selector: "g-repo-detail-page",
-  imports: [RouterLink, PillSelectComponent, ConfirmDialogComponent],
+  imports: [
+    RouterLink,
+    PillSelectComponent,
+    ConfirmDialogComponent,
+    TipDirective,
+  ],
   encapsulation: ViewEncapsulation.None,
   styleUrls: [
     "../shared/work-surface.css",
@@ -149,8 +225,8 @@ interface PendingReleaseRow {
               {{ repoSlug() }}
             </h1>
             <p class="view-subtitle">
-              Per-repository Git connection, CI workflows, merge gates,
-              branches, and release qualification.
+              Per-repository Git connection, CI workflows, merge gates, agents,
+              branches, releases, and declarations.
             </p>
           </div>
 
@@ -623,7 +699,10 @@ interface PendingReleaseRow {
                       [value]="setupCommand()"
                       [disabled]="
                         configRepoOnly() ||
-                        !can('PUT /api/repos/{owner}/{name}/setup-command')
+                        !access.can(
+                          'PUT /api/repos/{owner}/{name}/setup-command',
+                          repoSlug()
+                        )
                       "
                       (input)="setupCommand.set($any($event.target).value)"
                     />
@@ -640,7 +719,10 @@ interface PendingReleaseRow {
                       [value]="promptExtension()"
                       [disabled]="
                         configRepoOnly() ||
-                        !can('PUT /api/repos/{owner}/{name}/prompt-extension')
+                        !access.can(
+                          'PUT /api/repos/{owner}/{name}/prompt-extension',
+                          repoSlug()
+                        )
                       "
                       (input)="promptExtension.set($any($event.target).value)"
                     ></textarea>
@@ -653,10 +735,14 @@ interface PendingReleaseRow {
                       id="rp-caps"
                       class="s-input tabular"
                       type="text"
+                      data-testid="input-repo-caps"
                       [value]="repoCaps()"
                       [disabled]="
                         configRepoOnly() ||
-                        !can('PUT /api/repos/{owner}/{name}/capabilities')
+                        !access.can(
+                          'PUT /api/repos/{owner}/{name}/capabilities',
+                          repoSlug()
+                        )
                       "
                       (input)="repoCaps.set($any($event.target).value)"
                     />
@@ -667,6 +753,7 @@ interface PendingReleaseRow {
                       class="btn-primary s-btn-sm"
                       data-testid="save-repo-agents-btn"
                       [disabled]="!canSaveRepoAgents()"
+                      [gTip]="saveAgentsDeniedReason()"
                       (click)="saveAgentTabSettings()"
                     >
                       Save agent settings
@@ -1146,6 +1233,357 @@ interface PendingReleaseRow {
                   </div>
                 </div>
               }
+
+              @case ("declarations") {
+                <div class="s-card" data-testid="card-repo-declarations">
+                  <div class="s-card-head">
+                    <div>
+                      <h2 class="s-card-title">Repository declarations</h2>
+                      <p class="s-card-desc">
+                        Read templates, suites, schedules, path triggers, and
+                        merge rules declared in <code>.grain/</code> on the
+                        default branch.
+                      </p>
+                    </div>
+                    <div class="s-inline">
+                      @if (declarationsData() !== null) {
+                        <span
+                          [class]="
+                            'status-pill ' +
+                            (declarationsEnabled() ? 'healthy' : 'neutral')
+                          "
+                          data-testid="repo-declarations-state"
+                        >
+                          {{ declarationsEnabled() ? "Enabled" : "Disabled" }}
+                        </span>
+                      }
+                      <button
+                        type="button"
+                        class="btn-tonal s-btn-sm"
+                        data-testid="refresh-repo-declarations-btn"
+                        [disabled]="
+                          !access.can(
+                            'GET /api/repos/{owner}/{name}/declarations',
+                            repoSlug()
+                          ) || declarationsLoading()
+                        "
+                        [gTip]="
+                          access.deniedReason(
+                            'GET /api/repos/{owner}/{name}/declarations',
+                            repoSlug()
+                          )
+                        "
+                        (click)="loadDeclarations()"
+                      >
+                        {{ declarationsLoading() ? "Refreshing…" : "Refresh" }}
+                      </button>
+                    </div>
+                  </div>
+
+                  @if (
+                    !access.can(
+                      "GET /api/repos/{owner}/{name}/declarations",
+                      repoSlug()
+                    )
+                  ) {
+                    <div
+                      class="s-banner readonly"
+                      data-testid="repo-declarations-denied"
+                    >
+                      {{
+                        access.deniedReason(
+                          "GET /api/repos/{owner}/{name}/declarations",
+                          repoSlug()
+                        )
+                      }}
+                    </div>
+                  } @else if (
+                    declarationsError() && declarationsData() === null
+                  ) {
+                    <div
+                      class="s-banner error"
+                      role="alert"
+                      data-testid="repo-declarations-error"
+                    >
+                      {{ declarationsError() }}
+                    </div>
+                  } @else if (declarationsData() === null) {
+                    <p class="s-hint" data-testid="repo-declarations-loading">
+                      Loading declarations…
+                    </p>
+                  } @else {
+                    <div class="s-toggle-row">
+                      <div class="s-toggle-copy">
+                        <span class="s-toggle-name">
+                          Read {{ repoSlug() }}&#39;s own declarations
+                        </span>
+                        <span class="s-hint">
+                          Read the templates, suites, schedules and path
+                          triggers {{ repoSlug() }} declares in its own
+                          <code>.grain/templates</code>,
+                          <code>.grain/suites</code>,
+                          <code>.grain/schedules</code> and
+                          <code>.grain/triggers</code>. Grain re-reads them
+                          within a couple of minutes of every change, and they
+                          cannot be edited here — the files are. A declaration
+                          files work in {{ repoSlug() }} on a cadence; it can
+                          never widen what that work reads, writes, or holds.
+                        </span>
+                      </div>
+                      <button
+                        type="button"
+                        class="g-switch"
+                        role="switch"
+                        data-testid="switch-repo-declarations"
+                        [attr.aria-checked]="declarationsEnabled()"
+                        [attr.aria-label]="declarationsSwitchLabel()"
+                        [disabled]="
+                          configRepoOnly() ||
+                          declarationsSaving() ||
+                          !access.can(
+                            'PUT /api/repos/{owner}/{name}/declarations',
+                            repoSlug()
+                          )
+                        "
+                        [gTip]="
+                          configActionDeniedReason(
+                            'PUT /api/repos/{owner}/{name}/declarations'
+                          )
+                        "
+                        (click)="toggleDeclarations()"
+                      ></button>
+                    </div>
+
+                    @if (declarationsError(); as declErr) {
+                      <div
+                        class="s-banner error"
+                        role="alert"
+                        data-testid="repo-declarations-error"
+                      >
+                        {{ declErr }}
+                      </div>
+                    }
+
+                    @if (declarationsStatus(); as status) {
+                      @if (
+                        status.commit || status.checkedAt || status.syncedAt
+                      ) {
+                        <div class="decl-meta-row">
+                          @if (status.commit) {
+                            <span
+                              >Commit:
+                              <code class="tabular">{{
+                                status.commit.slice(0, 12)
+                              }}</code></span
+                            >
+                          }
+                          @if (status.checkedAt) {
+                            <span class="tabular"
+                              >Checked: {{ status.checkedAt }}</span
+                            >
+                          }
+                          @if (status.syncedAt) {
+                            <span class="tabular"
+                              >Synced: {{ status.syncedAt }}</span
+                            >
+                          }
+                        </div>
+                      }
+
+                      @if (status.error) {
+                        <div
+                          class="s-banner error decl-preline"
+                          role="alert"
+                          data-testid="repo-declarations-sync-error"
+                        >
+                          Last read failed: {{ status.error
+                          }}{{
+                            status.commit
+                              ? " — still running what " +
+                                status.commit.slice(0, 12) +
+                                " declared."
+                              : ""
+                          }}
+                        </div>
+                        @if (status.commit) {
+                          <p
+                            class="decl-still-running"
+                            data-testid="repo-declarations-still-running"
+                          >
+                            Still running from
+                            {{ status.commit.slice(0, 12) }}:
+                            {{ declaredSummary() }}
+                          </p>
+                        }
+                      } @else {
+                        <p
+                          class="decl-summary"
+                          data-testid="repo-declarations-summary"
+                        >
+                          Read at
+                          {{
+                            (status.commit || "").slice(0, 12) || "no commit"
+                          }}: {{ declaredSummary() }}
+                        </p>
+                      }
+
+                      @if (hasDiscoveredDeclFiles()) {
+                        <ul
+                          class="decl-files-list"
+                          data-testid="repo-declarations-files"
+                        >
+                          @for (p of status.templates ?? []; track p) {
+                            <li class="decl-file-row">
+                              <code class="tabular">{{ p }}</code>
+                              <span class="decl-kind-tag">template</span>
+                            </li>
+                          }
+                          @for (p of status.suites ?? []; track p) {
+                            <li class="decl-file-row">
+                              <code class="tabular">{{ p }}</code>
+                              <span class="decl-kind-tag">suite</span>
+                            </li>
+                          }
+                          @for (p of status.schedules ?? []; track p) {
+                            <li class="decl-file-row">
+                              <code class="tabular">{{ p }}</code>
+                              <span class="decl-kind-tag">schedule</span>
+                            </li>
+                          }
+                          @for (p of status.triggers ?? []; track p) {
+                            <li class="decl-file-row">
+                              <code class="tabular">{{ p }}</code>
+                              <span class="decl-kind-tag">trigger</span>
+                            </li>
+                          }
+                          @if (status.mergeRules) {
+                            <li class="decl-file-row">
+                              <code class="tabular">{{
+                                status.mergeRules
+                              }}</code>
+                              <span class="decl-kind-tag">merge-rules</span>
+                            </li>
+                          }
+                        </ul>
+                      }
+
+                      @for (p of status.pushes ?? []; track p.path) {
+                        <p
+                          class="decl-push-row"
+                          data-testid="repo-declarations-push"
+                        >
+                          Tasks from <code>{{ p.path }}</code> may also push:
+                          {{ formatPushRefs(p.refs) }}
+                        </p>
+                      }
+
+                      @for (w of status.warnings ?? []; track w) {
+                        <div
+                          class="s-banner warn"
+                          data-testid="repo-declarations-warning"
+                        >
+                          Warning: {{ w }}
+                        </div>
+                      }
+                    } @else if (declarationsEnabled()) {
+                      <p class="s-hint" data-testid="repo-declarations-pending">
+                        Not read yet — grain picks this up on its next cycle.
+                      </p>
+                    } @else {
+                      <p class="s-hint" data-testid="repo-declarations-off">
+                        Declarations sync is off for {{ repoSlug() }}.
+                      </p>
+                    }
+                  }
+                </div>
+
+                @if (hasPortsInfo()) {
+                  <div class="s-card" data-testid="card-repo-ports">
+                    <div>
+                      <h2 class="s-card-title">Ports</h2>
+                      <p class="s-card-desc">
+                        {{
+                          (declarationsData()?.pairedBranches?.length ?? 0) > 0
+                            ? "Grain ports each merge between " +
+                              (declarationsData()?.pairedBranches ?? []).join(
+                                ", "
+                              )
+                            : "No branches are paired"
+                        }}
+                        — operator:
+                        {{
+                          (declarationsData()?.portBranches ?? []).join(", ") ||
+                            "none"
+                        }}; declared in .grain/settings.yml:
+                        {{
+                          (declarationsData()?.declaredPortBranches ?? []).join(
+                            ", "
+                          ) || "none"
+                        }}. Set by the operator in grain/config and by
+                        {{ repoSlug() }}&#39;s own port-types; not editable
+                        here.
+                      </p>
+                    </div>
+                    @if (
+                      (declarationsData()?.portDirections?.length ?? 0) > 0
+                    ) {
+                      <div class="s-table-wrap">
+                        <table class="s-table" aria-label="Port directions">
+                          <thead>
+                            <tr>
+                              <th>Direction</th>
+                              <th>Operator</th>
+                              <th>Declared</th>
+                              <th>Ports</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            @for (
+                              d of declarationsData()?.portDirections ?? [];
+                              track d.from + "->" + d.to
+                            ) {
+                              <tr>
+                                <td>
+                                  <code class="tabular"
+                                    >{{ d.from }}-&gt;{{ d.to }}</code
+                                  >
+                                </td>
+                                <td>
+                                  {{
+                                    (d.operatorTypes ?? []).join(", ") || "—"
+                                  }}
+                                </td>
+                                <td>
+                                  {{
+                                    (d.declaredTypes ?? []).join(", ") || "—"
+                                  }}
+                                </td>
+                                <td>
+                                  {{
+                                    !d.paired
+                                      ? "nothing (not a paired branch)"
+                                      : (d.types?.length ?? 0) > 0
+                                        ? (d.types ?? []).join(", ")
+                                        : "every merge"
+                                  }}
+                                </td>
+                              </tr>
+                            }
+                          </tbody>
+                        </table>
+                      </div>
+                    }
+                    @for (w of declaredPortWarnings(); track w) {
+                      <div
+                        class="s-banner warn"
+                        data-testid="repo-port-warning"
+                      >
+                        Warning: {{ w }}
+                      </div>
+                    }
+                  </div>
+                }
+              }
             }
           }
         </div>
@@ -1229,6 +1667,46 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   protected readonly pendingReleases = signal<PendingReleaseRow[]>([]);
   protected readonly newReleaseName = signal("");
 
+  protected readonly declarationsData = signal<RepoDeclarationsData | null>(
+    null,
+  );
+  protected readonly declarationsLoading = signal(false);
+  protected readonly declarationsSaving = signal(false);
+  protected readonly declarationsError = signal<string | null>(null);
+
+  protected readonly declarationsEnabled = computed(() =>
+    Boolean(this.declarationsData()?.declarations),
+  );
+  protected readonly declarationsStatus = computed(
+    () => this.declarationsData()?.declarationsStatus ?? null,
+  );
+  protected readonly declaredSummary = computed(() => {
+    const status = this.declarationsStatus();
+    return status ? declaredSummaryText(status) : "";
+  });
+  protected readonly declaredPortWarnings = computed(() => {
+    const d = this.declarationsData();
+    const statusWarnings = new Set(d?.declarationsStatus?.warnings ?? []);
+    return (d?.portWarnings ?? []).filter((w) => !statusWarnings.has(w));
+  });
+  protected readonly hasPortsInfo = computed(() => {
+    const d = this.declarationsData();
+    return Boolean(
+      (d?.pairedBranches?.length ?? 0) > 0 ||
+      (d?.portDirections?.length ?? 0) > 0,
+    );
+  });
+  protected readonly hasDiscoveredDeclFiles = computed(() => {
+    const s = this.declarationsStatus();
+    return Boolean(
+      s?.templates?.length ||
+      s?.suites?.length ||
+      s?.schedules?.length ||
+      s?.triggers?.length ||
+      s?.mergeRules,
+    );
+  });
+
   private subs: Subscription[] = [];
 
   private readonly normalizedRouteParts = computed(() => {
@@ -1276,11 +1754,13 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     const h = this.resolvedHost();
     const o = this.resolvedOwner();
     const n = this.resolvedName();
+    if (!o || !n) return "";
     return h ? `${h}/${o}/${n}` : `${o}/${n}`;
   });
 
   protected readonly activeTab = computed<RepoTabId>(() => {
     const raw = (this.normalizedRouteParts().tab ?? "overview").toLowerCase();
+    if (raw === "advanced") return "declarations";
     return isRepoTabId(raw) ? raw : "overview";
   });
 
@@ -1303,29 +1783,66 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     return this.releases().map((r) => ({ value: r.name, label: r.name }));
   }
 
+  protected formatPushRefs(refs?: DeclaredPushRefRow[]): string {
+    return (refs ?? []).map(formatDeclaredPushRef).filter(Boolean).join(", ");
+  }
+
+  protected declarationsSwitchLabel(): string {
+    return `Read ${this.repoSlug()}'s own declarations`;
+  }
+
   protected canWriteSettings(): boolean {
-    if (this.configRepoOnly()) return false;
-    return this.can("PUT /api/repos/{owner}/{name}/settings");
+    const repo = this.repoSlug();
+    if (this.configRepoOnly() || !repo) return false;
+    return this.access.can("PUT /api/repos/{owner}/{name}/settings", repo);
   }
 
   protected canSaveRepoAgents(): boolean {
-    if (this.configRepoOnly()) return false;
+    const repo = this.repoSlug();
+    if (this.configRepoOnly() || !repo) return false;
     return (
-      this.can("PUT /api/repos/{owner}/{name}/setup-command") ||
-      this.can("PUT /api/repos/{owner}/{name}/prompt-extension") ||
-      this.can("PUT /api/repos/{owner}/{name}/capabilities")
+      this.access.can("PUT /api/repos/{owner}/{name}/setup-command", repo) ||
+      this.access.can("PUT /api/repos/{owner}/{name}/prompt-extension", repo) ||
+      this.access.can("PUT /api/repos/{owner}/{name}/capabilities", repo)
+    );
+  }
+
+  protected configActionDeniedReason(route: RouteKey): string {
+    if (this.configRepoOnly()) {
+      return "Repository configuration is managed in the config repository.";
+    }
+    const repo = this.repoSlug();
+    if (!repo) return "";
+    return this.access.deniedReason(route, repo);
+  }
+
+  protected saveAgentsDeniedReason(): string {
+    if (this.configRepoOnly()) {
+      return "Repository configuration is managed in the config repository.";
+    }
+    if (this.canSaveRepoAgents()) return "";
+    const repo = this.repoSlug();
+    if (!repo) return "";
+    return this.access.deniedReason(
+      "PUT /api/repos/{owner}/{name}/setup-command",
+      repo,
     );
   }
 
   ngOnInit(): void {
     this.subs.push(
       this.route.paramMap.subscribe((pm) => {
+        const prevRepo = this.repoSlug();
         this.routeHost.set(pm.get("host") ?? "");
         this.routeOwner.set(pm.get("owner") ?? "");
         this.routeName.set(pm.get("name") ?? "");
         this.routeTab.set(pm.get("tab"));
         if (this.ready()) {
-          void this.loadTabData();
+          if (this.repoSlug() !== prevRepo) {
+            void this.reloadForRepoChange();
+          } else {
+            void this.loadTabData();
+          }
         }
       }),
     );
@@ -1337,7 +1854,16 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected can(route: RouteKey): boolean {
-    return this.access.can(route, this.repoSlug());
+    const repo = this.repoSlug();
+    if (!repo) return false;
+    return this.access.can(route, repo);
+  }
+
+  private guardMutation(route: RouteKey, configSetting = false): boolean {
+    const repo = this.repoSlug();
+    if (!repo) return false;
+    if (configSetting && this.configRepoOnly()) return false;
+    return this.access.can(route, repo);
   }
 
   protected selectTab(tab: RepoTabId): void {
@@ -1380,15 +1906,61 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     }
   }
 
+  private async reloadForRepoChange(): Promise<void> {
+    this.error.set(null);
+    this.cloneUrl.set("");
+    this.gitCredential.set("");
+    this.lifecycleState.set("active");
+    this.importEnabled.set(false);
+    this.importLabel.set("");
+    this.importSourceRepo.set("");
+    this.importApproved.set(false);
+    this.ciMode.set("grain");
+    this.watchDefaultBranch.set(false);
+    this.workflows.set([]);
+    this.selectedWorkflowPath.set(".grain/workflows/ci.yml");
+    this.workflowYaml.set("");
+    this.newWorkflowPath.set("");
+    this.mergeOnGreen.set(false);
+    this.requireUpToDate.set(false);
+    this.bypassHumanGates.set(false);
+    this.confirmReq.set(null);
+    this.setupCommand.set("");
+    this.promptExtension.set("");
+    this.repoCaps.set("");
+    this.branches.set([]);
+    this.newBranchName.set("");
+    this.releaseEnabled.set(false);
+    this.baseBranchJobsText.set("");
+    this.postMergeJobsText.set("");
+    this.releaseSecrets.set([]);
+    this.releases.set([]);
+    this.selectedRelease.set("");
+    this.candidates.set([]);
+    this.pendingReleases.set([]);
+    this.newReleaseName.set("");
+    this.declarationsData.set(null);
+    this.declarationsError.set(null);
+    await this.loadCoreRepo();
+    await this.loadTabData();
+  }
+
   private async loadCoreRepo(): Promise<void> {
+    const targetRepo = this.repoSlug();
     const p = this.params();
-    if (!p.owner || !p.name) return;
-    if (this.can("GET /api/deployment/repos/{owner}/{name}/config")) {
+    if (!targetRepo || !p.owner || !p.name) return;
+    if (
+      this.access.can(
+        "GET /api/deployment/repos/{owner}/{name}/config",
+        targetRepo,
+      )
+    ) {
       try {
         const cfg = await this.api.get<Record<string, unknown>>(
           "GET /api/deployment/repos/{owner}/{name}/config",
           p,
         );
+        if (this.repoSlug() !== targetRepo) return;
         const eff =
           (cfg?.["effective"] as Record<string, unknown> | undefined) ?? cfg;
         if (eff?.["cloneUrl"] !== undefined) {
@@ -1401,12 +1973,13 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
         // Non-fatal
       }
     }
-    if (this.can("GET /api/repos/{owner}/{name}/settings")) {
+    if (this.access.can("GET /api/repos/{owner}/{name}/settings", targetRepo)) {
       try {
         const st = await this.api.get<Record<string, unknown>>(
           "GET /api/repos/{owner}/{name}/settings",
           p,
         );
+        if (this.repoSlug() !== targetRepo) return;
         if (st?.["ciMode"]) this.ciMode.set(String(st["ciMode"]));
         if (st?.["mergeOnGreen"] !== undefined) {
           this.mergeOnGreen.set(Boolean(st["mergeOnGreen"]));
@@ -1451,6 +2024,7 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
         const conns = await this.api.get<
           { credential?: string; id?: string }[] | { connections?: unknown[] }
         >("GET /api/deployment/git-connections");
+        if (this.repoSlug() !== targetRepo) return;
         const arr = (
           Array.isArray(conns) ? conns : (conns?.connections ?? [])
         ) as { credential?: string; id?: string }[];
@@ -1461,32 +2035,128 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
         // Non-fatal
       }
     }
+    await this.loadDeclarations();
+  }
+
+  private normalizeDeclarations(
+    res: RepoDeclarationsData | null | undefined,
+  ): RepoDeclarationsData {
+    return {
+      declarations: Boolean(res?.declarations),
+      declarationsStatus: res?.declarationsStatus ?? null,
+      pairedBranches: res?.pairedBranches ?? [],
+      portBranches: res?.portBranches ?? [],
+      declaredPortBranches: res?.declaredPortBranches ?? [],
+      portDirections: res?.portDirections ?? [],
+      portWarnings: res?.portWarnings ?? [],
+    };
+  }
+
+  protected async loadDeclarations(): Promise<void> {
+    const targetRepo = this.repoSlug();
+    const p = this.params();
+    if (
+      !targetRepo ||
+      !p.owner ||
+      !p.name ||
+      !this.access.can("GET /api/repos/{owner}/{name}/declarations", targetRepo)
+    ) {
+      return;
+    }
+    this.declarationsLoading.set(true);
+    this.declarationsError.set(null);
+    try {
+      const res = await this.api.get<RepoDeclarationsData>(
+        "GET /api/repos/{owner}/{name}/declarations",
+        p,
+      );
+      if (this.repoSlug() !== targetRepo) return;
+      this.declarationsData.set(this.normalizeDeclarations(res));
+    } catch (err) {
+      if (this.repoSlug() !== targetRepo) return;
+      this.declarationsError.set(errText(err));
+    } finally {
+      if (this.repoSlug() === targetRepo) {
+        this.declarationsLoading.set(false);
+      }
+    }
+  }
+
+  protected async toggleDeclarations(): Promise<void> {
+    if (
+      !this.guardMutation("PUT /api/repos/{owner}/{name}/declarations", true) ||
+      this.declarationsSaving() ||
+      this.declarationsData() === null
+    ) {
+      return;
+    }
+    const targetRepo = this.repoSlug();
+    const next = !this.declarationsEnabled();
+    const p = this.params();
+    this.declarationsSaving.set(true);
+    this.declarationsError.set(null);
+    try {
+      const updated = await this.api.put<RepoDeclarationsData>(
+        "PUT /api/repos/{owner}/{name}/declarations",
+        p,
+        { declarations: next },
+      );
+      if (this.repoSlug() !== targetRepo) return;
+      const prev = this.declarationsData();
+      if (updated && "declarations" in updated) {
+        this.declarationsData.set(this.normalizeDeclarations(updated));
+      } else {
+        this.declarationsData.set({
+          ...(prev ?? {}),
+          declarations: next,
+        });
+      }
+      this.snackbar.show(
+        next
+          ? `Enabled .grain/ declarations for ${targetRepo}`
+          : `Disabled .grain/ declarations for ${targetRepo}`,
+      );
+    } catch (err) {
+      if (this.repoSlug() !== targetRepo) return;
+      const msg = errText(err);
+      this.declarationsError.set(msg);
+      this.error.set(msg);
+    } finally {
+      this.declarationsSaving.set(false);
+    }
   }
 
   private async loadTabData(t: RepoTabId = this.activeTab()): Promise<void> {
+    const targetRepo = this.repoSlug();
     const p = this.params();
-    if (!p.owner || !p.name) return;
+    if (!targetRepo || !p.owner || !p.name) return;
     if (t === "overview") {
-      if (this.can("GET /api/repos/{owner}/{name}/lifecycle")) {
+      if (
+        this.access.can("GET /api/repos/{owner}/{name}/lifecycle", targetRepo)
+      ) {
         void this.api
           .get<Record<string, unknown>>(
             "GET /api/repos/{owner}/{name}/lifecycle",
             p,
           )
           .then((l) => {
+            if (this.repoSlug() !== targetRepo) return;
             const st = l?.["state"] ?? l?.["stage"];
             if (st) this.lifecycleState.set(String(st));
           })
           .catch(() => undefined);
       }
     } else if (t === "ci") {
-      if (this.can("GET /api/repos/{owner}/{name}/workflows")) {
+      if (
+        this.access.can("GET /api/repos/{owner}/{name}/workflows", targetRepo)
+      ) {
         void this.api
           .get<{ workflows?: RepoWorkflowRow[] } | RepoWorkflowRow[]>(
             "GET /api/repos/{owner}/{name}/workflows",
             p,
           )
           .then((w) => {
+            if (this.repoSlug() !== targetRepo) return;
             const list = (Array.isArray(w) ? w : (w?.workflows ?? [])).map(
               (item) => ({
                 path: item.path,
@@ -1508,13 +2178,19 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
           .catch(() => undefined);
       }
     } else if (t === "agents") {
-      if (this.can("GET /api/repos/{owner}/{name}/capabilities")) {
+      if (
+        this.access.can(
+          "GET /api/repos/{owner}/{name}/capabilities",
+          targetRepo,
+        )
+      ) {
         void this.api
           .get<{ defaultCapabilities?: string[] }>(
             "GET /api/repos/{owner}/{name}/capabilities",
             p,
           )
           .then((c) => {
+            if (this.repoSlug() !== targetRepo) return;
             if (Array.isArray(c?.defaultCapabilities)) {
               this.repoCaps.set(c.defaultCapabilities.join(", "));
             }
@@ -1522,19 +2198,30 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
           .catch(() => undefined);
       }
     } else if (t === "branches") {
-      if (this.can("GET /api/repos/{owner}/{name}/branches")) {
+      if (
+        this.access.can("GET /api/repos/{owner}/{name}/branches", targetRepo)
+      ) {
         void this.api
           .get<BranchRow[] | { branches?: BranchRow[] }>(
             "GET /api/repos/{owner}/{name}/branches",
             p,
           )
-          .then((b) =>
-            this.branches.set(Array.isArray(b) ? b : (b?.branches ?? [])),
-          )
+          .then((b) => {
+            if (this.repoSlug() !== targetRepo) return;
+            this.branches.set(Array.isArray(b) ? b : (b?.branches ?? []));
+          })
           .catch(() => undefined);
       }
     } else if (t === "releases") {
       await this.loadReleasesTab();
+    } else if (t === "declarations") {
+      if (
+        this.declarationsData() === null &&
+        !this.declarationsLoading() &&
+        !this.declarationsError()
+      ) {
+        await this.loadDeclarations();
+      }
     }
   }
 
@@ -1567,23 +2254,27 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   private async loadReleasesTab(): Promise<void> {
+    const targetRepo = this.repoSlug();
     const p = this.params();
-    if (this.can("GET /api/repos/{owner}/{name}/release")) {
+    if (!targetRepo || !p.owner || !p.name) return;
+    if (this.access.can("GET /api/repos/{owner}/{name}/release", targetRepo)) {
       try {
         const relCfg = await this.api.get<Record<string, unknown>>(
           "GET /api/repos/{owner}/{name}/release",
           p,
         );
+        if (this.repoSlug() !== targetRepo) return;
         this.applyReleaseSettings(relCfg);
       } catch {
         // Non-fatal
       }
     }
-    if (this.can("GET /api/repos/{owner}/{name}/releases")) {
+    if (this.access.can("GET /api/repos/{owner}/{name}/releases", targetRepo)) {
       try {
         const list = await this.api.get<
           ReleaseRow[] | { releases?: ReleaseRow[]; items?: ReleaseRow[] }
         >("GET /api/repos/{owner}/{name}/releases", p);
+        if (this.repoSlug() !== targetRepo) return;
         const rows = Array.isArray(list)
           ? list
           : (list?.releases ?? list?.items ?? []);
@@ -1609,9 +2300,14 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   private async loadCandidatesFor(release: string): Promise<void> {
+    const targetRepo = this.repoSlug();
     if (
+      !targetRepo ||
       !release ||
-      !this.can("GET /api/repos/{owner}/{name}/releases/{release}/candidates")
+      !this.access.can(
+        "GET /api/repos/{owner}/{name}/releases/{release}/candidates",
+        targetRepo,
+      )
     ) {
       return;
     }
@@ -1622,6 +2318,7 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
         ...this.params(),
         release,
       });
+      if (this.repoSlug() !== targetRepo) return;
       this.candidates.set(
         Array.isArray(cands)
           ? cands
@@ -1633,6 +2330,14 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async saveRepoConfig(): Promise<void> {
+    if (
+      !this.guardMutation(
+        "PUT /api/deployment/repos/{owner}/{name}/config",
+        true,
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.put(
         "PUT /api/deployment/repos/{owner}/{name}/config",
@@ -1651,6 +2356,15 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async pinGitConnection(credential: string): Promise<void> {
+    if (
+      !this.guardMutation(
+        "PUT /api/deployment/repos/{owner}/{name}/git-connection",
+        true,
+      )
+    ) {
+      return;
+    }
+    const previous = this.gitCredential();
     this.gitCredential.set(credential);
     try {
       await this.api.put(
@@ -1660,11 +2374,17 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
       );
       this.snackbar.show("Pinned Git connection");
     } catch (err) {
+      this.gitCredential.set(previous);
       this.error.set(errText(err));
     }
   }
 
   protected async refreshLifecycle(): Promise<void> {
+    if (
+      !this.guardMutation("POST /api/repos/{owner}/{name}/lifecycle/refresh")
+    ) {
+      return;
+    }
     try {
       const res = await this.api.post<{ state?: string; stage?: string }>(
         "POST /api/repos/{owner}/{name}/lifecycle/refresh",
@@ -1680,6 +2400,9 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async saveIssueImportSettings(): Promise<void> {
+    if (!this.guardMutation("PUT /api/repos/{owner}/{name}/settings", true)) {
+      return;
+    }
     try {
       await this.api.put(
         "PUT /api/repos/{owner}/{name}/settings",
@@ -1698,6 +2421,9 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async importIssues(): Promise<void> {
+    if (!this.guardMutation("POST /api/repos/{owner}/{name}/import-issues")) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/import-issues",
@@ -1711,6 +2437,9 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async saveCiMode(ciMode: string): Promise<void> {
+    if (!this.guardMutation("PUT /api/repos/{owner}/{name}/ci-mode", true)) {
+      return;
+    }
     const previous = this.ciMode();
     this.ciMode.set(ciMode);
     try {
@@ -1730,6 +2459,14 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async toggleWatchDefaultBranch(): Promise<void> {
+    if (
+      !this.guardMutation(
+        "PUT /api/repos/{owner}/{name}/watch-default-branch",
+        true,
+      )
+    ) {
+      return;
+    }
     const next = !this.watchDefaultBranch();
     try {
       await this.api.put(
@@ -1744,6 +2481,11 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async triggerBaseCiRun(): Promise<void> {
+    if (
+      !this.guardMutation("POST /api/repos/{owner}/{name}/base-branch-runs")
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/base-branch-runs",
@@ -1775,6 +2517,9 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected addWorkflowFile(): void {
+    if (!this.guardMutation("PUT /api/repos/{owner}/{name}/workflows", true)) {
+      return;
+    }
     const path = normalizeWorkflowPath(this.newWorkflowPath());
     if (!path) return;
     this.newWorkflowPath.set("");
@@ -1796,6 +2541,9 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async deleteSelectedWorkflow(): Promise<void> {
+    if (!this.guardMutation("PUT /api/repos/{owner}/{name}/workflows", true)) {
+      return;
+    }
     const target = this.selectedWorkflowPath();
     const remaining = this.workflows().filter((w) => w.path !== target);
     try {
@@ -1817,6 +2565,9 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async saveWorkflows(): Promise<void> {
+    if (!this.guardMutation("PUT /api/repos/{owner}/{name}/workflows", true)) {
+      return;
+    }
     const path =
       normalizeWorkflowPath(this.selectedWorkflowPath()) ||
       ".grain/workflows/ci.yml";
@@ -1853,6 +2604,9 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async saveReleaseSettings(): Promise<void> {
+    if (!this.guardMutation("PUT /api/repos/{owner}/{name}/release", true)) {
+      return;
+    }
     const parseJobs = (raw: string): string[] =>
       raw
         .split(",")
@@ -1878,6 +2632,11 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async toggleMergeOnGreen(): Promise<void> {
+    if (
+      !this.guardMutation("PUT /api/repos/{owner}/{name}/merge-on-green", true)
+    ) {
+      return;
+    }
     const next = !this.mergeOnGreen();
     try {
       await this.api.put(
@@ -1892,6 +2651,14 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async toggleRequireUpToDate(): Promise<void> {
+    if (
+      !this.guardMutation(
+        "PUT /api/repos/{owner}/{name}/require-branch-up-to-date",
+        true,
+      )
+    ) {
+      return;
+    }
     const next = !this.requireUpToDate();
     try {
       await this.api.put(
@@ -1913,6 +2680,14 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected toggleBypassHumanGates(): void {
+    if (
+      !this.guardMutation(
+        "PUT /api/repos/{owner}/{name}/base-repair-bypasses-human-gates",
+        true,
+      )
+    ) {
+      return;
+    }
     const next = !this.bypassHumanGates();
     if (next) {
       this.confirmReq.set(
@@ -1924,6 +2699,14 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   private async saveBypassHumanGates(next: boolean): Promise<void> {
+    if (
+      !this.guardMutation(
+        "PUT /api/repos/{owner}/{name}/base-repair-bypasses-human-gates",
+        true,
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.put(
         "PUT /api/repos/{owner}/{name}/base-repair-bypasses-human-gates",
@@ -1937,21 +2720,31 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async saveAgentTabSettings(): Promise<void> {
+    if (this.configRepoOnly() || !this.canSaveRepoAgents()) return;
+    const repo = this.repoSlug();
     const p = this.params();
+    if (!repo || !p.owner || !p.name) return;
+    let savedAny = false;
     try {
-      if (this.can("PUT /api/repos/{owner}/{name}/setup-command")) {
+      if (
+        this.access.can("PUT /api/repos/{owner}/{name}/setup-command", repo)
+      ) {
         await this.api.put("PUT /api/repos/{owner}/{name}/setup-command", p, {
           setupCommand: this.setupCommand(),
         });
+        savedAny = true;
       }
-      if (this.can("PUT /api/repos/{owner}/{name}/prompt-extension")) {
+      if (
+        this.access.can("PUT /api/repos/{owner}/{name}/prompt-extension", repo)
+      ) {
         await this.api.put(
           "PUT /api/repos/{owner}/{name}/prompt-extension",
           p,
           { promptExtension: this.promptExtension() },
         );
+        savedAny = true;
       }
-      if (this.can("PUT /api/repos/{owner}/{name}/capabilities")) {
+      if (this.access.can("PUT /api/repos/{owner}/{name}/capabilities", repo)) {
         const defaultCapabilities = this.repoCaps()
           .split(",")
           .map((s) => s.trim())
@@ -1959,14 +2752,20 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
         await this.api.put("PUT /api/repos/{owner}/{name}/capabilities", p, {
           defaultCapabilities,
         });
+        savedAny = true;
       }
-      this.snackbar.show("Saved repository agent settings");
+      if (savedAny) {
+        this.snackbar.show("Saved repository agent settings");
+      }
     } catch (err) {
       this.error.set(errText(err));
     }
   }
 
   protected async createBranch(): Promise<void> {
+    if (!this.guardMutation("POST /api/repos/{owner}/{name}/branches")) {
+      return;
+    }
     const name = this.newBranchName().trim();
     if (!name) return;
     try {
@@ -1984,6 +2783,9 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async createRelease(): Promise<void> {
+    if (!this.guardMutation("POST /api/repos/{owner}/{name}/releases")) {
+      return;
+    }
     const name = this.newReleaseName().trim();
     if (!name) return;
     try {
@@ -2001,6 +2803,13 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async cutCandidate(release: string): Promise<void> {
+    if (
+      !this.guardMutation(
+        "POST /api/repos/{owner}/{name}/releases/{release}/candidates",
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/releases/{release}/candidates",
@@ -2015,6 +2824,13 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async promoteCandidate(release: string): Promise<void> {
+    if (
+      !this.guardMutation(
+        "POST /api/repos/{owner}/{name}/releases/{release}/candidates/promote",
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/releases/{release}/candidates/promote",
@@ -2029,6 +2845,13 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async mergeRelease(release: string): Promise<void> {
+    if (
+      !this.guardMutation(
+        "POST /api/repos/{owner}/{name}/releases/{release}/merge",
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/releases/{release}/merge",
@@ -2043,6 +2866,11 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async deleteRelease(release: string): Promise<void> {
+    if (
+      !this.guardMutation("DELETE /api/repos/{owner}/{name}/releases/{release}")
+    ) {
+      return;
+    }
     try {
       await this.api.delete(
         "DELETE /api/repos/{owner}/{name}/releases/{release}",
@@ -2056,6 +2884,13 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async approveQualification(id: string): Promise<void> {
+    if (
+      !this.guardMutation(
+        "POST /api/repos/{owner}/{name}/candidates/{id}/qualification/approve",
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/candidates/{id}/qualification/approve",
@@ -2070,6 +2905,9 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async triggerReleaseRun(): Promise<void> {
+    if (!this.guardMutation("POST /api/repos/{owner}/{name}/release-runs")) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/release-runs",
@@ -2083,6 +2921,13 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async approvePendingRelease(version: string): Promise<void> {
+    if (
+      !this.guardMutation(
+        "POST /api/repos/{owner}/{name}/pending-releases/{version}/approve",
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/pending-releases/{version}/approve",
@@ -2097,6 +2942,13 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   protected async rejectPendingRelease(version: string): Promise<void> {
+    if (
+      !this.guardMutation(
+        "POST /api/repos/{owner}/{name}/pending-releases/{version}/reject",
+      )
+    ) {
+      return;
+    }
     try {
       await this.api.post(
         "POST /api/repos/{owner}/{name}/pending-releases/{version}/reject",
