@@ -265,6 +265,35 @@
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
 
+.ci-cancel-body {
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.ci-cancel-dialog textarea {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-height: 64px;
+  resize: vertical;
+}
+
+.ci-cancel-dialog textarea:focus-visible,
+.ci-cancel-dialog button:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
+}
+
+.ci-cancel-dialog .dialog-actions {
+  align-items: center;
+}
+
+.ci-cancel-dialog .dialog-actions .btn-text {
+  min-height: 40px;
+}
+
 @media (max-width: 599.95px) {
   .ci-inspector {
     padding: 14px 12px 24px;
