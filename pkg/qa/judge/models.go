@@ -24,7 +24,8 @@ func ModelFamily(modelID string) string {
 	if strings.Contains(lower, "gemini") || strings.HasPrefix(lower, "agy") {
 		return "gemini"
 	}
-	if strings.Contains(lower, "claude") || strings.Contains(lower, "anthropic") {
+	if strings.Contains(lower, "claude") || strings.Contains(lower, "anthropic") ||
+		strings.Contains(lower, "opus") || strings.Contains(lower, "sonnet") || strings.Contains(lower, "haiku") {
 		return "claude"
 	}
 	if strings.Contains(lower, "gpt") || strings.Contains(lower, "o1") || strings.Contains(lower, "o3") || strings.Contains(lower, "o4") || strings.Contains(lower, "openai") {
@@ -47,6 +48,9 @@ func ModelFamily(modelID string) string {
 
 func ValidateCrossFamilyJudge(judgeModel string, codingModels []string) error {
 	judgeFam := ModelFamily(judgeModel)
+	if judgeFam == "unknown" {
+		return errors.New("judge model family is unknown; specify a recognized cross-family judge model (for example claude/opus/sonnet, gemini, gpt, llama, mistral, qwen, or deepseek)")
+	}
 	for _, cm := range codingModels {
 		if cm == "" {
 			continue

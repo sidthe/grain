@@ -63,6 +63,21 @@ export interface QAExperimentDetail {
     keys?: string[];
     listHash?: string;
   };
+  allocationKeys?: string[];
+  allocationPairs?: Array<{
+    pair: number;
+    keyA: string;
+    baseA?: string;
+    keyB: string;
+    baseB?: string;
+  }>;
+  allocationList?: Array<{
+    key: string;
+    armId: string;
+    stratum?: string;
+    pairId?: string;
+  }>;
+  salt?: string;
   primaryMetric: string;
   coPrimaries: string[];
   primaryContrast: string;

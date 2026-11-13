@@ -1618,9 +1618,7 @@ export class TelemetryPageComponent implements OnInit {
   protected readonly qualityPeriod = computed<string | null>(() => {
     if (this.tab() !== "quality") return null;
     const e = experimentScope(this.qaSummary());
-    return e
-      ? experimentPeriodLabel(e)
-      : `Legacy epoch lookback: ${this.window()}`;
+    return e ? experimentPeriodLabel(e) : "Enrollment-scoped (unwindowed)";
   });
 
   /** One-line Overview digest; reuses the Quality tab's verdict wording. */

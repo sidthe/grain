@@ -430,7 +430,7 @@ func runBlindHumanCalibration(ctx context.Context, c *ui.HTTPClient, out *printe
 	if readoutDir == "" {
 		readoutDir = filepath.Join(".", "qa-readout-"+expID)
 	}
-	_, _, _, _, packets, err := judge.LoadReadoutBundle(readoutDir)
+	manifest, scores, sevs, probe, packets, err := judge.LoadReadoutBundle(readoutDir)
 	if err != nil {
 		return fmt.Errorf("loading readout bundle from %s: %w", readoutDir, err)
 	}
@@ -452,7 +452,10 @@ func runBlindHumanCalibration(ctx context.Context, c *ui.HTTPClient, out *printe
 	var resp map[string]any
 	if err := c.DoJSON(ctx, http.MethodPost, "/api/qa/experiments/"+url.PathEscape(expID)+"/readout", map[string]any{
 		"action":           "import",
-		"readoutDir":       readoutDir,
+		"manifest":         manifest,
+		"scores":           scores,
+		"severities":       sevs,
+		"probe":            probe,
 		"humanLabelsCount": labelled,
 	}, &resp); err != nil {
 		return err

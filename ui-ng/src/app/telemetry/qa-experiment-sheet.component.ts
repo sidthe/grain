@@ -45,8 +45,30 @@ interface FlowVersionOptionRow {
 
 interface FlowVersionDetailPayload {
   parentHash?: string;
+  declaration?: {
+    skill?: { text?: string };
+    verifier?: {
+      enabled?: boolean;
+      tiers?: string[];
+      checklist?: string;
+      maxSeconds?: number;
+      maxTokens?: number;
+    };
+  };
+  resolved?: {
+    skillMarkdown?: string;
+    enableS4?: boolean;
+    s4Tiers?: string[];
+    s4Checklist?: string;
+    maxS4Seconds?: number;
+  };
   spec?: {
     skill?: { text?: string };
+    skillMarkdown?: string;
+    enableS4?: boolean;
+    s4Tiers?: string[];
+    s4Checklist?: string;
+    maxS4Seconds?: number;
     verifier?: {
       enabled?: boolean;
       tiers?: string[];
@@ -720,13 +742,13 @@ export class QaStartDialogComponent implements OnInit {
           )
           .catch(() => null) as Promise<{ wouldBlockPRs?: number } | null>,
       ]);
-      if (flow?.spec) {
+      if (flow?.spec || flow?.resolved || flow?.declaration) {
         this.childText.set(this.formatSpecSummary(flow));
         if (flow.parentHash) {
           const parent = (await this.api
             .get("GET /api/qa/flow-versions/{hash}", { hash: flow.parentHash })
             .catch(() => null)) as FlowVersionDetailPayload | null;
-          if (parent?.spec) {
+          if (parent?.spec || parent?.resolved || parent?.declaration) {
             this.parentText.set(this.formatSpecSummary(parent));
           }
         }
@@ -741,10 +763,24 @@ export class QaStartDialogComponent implements OnInit {
   }
 
   private formatSpecSummary(f: FlowVersionDetailPayload): string {
-    const skill = f.spec?.skill?.text?.trim() || "(empty coding skill)";
-    const v = f.spec?.verifier;
-    const verifierLine = v?.enabled
-      ? `verifier: enabled tiers=[${(v.tiers ?? []).join(",")}] checklist=${v.checklist ?? "default"} maxSeconds=${v.maxSeconds ?? 60} maxTokens=${v.maxTokens ?? 50000}`
+    const skill =
+      f.resolved?.skillMarkdown?.trim() ||
+      f.declaration?.skill?.text?.trim() ||
+      f.spec?.skillMarkdown?.trim() ||
+      f.spec?.skill?.text?.trim() ||
+      "(empty coding skill)";
+    const v = f.declaration?.verifier ?? f.spec?.verifier;
+    const enabled = v?.enabled ?? f.resolved?.enableS4 ?? f.spec?.enableS4;
+    const tiers = v?.tiers ?? f.resolved?.s4Tiers ?? f.spec?.s4Tiers ?? [];
+    const checklist =
+      v?.checklist ??
+      f.resolved?.s4Checklist ??
+      f.spec?.s4Checklist ??
+      "default";
+    const maxSec =
+      v?.maxSeconds ?? f.resolved?.maxS4Seconds ?? f.spec?.maxS4Seconds ?? 60;
+    const verifierLine = enabled
+      ? `verifier: enabled tiers=[${tiers.join(",")}] checklist=${checklist} maxSeconds=${maxSec} maxTokens=${v?.maxTokens ?? 50000}`
       : "verifier: disabled";
     return `${skill}\n---\n${verifierLine}`;
   }

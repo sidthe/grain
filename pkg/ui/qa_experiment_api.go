@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
@@ -34,6 +36,7 @@ import (
 	"github.com/ai-on-gke/grain/pkg/qa/expstats"
 	"github.com/ai-on-gke/grain/pkg/qa/judge"
 	"github.com/ai-on-gke/grain/pkg/qa/resolve"
+	"github.com/ai-on-gke/grain/pkg/safepath"
 )
 
 type postQAExperimentReq struct {
@@ -1122,7 +1125,21 @@ func (s *Server) handlePostQAExperimentReadout(w http.ResponseWriter, r *http.Re
 		HumanAgreement:   req.HumanAgreement,
 	}
 	if strings.TrimSpace(req.ReadoutDir) != "" {
-		manifest, scores, sevs, probe, _, lErr := judge.LoadReadoutBundle(strings.TrimSpace(req.ReadoutDir))
+		if strings.TrimSpace(s.tasks.Config.DataDir) == "" {
+			writeError(w, http.StatusBadRequest, errors.New("readoutDir import requires a configured server dataDir; submit inline readout JSON instead"))
+			return
+		}
+		readoutsRoot := filepath.Join(s.tasks.Config.DataDir, "qa", "readouts")
+		if mkErr := os.MkdirAll(readoutsRoot, 0o750); mkErr != nil {
+			writeError(w, http.StatusInternalServerError, mkErr)
+			return
+		}
+		safeDir, spErr := safepath.Within(readoutsRoot, strings.TrimSpace(req.ReadoutDir))
+		if spErr != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("readoutDir must reside within server qa/readouts directory: %w", spErr))
+			return
+		}
+		manifest, scores, sevs, probe, _, lErr := judge.LoadReadoutBundle(safeDir)
 		if lErr != nil {
 			writeError(w, http.StatusBadRequest, fmt.Errorf("loading readout bundle: %w", lErr))
 			return

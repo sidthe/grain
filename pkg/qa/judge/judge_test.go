@@ -70,6 +70,14 @@ func TestValidateCrossFamilyJudge(t *testing.T) {
 		t.Errorf("Expected nil, got %v", err)
 	}
 
+	if err := ValidateCrossFamilyJudge("opus-5.5-high", []string{"custom-coding-model-v1", "gemini-2.5-pro"}); err != nil {
+		t.Errorf("Expected opus judge to pass against non-claude coding models, got %v", err)
+	}
+
+	if err := ValidateCrossFamilyJudge("unknown-judge-v1", []string{"custom-coding-model-v1"}); err == nil {
+		t.Errorf("Expected error when judge model family is unknown")
+	}
+
 	err = ValidateCrossFamilyJudge("gemini-2.5-flash", []string{"gemini-2.5-pro"})
 	if err == nil {
 		t.Errorf("Expected error for same family")

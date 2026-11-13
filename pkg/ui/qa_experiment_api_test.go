@@ -166,6 +166,15 @@ func TestQAExperimentLifecycleBlindSaltResultsAndReadoutAPI(t *testing.T) {
 		t.Fatalf("expected salt and allocationList revealed after stop, got %+v", stoppedDetail)
 	}
 
+	// Arbitrary path outside <dataDir>/qa/readouts must be rejected by safepath confinement.
+	badCode, _ := doJSON(http.MethodPost, "/api/qa/experiments/golden-v2-paired/readout", map[string]any{
+		"action":     "import",
+		"readoutDir": "/etc",
+	})
+	if badCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 on out-of-root readoutDir, got %d", badCode)
+	}
+
 	tPass, cPass := true, false
 	cScore, tScore := 6.5, 8.5
 	cMut, tMut := 0.55, 0.85

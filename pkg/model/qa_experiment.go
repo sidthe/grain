@@ -492,33 +492,34 @@ func (s *Store) InsertQAEnrollment(ctx context.Context, candidate QAEnrollment) 
 		created bool
 	)
 	err := s.write(ctx, "enroll qa origin "+candidate.RootOrigin, func(tx *sql.Tx) error {
-		row := tx.QueryRowContext(ctx,
-			"SELECT "+qaEnrollmentColumns+" FROM `qa_enrollment` WHERE `root_origin` = ?",
-			candidate.RootOrigin,
-		)
-		existing, sErr := scanQAEnrollment(row)
-		if sErr == nil {
-			out = existing
-			created = false
-			return nil
-		}
-		if !errors.Is(sErr, sql.ErrNoRows) {
-			return sErr
-		}
 		var bucketVal any
 		if candidate.Bucket != nil {
 			bucketVal = *candidate.Bucket
 		}
-		_, err := tx.ExecContext(ctx,
-			"INSERT INTO `qa_enrollment` ("+qaEnrollmentColumns+") VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+		res, err := tx.ExecContext(ctx,
+			"INSERT INTO `qa_enrollment` ("+qaEnrollmentColumns+") VALUES (?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT (`root_origin`) DO NOTHING",
 			candidate.RootOrigin, candidate.ExperimentID, candidate.Segment, candidate.ArmID, candidate.FlowHash,
 			candidate.QAEngineRev, candidate.Model, candidate.GrainBuild, candidate.AllocationKey, bucketVal, candidate.ExcludedReason, candidate.AssignedAt,
 		)
 		if err != nil {
 			return err
 		}
-		out = candidate
-		created = true
+		affected, rErr := res.RowsAffected()
+		if rErr == nil && affected > 0 {
+			out = candidate
+			created = true
+			return nil
+		}
+		row := tx.QueryRowContext(ctx,
+			"SELECT "+qaEnrollmentColumns+" FROM `qa_enrollment` WHERE `root_origin` = ?",
+			candidate.RootOrigin,
+		)
+		existing, sErr := scanQAEnrollment(row)
+		if sErr != nil {
+			return sErr
+		}
+		out = existing
+		created = false
 		return nil
 	})
 	return out, created, err

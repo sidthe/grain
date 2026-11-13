@@ -478,7 +478,12 @@ import {
             <div class="cards-layout" data-testid="qa-flow-detail-card">
               <div class="card">
                 <h3>Coding skill</h3>
-                <div class="s-mono skill-text-readonly">
+                <div
+                  class="s-mono skill-text-readonly"
+                  tabindex="0"
+                  role="region"
+                  aria-label="Coding skill markdown"
+                >
                   {{ readonlySkillText(detail) }}
                 </div>
                 <div class="byte-count s-num">

@@ -166,11 +166,23 @@ func PairedCorrelation(x, y []float64) float64 {
 		sumY2 += y[i] * y[i]
 	}
 	num := n*sumXY - sumX*sumY
-	den := math.Sqrt((n*sumX2 - sumX*sumX) * (n*sumY2 - sumY*sumY))
-	if den == 0 {
+	varX := n*sumX2 - sumX*sumX
+	varY := n*sumY2 - sumY*sumY
+	if varX <= 0 || varY <= 0 {
 		return 0
 	}
-	return num / den
+	den := math.Sqrt(varX * varY)
+	if den == 0 || math.IsNaN(den) || math.IsInf(den, 0) {
+		return 0
+	}
+	r := num / den
+	if r > 1 {
+		return 1
+	}
+	if r < -1 {
+		return -1
+	}
+	return r
 }
 
 func PairedSignFlipTest(diffs []float64, nPerm int, seed int64) (meanDiff, ciLow, ciHigh, pValue, pearsonRho float64) {

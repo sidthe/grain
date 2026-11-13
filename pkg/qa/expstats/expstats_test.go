@@ -93,6 +93,13 @@ func TestTests(t *testing.T) {
 	if pVal0 < 0.05 {
 		t.Errorf("expected null signal to have high p, got %f", pVal0)
 	}
+
+	// Constant float slices whose sumX2*n - sumX*sumX can underflow below 0 in IEEE-754 must return 0, never NaN.
+	constVals := []float64{0.1 + 0.2, 0.1 + 0.2, 0.1 + 0.2, 0.1 + 0.2, 0.1 + 0.2, 0.1 + 0.2, 0.1 + 0.2}
+	rho := PairedCorrelation(constVals, []float64{1, 2, 3, 4, 5, 6, 7})
+	if math.IsNaN(rho) || rho != 0 {
+		t.Errorf("expected PairedCorrelation on constant vector to be 0 (non-NaN), got %v", rho)
+	}
 }
 
 func TestClusterPermutationTest(t *testing.T) {
