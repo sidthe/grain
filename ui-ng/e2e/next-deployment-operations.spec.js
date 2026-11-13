@@ -242,3 +242,102 @@ test("Re-run failed follows to the run it starts", async ({ page }) => {
     }),
   ]);
 });
+
+test("Fleet persistent sandbox Logs button enforces deployment:read scope context", async ({
+  page,
+}) => {
+  const logRequests = [];
+  await page.route("**/api/config", async (route) => {
+    const res = await route.fetch();
+    const body = await res.json();
+    await route.fulfill({
+      response: res,
+      json: {
+        ...body,
+        access: {
+          role: "repo-reader",
+          roles: ["repo-reader"],
+          full: false,
+          scopes: ["sandboxes:read", "deployment:read"],
+          repoLimits: { "deployment:read": ["acme/allowed"] },
+        },
+      },
+    });
+  });
+  await page.route(/\/api\/persistent-sandboxes(\?.*)?$/, (route) =>
+    route.fulfill({
+      json: [
+        {
+          name: "sb-allowed",
+          repo: "acme/allowed",
+          ref: "main",
+          command: "npm run preview",
+          state: "running",
+          enabled: true,
+          restarts: 0,
+        },
+        {
+          name: "sb-other",
+          repo: "acme/other",
+          ref: "main",
+          command: "npm run preview",
+          state: "running",
+          enabled: true,
+          restarts: 0,
+        },
+        {
+          name: "sb-norepo",
+          repo: "",
+          ref: "",
+          command: "npm run preview",
+          state: "running",
+          enabled: true,
+          restarts: 0,
+        },
+      ],
+    }),
+  );
+  await page.route(/\/api\/persistent-sandboxes\/[^/]+\/logs/, (route) => {
+    logRequests.push(route.request().url());
+    return route.fulfill({
+      status: 200,
+      contentType: "text/plain; charset=utf-8",
+      body: "> preview\n  Local: http://localhost:4281/\n",
+    });
+  });
+
+  await page.goto("fleet");
+  await expect(page.getByTestId("persistent-card-sb-allowed")).toBeVisible();
+
+  const allowedBtn = page.getByTestId("persistent-logs-btn-sb-allowed");
+  const otherBtn = page.getByTestId("persistent-logs-btn-sb-other");
+  const noRepoBtn = page.getByTestId("persistent-logs-btn-sb-norepo");
+
+  await expect(allowedBtn).toBeEnabled();
+  await expect(otherBtn).toBeDisabled();
+  await expect(noRepoBtn).toBeDisabled();
+
+  await allowedBtn.click();
+  const logWell = page.getByTestId("persistent-logs-sb-allowed");
+  await expect(logWell).toContainText("Local: http://localhost:4281/");
+
+  const cardBox = await page
+    .getByTestId("persistent-card-sb-allowed")
+    .boundingBox();
+  const logBox = await logWell.boundingBox();
+  expect(cardBox).not.toBeNull();
+  expect(logBox).not.toBeNull();
+  expect(logBox.x).toBeGreaterThanOrEqual(cardBox.x);
+  expect(logBox.x + logBox.width).toBeLessThanOrEqual(
+    cardBox.x + cardBox.width + 1,
+  );
+
+  await expect
+    .poll(() =>
+      logRequests.some((u) =>
+        u.endsWith("/api/persistent-sandboxes/sb-allowed/logs?format=text"),
+      ),
+    )
+    .toBe(true);
+  expect(logRequests).toHaveLength(1);
+});
