@@ -265,6 +265,32 @@
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
 
+.ci-cancel-desc {
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--md-sys-color-on-surface-variant);
+  overflow-wrap: anywhere;
+}
+
+.ci-cancel-reason-input {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+}
+
+.ci-cancel-error {
+  margin: 12px 0 0;
+}
+
+.ci-cancel-actions {
+  align-items: center;
+}
+
+.ci-cancel-actions .btn-text {
+  height: 40px;
+}
+
 @media (max-width: 599.95px) {
   .ci-inspector {
     padding: 14px 12px 24px;
