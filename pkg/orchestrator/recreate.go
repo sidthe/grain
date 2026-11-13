@@ -15,6 +15,7 @@
 package orchestrator
 
 import (
+	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 	"context"
 	"errors"
 	"fmt"
@@ -572,8 +573,8 @@ func (s *sandboxRecreation) restoreCheckout(ctx context.Context, out *SandboxRec
 	upstreamRepo, _, _ := resolveUpstreamRepo(ctx, s.store, s.task)
 	pushBranch := s.task.BranchName()
 	if s.store != nil {
-		if assign, qaCfg, aErr := s.store.ActiveQAAssignmentForTask(ctx, s.task.ID); aErr == nil &&
-			qaCfg.Enabled && assign != nil && assign.Arm == model.QAArmTreatment {
+		if assign, qaCfg, aErr := resolve.ActiveQAResolutionForTask(ctx, s.store, s.task.ID); aErr == nil &&
+			qaCfg.Enabled && assign != nil && assign.ArmID == model.QAArmTreatment {
 			pushBranch = model.QAStageBranchName(s.task.ID)
 		}
 	}

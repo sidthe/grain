@@ -1150,6 +1150,7 @@ var agentAPISingleReadRoutes = map[string]bool{
 	"GET /api/config":                                                true,
 	"GET /api/database":                                              true,
 	"GET /api/deployment":                                            true,
+	"GET /api/qa/flow-versions/{hash}":                               true,
 	"GET /api/deployment/repos/{owner}/{name}/config":                true,
 	"GET /api/fs/ci/{path...}":                                       true,
 	"GET /api/fs/config/{path...}":                                   true,

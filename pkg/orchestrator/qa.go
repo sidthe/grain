@@ -15,12 +15,13 @@
 package orchestrator
 
 import (
+	"github.com/ai-on-gke/grain/pkg/qa"
 	"context"
 	"fmt"
 	"time"
 
 	"github.com/ai-on-gke/grain/pkg/model"
-	"github.com/ai-on-gke/grain/pkg/qa"
+	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 )
 
 // resolveTaskQAAssignment resolves and persists the sticky work-tree QA arm for task
@@ -33,36 +34,34 @@ func resolveTaskQAAssignment(
 	task model.Task,
 	runID string,
 	now time.Time,
-) (model.QAAssignment, error) {
+) (*resolve.Resolution, error) {
 	qaCfg := cfg.QA
 	if qaCfg.IsZero() && store != nil {
 		mc, err := store.GetConfig(ctx)
 		if err != nil {
-			return model.QAAssignment{}, fmt.Errorf("orchestrator: reading deployment config for qa: %w", err)
+			return nil, fmt.Errorf("orchestrator: reading deployment config for qa: %w", err)
 		}
 		if mc != nil {
 			qaCfg = mc.QA
 		}
 	}
-	rootOrigin := qa.ResolveRootOrigin(string(task.WorkOrigin), task.ID)
-	tier := qa.ClassifyTaskComplexity(task.Title, task.Body)
-	if !qaCfg.Enabled || store == nil {
-		return qa.AssignOrLoadArm(ctx, store, rootOrigin, tier, qaCfg, now)
+	if store == nil {
+		return &resolve.Resolution{Source: "none", ArmID: "baseline"}, nil
 	}
 
-	var assigned model.QAAssignment
+	var assigned *resolve.Resolution
 	_, assignErr := cfg.QAProfiler.Measure(qa.PerfSample{
 		TaskID:  task.ID,
 		RunID:   runID,
 		Stage:   "S0",
 		CheckID: "arm-assign",
 	}, func() (string, error) {
-		a, err := qa.AssignOrLoadArm(ctx, store, rootOrigin, tier, qaCfg, now)
+		a, _, err := resolve.EnsureQAResolutionAtDispatch(ctx, store, task, runID, now)
 		if err != nil {
 			return "error", err
 		}
 		assigned = a
-		return a.Arm, nil
+		return a.ArmID, nil
 	})
 	return assigned, assignErr
 }

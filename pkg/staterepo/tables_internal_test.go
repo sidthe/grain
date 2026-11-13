@@ -118,6 +118,7 @@ var notSettings = []string{
 	"task_filed_template",
 	"task_source_template",
 	"task_grant",
+	"qa_flow_version",
 	"task_link",
 	"task_tag",
 	// Which comment grain keeps on a work tree's GitHub origin, and what it

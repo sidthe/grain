@@ -30,6 +30,7 @@ import (
 	"github.com/ai-on-gke/grain/pkg/metrics"
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/qa"
+	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 )
 
 // QAFlowsResponse is returned by GET /api/qa/flows.
@@ -233,13 +234,13 @@ func (s *Server) handleGetTaskQA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	assign, qaCfg, err := s.tasks.Store.ActiveQAAssignmentForTask(ctx, taskID)
+	res, qaCfg, err := resolve.ActiveQAResolutionForTask(ctx, s.tasks.Store, taskID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if assign == nil && qaCfg.EpochOrDefault() >= 1 {
-		// Also surface historical assignments when QA was later turned off.
+	var assign *model.QAAssignment
+	if res != nil || qaCfg.EpochOrDefault() >= 1 {
 		assign, _ = s.tasks.Store.QAAssignment(ctx, model.ResolveQARootOrigin(task.WorkOrigin, task.ID), qaCfg.EpochOrDefault())
 	}
 

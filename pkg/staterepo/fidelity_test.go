@@ -1325,6 +1325,8 @@ func fill(t *testing.T, ctx context.Context, store *model.Store, db *sql.DB) {
 			[]any{"gemini-api-key", "value", "grain-inst-alice-gemini-api-key", "2", time.Date(2026, 11, 5, 10, 0, 0, 0, time.UTC)}},
 		{"INSERT INTO `task_qa_assignment` (`root_origin`, `epoch`, `regime_id`, `arm`, `flow_id`, `rollout_pct_at_assign`, `complexity_tier`, `assigned_at`) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			[]any{"task:a1b2", 1, 2, "treatment", "golden-v1-minimal", 50, "high", time.Date(2026, 11, 12, 18, 0, 0, 0, time.UTC)}},
+		{"INSERT INTO `qa_flow_version` (`hash`, `key`, `version`, `parent_hash`, `label`, `summary`, `spec_json`, `source_yaml`, `qa_engine_rev`, `created_by`, `created_at`, `retired_at`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			[]any{"f00baa0123456789abcdef0123456789abcdef0123456789abcdef0123456789", "custom-flow", 1, "", "Custom Flow", "Summary", `{"id":"custom-flow@1"}`, "schema: grain.dev/qa-flow/v2\nkey: custom-flow\n", 1, "alice", time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC), nil}},
 		{"INSERT INTO `task_qa_check_run` (`id`, `task_id`, `run_id`, `commit_sha`, `stage`, `check_id`, `arm`, `shadow`, `verdict`, `duration_ms`, `tokens_in`, `tokens_out`, `alloc_bytes`, `detail_json`, `created_at`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			[]any{1, "a1b2", "run-1", "0123456789abcdef0123456789abcdef01234567", "S3", "hollow-test-ast", "treatment", 0, "fail", 125, 0, 0, 65536, `{"files":1}`, time.Date(2026, 11, 12, 18, 1, 0, 0, time.UTC)}},
 		{"INSERT INTO `task_qa_check_run` (`id`, `task_id`, `run_id`, `commit_sha`, `stage`, `check_id`, `arm`, `shadow`, `verdict`, `duration_ms`, `tokens_in`, `tokens_out`, `alloc_bytes`, `detail_json`, `created_at`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

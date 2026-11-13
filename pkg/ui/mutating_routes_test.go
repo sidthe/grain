@@ -790,6 +790,11 @@ var attributedRoutes = map[string]attributedRoute{
 		agentGrants: []string{"api:settings:write"},
 		recorded:    lastConfigAudit,
 	},
+	"POST /api/qa/flow-versions": {
+		body:        `{"yaml":"schema: grain.dev/qa-flow/v2\nkey: custom-flow\nlabel: Custom\nskill:\n  mode: replace\n  max-bytes: 1800\n  text: test\n"}`,
+		agentGrants: []string{"api:qa:admin"},
+		recorded:    lastConfigAudit,
+	},
 	"PUT /api/repos/{owner}/{name}/merge-on-green": {
 		path:        "/api/repos/acme/widgets/merge-on-green",
 		body:        `{"enabled":true}`,

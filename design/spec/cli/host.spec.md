@@ -879,6 +879,48 @@ _No flags._
 _No flags._
 <!-- END GENERATED FLAGS -->
 
+- `qa flow list [-key string] [-limit n]` lists published QA flow versions.
+- `qa flow show <REF> [-yaml]` prints a specific flow version.
+- `qa flow fork <SRC> -key <K> [-o <FILE>]` forks a flow.
+- `qa flow validate <FILE> [-dry-run n]` validates a flow declaration locally.
+- `qa flow publish <FILE>` publishes a flow declaration.
+- `qa flow retire <KEY@N|HASH>` retires a flow version.
+
+<!-- BEGIN GENERATED FLAGS: grain qa flow list -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-key` | string |  |  | filter by flow key |
+| `-limit` | int | `50` |  | maximum versions to return |
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa flow show -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-yaml` | bool |  |  | output YAML declaration |
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa flow fork -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-key` | string |  |  | new flow key |
+| `-o` | string |  |  | output file path (stdout if omitted) |
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa flow validate -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-dry-run` | int |  |  | dry run sampling count over recent PRs |
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa flow publish -->
+_No flags._
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa flow retire -->
+_No flags._
+<!-- END GENERATED FLAGS -->
+
+
 **Pinned by:** `pkg/cli/qa_test.go`: `TestQACommandStatusEnableDisableAndFlagPreservation`.
 
 ### 4.10 `grain release approve|reject|rollback vX.Y.Z` {#CLI-39}
