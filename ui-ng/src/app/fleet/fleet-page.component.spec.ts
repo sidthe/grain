@@ -1196,4 +1196,53 @@ describe("FleetPageComponent", () => {
         ?.textContent,
     ).toContain("[sb-norepo] listening on :4173");
   });
+
+  it("fails closed on canReadPersistentLogs before access config is loaded", async () => {
+    const api = new FakeFleetApi();
+    let resolveCfg!: (cfg: GrainConfig) => void;
+    api.config = () =>
+      new Promise<GrainConfig>((resolve) => {
+        resolveCfg = resolve;
+      });
+
+    TestBed.configureTestingModule({
+      imports: [FleetPageComponent],
+      providers: [
+        provideRouter([
+          { path: "task/:id", children: [] },
+          { path: "settings/hostds", children: [] },
+        ]),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => NEVER } },
+      ],
+    });
+
+    const access = TestBed.inject(AccessService);
+    const fixture = TestBed.createComponent(FleetPageComponent);
+    fixture.detectChanges();
+
+    const comp = fixture.componentInstance as unknown as {
+      canReadPersistentLogs: (ps: PersistentSandboxStatus) => boolean;
+      persistentLogsTip: (ps: PersistentSandboxStatus) => string;
+      togglePersistentLogs: (ps: PersistentSandboxStatus) => Promise<void>;
+    };
+    const sandbox = api.persistentBody[0];
+
+    expect(access.configLoaded()).toBe(false);
+    expect(comp.canReadPersistentLogs(sandbox)).toBe(false);
+    expect(comp.persistentLogsTip(sandbox)).toContain("deployment:read");
+
+    await comp.togglePersistentLogs(sandbox);
+    expect(
+      api.calls.filter(
+        (c) => c.route === "GET /api/persistent-sandboxes/{name}/logs",
+      ),
+    ).toEqual([]);
+
+    resolveCfg(api.configBody);
+    await settle(fixture);
+
+    expect(access.configLoaded()).toBe(true);
+    expect(comp.canReadPersistentLogs(sandbox)).toBe(true);
+  });
 });

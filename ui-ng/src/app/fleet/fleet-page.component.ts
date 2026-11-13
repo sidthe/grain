@@ -1733,6 +1733,7 @@ export class FleetPageComponent implements OnInit {
   }
 
   protected canReadPersistentLogs(ps: PersistentSandboxStatus): boolean {
+    if (!this.access.configLoaded()) return false;
     const repo = ps.repo?.trim() || undefined;
     if (!repo) {
       return (
@@ -1749,6 +1750,9 @@ export class FleetPageComponent implements OnInit {
   protected persistentLogsTip(ps: PersistentSandboxStatus): string {
     if (this.canReadPersistentLogs(ps)) {
       return `View logs for ${ps.name}`;
+    }
+    if (!this.access.configLoaded()) {
+      return "Checking deployment:read permissions…";
     }
     const repo = ps.repo?.trim() || undefined;
     return (
