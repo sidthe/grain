@@ -46,6 +46,7 @@ import (
 
 	"github.com/ai-on-gke/grain/pkg/ci"
 	"github.com/ai-on-gke/grain/pkg/hub/api"
+	"github.com/ai-on-gke/grain/pkg/metrics"
 	"github.com/ai-on-gke/grain/pkg/model"
 )
 
@@ -1153,6 +1154,28 @@ func (c *HTTPClient) QAFlows(ctx context.Context) (QAFlowsResponse, error) {
 	var out QAFlowsResponse
 	if err := c.do(ctx, http.MethodGet, "/api/qa/flows", nil, &out); err != nil {
 		return QAFlowsResponse{}, err
+	}
+	return out, nil
+}
+
+// QASummary reads the deployment's quality control A/B rollout summary (GET /api/qa/summary).
+func (c *HTTPClient) QASummary(ctx context.Context, window string, repos []string) (metrics.QASummary, error) {
+	q := url.Values{}
+	if window = strings.TrimSpace(window); window != "" {
+		q.Set("window", window)
+	}
+	for _, repo := range repos {
+		if repo = strings.TrimSpace(repo); repo != "" {
+			q.Add("repo", repo)
+		}
+	}
+	path := "/api/qa/summary"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	var out metrics.QASummary
+	if err := c.do(ctx, http.MethodGet, path, nil, &out); err != nil {
+		return metrics.QASummary{}, err
 	}
 	return out, nil
 }

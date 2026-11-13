@@ -22,10 +22,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ai-on-gke/grain/pkg/github"
+	"github.com/ai-on-gke/grain/pkg/metrics"
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/qa"
 	"github.com/ai-on-gke/grain/pkg/qa/checks"
@@ -85,8 +87,11 @@ func OpenPullRequestForTaskWithQA(
 
 	if assign.Arm == model.QAArmControl {
 		status, err := OpenPullRequestForTask(ctx, store, client, task)
-		if err == nil && qaCfg.ShadowOnControlEnabled() {
-			maybeRunControlShadowS3(store, client, task, assign.FlowID)
+		if err == nil {
+			if qaCfg.ShadowOnControlEnabled() {
+				maybeRunControlShadowS3(store, client, task, assign.FlowID)
+			}
+			maybeEvaluateQACircuitBreakerThrottled(ctx, store, time.Now().UTC())
 		}
 		return status, err
 	}
@@ -166,7 +171,11 @@ func OpenPullRequestForTaskWithQA(
 		if err := holdTaskForQA(ctx, store, task.ID, headSHA, firstLineSummary(s3Summary), time.Now().UTC()); err != nil {
 			return PullRequestStatus{}, err
 		}
-		return OpenPullRequestForTask(ctx, store, client, task)
+		status, err := OpenPullRequestForTask(ctx, store, client, task)
+		if err == nil {
+			maybeEvaluateQACircuitBreakerThrottled(ctx, store, time.Now().UTC())
+		}
+		return status, err
 	}
 
 	// On T2/T3 diffs under a flow with EnableS4, defer live PR branch promotion so the
@@ -192,7 +201,11 @@ func OpenPullRequestForTaskWithQA(
 		}
 	}
 	clearTaskQAHold(ctx, store, task.ID)
-	return OpenPullRequestForTask(ctx, store, client, task)
+	status, err := OpenPullRequestForTask(ctx, store, client, task)
+	if err == nil {
+		maybeEvaluateQACircuitBreakerThrottled(ctx, store, time.Now().UTC())
+	}
+	return status, err
 }
 
 // salvageQAStageIfPresent runs S3 (if not yet evaluated for the staged commit) and bounded 1-round
@@ -817,4 +830,201 @@ func nonEmptySummary(s, fallback string) string {
 		return strings.TrimSpace(s)
 	}
 	return fallback
+}
+
+var (
+	qaCircuitBreakerThrottleMu sync.Mutex
+	qaLastEvalStore            *model.Store
+	qaLastEvalAt               time.Time
+)
+
+const qaCircuitBreakerEvalWindow = 30 * 24 * time.Hour
+
+func maybeEvaluateQACircuitBreakerThrottled(ctx context.Context, store *model.Store, now time.Time) {
+	if store == nil {
+		return
+	}
+	defer func() {
+		if p := recover(); p != nil {
+			log.Printf("orchestrator: recovered panic in QA circuit breaker evaluation: %v", p)
+		}
+	}()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	qaCircuitBreakerThrottleMu.Lock()
+	if qaLastEvalStore == store && now.Sub(qaLastEvalAt) < 30*time.Second && !now.Before(qaLastEvalAt) {
+		qaCircuitBreakerThrottleMu.Unlock()
+		return
+	}
+	qaLastEvalStore = store
+	qaLastEvalAt = now
+	qaCircuitBreakerThrottleMu.Unlock()
+
+	if _, _, err := MaybeAutoDowngradeQARollout(ctx, store, now); err != nil {
+		log.Printf("orchestrator: evaluating QA circuit breaker: %v", err)
+	}
+}
+
+// MaybeAutoDowngradeQARollout evaluates mSPRT latency/escape, context ThreadCut, and operator
+// Not-Helpful guardrails once at least MinTreatmentSampleForAutoDowngrade WorkOrigins have been
+// assigned in the active (epoch, regime). When a safety rail trips, it atomically downgrades
+// rolloutPct to 0% inside Store.UpdateConfig (preserving shadowOnControl=true and advancing
+// regimeId) and records a config_audit entry.
+func MaybeAutoDowngradeQARollout(ctx context.Context, store *model.Store, now time.Time) (bool, []string, error) {
+	if store == nil {
+		return false, nil, nil
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	cfg, err := store.GetConfig(ctx)
+	if err != nil || cfg == nil {
+		return false, nil, err
+	}
+	if !cfg.QA.Enabled || cfg.QA.RolloutPct <= 0 {
+		return false, nil, nil
+	}
+	epoch := cfg.QA.EpochOrDefault()
+	regime := cfg.QA.RegimeIDOrDefault()
+	assignments, err := store.ListQAAssignments(ctx)
+	if err != nil {
+		return false, nil, err
+	}
+	activeOrigins := map[string]bool{}
+	var activeAssignments []model.QAAssignment
+	treatCount := 0
+	for _, a := range assignments {
+		if a.Epoch == epoch && a.RegimeID == regime {
+			activeAssignments = append(activeAssignments, a)
+			activeOrigins[a.RootOrigin] = true
+			if a.Arm == model.QAArmTreatment {
+				treatCount++
+			}
+		}
+	}
+	if treatCount < metrics.MinTreatmentSampleForAutoDowngrade {
+		return false, nil, nil
+	}
+
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		return false, nil, err
+	}
+	activeTaskIDs := map[string]bool{}
+	for _, t := range tasks {
+		if activeOrigins[model.ResolveQARootOrigin(t.WorkOrigin, t.ID)] {
+			activeTaskIDs[t.ID] = true
+		}
+	}
+
+	allCheckRuns, err := store.ListAllQACheckRuns(ctx)
+	if err != nil {
+		return false, nil, err
+	}
+	checkRuns := make([]model.QACheckRun, 0, len(allCheckRuns))
+	activeCheckRunIDs := map[int64]bool{}
+	for _, cr := range allCheckRuns {
+		if activeTaskIDs[cr.TaskID] {
+			checkRuns = append(checkRuns, cr)
+			if cr.ID > 0 {
+				activeCheckRunIDs[cr.ID] = true
+			}
+		}
+	}
+
+	allFindings, err := store.ListAllQAFindings(ctx)
+	if err != nil {
+		return false, nil, err
+	}
+	findings := make([]model.QAFinding, 0, len(allFindings))
+	for _, f := range allFindings {
+		if (f.CheckRunID > 0 && activeCheckRunIDs[f.CheckRunID]) || activeTaskIDs[f.TaskID] {
+			findings = append(findings, f)
+		}
+	}
+
+	timings, err := store.TaskTimings(ctx)
+	if err != nil {
+		return false, nil, err
+	}
+	runs, err := store.RunTimings(ctx)
+	if err != nil {
+		return false, nil, err
+	}
+	prompts, err := store.RunPrompts(ctx)
+	if err != nil {
+		return false, nil, err
+	}
+	usages, err := store.RunUsagesSince(ctx, time.Time{})
+	if err != nil {
+		return false, nil, err
+	}
+	ciRuns, err := store.CIRunOutcomes(ctx)
+	if err != nil {
+		return false, nil, err
+	}
+
+	summary := metrics.ComputeQASummary(metrics.QASummaryInput{
+		Window: metrics.Window{
+			Since: now.Add(-qaCircuitBreakerEvalWindow),
+			Until: now.Add(time.Second),
+		},
+		Config:      cfg.QA,
+		Assignments: activeAssignments,
+		CheckRuns:   checkRuns,
+		Findings:    findings,
+		Tasks:       tasks,
+		Timings:     timings,
+		Runs:        runs,
+		Prompts:     prompts,
+		Usages:      usages,
+		CIRuns:      ciRuns,
+	})
+	if !summary.CircuitBreaker.ShouldAutoDowngrade {
+		return false, nil, nil
+	}
+
+	var didDowngrade bool
+	var prevPct int
+	err = store.UpdateConfig(ctx, func(fresh *model.Config) error {
+		if !fresh.QA.Enabled || fresh.QA.RolloutPct <= 0 {
+			return nil
+		}
+		if fresh.QA.EpochOrDefault() != epoch || fresh.QA.RegimeIDOrDefault() != regime {
+			return nil
+		}
+		prevPct = fresh.QA.RolloutPct
+		downgraded, advErr := model.AdvanceQAConfig(fresh.QA, model.QAConfig{
+			Enabled:         true,
+			FlowID:          fresh.QA.FlowIDOrDefault(),
+			RolloutPct:      0,
+			ShadowOnControl: model.BoolPtr(true),
+			Epoch:           fresh.QA.EpochOrDefault(),
+		})
+		if advErr != nil {
+			return advErr
+		}
+		fresh.QA = downgraded
+		didDowngrade = true
+		return nil
+	})
+	if err != nil || !didDowngrade {
+		return false, nil, err
+	}
+	reasons := slices.Clone(summary.CircuitBreaker.Reasons)
+	auditSummary := fmt.Sprintf("auto-downgraded quality control rollout from %d%% to 0%% shadow-only (%s)",
+		prevPct, strings.Join(reasons, "; "))
+	_, _ = store.RecordConfigAudit(ctx, model.ConfigAuditEntry{
+		At: now,
+		By: model.Principal{
+			Kind:   model.PrincipalAutomation,
+			ID:     "qa-circuit-breaker",
+			Source: model.SourceInternal,
+		},
+		Surface: "settings",
+		Summary: auditSummary,
+	})
+	log.Printf("orchestrator: %s", auditSummary)
+	return true, reasons, nil
 }

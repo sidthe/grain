@@ -559,6 +559,7 @@ func (s *Server) routes() {
 	s.route("GET /api/tasks/{id}/diff-preview", s.handleTaskDiffPreview)
 	s.route("GET /api/tasks/{id}/tree", s.handleGetTaskTree)
 	s.route("GET /api/qa/flows", s.handleGetQAFlows)
+	s.route("GET /api/qa/summary", s.handleGetQASummary)
 	s.route("GET /api/tasks/{id}/qa", s.handleGetTaskQA)
 	s.route("POST /api/tasks/{id}/qa/check-runs", s.handleRecordTaskQACheckRuns)
 	s.route("POST /api/tasks/{id}/qa/findings/{finding}/feedback", s.handleVoteTaskQAFinding)

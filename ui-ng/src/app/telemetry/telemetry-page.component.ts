@@ -38,15 +38,20 @@ import {
   type ClusterStats,
   type MetricsReport,
   type MetricsWindow,
+  type QASummary,
   type ReleaseNote,
   type TokenBudget,
   type UsageResponse,
   buildAlphabeticalContributors,
   buildThroughputGeometry,
   bucketRangeLabel,
+  formatCheckDurationMs,
   formatCompactNum,
   formatDurationSec,
   formatPct,
+  formatSignedDurationSec,
+  formatSignedPctPoints,
+  formatSignedRelPct,
 } from "./telemetry.models";
 
 const WINDOWS: readonly { id: MetricsWindow; label: string }[] = [
@@ -862,6 +867,419 @@ const BUDGET_WINDOWS: readonly string[] = ["5h", "24h", "168h"];
                 </div>
               }
             </article>
+
+            @if (canReadQaSummary() && qaSummary(); as qa) {
+              <!-- Card 5: Quality Control Rollout (A/B) -->
+              <article class="ops-card" data-testid="card-qa-rollout">
+                <div class="ops-card-head">
+                  <div style="flex: 1 1 220px; min-width: 0">
+                    <h2 class="ops-card-title">
+                      Quality Control Rollout (A/B)
+                    </h2>
+                    <p class="ops-card-sub">
+                      @if (
+                        qa.enabled ||
+                        qa.treatment.assignedOrigins +
+                          qa.control.assignedOrigins >
+                          0
+                      ) {
+                        <span class="tabular">
+                          Epoch {{ qa.epoch }} · Regime {{ qa.regimeId }} ·
+                          {{ qa.treatment.assignedOrigins }} treatment /
+                          {{ qa.control.assignedOrigins }} control workstreams
+                          ({{ qa.treatment.prsOpened }} /
+                          {{ qa.control.prsOpened }} PRs)
+                        </span>
+                      } @else {
+                        Single-instance WorkOrigin A/B comparison across pre-PR
+                        checks and blind post-PR review
+                      }
+                    </p>
+                  </div>
+                  <div class="headline-actions">
+                    @if (
+                      qa.circuitBreaker.shouldAutoDowngrade ||
+                      (qa.enabled && qa.rolloutPct === 0 && qa.regimeId > 1)
+                    ) {
+                      <span
+                        class="status-pill blast tabular"
+                        data-testid="qa-rollout-pill"
+                      >
+                        <g-status-icon tone="blast" kind="warning" />
+                        0% shadow-only · {{ qa.flowId }}
+                      </span>
+                    } @else if (qa.enabled) {
+                      <span
+                        class="status-pill healthy tabular"
+                        data-testid="qa-rollout-pill"
+                      >
+                        <g-status-icon tone="healthy" kind="healthy" />
+                        {{ qa.rolloutPct }}% · {{ qa.flowId }}
+                      </span>
+                    } @else {
+                      <span
+                        class="status-pill neutral"
+                        data-testid="qa-rollout-pill"
+                      >
+                        <g-status-icon tone="neutral" kind="idle" />
+                        Off
+                      </span>
+                    }
+                    <a
+                      class="btn-tonal"
+                      routerLink="/settings/tasks"
+                      data-testid="qa-configure-link"
+                    >
+                      Configure
+                    </a>
+                  </div>
+                </div>
+
+                @if ((qa.circuitBreaker.reasons?.length ?? 0) > 0) {
+                  <p
+                    class="banner banner-error"
+                    style="margin: 0"
+                    role="status"
+                    data-testid="qa-circuit-breaker-banner"
+                  >
+                    Safety guardrail tripped:
+                    {{ (qa.circuitBreaker.reasons ?? []).join(" · ") }}
+                  </p>
+                }
+
+                @if (
+                  qa.treatment.assignedOrigins + qa.control.assignedOrigins ===
+                  0
+                ) {
+                  <p
+                    class="muted"
+                    style="margin: 4px 0"
+                    data-testid="qa-rollout-empty"
+                  >
+                    @if (qa.enabled) {
+                      Waiting for eligible tasks to dispatch under Epoch
+                      {{ qa.epoch }}.
+                    } @else {
+                      Quality control is off on this deployment. Enable a
+                      rollout in Settings → Tasks to compare treatment and
+                      control pull requests.
+                    }
+                  </p>
+                } @else {
+                  <div class="tel-legend tabular">
+                    <span
+                      >Escape Δ (CMH):
+                      <strong>{{
+                        fmtSignedPctPts(qa.blindEscapeCmh.riskDiff)
+                      }}</strong>
+                      (p={{ qa.blindEscapeCmh.pValue.toFixed(2) }})</span
+                    >
+                    <span
+                      >Online-CUPED cost Δ:
+                      <strong>{{
+                        fmtSignedRel(qa.costCuped.adjRelativeDelta)
+                      }}</strong>
+                      (VR {{ fmtPct(qa.costCuped.varianceReduction) }})</span
+                    >
+                    <span
+                      >Fast-lane T0/T1 shift:
+                      <strong>{{
+                        fmtSignedSec(qa.fastLaneTimeToPrSeconds.shift)
+                      }}</strong></span
+                    >
+                  </div>
+
+                  <div class="tel-stage-list" data-testid="chart-qa-rollout">
+                    <div
+                      class="tel-stage-row"
+                      [gTip]="
+                        'Blind every-pr.yml / first-push CI escapes + held QA PRs (' +
+                        qa.treatment.heldByQaGate +
+                        ' held); tonal bar shows Control baseline'
+                      "
+                    >
+                      <span class="tel-stage-name">Blind escape rate</span>
+                      <svg
+                        width="100%"
+                        height="14"
+                        viewBox="0 0 200 14"
+                        preserveAspectRatio="none"
+                        aria-hidden="true"
+                      >
+                        <rect
+                          x="0"
+                          y="3"
+                          width="200"
+                          height="8"
+                          rx="4"
+                          fill="var(--md-sys-color-surface-container-highest)"
+                        />
+                        <rect
+                          x="0"
+                          y="3"
+                          [attr.width]="
+                            Math.min(100, qa.control.blindEscapeRate * 100) * 2
+                          "
+                          height="8"
+                          rx="4"
+                          fill="var(--md-sys-color-secondary-container)"
+                        />
+                        <rect
+                          x="0"
+                          y="3"
+                          [attr.width]="
+                            Math.min(100, qa.treatment.blindEscapeRate * 100) *
+                            2
+                          "
+                          height="8"
+                          rx="4"
+                          [attr.fill]="
+                            qa.treatment.blindEscapeRate <=
+                            qa.control.blindEscapeRate
+                              ? 'var(--md-sys-color-tertiary)'
+                              : 'var(--md-sys-color-warning)'
+                          "
+                        />
+                      </svg>
+                      <span class="tel-stage-nums tabular">
+                        {{ fmtPct(qa.treatment.blindEscapeRate) }} vs
+                        {{ fmtPct(qa.control.blindEscapeRate) }}
+                      </span>
+                    </div>
+
+                    <div
+                      class="tel-stage-row"
+                      gTip="First-push Grain CI green rate (treatment solid vs control tonal)"
+                    >
+                      <span class="tel-stage-name">First-push CI green</span>
+                      <svg
+                        width="100%"
+                        height="14"
+                        viewBox="0 0 200 14"
+                        preserveAspectRatio="none"
+                        aria-hidden="true"
+                      >
+                        <rect
+                          x="0"
+                          y="3"
+                          width="200"
+                          height="8"
+                          rx="4"
+                          fill="var(--md-sys-color-surface-container-highest)"
+                        />
+                        <rect
+                          x="0"
+                          y="3"
+                          [attr.width]="
+                            Math.min(
+                              100,
+                              qa.control.firstPushCiGreenRate * 100
+                            ) * 2
+                          "
+                          height="8"
+                          rx="4"
+                          fill="var(--md-sys-color-secondary-container)"
+                        />
+                        <rect
+                          x="0"
+                          y="3"
+                          [attr.width]="
+                            Math.min(
+                              100,
+                              qa.treatment.firstPushCiGreenRate * 100
+                            ) * 2
+                          "
+                          height="8"
+                          rx="4"
+                          fill="var(--md-sys-color-tertiary)"
+                        />
+                      </svg>
+                      <span class="tel-stage-nums tabular">
+                        {{ fmtPct(qa.treatment.firstPushCiGreenRate) }} vs
+                        {{ fmtPct(qa.control.firstPushCiGreenRate) }}
+                      </span>
+                    </div>
+
+                    <div
+                      class="tel-stage-row"
+                      gTip="7-day post-merge follow-up repair churn (treatment solid vs control tonal)"
+                    >
+                      <span class="tel-stage-name">7d post-merge churn</span>
+                      <svg
+                        width="100%"
+                        height="14"
+                        viewBox="0 0 200 14"
+                        preserveAspectRatio="none"
+                        aria-hidden="true"
+                      >
+                        <rect
+                          x="0"
+                          y="3"
+                          width="200"
+                          height="8"
+                          rx="4"
+                          fill="var(--md-sys-color-surface-container-highest)"
+                        />
+                        <rect
+                          x="0"
+                          y="3"
+                          [attr.width]="
+                            Math.min(
+                              100,
+                              qa.control.postMergeChurn7dRate * 100
+                            ) * 2
+                          "
+                          height="8"
+                          rx="4"
+                          fill="var(--md-sys-color-secondary-container)"
+                        />
+                        <rect
+                          x="0"
+                          y="3"
+                          [attr.width]="
+                            Math.min(
+                              100,
+                              qa.treatment.postMergeChurn7dRate * 100
+                            ) * 2
+                          "
+                          height="8"
+                          rx="4"
+                          [attr.fill]="
+                            qa.treatment.postMergeChurn7dRate <=
+                            qa.control.postMergeChurn7dRate
+                              ? 'var(--md-sys-color-tertiary)'
+                              : 'var(--md-sys-color-warning)'
+                          "
+                        />
+                      </svg>
+                      <span class="tel-stage-nums tabular">
+                        {{ fmtPct(qa.treatment.postMergeChurn7dRate) }} vs
+                        {{ fmtPct(qa.control.postMergeChurn7dRate) }}
+                      </span>
+                    </div>
+
+                    <div
+                      class="tel-stage-row"
+                      gTip="Injected QA skill share of total prompt bytes and context ThreadCut rate"
+                    >
+                      <span class="tel-stage-name">Prompt QA share</span>
+                      <div class="meter-track">
+                        <div
+                          class="meter-fill"
+                          [style.width.%]="
+                            Math.min(
+                              100,
+                              qa.treatment.qaSkillPromptByteShare * 100
+                            )
+                          "
+                        ></div>
+                      </div>
+                      <span class="tel-stage-nums tabular">
+                        {{ fmtPct(qa.treatment.qaSkillPromptByteShare) }} · cut
+                        {{ fmtPct(qa.treatment.threadCutShare) }}
+                      </span>
+                    </div>
+                  </div>
+                }
+              </article>
+
+              <!-- Card 6: Pre-PR Check Latency & Catch Rate -->
+              <article class="ops-card" data-testid="card-qa-checks">
+                <div class="ops-card-head">
+                  <div style="flex: 1 1 220px; min-width: 0">
+                    <h2 class="ops-card-title">
+                      Pre-PR Check Latency &amp; Catch Rate
+                    </h2>
+                    <p class="ops-card-sub">
+                      Deterministic S3 rules and T2/T3 S4 verification across
+                      enforced and control-shadow runs
+                    </p>
+                  </div>
+                  <div class="headline-actions">
+                    @if (qa.shadowRecall.controlTasksChecked > 0) {
+                      <span
+                        class="status-pill neutral tabular"
+                        data-testid="qa-shadow-recall-pill"
+                        [gTip]="
+                          qa.shadowRecall.controlBlindEscapes > 0
+                            ? 'Paired deterministic S3 recall on Control PRs with blind post-PR escapes'
+                            : 'Deterministic S3 shadow catch rate across uncontaminated Control PRs'
+                        "
+                      >
+                        <g-status-icon tone="neutral" kind="progress" />
+                        @if (qa.shadowRecall.controlBlindEscapes > 0) {
+                          Shadow recall
+                          {{ fmtPct(qa.shadowRecall.pairedRecall) }} ({{
+                            qa.shadowRecall.matchedBlindEscapes
+                          }}/{{ qa.shadowRecall.controlBlindEscapes }})
+                        } @else {
+                          Shadow catch
+                          {{ fmtPct(qa.shadowRecall.shadowCatchRate) }} ({{
+                            qa.shadowRecall.shadowWouldBlock
+                          }}/{{ qa.shadowRecall.controlTasksChecked }})
+                        }
+                      </span>
+                    }
+                    <a
+                      class="btn-tonal"
+                      routerLink="/processes/quality"
+                      data-testid="qa-rules-link"
+                    >
+                      Rules
+                    </a>
+                  </div>
+                </div>
+
+                @if (qa.checks.length === 0) {
+                  <p
+                    class="muted"
+                    style="margin: 4px 0"
+                    data-testid="qa-checks-empty"
+                  >
+                    No pre-PR quality check runs recorded in this window.
+                  </p>
+                } @else {
+                  <div
+                    class="tel-qa-check-list"
+                    role="list"
+                    aria-label="Pre-PR quality check latency and catch rate"
+                    data-testid="qa-checks-table"
+                  >
+                    @for (r of qa.checks; track r.stage + ":" + r.ruleId) {
+                      <div class="tel-qa-check-row" role="listitem">
+                        <div class="tel-qa-check-top">
+                          <span
+                            class="tel-qa-check-name"
+                            [gTip]="r.ruleId + ' (' + r.stage + ')'"
+                          >
+                            <strong class="tabular">{{ r.ruleId }}</strong>
+                            <span class="muted tabular"> · {{ r.stage }}</span>
+                          </span>
+                          <span class="tabular" style="white-space: nowrap">
+                            Catch {{ fmtPct(r.catchRate) }} ({{ r.failCount }})
+                          </span>
+                        </div>
+                        <div class="tel-qa-check-meta tabular">
+                          <span>
+                            {{ r.enforcedRuns }} enf
+                            @if (r.shadowRuns > 0) {
+                              · {{ r.shadowRuns }} shd
+                            }
+                          </span>
+                          <span>
+                            {{ fmtCheckMs(r.p50DurationMs) }} /
+                            {{ fmtCheckMs(r.p95DurationMs) }}
+                          </span>
+                          <span>
+                            +{{ r.helpfulVotes }} / −{{ r.notHelpfulVotes }}
+                          </span>
+                        </div>
+                      </div>
+                    }
+                  </div>
+                }
+              </article>
+            }
           </div>
 
           <!-- Token Usage & Budget Caps (GET /api/usage, PUT /api/usage/settings) -->
@@ -1366,8 +1784,12 @@ export class TelemetryPageComponent implements OnInit {
   protected readonly spacePeriods = SPACE_PERIODS;
   protected readonly budgetWindows = BUDGET_WINDOWS;
   protected readonly fmtDur = formatDurationSec;
+  protected readonly fmtCheckMs = formatCheckDurationMs;
   protected readonly fmtNum = formatCompactNum;
   protected readonly fmtPct = formatPct;
+  protected readonly fmtSignedPctPts = formatSignedPctPoints;
+  protected readonly fmtSignedRel = formatSignedRelPct;
+  protected readonly fmtSignedSec = formatSignedDurationSec;
 
   protected readonly window = signal<MetricsWindow>("7d");
   protected readonly selectedRepo = signal<string>("");
@@ -1378,6 +1800,7 @@ export class TelemetryPageComponent implements OnInit {
   protected readonly loading = signal(false);
   protected readonly loadError = signal<string | null>(null);
   protected readonly report = signal<MetricsReport | null>(null);
+  protected readonly qaSummary = signal<QASummary | null>(null);
   protected readonly usage = signal<UsageResponse | null>(null);
   protected readonly clusterStats = signal<ClusterStats | null>(null);
   protected readonly releaseNotes = signal<ReleaseNote[]>([]);
@@ -1393,6 +1816,7 @@ export class TelemetryPageComponent implements OnInit {
   protected readonly draftBudgets = signal<TokenBudget[]>([]);
 
   private metricsSeq = 0;
+  private qaSeq = 0;
 
   protected readonly deploymentReadLimits = computed<string[]>(() =>
     this.access.isFullAccess()
@@ -1412,6 +1836,16 @@ export class TelemetryPageComponent implements OnInit {
     const repo = this.selectedRepo();
     if (!repo) return this.canReadAllReposMetrics();
     return this.access.can("GET /api/metrics", repo);
+  });
+
+  protected readonly canReadQaSummary = computed(() => {
+    const repo = this.selectedRepo();
+    if (!repo) {
+      return (
+        this.access.can("GET /api/qa/summary") && !this.isMetricsRepoLimited()
+      );
+    }
+    return this.access.can("GET /api/qa/summary", repo);
   });
 
   protected deniedMetricsReason(repo: string): string {
@@ -1656,9 +2090,35 @@ export class TelemetryPageComponent implements OnInit {
   async refreshAll(): Promise<void> {
     await Promise.all([
       this.loadMetrics(),
+      this.loadQaSummary(),
       this.loadUsage(),
       this.loadSpaceStats(),
     ]);
+  }
+
+  async loadQaSummary(): Promise<void> {
+    if (!this.canReadQaSummary()) {
+      ++this.qaSeq;
+      this.qaSummary.set(null);
+      return;
+    }
+    const seq = ++this.qaSeq;
+    const params = new URLSearchParams();
+    params.set("window", this.window());
+    if (this.selectedRepo()) params.append("repo", this.selectedRepo());
+    try {
+      const qa = await this.api.get<QASummary>(
+        "GET /api/qa/summary",
+        undefined,
+        params.toString(),
+      );
+      if (seq !== this.qaSeq) return;
+      this.qaSummary.set(qa);
+    } catch {
+      if (seq === this.qaSeq) {
+        this.qaSummary.set(null);
+      }
+    }
   }
 
   async loadMetrics(): Promise<void> {
@@ -1723,6 +2183,7 @@ export class TelemetryPageComponent implements OnInit {
     this.window.set(w);
     this.syncUrl();
     void this.loadMetrics();
+    void this.loadQaSummary();
   }
 
   protected pickRepo(repo: string): void {
@@ -1732,6 +2193,7 @@ export class TelemetryPageComponent implements OnInit {
     this.selectedRepo.set(repo);
     this.syncUrl();
     void this.loadMetrics();
+    void this.loadQaSummary();
   }
 
   protected pickAuthor(author: string): void {
@@ -1751,6 +2213,7 @@ export class TelemetryPageComponent implements OnInit {
     this.selectedAuthor.set("");
     this.syncUrl();
     void this.loadMetrics();
+    void this.loadQaSummary();
   }
 
   protected pickSpacePeriod(p: string): void {

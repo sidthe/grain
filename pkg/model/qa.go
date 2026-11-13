@@ -75,12 +75,12 @@ func ResolveQARootOrigin(workOrigin WorkOrigin, taskID string) string {
 }
 
 // TaskEligibleForQAStaging reports whether task pushes its own candidate PR branch (and is not
-// an interactive console session, an in-place review push, a comments-only review, or an external PR).
+// an interactive task, a priority-dispatch/durable session, an in-place review push, a comments-only review, or an external PR).
 func TaskEligibleForQAStaging(task Task) bool {
 	if task.Target == nil || IsConfigRepo(*task.Target) || task.ChangeTarget != nil {
 		return false
 	}
-	if task.Interactive || task.IsConsoleSession() {
+	if task.Interactive || task.HasPriorityDispatch() {
 		return false
 	}
 	for _, l := range task.Links {
@@ -586,4 +586,131 @@ func firstNonEmpty(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// ListQAAssignments returns all sticky QA arm assignments ordered chronologically for
+// Online-CUPED pre-filtration and CMH regime stratification.
+func (s *Store) ListQAAssignments(ctx context.Context) ([]QAAssignment, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT `root_origin`, `epoch`, `regime_id`, `arm`, `flow_id`, `rollout_pct_at_assign`, `complexity_tier`, `assigned_at` "+
+			"FROM `task_qa_assignment` ORDER BY `assigned_at` ASC, `root_origin` ASC",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing qa assignments: %w", err)
+	}
+	defer rows.Close()
+	var out []QAAssignment
+	for rows.Next() {
+		var a QAAssignment
+		if err := rows.Scan(
+			&a.RootOrigin, &a.Epoch, &a.RegimeID, &a.Arm, &a.FlowID,
+			&a.RolloutPctAtAssign, &a.ComplexityTier, &a.AssignedAt,
+		); err != nil {
+			return nil, err
+		}
+		a.AssignedAt = a.AssignedAt.UTC()
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// ListAllQACheckRuns returns all recorded QA check runs ordered by id ASC.
+func (s *Store) ListAllQACheckRuns(ctx context.Context) ([]QACheckRun, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT `id`, `task_id`, `run_id`, `commit_sha`, `stage`, `check_id`, `arm`, `shadow`, `verdict`, "+
+			"`duration_ms`, `tokens_in`, `tokens_out`, `alloc_bytes`, `detail_json`, `created_at` "+
+			"FROM `task_qa_check_run` ORDER BY `id` ASC",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing all qa check runs: %w", err)
+	}
+	defer rows.Close()
+	var out []QACheckRun
+	for rows.Next() {
+		var r QACheckRun
+		var shadowInt int
+		if err := rows.Scan(
+			&r.ID, &r.TaskID, &r.RunID, &r.CommitSHA, &r.Stage, &r.CheckID, &r.Arm, &shadowInt, &r.Verdict,
+			&r.DurationMS, &r.TokensIn, &r.TokensOut, &r.AllocBytes, &r.DetailJSON, &r.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		r.Shadow = shadowInt != 0
+		r.CreatedAt = r.CreatedAt.UTC()
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ListAllQAFindings returns all recorded QA findings ordered by id ASC.
+func (s *Store) ListAllQAFindings(ctx context.Context) ([]QAFinding, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT `id`, `check_run_id`, `task_id`, `stage`, `rule_id`, `severity`, `file_path`, `line`, "+
+			"`summary`, `evidence`, `human_vote`, `voted_by`, `voted_at`, `created_at` "+
+			"FROM `task_qa_finding` ORDER BY `id` ASC",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing all qa findings: %w", err)
+	}
+	defer rows.Close()
+	var out []QAFinding
+	for rows.Next() {
+		var f QAFinding
+		var votedAt sql.NullTime
+		if err := rows.Scan(
+			&f.ID, &f.CheckRunID, &f.TaskID, &f.Stage, &f.RuleID, &f.Severity, &f.FilePath, &f.Line,
+			&f.Summary, &f.Evidence, &f.HumanVote, &f.VotedBy, &votedAt, &f.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		f.CreatedAt = f.CreatedAt.UTC()
+		if votedAt.Valid {
+			t := votedAt.Time.UTC()
+			f.VotedAt = &t
+		}
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+// CIRunOutcome is one stored grain CI run's conclusion, used by QA telemetry to compute
+// first-push CI pass rates per branch without loading job step output.
+type CIRunOutcome struct {
+	ID         string
+	Repo       string
+	Ref        string
+	CommitSHA  string
+	Event      string
+	Conclusion string
+	Recheck    bool
+	StartedAt  *time.Time
+	FinishedAt *time.Time
+}
+
+// CIRunOutcomes returns all stored grain CI run conclusions ordered chronologically.
+func (s *Store) CIRunOutcomes(ctx context.Context) ([]CIRunOutcome, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT `id`, `repo`, `ref`, `commit_sha`, `event`, `conclusion`, `recheck`, `started_at`, `finished_at` "+
+			"FROM `ci_run` ORDER BY COALESCE(`started_at`, `finished_at`), `id`",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("listing ci run outcomes: %w", err)
+	}
+	defer rows.Close()
+	var out []CIRunOutcome
+	for rows.Next() {
+		var r CIRunOutcome
+		var recheckInt int
+		var started, finished sql.NullTime
+		if err := rows.Scan(
+			&r.ID, &r.Repo, &r.Ref, &r.CommitSHA, &r.Event, &r.Conclusion, &recheckInt, &started, &finished,
+		); err != nil {
+			return nil, err
+		}
+		r.Recheck = recheckInt != 0
+		r.StartedAt = timePtr(started)
+		r.FinishedAt = timePtr(finished)
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }

@@ -2955,7 +2955,7 @@ func (s *Server) queryCallRepo(r *http.Request, pattern string, allowed func(str
 	if len(values) == 0 {
 		return "", false, nil
 	}
-	if pattern == "GET /api/metrics" {
+	if pattern == "GET /api/metrics" || pattern == "GET /api/qa/summary" {
 		var items []string
 		for _, raw := range values {
 			for _, part := range strings.Split(raw, ",") {
