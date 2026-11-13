@@ -1,4 +1,18 @@
-/* Telemetry → Quality checks tab (lazy, ViewEncapsulation.None, tq- prefix). */
+/*
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
 
 g-telemetry-quality {
   display: flex;
@@ -63,7 +77,6 @@ g-telemetry-quality .status-pill[tabindex]:focus-visible {
   outline-offset: 2px;
 }
 
-/* Verdict per arm */
 .tq-verdicts {
   list-style: none;
   margin: 0;
@@ -88,7 +101,6 @@ g-telemetry-quality .status-pill[tabindex]:focus-visible {
   color: var(--md-sys-color-on-surface);
 }
 
-/* Measures by arm: a 4-column grid on wide screens, stacked on phones. */
 .tq-table {
   display: flex;
   flex-direction: column;
@@ -125,7 +137,6 @@ g-telemetry-quality .status-pill[tabindex]:focus-visible {
   color: var(--md-sys-color-on-surface-variant);
 }
 
-/* Per-check health */
 .tq-checks {
   list-style: none;
   margin: 0;
@@ -183,7 +194,6 @@ g-telemetry-quality .status-pill[tabindex]:focus-visible {
   margin: 0;
 }
 
-/* Loading skeleton */
 .tq-skel {
   display: flex;
   flex-direction: column;
@@ -205,6 +215,158 @@ g-telemetry-quality .status-pill[tabindex]:focus-visible {
   width: 45%;
 }
 
+/* M10 experiment bar, forest plot, and rubric whiskers */
+.tq-expbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.tq-exp-actions {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.tq-armline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin-top: 12px;
+}
+
+.tq-arm-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-radius: var(--md-sys-shape-corner-small);
+  background: var(--md-sys-color-surface-container-low);
+  font-size: 13px;
+}
+
+.tq-arm-item.is-halted {
+  opacity: 0.72;
+  border: 1px solid var(--md-sys-color-error);
+}
+
+.tq-axishead,
+.tq-frow {
+  display: grid;
+  grid-template-columns: minmax(170px, 1.3fr) minmax(180px, 2fr) minmax(
+      130px,
+      1fr
+    );
+  gap: 8px 16px;
+  align-items: center;
+}
+
+.tq-axishead {
+  font-size: 11px;
+  color: var(--md-sys-color-on-surface-variant);
+  margin-top: 12px;
+}
+
+.tq-frow {
+  padding: 10px 0;
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+  font-size: 13px;
+}
+
+.tq-frow-sub {
+  display: block;
+  font-size: 11px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.tq-ftrack,
+.tq-rtrack {
+  position: relative;
+  height: 22px;
+  display: flex;
+  align-items: center;
+}
+
+.tq-ftrack-base,
+.tq-rtrack-base {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--md-sys-color-outline-variant);
+}
+
+.tq-ftrack-zero {
+  position: absolute;
+  left: 50%;
+  top: 2px;
+  bottom: 2px;
+  width: 1px;
+  background: var(--md-sys-color-outline);
+}
+
+.tq-ftrack-ci,
+.tq-rtrack-ci {
+  position: absolute;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--md-sys-color-primary);
+}
+
+.tq-ftrack-pt,
+.tq-rtrack-pt {
+  position: absolute;
+  transform: translateX(-50%);
+  color: var(--md-sys-color-primary);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.tq-ftrack-ends {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -10px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.tq-prov-tag {
+  display: block;
+  font-size: 11px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.tq-rdim {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0;
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+}
+
+.tq-rrow {
+  display: grid;
+  grid-template-columns: 90px 1fr auto;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+}
+
+.tq-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 @media (max-width: 599.95px) {
   .tq-row {
     grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -223,7 +385,13 @@ g-telemetry-quality .status-pill[tabindex]:focus-visible {
     overflow-wrap: anywhere;
   }
 
-  .tq-row-head {
+  .tq-row-head,
+  .tq-axishead {
     display: none;
+  }
+
+  .tq-frow {
+    grid-template-columns: 1fr;
+    gap: 12px;
   }
 }

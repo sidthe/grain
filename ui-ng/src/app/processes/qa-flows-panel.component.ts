@@ -72,14 +72,27 @@ import {
               <button
                 type="button"
                 class="flow-item"
+                [attr.data-testid]="
+                  v.hash === group.latestActiveHash
+                    ? 'qa-flow-row-' + group.key
+                    : null
+                "
                 [class.selected]="v.hash === selectedHash()"
                 [attr.aria-current]="v.hash === selectedHash() ? 'true' : null"
                 (click)="selectVersion(v.hash)"
               >
                 <div class="flow-item-header">
                   <span class="s-mono">&#64;{{ v.version }}</span>
-                  @if (v.hash === group.latestActiveHash) {
-                    <span class="badge active-badge">Active</span>
+                  @if (
+                    qaEnabled() &&
+                    activeFlowId() === v.key &&
+                    v.hash === group.latestActiveHash
+                  ) {
+                    <span class="badge active-badge"
+                      >Active ({{ activeRolloutPct() }}%)</span
+                    >
+                  } @else if (v.hash === group.latestActiveHash) {
+                    <span class="badge active-badge">Available</span>
                   }
                   @if (v.builtIn) {
                     <span class="badge builtin-badge">Built-in</span>
@@ -120,6 +133,35 @@ import {
                 </button>
               </div>
             </div>
+
+            @if (dryRunResult(); as dr) {
+              <div class="dry-run-results">
+                <h3>Dry Run Results</h3>
+                <div>
+                  Sampled PRs: <span class="s-num">{{ dr.sampledPRs }}</span> |
+                  Would block PRs:
+                  <span class="s-num">{{ dr.wouldBlockPRs }}</span>
+                </div>
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Rule</th>
+                      <th>Would Block</th>
+                      <th>Warn Count</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (c of dr.byCheck; track c.ruleId) {
+                      <tr>
+                        <td class="s-mono">{{ c.ruleId }}</td>
+                        <td class="s-num">{{ c.wouldBlock }}</td>
+                        <td class="s-num">{{ c.warnCount }}</td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+            }
 
             <div class="jump-select">
               <span class="s-label">Jump to section</span>
@@ -354,11 +396,17 @@ import {
             </div>
           } @else {
             <div class="detail-header">
-              <h2>
-                {{ detail.key }}
+              <h2 data-testid="qa-flow-insp-title">
+                {{ detail.label || detail.key }}
                 <span class="s-mono">&#64;{{ detail.version }}</span>
               </h2>
               <div class="detail-actions">
+                <a
+                  class="btn-text"
+                  routerLink="/settings/tasks"
+                  data-testid="qa-configure-rollout-link"
+                  >Settings → Tasks</a
+                >
                 @if (canAdmin()) {
                   @if (!detail.builtIn) {
                     <button
@@ -427,7 +475,7 @@ import {
               </div>
             }
 
-            <div class="cards-layout">
+            <div class="cards-layout" data-testid="qa-flow-detail-card">
               <div class="card">
                 <h3>Coding skill</h3>
                 <div class="s-mono skill-text-readonly">
@@ -442,7 +490,7 @@ import {
                 <table>
                   <tbody>
                     @for (rule of detail.resolved?.rules || []; track rule.id) {
-                      <tr>
+                      <tr [attr.data-testid]="'qa-rule-card-' + rule.id">
                         <td class="s-mono">{{ rule.id }}</td>
                         <td>
                           <span class="severity-pill">{{ rule.severity }}</span>
@@ -459,6 +507,26 @@ import {
               <div class="card">
                 <h3>Verifier</h3>
                 <div>
+                  @if (
+                    detail.declaration
+                      ? detail.declaration.verifier.enabled
+                      : detail.resolved?.enableS4
+                  ) {
+                    Status:
+                    <span class="s-mono">{{
+                      detail.declaration?.verifier?.tiers?.length
+                        ? detail.declaration!.verifier.tiers.join("/") +
+                          " diffs (max " +
+                          detail.declaration!.verifier.maxRepairRounds +
+                          " round)"
+                        : "T2/T3 diffs (max " +
+                          (detail.resolved?.maxS4RepairRounds ?? 1) +
+                          " round)"
+                    }}</span
+                    ><br />
+                  } @else {
+                    Status: <span class="s-mono">disabled</span><br />
+                  }
                   Tiers:
                   <span class="s-mono">{{
                     (detail.declaration?.verifier?.tiers || []).join(", ") ||
@@ -513,6 +581,9 @@ export class QaFlowsPanelComponent {
   versions = signal<QAFlowVersionItem[]>([]);
   selectedHash = signal<string | null>(null);
   selectedDetail = signal<QAFlowVersionDetail | null>(null);
+  qaEnabled = signal(false);
+  activeFlowId = signal("");
+  activeRolloutPct = signal(0);
 
   isEditing = signal(false);
   isFork = signal(false);
@@ -701,30 +772,56 @@ export class QaFlowsPanelComponent {
   }
 
   async loadVersions(): Promise<void> {
+    if (this.access.can("GET /api/settings")) {
+      const settings = (await this.api
+        .get("GET /api/settings")
+        .catch(() => null)) as {
+        qaEnabled?: boolean;
+        qaFlowId?: string;
+        qaRolloutPct?: number;
+      } | null;
+      if (settings) {
+        this.qaEnabled.set(Boolean(settings.qaEnabled));
+        this.activeFlowId.set(settings.qaFlowId ?? "");
+        this.activeRolloutPct.set(settings.qaRolloutPct ?? 0);
+      }
+    }
+
+    let loaded: QAFlowVersionItem[] = [];
     try {
-      const res = await this.api.get<QAFlowVersionsResponse>(
+      const res = (await this.api.get<QAFlowVersionsResponse>(
         "GET /api/qa/flow-versions",
         undefined,
         "limit=50",
-      );
-      this.versions.set(res.versions || []);
-    } catch (err: unknown) {
-      const e = err as { status?: number; body?: { versions?: unknown[] } };
-      if (e?.status === 404 || (e?.body && !e?.body.versions)) {
-        const fallback =
-          await this.api.get<QAFlowsResponse>("GET /api/qa/flows");
-        const mapped = (fallback.flows || []).map((f) => ({
-          hash: f.id,
-          key: f.id,
-          version: 1,
-          label: f.label,
-          summary: f.summary,
-          qaEngineRev: 1,
-          builtIn: true,
-          resolved: f,
-        }));
-        this.versions.set(mapped);
-      }
+      )) as QAFlowVersionsResponse | null;
+      loaded = Array.isArray(res?.versions) ? res.versions : [];
+    } catch {
+      loaded = [];
+    }
+
+    if (loaded.length === 0) {
+      const fallback = (await this.api
+        .get<QAFlowsResponse>("GET /api/qa/flows")
+        .catch(() => null)) as QAFlowsResponse | null;
+      loaded = (fallback?.flows ?? []).map((f) => ({
+        hash: f.id,
+        key: f.id,
+        version: 1,
+        label: f.label,
+        summary: f.summary,
+        qaEngineRev: 1,
+        builtIn: true,
+        resolved: f,
+      }));
+    }
+
+    this.versions.set(loaded);
+    if (!this.selectedHash() && loaded.length > 0) {
+      const activeMatch = this.activeFlowId()
+        ? loaded.find((v) => v.key === this.activeFlowId() && !v.retiredAt)
+        : undefined;
+      const firstHash = activeMatch?.hash ?? loaded[0].hash;
+      await this.doSelectVersion(firstHash);
     }
   }
 
@@ -748,15 +845,29 @@ export class QaFlowsPanelComponent {
     this.selectedHash.set(hash);
     this.isEditing.set(false);
     this.dryRunResult.set(null);
+    const local = this.versions().find((x) => x.hash === hash);
     try {
-      const detail = await this.api.get<QAFlowVersionDetail>(
+      const detail = (await this.api.get<QAFlowVersionDetail>(
         "GET /api/qa/flow-versions/{hash}",
         { hash },
-      );
-      this.selectedDetail.set(detail);
+      )) as QAFlowVersionDetail | null;
+      if (detail && detail.hash) {
+        this.selectedDetail.set({
+          ...local,
+          ...detail,
+          resolved:
+            detail.resolved ??
+            (detail as unknown as { spec?: QAFlowVersionDetail["resolved"] })
+              .spec ??
+            local?.resolved,
+        });
+        return;
+      }
     } catch {
-      const v = this.versions().find((x) => x.hash === hash);
-      if (v) this.selectedDetail.set(v);
+      // Fall back to cached list item below.
+    }
+    if (local) {
+      this.selectedDetail.set(local);
     }
   }
 

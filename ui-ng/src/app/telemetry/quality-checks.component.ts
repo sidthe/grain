@@ -15,14 +15,34 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  type OnInit,
   ViewEncapsulation,
   computed,
+  inject,
   input,
   output,
+  signal,
 } from "@angular/core";
-import { RouterLink } from "@angular/router";
+import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
+import { ActivatedRoute, Router, RouterLink } from "@angular/router";
+import { GrainApi } from "../api/grain-api.service";
+import { AccessService } from "../services/access.service";
+import { SnackbarService } from "../services/snackbar.service";
+import {
+  type PillOption,
+  PillSelectComponent,
+} from "../shared/pill-select.component";
 import { StatusIconComponent } from "../shared/status-icon.component";
 import { TipDirective } from "../shared/tip.directive";
+import {
+  QaExperimentSheetComponent,
+  QaStartDialogComponent,
+} from "./qa-experiment-sheet.component";
+import type {
+  QAExperimentDetail,
+  QAExperimentResults,
+  QAExperimentSummary,
+} from "./qa-experiments.models";
 import {
   armLabel,
   armVerdicts,
@@ -56,20 +76,527 @@ interface MetricRow {
   diff: string;
 }
 
-/**
- * Telemetry → Quality checks tab: read-only rollout results and per-check
- * health from GET /api/qa/summary. The parent page owns fetching, the
- * window/repository controls and the tablist.
- */
 @Component({
   selector: "g-telemetry-quality",
-  imports: [RouterLink, TipDirective, StatusIconComponent],
+  imports: [
+    RouterLink,
+    TipDirective,
+    StatusIconComponent,
+    PillSelectComponent,
+    QaExperimentSheetComponent,
+    QaStartDialogComponent,
+  ],
   encapsulation: ViewEncapsulation.None,
   styleUrl: "./quality-checks.component.css",
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @if (deniedReason(); as why) {
       <p class="empty-state" data-testid="qa-denied">{{ why }}</p>
+    } @else if (expDenied()) {
+      <p class="empty-state" data-testid="qa-exp-denied">
+        You need the <span class="mono">qa:read</span> permission to view
+        quality experiments. Ask a deployment admin.
+      </p>
+    } @else if (activeV2Mode()) {
+      @if (expLoading() && !exp()) {
+        <article
+          class="ops-card tq-card"
+          aria-busy="true"
+          data-testid="qa-loading"
+        >
+          <h2 class="ops-card-title">Loading quality experiment…</h2>
+          <div class="tq-skel" aria-hidden="true"><i></i><i></i><i></i></div>
+        </article>
+      } @else if (expError()) {
+        <div
+          class="banner banner-error tq-error"
+          role="alert"
+          data-testid="qa-error"
+        >
+          <span>Could not load quality experiment: {{ expError() }}</span>
+          <button
+            type="button"
+            class="btn-text"
+            data-testid="qa-retry"
+            (click)="loadExperiments()"
+          >
+            Try again
+          </button>
+        </div>
+      } @else if (exp()) {
+        @let detail = exp()!;
+        <article
+          class="ops-card tq-card"
+          aria-label="Experiment"
+          data-testid="card-qa-experiment"
+        >
+          <div class="tq-expbar">
+            <g-pill-select
+              testid="pill-qa-experiment"
+              ariaLabel="Experiment"
+              [options]="expOptions()"
+              [value]="detail.id"
+              (valueChange)="setExp($event)"
+            />
+            @if (detail.state === "draft") {
+              <span class="status-pill neutral" data-testid="qa-exp-state-pill">
+                <g-status-icon tone="neutral" kind="idle" />Draft
+              </span>
+            } @else if (detail.state === "running") {
+              <span class="status-pill healthy" data-testid="qa-exp-state-pill">
+                <g-status-icon tone="healthy" kind="running" />Running
+              </span>
+            } @else {
+              <span class="status-pill neutral" data-testid="qa-exp-state-pill">
+                <g-status-icon tone="neutral" kind="idle" />{{
+                  detail.state === "archived" ? "Archived" : "Stopped"
+                }}
+              </span>
+            }
+
+            @if (res()?.periodLabel; as pLabel) {
+              <span class="status-pill neutral" data-testid="qa-period-chip">
+                <g-status-icon tone="neutral" kind="progress" />{{ pLabel }}
+              </span>
+            }
+
+            @if (res()?.assignmentAudit && !res()!.assignmentAudit.passed) {
+              <span
+                class="status-pill error"
+                data-testid="qa-audit-pill"
+                tabindex="0"
+                [gTip]="
+                  res()!.assignmentAudit.mismatches.length +
+                  ' enrollment mismatches detected'
+                "
+              >
+                <g-status-icon tone="error" kind="error" />Assignment check
+                failed
+              </span>
+            } @else if (res()?.assignmentAudit?.passed) {
+              <span
+                class="status-pill healthy"
+                data-testid="qa-audit-pill"
+                tabindex="0"
+                gTip="Every enrolled work tree's arm matches its deterministic salt or explicit key."
+              >
+                <g-status-icon tone="healthy" kind="ok" />Assignment checked
+              </span>
+            }
+
+            <div class="tq-exp-actions">
+              @if (canAdmin()) {
+                @if (detail.state === "draft") {
+                  <button
+                    type="button"
+                    class="btn-primary"
+                    data-testid="btn-exp-open-start"
+                    (click)="openStartDialog()"
+                  >
+                    Start experiment
+                  </button>
+                } @else if (detail.enrollmentHeld === "engine-change") {
+                  <button
+                    type="button"
+                    class="btn-primary"
+                    data-testid="btn-exp-resume"
+                    (click)="transition('resume-enrollment')"
+                  >
+                    Resume enrollment (new segment)
+                  </button>
+                  <button
+                    type="button"
+                    class="btn-tonal"
+                    data-testid="btn-exp-stop"
+                    (click)="transition('stop')"
+                  >
+                    Stop experiment
+                  </button>
+                } @else if (detail.state === "running") {
+                  @if (haltableArmId(); as haltArm) {
+                    <button
+                      type="button"
+                      class="btn-tonal"
+                      data-testid="btn-exp-halt-arm"
+                      (click)="haltSingleArm(haltArm)"
+                    >
+                      Halt arm
+                    </button>
+                  }
+                  <button
+                    type="button"
+                    class="btn-tonal"
+                    data-testid="btn-exp-stop"
+                    (click)="transition('stop')"
+                  >
+                    Stop experiment
+                  </button>
+                }
+                <button
+                  type="button"
+                  class="btn-tonal"
+                  data-testid="btn-new-experiment"
+                  (click)="showCreateSheet.set(true)"
+                >
+                  New experiment
+                </button>
+              }
+              <a class="btn-text" routerLink="/processes/quality"
+                >Manage flows</a
+              >
+            </div>
+          </div>
+
+          <div class="tq-armline" data-testid="qa-exp-arms">
+            @for (a of detail.arms; track a.id) {
+              <div
+                class="tq-arm-item"
+                [class.is-halted]="a.halted"
+                [attr.data-testid]="'qa-arm-' + a.id"
+              >
+                <span>{{ a.label }} · {{ a.weight }}%</span>
+                <span class="tabular s-num">
+                  {{ enrolledForArm(a.id) }} of
+                  {{ detail.plan.plannedOriginsPerArm }} work trees
+                </span>
+                @if (a.halted) {
+                  <span class="status-pill error">
+                    <g-status-icon tone="error" kind="error" />Halted{{
+                      a.haltedAt ? " · " + a.haltedAt : ""
+                    }}
+                  </span>
+                }
+              </div>
+            }
+          </div>
+          <p class="ops-card-sub" style="margin: 8px 0 0;">
+            A <strong>work tree</strong> is a root task and every child task
+            filed under it.
+            @if (detail.scope.repos.length > 0) {
+              Scope: {{ detail.scope.repos.join(", ") }}.
+            }
+          </p>
+        </article>
+
+        @if (detail.state === "draft") {
+          <article class="ops-card tq-card" data-testid="qa-exp-draft-card">
+            <h2 class="ops-card-title">Draft, not started</h2>
+            <p class="tq-lead muted">
+              No work trees are enrolled until the experiment starts. Planned
+              decision-rule power:
+              {{ pct(detail.plan.power.observedEffect.power) }} for
+              {{ detail.plan.power.observedEffect.label }} (MDE 80%:
+              {{ detail.plan.power.mde80.label }}).
+            </p>
+          </article>
+        } @else if (res()?.assignmentAudit && !res()!.assignmentAudit.passed) {
+          <article
+            class="ops-card tq-card"
+            data-testid="qa-exp-audit-failed-card"
+          >
+            <h2 class="ops-card-title">Assignment check failed</h2>
+            <div class="banner banner-error tq-banner" role="alert">
+              <g-status-icon tone="error" kind="error" />
+              <span>
+                <strong>Readout is blocked.</strong> Enrollment mismatches:
+                {{ auditMismatches() }}. Do not make a ship decision from these
+                counts.
+              </span>
+            </div>
+          </article>
+        } @else if (detail.enrollmentHeld === "engine-change") {
+          <article
+            class="ops-card tq-card"
+            data-testid="qa-exp-engine-held-card"
+          >
+            <h2 class="ops-card-title">Enrollment held after engine change</h2>
+            <div class="banner tq-banner" role="status">
+              <g-status-icon tone="blast" kind="warning" />
+              <span>
+                The quality-check engine digest changed while this experiment
+                was running. New work trees are held until you resume enrollment
+                in a new segment or stop the experiment.
+              </span>
+            </div>
+          </article>
+        }
+
+        @if (
+          res() &&
+          detail.state !== "draft" &&
+          (!res()!.assignmentAudit || res()!.assignmentAudit.passed)
+        ) {
+          @let r = res()!;
+          <article class="ops-card tq-card" data-testid="qa-exp-results-card">
+            <div class="ops-card-head">
+              <div>
+                <h2 class="ops-card-title">Results</h2>
+                <p class="ops-card-sub">
+                  Every row is plotted in improvement units (right of the zero
+                  line is better).
+                </p>
+              </div>
+            </div>
+            <ul class="tq-verdicts" aria-label="Verdict by arm">
+              @for (v of r.verdicts; track v.armId) {
+                <li class="tq-verdict" data-testid="qa-verdict">
+                  <span [class]="'status-pill ' + verdictTone(v.status)">
+                    <g-status-icon
+                      [tone]="verdictTone(v.status)"
+                      [kind]="verdictKind(v.status)"
+                    />
+                    {{ v.status }}
+                  </span>
+                  <p class="tq-sentence">
+                    <strong>{{ v.title }}</strong> {{ v.summary }}
+                  </p>
+                </li>
+              }
+            </ul>
+
+            @if (r.forestRows.length > 0) {
+              <div class="tq-axishead" aria-hidden="true">
+                <div></div>
+                <div style="display: flex; justify-content: space-between;">
+                  <span>worse</span><span>no difference</span
+                  ><span>better</span>
+                </div>
+                <div></div>
+              </div>
+              @for (row of r.forestRows; track row.id) {
+                <div class="tq-frow" [attr.data-testid]="'qa-forest-' + row.id">
+                  <div>
+                    <span class="tq-term" tabindex="0" [gTip]="row.tip">{{
+                      row.label
+                    }}</span>
+                    <span class="tq-frow-sub">{{ row.sub }}</span>
+                  </div>
+                  <div class="tq-ftrack" aria-hidden="true">
+                    <div class="tq-ftrack-base"></div>
+                    <div class="tq-ftrack-zero"></div>
+                    <div
+                      class="tq-ftrack-ci"
+                      [style.left.%]="row.ciLowPct"
+                      [style.width.%]="row.ciWidthPct"
+                    ></div>
+                    <div class="tq-ftrack-pt" [style.left.%]="row.meanPct">
+                      ●
+                    </div>
+                    <div class="tq-ftrack-ends">
+                      <span>{{ row.minLabel }}</span>
+                      <span>{{ row.maxLabel }}</span>
+                    </div>
+                  </div>
+                  <div class="tabular s-num">
+                    <strong>{{ row.valueStr }}</strong>
+                    @if (r.provisional) {
+                      <span class="tq-prov-tag">valid at planned n only</span>
+                    }
+                  </div>
+                </div>
+              }
+            }
+          </article>
+
+          <div class="ops-grid-2">
+            <article
+              class="ops-card tq-card"
+              data-testid="qa-exp-guardrails-card"
+            >
+              <div class="ops-card-head">
+                <div><h2 class="ops-card-title">Guardrails</h2></div>
+              </div>
+              <table class="ops-table stack">
+                <thead>
+                  <tr>
+                    <th>Guardrail</th>
+                    <th>Value</th>
+                    <th>State</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (g of r.guardrails; track g.id) {
+                    <tr>
+                      <td>{{ g.label }}</td>
+                      <td class="tabular s-num">{{ g.value }}</td>
+                      <td>
+                        @if (g.state === "ok") {
+                          <span class="status-pill healthy"
+                            ><g-status-icon tone="healthy" kind="ok" />ok</span
+                          >
+                        } @else if (g.state === "watch") {
+                          <span class="status-pill blast"
+                            ><g-status-icon
+                              tone="blast"
+                              kind="warning"
+                            />watch</span
+                          >
+                        } @else {
+                          <span class="status-pill error"
+                            ><g-status-icon
+                              tone="error"
+                              kind="error"
+                            />tripped</span
+                          >
+                        }
+                      </td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </article>
+
+            <article class="ops-card tq-card" data-testid="card-qa-checks">
+              <div class="ops-card-head">
+                <div><h2 class="ops-card-title">Check health</h2></div>
+              </div>
+              <table class="ops-table stack">
+                <thead>
+                  <tr>
+                    <th>Check</th>
+                    <th>Precision</th>
+                    <th>Applies</th>
+                    <th>Time (p95)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (c of r.checkHealth; track c.id) {
+                    <tr>
+                      <td class="mono">{{ c.id }}</td>
+                      <td class="tabular s-num">{{ c.precision }}</td>
+                      <td class="tabular s-num">{{ c.applies }}</td>
+                      <td class="tabular s-num">{{ c.p95 }}</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </article>
+          </div>
+
+          <div class="ops-grid-2">
+            @if (r.rubric; as rub) {
+              <article
+                class="ops-card tq-card"
+                data-testid="qa-exp-rubric-card"
+              >
+                <div class="ops-card-head">
+                  <div>
+                    <h2 class="ops-card-title">Senior review score (1–10)</h2>
+                  </div>
+                  @if (!rub.validated) {
+                    <span class="status-pill blast">
+                      <g-status-icon tone="blast" kind="warning" />Not validated
+                    </span>
+                  }
+                </div>
+                @for (d of rub.dimensions; track d.id) {
+                  <div class="tq-rdim">
+                    <strong>{{ d.label }}</strong>
+                    @for (a of d.arms; track a.armId) {
+                      <div class="tq-rrow">
+                        <span>{{ a.armId }}</span>
+                        <div class="tq-rtrack" aria-hidden="true">
+                          <div class="tq-rtrack-base"></div>
+                          <div
+                            class="tq-rtrack-ci"
+                            [style.left.%]="a.ciLow * 10"
+                            [style.width.%]="(a.ciHigh - a.ciLow) * 10"
+                          ></div>
+                          <div
+                            class="tq-rtrack-pt"
+                            [style.left.%]="a.mean * 10"
+                          >
+                            ●
+                          </div>
+                        </div>
+                        <span class="tabular s-num">
+                          {{ a.mean.toFixed(2) }}
+                          @if (!rub.validated) {
+                            <span class="tq-prov-tag">Not validated</span>
+                          }
+                        </span>
+                      </div>
+                    }
+                  </div>
+                }
+              </article>
+            }
+
+            <article class="ops-card tq-card" data-testid="qa-exp-prshape-card">
+              <div class="ops-card-head">
+                <div>
+                  <h2 class="ops-card-title">PR size</h2>
+                  <p class="ops-card-sub">Medians per arm</p>
+                </div>
+              </div>
+              <table class="ops-table stack">
+                <thead>
+                  <tr>
+                    <th>Arm</th>
+                    <th>PRs/work tree</th>
+                    <th>Prod lines</th>
+                    <th>Test lines</th>
+                    <th>Test:Prod</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (s of r.prShape; track s.armId) {
+                    <tr>
+                      <td>{{ s.armId }}</td>
+                      <td class="tabular s-num">{{ s.prsPerWorkTree }}</td>
+                      <td class="tabular s-num">{{ s.prodLines }}</td>
+                      <td class="tabular s-num">{{ s.testLines }}</td>
+                      <td class="tabular s-num">{{ s.testProdRatio }}</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </article>
+
+            <article
+              class="ops-card tq-card"
+              data-testid="qa-exp-limitations-card"
+            >
+              <div class="ops-card-head">
+                <div><h2 class="ops-card-title">Limitations</h2></div>
+              </div>
+              <ul class="tq-list">
+                @if (r.limitations.sharedMain) {
+                  <li>
+                    Shared main branch: merged pull requests from one arm enter
+                    the repository seen by later tasks in both arms.
+                  </li>
+                }
+                <li>
+                  Repository memory mode: {{ r.limitations.memoryMode }} ({{
+                    memoryWrites()
+                  }}).
+                </li>
+                @if (r.limitations.exposureBreaks > 0) {
+                  <li>
+                    {{ r.limitations.exposureBreaks }} work trees experienced a
+                    mid-flight kill-switch exposure break (kept under
+                    intent-to-treat).
+                  </li>
+                }
+                <li>
+                  Model mix balanced across arms:
+                  {{ r.modelMix.balanced ? "Yes" : "No (p < 0.01)" }}.
+                </li>
+              </ul>
+              <div class="tq-links" style="margin-top: 12px;">
+                <a
+                  class="btn-tonal"
+                  data-testid="link-iterate-flow"
+                  [routerLink]="['/processes', 'quality']"
+                  [queryParams]="{ from: primaryTreatmentFlowHash() }"
+                  >Iterate on this flow</a
+                >
+              </div>
+            </article>
+          </div>
+        }
+      }
     } @else if (!summary()) {
       @if (error(); as err) {
         <div
@@ -127,6 +654,16 @@ interface MetricRow {
             >
               Settings → Tasks
             </a>
+            @if (canAdmin()) {
+              <button
+                type="button"
+                class="btn-tonal"
+                data-testid="btn-new-experiment"
+                (click)="showCreateSheet.set(true)"
+              >
+                New experiment
+              </button>
+            }
             <a
               class="btn-text"
               routerLink="/processes/quality"
@@ -154,6 +691,15 @@ interface MetricRow {
               </p>
             </div>
             <div class="headline-actions">
+              @if (expOptions().length > 1) {
+                <g-pill-select
+                  testid="pill-qa-experiment"
+                  ariaLabel="Experiment"
+                  [options]="expOptions()"
+                  [value]="selectedExpId() || expOptions()[0].value"
+                  (valueChange)="setExp($event)"
+                />
+              }
               <span
                 [class]="'status-pill tabular ' + rollout().tone"
                 data-testid="qa-rollout-pill"
@@ -166,6 +712,16 @@ interface MetricRow {
                 />
                 {{ rollout().label }}
               </span>
+              @if (canAdmin()) {
+                <button
+                  type="button"
+                  class="btn-tonal"
+                  data-testid="btn-new-experiment"
+                  (click)="showCreateSheet.set(true)"
+                >
+                  New experiment
+                </button>
+              }
               <a
                 class="btn-tonal"
                 routerLink="/settings/tasks"
@@ -212,8 +768,8 @@ interface MetricRow {
               <g-status-icon tone="error" kind="blocked" />
               <span>
                 Safety guardrail tripped:
-                {{ (qa.circuitBreaker.reasons ?? []).join(" · ") }}. New
-                work trees run without enforcement until the rollout is reset.
+                {{ (qa.circuitBreaker.reasons ?? []).join(" · ") }}. New work
+                trees run without enforcement until the rollout is reset.
               </span>
             </p>
           }
@@ -261,8 +817,8 @@ interface MetricRow {
               <div class="tq-row tq-row-head" role="row">
                 <span role="columnheader">Measure</span>
                 <span role="columnheader" class="tabular"
-                  >{{ arm() }} ·
-                  {{ qa.treatment.assignedOrigins }} work trees</span
+                  >{{ arm() }} · {{ qa.treatment.assignedOrigins }} work
+                  trees</span
                 >
                 <span role="columnheader" class="tabular"
                   >Control · {{ qa.control.assignedOrigins }} work trees</span
@@ -470,9 +1026,34 @@ interface MetricRow {
         </article>
       }
     }
+
+    @if (showCreateSheet()) {
+      <g-qa-experiment-sheet
+        [preselectFlow]="createExpFlow()"
+        (dismiss)="showCreateSheet.set(false)"
+        (done)="onCreated($event)"
+      />
+    }
+
+    @if (showStartDialog() && exp()) {
+      @let detail = exp()!;
+      <g-qa-start-dialog
+        [expId]="detail.id"
+        [n]="detail.plan.plannedOriginsPerArm * detail.arms.length"
+        [flowHash]="primaryTreatmentFlowHash()"
+        [splitLabel]="splitLabel(detail)"
+        [scopeLabel]="
+          detail.scope.repos.length > 0
+            ? detail.scope.repos.join(', ')
+            : 'configured repositories'
+        "
+        (dismiss)="showStartDialog.set(false)"
+        (done)="onStarted()"
+      />
+    }
   `,
 })
-export class TelemetryQualityComponent {
+export class TelemetryQualityComponent implements OnInit {
   readonly summary = input<QASummary | null>(null);
   readonly error = input<string | null>(null);
   readonly deniedReason = input<string | null>(null);
@@ -480,10 +1061,281 @@ export class TelemetryQualityComponent {
   readonly repo = input<string>("");
   readonly retry = output<void>();
 
+  private readonly route = inject(ActivatedRoute);
+  private readonly router = inject(Router);
+  private readonly api = inject(GrainApi);
+  private readonly access = inject(AccessService);
+  private readonly snackbar = inject(SnackbarService);
+
   protected readonly pct = formatPct;
   protected readonly ms = formatCheckDurationMs;
   protected readonly stage = stageWords;
 
+  readonly expLoading = signal(false);
+  readonly expError = signal("");
+  readonly exps = signal<QAExperimentSummary[]>([]);
+  readonly selectedExpId = signal<string>("");
+  readonly exp = signal<QAExperimentDetail | null>(null);
+  readonly res = signal<QAExperimentResults | null>(null);
+
+  readonly showCreateSheet = signal(false);
+  readonly showStartDialog = signal(false);
+  readonly createExpFlow = signal<string | null>(null);
+
+  readonly expDenied = computed(
+    () => !this.deniedReason() && !this.summary() && !this.canReadExperiments(),
+  );
+
+  readonly activeV2Mode = computed(() => {
+    const id = this.selectedExpId();
+    if (!id || id.startsWith("legacy")) return false;
+    return (
+      this.exps().some((e) => e.id === id && !e.legacy) ||
+      this.exp()?.id === id ||
+      this.expLoading() ||
+      Boolean(this.expError())
+    );
+  });
+
+  readonly expOptions = computed<PillOption[]>(() => {
+    const list = this.exps();
+    const ordered = [
+      ...list.filter((e) => e.state === "running"),
+      ...list.filter(
+        (e) => e.state === "stopped" && !e.id.startsWith("legacy"),
+      ),
+      ...list.filter((e) => e.state === "draft"),
+      ...list.filter(
+        (e) => e.state === "archived" || e.id.startsWith("legacy"),
+      ),
+    ];
+    return ordered.map((e) => ({ value: e.id, label: e.name }));
+  });
+
+  readonly haltableArmId = computed<string | null>(() => {
+    const d = this.exp();
+    if (!d) return null;
+    const activeTreatments = d.arms.filter(
+      (a) => a.id !== "control" && !a.halted,
+    );
+    return activeTreatments.length >= 2 ? activeTreatments[0].id : null;
+  });
+
+  constructor() {
+    this.route.queryParams.pipe(takeUntilDestroyed()).subscribe((q) => {
+      if (q["createExp"]) {
+        this.createExpFlow.set(
+          typeof q["flow"] === "string" ? q["flow"] : null,
+        );
+        this.showCreateSheet.set(true);
+        void this.router.navigate([], {
+          queryParams: { createExp: null, flow: null },
+          queryParamsHandling: "merge",
+          replaceUrl: true,
+        });
+      }
+      const qpExp = typeof q["exp"] === "string" ? q["exp"] : "";
+      if (qpExp && qpExp !== this.selectedExpId()) {
+        this.selectedExpId.set(qpExp);
+        if (!qpExp.startsWith("legacy")) {
+          void this.loadExp(qpExp);
+        }
+      }
+    });
+  }
+
+  ngOnInit(): void {
+    void this.loadExperiments();
+  }
+
+  canReadExperiments(): boolean {
+    return this.access.can("GET /api/qa/experiments");
+  }
+
+  canAdmin(): boolean {
+    return this.access.can("POST /api/qa/experiments");
+  }
+
+  async loadExperiments(): Promise<void> {
+    if (!this.canReadExperiments()) return;
+    this.expError.set("");
+    try {
+      const resp = (await this.api
+        .get("GET /api/qa/experiments", undefined, "limit=50")
+        .catch(() => null)) as { experiments?: QAExperimentSummary[] } | null;
+      const list = Array.isArray(resp?.experiments) ? resp.experiments : [];
+      this.exps.set(list);
+      const qpExp = this.route.snapshot.queryParams["exp"];
+      const preferred =
+        (typeof qpExp === "string" && list.find((e) => e.id === qpExp)?.id) ||
+        list.find((e) => e.state === "running" && !e.id.startsWith("legacy"))
+          ?.id ||
+        list.find((e) => !e.id.startsWith("legacy"))?.id ||
+        "";
+      if (preferred) {
+        this.selectedExpId.set(preferred);
+        await this.loadExp(preferred);
+      }
+    } catch (e: unknown) {
+      this.expError.set(String(e));
+    }
+  }
+
+  setExp(id: string): void {
+    this.selectedExpId.set(id);
+    void this.router.navigate([], {
+      queryParams: { exp: id },
+      queryParamsHandling: "merge",
+    });
+    if (!id.startsWith("legacy")) {
+      void this.loadExp(id);
+    }
+  }
+
+  async loadExp(id?: string): Promise<void> {
+    if (!id || id.startsWith("legacy") || !this.canReadExperiments()) return;
+    this.expLoading.set(true);
+    this.expError.set("");
+    try {
+      const rawDetail = (await this.api.get("GET /api/qa/experiments/{id}", {
+        id,
+      })) as QAExperimentDetail | { experiment: QAExperimentDetail } | null;
+      if (!rawDetail) return;
+      const detail =
+        "experiment" in rawDetail ? rawDetail.experiment : rawDetail;
+      this.exp.set(detail);
+      if (detail.state !== "draft") {
+        const results = (await this.api.get(
+          "GET /api/qa/experiments/{id}/results",
+          { id },
+        )) as QAExperimentResults | null;
+        this.res.set(results);
+      } else {
+        this.res.set(null);
+      }
+    } catch (e: unknown) {
+      this.expError.set(String(e));
+    } finally {
+      this.expLoading.set(false);
+    }
+  }
+
+  enrolledForArm(armId: string): number {
+    return (
+      this.res()?.srm.counts[armId] ?? this.exp()?.enrolledByArm?.[armId] ?? 0
+    );
+  }
+
+  primaryTreatmentFlowHash(): string {
+    const arms = this.exp()?.arms ?? [];
+    const treat = arms.find((a) => a.id !== "control") ?? arms[1] ?? arms[0];
+    return treat?.flowHash ?? "";
+  }
+
+  splitLabel(detail: QAExperimentDetail): string {
+    return detail.arms.map((a) => `${a.label} ${a.weight}%`).join(" / ");
+  }
+
+  verdictTone(
+    status: string,
+  ): "healthy" | "reply" | "error" | "blast" | "neutral" {
+    switch (status.toLowerCase()) {
+      case "better":
+        return "healthy";
+      case "provisional":
+      case "leading":
+        return "reply";
+      case "halted":
+      case "worse":
+        return "error";
+      case "trailing":
+        return "blast";
+      default:
+        return "neutral";
+    }
+  }
+
+  verdictKind(status: string): string {
+    switch (status.toLowerCase()) {
+      case "better":
+        return "ok";
+      case "provisional":
+      case "leading":
+        return "progress";
+      case "halted":
+      case "worse":
+        return "error";
+      case "trailing":
+        return "warning";
+      default:
+        return "idle";
+    }
+  }
+
+  auditMismatches(): string {
+    return (
+      this.res()
+        ?.assignmentAudit.mismatches.map(
+          (m) =>
+            `${m.rootOrigin} (expected ${m.expectedArm}, got ${m.actualArm})`,
+        )
+        .join(", ") || "none"
+    );
+  }
+
+  memoryWrites(): string {
+    const entries = Object.entries(
+      this.res()?.limitations.memoryWritesByArm ?? {},
+    );
+    if (entries.length === 0) return "0 writes";
+    return entries.map(([k, v]) => `${v} from ${k}`).join(", ");
+  }
+
+  openStartDialog(): void {
+    this.showStartDialog.set(true);
+  }
+
+  async haltSingleArm(armId: string): Promise<void> {
+    await this.transition("halt-arm", armId);
+  }
+
+  async transition(action: string, armId?: string): Promise<void> {
+    const id = this.selectedExpId() || this.exp()?.id;
+    if (!id) return;
+    try {
+      const body: Record<string, unknown> = {
+        action,
+        reason: `Operator ${action} from Telemetry Quality view`,
+      };
+      if (action === "stop") {
+        body["decision"] = "inconclusive";
+      }
+      if (armId) {
+        body["arm"] = armId;
+      }
+      await this.api.post(
+        "POST /api/qa/experiments/{id}/transition",
+        { id },
+        body,
+      );
+      this.snackbar.show(`Experiment updated (${action}).`);
+      await this.loadExperiments();
+    } catch (e: unknown) {
+      this.snackbar.show(`Failed to update experiment: ${String(e)}`);
+    }
+  }
+
+  onCreated(id: string): void {
+    this.showCreateSheet.set(false);
+    void this.loadExperiments().then(() => this.setExp(id));
+  }
+
+  onStarted(): void {
+    this.showStartDialog.set(false);
+    void this.loadExperiments();
+  }
+
+  // Legacy summary computed helpers (M7 / v1 epoch fallback)
   protected readonly arm = computed(() => {
     const qa = this.summary();
     return qa ? armLabel(qa) : "Treatment";
@@ -499,7 +1351,6 @@ export class TelemetryQualityComponent {
     );
   });
 
-  /** Off and nothing to read: one designed empty state. */
   protected readonly isOff = computed(() => {
     const qa = this.summary();
     return (
@@ -606,7 +1457,8 @@ export class TelemetryQualityComponent {
         diff: rateDiffWords(t.postMergeChurn7dRate, c.postMergeChurn7dRate),
       },
     ];
-    const isCostZero = (qa as QASummary & { costMeasured?: boolean }).costMeasured === false;
+    const isCostZero =
+      (qa as QASummary & { costMeasured?: boolean }).costMeasured === false;
     rows.push(
       this.timeRow(
         "time-to-pr",
@@ -629,7 +1481,11 @@ export class TelemetryQualityComponent {
       {
         id: "tokens",
         label: "Tokens per work tree",
-        tip: cupedTip("Tokens per work tree", qa.tokensCuped, tokenWords) + (isCostZero ? " Token usage (provider does not report dollar billing)." : ""),
+        tip:
+          cupedTip("Tokens per work tree", qa.tokensCuped, tokenWords) +
+          (isCostZero
+            ? " Token usage (provider does not report dollar billing)."
+            : ""),
         treatment: qa.tokensCuped.treatN
           ? tokenWords(qa.tokensCuped.adjTreatMean)
           : "—",
@@ -663,8 +1519,8 @@ export class TelemetryQualityComponent {
         id: "thread-cuts",
         label: "Conversations trimmed for length",
         tip: "Share of agent runs whose context was cut to fit the model window.",
-        treatment: `${formatPct(t.threadCutShare)} (${t.threadCuts})`,
-        control: `${formatPct(c.threadCutShare)} (${c.threadCuts})`,
+        treatment: `${formatPct(t.threadCuts ? t.threadCutShare : 0)} (${t.threadCuts})`,
+        control: `${formatPct(c.threadCuts ? c.threadCutShare : 0)} (${c.threadCuts})`,
         diff: rateDiffWords(t.threadCutShare, c.threadCutShare),
       },
     );

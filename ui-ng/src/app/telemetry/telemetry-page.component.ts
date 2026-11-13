@@ -179,75 +179,77 @@ const TABS: readonly { id: TelemetryTab; label: string }[] = [
                 All repositories
               </span>
             } @else {
-            <button
-              #repoTrigger
-              type="button"
-              class="pop-trigger"
-              [class.is-active]="!!selectedRepo()"
-              data-testid="telemetry-repo-trigger"
-              aria-haspopup="listbox"
-              [attr.aria-expanded]="openMenu() === 'repo'"
-              aria-controls="telemetry-repo-menu"
-              (click)="toggleMenu('repo', $event)"
-              (keydown)="onMenuTriggerKeydown('repo', $event)"
-            >
-              <span>{{
-                selectedRepo() ? "Repo: " + selectedRepo() : "All repositories"
-              }}</span>
-              <svg
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                aria-hidden="true"
+              <button
+                #repoTrigger
+                type="button"
+                class="pop-trigger"
+                [class.is-active]="!!selectedRepo()"
+                data-testid="telemetry-repo-trigger"
+                aria-haspopup="listbox"
+                [attr.aria-expanded]="openMenu() === 'repo'"
+                aria-controls="telemetry-repo-menu"
+                (click)="toggleMenu('repo', $event)"
+                (keydown)="onMenuTriggerKeydown('repo', $event)"
               >
-                <path d="M7 10l5 5 5-5z" fill="currentColor" />
-              </svg>
-            </button>
-            @if (openMenu() === "repo") {
-              <ul
-                #repoListbox
-                class="pop-menu"
-                id="telemetry-repo-menu"
-                role="listbox"
-                tabindex="-1"
-                aria-label="Filter by repository"
-                data-testid="telemetry-repo-menu"
-                (keydown)="onListboxKeydown('repo', $event)"
-              >
-                <li role="none">
-                  <button
-                    type="button"
-                    class="pop-item"
-                    role="option"
-                    [disabled]="!canReadAllReposMetrics()"
-                    [attr.aria-selected]="!selectedRepo()"
-                    (click)="pickRepo('')"
-                  >
-                    <span>All repositories</span>
-                    @if (!selectedRepo()) {
-                      <span aria-hidden="true">✓</span>
-                    }
-                  </button>
-                </li>
-                @for (r of repoOptions(); track r) {
+                <span>{{
+                  selectedRepo()
+                    ? "Repo: " + selectedRepo()
+                    : "All repositories"
+                }}</span>
+                <svg
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                >
+                  <path d="M7 10l5 5 5-5z" fill="currentColor" />
+                </svg>
+              </button>
+              @if (openMenu() === "repo") {
+                <ul
+                  #repoListbox
+                  class="pop-menu"
+                  id="telemetry-repo-menu"
+                  role="listbox"
+                  tabindex="-1"
+                  aria-label="Filter by repository"
+                  data-testid="telemetry-repo-menu"
+                  (keydown)="onListboxKeydown('repo', $event)"
+                >
                   <li role="none">
                     <button
                       type="button"
                       class="pop-item"
                       role="option"
-                      [attr.aria-selected]="selectedRepo() === r"
-                      [attr.data-testid]="'telemetry-repo-opt-' + r"
-                      (click)="pickRepo(r)"
+                      [disabled]="!canReadAllReposMetrics()"
+                      [attr.aria-selected]="!selectedRepo()"
+                      (click)="pickRepo('')"
                     >
-                      <span class="tabular">{{ r }}</span>
-                      @if (selectedRepo() === r) {
+                      <span>All repositories</span>
+                      @if (!selectedRepo()) {
                         <span aria-hidden="true">✓</span>
                       }
                     </button>
                   </li>
-                }
-              </ul>
-            }
+                  @for (r of repoOptions(); track r) {
+                    <li role="none">
+                      <button
+                        type="button"
+                        class="pop-item"
+                        role="option"
+                        [attr.aria-selected]="selectedRepo() === r"
+                        [attr.data-testid]="'telemetry-repo-opt-' + r"
+                        (click)="pickRepo(r)"
+                      >
+                        <span class="tabular">{{ r }}</span>
+                        @if (selectedRepo() === r) {
+                          <span aria-hidden="true">✓</span>
+                        }
+                      </button>
+                    </li>
+                  }
+                </ul>
+              }
             }
           </div>
 
@@ -361,7 +363,7 @@ const TABS: readonly { id: TelemetryTab; label: string }[] = [
               (click)="pickTab(t.id)"
               (keydown)="onTabKeydown($event, t.id)"
             >
-              @if (t.id === 'quality' && qaDigest()?.state === 'halted') {
+              @if (t.id === "quality" && qaDigest()?.state === "halted") {
                 <g-status-icon tone="error" kind="error" />
               }
               {{ t.label }}
@@ -1616,7 +1618,9 @@ export class TelemetryPageComponent implements OnInit {
   protected readonly qualityPeriod = computed<string | null>(() => {
     if (this.tab() !== "quality") return null;
     const e = experimentScope(this.qaSummary());
-    return e ? experimentPeriodLabel(e) : `Legacy epoch lookback: ${this.window()}`;
+    return e
+      ? experimentPeriodLabel(e)
+      : `Legacy epoch lookback: ${this.window()}`;
   });
 
   /** One-line Overview digest; reuses the Quality tab's verdict wording. */
