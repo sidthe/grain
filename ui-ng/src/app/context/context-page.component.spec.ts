@@ -829,4 +829,56 @@ describe("ContextPageComponent", () => {
     await settle(fixture);
     expect(root.querySelector('[data-testid="fs-scheme-config"]')).toBeNull();
   });
+
+  it("fails closed before config loads and blocks whitespace/traversal repo bypasses", async () => {
+    const api = new FakeContextApi();
+    let resolveCfg!: (v: GrainConfig) => void;
+    api.config = () =>
+      new Promise<GrainConfig>((resolve) => {
+        resolveCfg = resolve;
+      });
+
+    localStorage.clear();
+    TestBed.configureTestingModule({
+      imports: [ContextPageComponent],
+      providers: [
+        provideRouter([]),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => NEVER } },
+      ],
+    });
+    const access = TestBed.inject(AccessService);
+    const fixture = TestBed.createComponent(ContextPageComponent);
+    fixture.detectChanges();
+
+    // Before /api/config completes, deployment writes and config:// stay denied.
+    const root = fixture.nativeElement as HTMLElement;
+    expect(access.configLoaded()).toBe(false);
+    expect(root.querySelector('[data-testid="memory-save-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="fs-scheme-config"]')).toBeNull();
+
+    resolveCfg({
+      version: "v3.5.0-test",
+      targetRepos: ["acme/api"],
+      access: {
+        role: "repo-dev",
+        roles: ["repo-dev"],
+        full: false,
+        scopes: ["memory:read", "memory:write", "settings:read"],
+        repoLimits: {
+          "memory:read": ["acme/api"],
+          "memory:write": ["acme/api"],
+        },
+      },
+    });
+    await settle(fixture);
+
+    expect(
+      root.querySelector('[data-testid="memory-scope-title"]')?.textContent,
+    ).toContain("acme/api");
+    expect(
+      api.calls.some((c) => c.route === "GET /api/memory" && !c.query),
+    ).toBe(false);
+    expect(root.querySelector('[data-testid="fs-scheme-config"]')).toBeNull();
+  });
 });
