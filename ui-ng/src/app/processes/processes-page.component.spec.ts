@@ -356,6 +356,74 @@ class FakeProcessesApi {
     if (route === "GET /api/repos/{owner}/{name}/workflows") {
       return Promise.resolve(structuredClone(this.repoWfs));
     }
+    if (route === "GET /api/qa/flows") {
+      return Promise.resolve({
+        flows: [
+          {
+            id: "golden-v1-minimal",
+            label: "Golden V1 Minimal",
+            summary:
+              "Staging-branch isolation + <400ms Go AST/YAML S3 checks + T2/T3 S4 verifier.",
+            injectSkill: true,
+            skillBytes: 1120,
+            stagingIsolation: true,
+            enableS4: true,
+            maxS4RepairRounds: 1,
+            rules: [
+              {
+                id: "go-test-assertion-floor",
+                stage: "S3",
+                label: "Go test assertion & integrity floor",
+                summary:
+                  "Rejects assertion-free tests and weakened existing assertions.",
+                severity: "block",
+                enabled: true,
+                targetPaths: ["*_test.go"],
+              },
+              {
+                id: "s4-inquisitor-verifier",
+                stage: "S4",
+                label: "Fresh-context S4 verifier + 6-filter Inquisitor",
+                summary: "Runs one bounded fresh-context pass on T2/T3 diffs.",
+                severity: "block",
+                enabled: true,
+                targetPaths: ["T2/T3 multi-package diffs"],
+              },
+            ],
+          },
+          {
+            id: "deterministic-s3-only",
+            label: "Deterministic S3 Only",
+            summary: "Zero-token pure-Go S3 checks with S4 disabled.",
+            injectSkill: true,
+            skillBytes: 1120,
+            stagingIsolation: true,
+            enableS4: false,
+            maxS4RepairRounds: 0,
+            rules: [
+              {
+                id: "go-test-assertion-floor",
+                stage: "S3",
+                label: "Go test assertion & integrity floor",
+                summary:
+                  "Rejects assertion-free tests and weakened existing assertions.",
+                severity: "block",
+                enabled: true,
+                targetPaths: ["*_test.go"],
+              },
+            ],
+          },
+        ],
+      });
+    }
+    if (route === "GET /api/settings") {
+      return Promise.resolve({
+        qaEnabled: true,
+        qaFlowId: "golden-v1-minimal",
+        qaRolloutPct: 50,
+        qaShadowOnControl: true,
+      });
+    }
     return Promise.resolve({});
   };
 
@@ -1003,5 +1071,51 @@ describe("ProcessesPageComponent (D-9)", () => {
     expect(
       root.querySelectorAll('[data-testid^="decl-repo-row-"]').length,
     ).toBe(2);
+  });
+
+  it("renders Quality checks flow packages, active rollout badge, and rule inspector", async () => {
+    const harness = await RouterTestingHarness.create("/processes/quality");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    const goldenRow = root.querySelector<HTMLButtonElement>(
+      '[data-testid="qa-flow-row-golden-v1-minimal"]',
+    )!;
+    const detRow = root.querySelector<HTMLButtonElement>(
+      '[data-testid="qa-flow-row-deterministic-s3-only"]',
+    )!;
+    expect(goldenRow).not.toBeNull();
+    expect(detRow).not.toBeNull();
+    expect(goldenRow.textContent).toContain("Active (50%)");
+    expect(detRow.textContent).toContain("Available");
+
+    const inspTitle = root.querySelector(
+      '[data-testid="qa-flow-insp-title"]',
+    )!;
+    const detailCard = root.querySelector(
+      '[data-testid="qa-flow-detail-card"]',
+    )!;
+    expect(inspTitle.textContent).toContain("Golden V1 Minimal");
+    expect(detailCard.textContent).toContain("T2/T3 diffs (max 1 round)");
+    expect(
+      root
+        .querySelector('[data-testid="qa-configure-rollout-link"]')
+        ?.getAttribute("href"),
+    ).toBe("/settings/tasks");
+    expect(
+      root.querySelector(
+        '[data-testid="qa-rule-card-go-test-assertion-floor"]',
+      ),
+    ).not.toBeNull();
+
+    // Selecting deterministic-s3-only updates the inspector
+    detRow.click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="qa-flow-insp-title"]')!.textContent,
+    ).toContain("Deterministic S3 Only");
+    expect(
+      root.querySelector('[data-testid="qa-flow-detail-card"]')!.textContent,
+    ).toContain("disabled");
   });
 });

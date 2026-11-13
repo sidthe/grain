@@ -2414,3 +2414,12 @@ button.more-sheet-item {
 .btn-outlined.danger:hover:not(:disabled) {
   background: var(--gm-color-error-container);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0s !important;
+    animation-duration: 0s !important;
+  }
+}

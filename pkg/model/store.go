@@ -5541,6 +5541,9 @@ func (s *Store) GitPushBranch(ctx context.Context, sandbox string) (branch strin
 	if closedInPlace > 0 {
 		return "", false, nil
 	}
+	if assign, _, qaErr := s.ActiveQAAssignmentForTask(ctx, taskID); qaErr == nil && assign != nil && assign.Arm == QAArmTreatment {
+		return QAStageBranchName(taskID), true, nil
+	}
 	return Task{ID: taskID, Branch: stored.String}.BranchName(), true, nil
 }
 

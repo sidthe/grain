@@ -18,7 +18,8 @@ import type { Task } from "../api/models";
 // suites.go, composition.go, repo_workflows.go, declarations.go, and
 // declaration_acceptance.go.
 
-export type ProcessTab = "schedules" | "templates" | "suites" | "declarations";
+export type ProcessTab =
+  "schedules" | "templates" | "suites" | "declarations" | "quality";
 
 export interface WriteTarget {
   repo: string;

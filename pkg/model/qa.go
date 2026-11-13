@@ -46,7 +46,76 @@ const (
 	QAComplexityLow    = "low"
 	QAComplexityMedium = "medium"
 	QAComplexityHigh   = "high"
+
+	// QAStageBranchPrefix namespaces pre-PR staging branches pushed by treatment-arm sandboxes
+	// before S3/S4 quality verification promotes commits to the task's live PR branch.
+	QAStageBranchPrefix = "grain-qa-stage/"
 )
+
+// QAStageBranchName returns the isolated staging branch ref name for taskID.
+func QAStageBranchName(taskID string) string {
+	return QAStageBranchPrefix + strings.TrimSpace(taskID)
+}
+
+// ResolveQARootOrigin normalizes a task's WorkOrigin into a sticky root-origin key.
+//
+// It preserves repository-qualified origins such as "acme/widgets#12" intact so
+// Store.ActiveQAAssignmentForTask, Store.GitPushBranch, and qa.ResolveRootOrigin
+// always agree on the same key.
+func ResolveQARootOrigin(workOrigin WorkOrigin, taskID string) string {
+	s := strings.TrimSpace(string(workOrigin))
+	if s != "" {
+		return s
+	}
+	id := strings.TrimSpace(taskID)
+	if id == "" {
+		return ""
+	}
+	return "task:" + id
+}
+
+// TaskEligibleForQAStaging reports whether task pushes its own candidate PR branch (and is not
+// an interactive console session, an in-place review push, a comments-only review, or an external PR).
+func TaskEligibleForQAStaging(task Task) bool {
+	if task.Target == nil || IsConfigRepo(*task.Target) || task.ChangeTarget != nil {
+		return false
+	}
+	if task.Interactive || task.IsConsoleSession() {
+		return false
+	}
+	for _, l := range task.Links {
+		switch l.Kind {
+		case LinkPushesReviewedBranch, LinkReviewCommentsOnly, LinkExternalPR:
+			return false
+		}
+	}
+	return true
+}
+
+// ActiveQAAssignmentForTask returns the active sticky QAAssignment and QAConfig for taskID when
+// deployment-wide QA is enabled and taskID is eligible for pre-PR quality gating.
+func (s *Store) ActiveQAAssignmentForTask(ctx context.Context, taskID string) (*QAAssignment, QAConfig, error) {
+	if s == nil || strings.TrimSpace(taskID) == "" {
+		return nil, QAConfig{}, nil
+	}
+	var rawQA sql.NullString
+	if err := s.db.QueryRowContext(ctx, "SELECT `qa` FROM `grain_config` WHERE `id` = 1").Scan(&rawQA); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, QAConfig{}, nil
+		}
+		return nil, QAConfig{}, err
+	}
+	qaCfg, err := DecodeQAConfig(rawQA.String)
+	if err != nil || !qaCfg.Enabled {
+		return nil, qaCfg, nil
+	}
+	task, err := s.GetTask(ctx, taskID)
+	if err != nil || task == nil || !TaskEligibleForQAStaging(*task) {
+		return nil, qaCfg, err
+	}
+	assign, err := s.QAAssignment(ctx, ResolveQARootOrigin(task.WorkOrigin, task.ID), qaCfg.EpochOrDefault())
+	return assign, qaCfg, err
+}
 
 // QAFlowIDs returns the supported quality control flow identifiers in UI picker order.
 func QAFlowIDs() []string {

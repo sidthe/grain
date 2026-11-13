@@ -3028,7 +3028,7 @@ func runOneWithFramework(ctx context.Context, deps Deps, d dispatch.Dispatch, pr
 	obs, _ := deps.Store.GetObservation(ctx, task.ID)
 	var preRunBranchSHA string
 	if deps.Client != nil && task.Target != nil && (d.Attempt > 1 || obs.RepairInFlight() || hasFixesLink(*task)) {
-		if head, err := deps.Client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, task.BranchName()); err == nil && head != nil {
+		if head, err := effectiveTaskPushHead(ctx, deps.Store, deps.Client, *task); err == nil && head != nil {
 			preRunBranchSHA = head.SHA
 		}
 	}
@@ -3126,7 +3126,7 @@ func afterAgentRun(ctx context.Context, deps Deps, task model.Task, runID string
 			// usage-limit-paused repair as completed.
 			salvage := true
 			if preRunBranchSHA != "" && deps.Client != nil && task.Target != nil {
-				head, err := deps.Client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, task.BranchName())
+				head, err := effectiveTaskPushHead(ctx, deps.Store, deps.Client, task)
 				salvage = err == nil && head != nil && head.SHA != preRunBranchSHA
 			} else if obs, err := deps.Store.GetObservation(ctx, task.ID); err == nil && obs.RepairInFlight() {
 				salvage = false

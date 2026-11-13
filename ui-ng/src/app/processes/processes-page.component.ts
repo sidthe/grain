@@ -32,6 +32,7 @@ import {
   viewChild,
 } from "@angular/core";
 import { Router, RouterLink } from "@angular/router";
+import type { QAFlowSpec } from "../api/models";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
 import { TaskFeedStore } from "../services/task-feed.service";
@@ -91,6 +92,11 @@ const TABS: readonly { id: ProcessTab; label: string; tip: string }[] = [
     id: "declarations",
     label: "Repo Workflows & Declarations",
     tip: "Repository .grain/ declarations, workflows, and capability acceptances.",
+  },
+  {
+    id: "quality",
+    label: "Quality checks",
+    tip: "Pre-PR deterministic and fresh-context quality flow packages and rules.",
   },
 ];
 
@@ -221,7 +227,8 @@ type SuitesPaneView = "suites" | "runs";
         </div>
         <p class="view-subtitle">
           Standing schedules, event triggers, reusable templates, multi-pass
-          suites, and repository <code>.grain/</code> declarations.
+          suites, repository <code>.grain/</code> declarations, and pre-PR
+          quality checks.
         </p>
 
         <nav class="tab-strip" aria-label="Process sections">
@@ -635,6 +642,72 @@ type SuitesPaneView = "suites" | "runs";
                               >Inspect .grain/ declarations & workflows</span
                             >
                           }
+                        </div>
+                      </button>
+                    </li>
+                  }
+                </ul>
+              }
+            }
+
+            @case ("quality") {
+              @if (!store.qaFlowsLoaded()) {
+                <div class="empty-state" data-testid="quality-flows-loading">
+                  <p>Loading quality flow packages…</p>
+                </div>
+              } @else if (!store.canReadGlobalSettings()) {
+                <div class="empty-state" data-testid="quality-flows-denied">
+                  <p>
+                    Deployment-wide <code>settings:read</code> permission is
+                    required to inspect quality control flow packages.
+                  </p>
+                </div>
+              } @else if (filteredQaFlows().length === 0) {
+                <div class="empty-state" data-testid="quality-flows-empty">
+                  <p>No quality control flow packages match this filter.</p>
+                </div>
+              } @else {
+                <ul class="proc-list" data-testid="quality-flows-list">
+                  @for (fl of filteredQaFlows(); track fl.id) {
+                    @let active = isActiveQaFlow(fl.id);
+                    <li class="proc-li">
+                      <button
+                        type="button"
+                        class="proc-row"
+                        [class.is-selected]="selectedQaFlow()?.id === fl.id"
+                        [attr.aria-current]="
+                          selectedQaFlow()?.id === fl.id ? 'true' : null
+                        "
+                        [attr.data-testid]="'qa-flow-row-' + fl.id"
+                        (click)="selectQaFlow(fl.id, true)"
+                        (keydown.space)="
+                          selectQaFlow(fl.id, true); $event.preventDefault()
+                        "
+                      >
+                        <div class="proc-row-top">
+                          <span
+                            [class]="
+                              active
+                                ? 'status-pill healthy'
+                                : 'status-pill neutral'
+                            "
+                          >
+                            <g-status-icon
+                              [tone]="active ? 'healthy' : 'neutral'"
+                              [kind]="active ? 'healthy' : 'neutral'"
+                            />
+                            {{ active ? activeQaBadgeLabel() : "Available" }}
+                          </span>
+                          <span class="proc-row-title mono">{{ fl.id }}</span>
+                        </div>
+                        <div class="proc-row-sub">
+                          <span>{{ enabledRuleCount(fl) }} active rules</span>
+                          <span
+                            >·
+                            {{
+                              fl.enableS4 ? "S3 + T2/T3 S4" : "S3 only"
+                            }}</span
+                          >
                         </div>
                       </button>
                     </li>
@@ -1522,6 +1595,131 @@ type SuitesPaneView = "suites" | "runs";
                   <p>
                     Select a repository to inspect its <code>.grain/</code>
                     declarations, sync errors, and workflow overrides.
+                  </p>
+                </div>
+              }
+            }
+
+            @case ("quality") {
+              @if (selectedQaFlow(); as fl) {
+                <div class="proc-insp-head">
+                  <div class="proc-insp-top">
+                    <div class="headline-cluster">
+                      <button
+                        type="button"
+                        class="btn-text proc-mobile-back"
+                        data-testid="qa-mobile-back"
+                        (click)="closeMobileQaDetail()"
+                      >
+                        ← Back
+                      </button>
+                      <h2
+                        class="proc-insp-title"
+                        data-testid="qa-flow-insp-title"
+                      >
+                        {{ fl.label }}
+                      </h2>
+                    </div>
+                    @if (store.canReadGlobalSettings()) {
+                      <a
+                        routerLink="/settings/tasks"
+                        class="btn-tonal"
+                        style="flex-shrink: 0"
+                        data-testid="qa-configure-rollout-link"
+                      >
+                        Configure rollout
+                      </a>
+                    }
+                  </div>
+                </div>
+
+                <div class="proc-card" data-testid="qa-flow-detail-card">
+                  <p class="muted" style="margin: 0">
+                    {{ fl.summary }}
+                  </p>
+
+                  <div class="proc-meta-row" style="margin-top: 8px">
+                    <span class="tabular">
+                      Staging branch isolation:
+                      <strong>{{
+                        fl.stagingIsolation
+                          ? "refs/heads/grain-qa-stage/{task-id}"
+                          : "off"
+                      }}</strong>
+                    </span>
+                    <span class="tabular">
+                      Coding contract:
+                      <strong>{{
+                        fl.injectSkill ? fl.skillBytes + " bytes" : "0 bytes"
+                      }}</strong>
+                    </span>
+                    <span class="tabular">
+                      S4 fresh-context verifier:
+                      <strong>{{
+                        fl.enableS4
+                          ? "T2/T3 diffs (max " +
+                            fl.maxS4RepairRounds +
+                            " round)"
+                          : "disabled"
+                      }}</strong>
+                    </span>
+                  </div>
+                </div>
+
+                <div class="proc-card" data-testid="qa-flow-rules-card">
+                  <h3 class="section-title">Stage checks &amp; invariants</h3>
+                  <ul class="proc-kv-list">
+                    @for (rule of fl.rules; track rule.id) {
+                      <li
+                        class="proc-kv-item"
+                        style="flex-direction: column; align-items: stretch; gap: 6px"
+                        [attr.data-testid]="'qa-rule-card-' + rule.id"
+                      >
+                        <div class="proc-qa-rule-head">
+                          <span
+                            [class]="
+                              rule.enabled
+                                ? 'status-pill healthy'
+                                : 'status-pill neutral'
+                            "
+                          >
+                            <g-status-icon
+                              [tone]="rule.enabled ? 'healthy' : 'neutral'"
+                              [kind]="rule.enabled ? 'healthy' : 'neutral'"
+                            />
+                            {{ rule.enabled ? rule.severity : "disabled" }}
+                          </span>
+                          <strong>{{ rule.label }}</strong>
+                          <code class="mono muted">{{ rule.id }}</code>
+                          <span
+                            class="ci-provider-tag"
+                            [gTip]="
+                              rule.stage === 'S3'
+                                ? 'Stage S3 — sub-second deterministic AST & diff check'
+                                : 'Stage S4 — 1-round fresh-context orthogonal diff verifier on T2/T3 changes'
+                            "
+                            >{{ rule.stage }}</span
+                          >
+                        </div>
+                        <p class="muted" style="margin: 0; font-size: 13px">
+                          {{ rule.summary }}
+                        </p>
+                        @if (rule.targetPaths.length > 0) {
+                          <div class="muted" style="font-size: 12px">
+                            Applies to:
+                            <code class="mono">{{
+                              rule.targetPaths.join(", ")
+                            }}</code>
+                          </div>
+                        }
+                      </li>
+                    }
+                  </ul>
+                </div>
+              } @else if (filteredQaFlows().length > 0) {
+                <div class="empty-state" data-testid="qa-flow-empty-inspector">
+                  <p>
+                    Select a quality control flow package to inspect its checks.
                   </p>
                 </div>
               }
@@ -2579,6 +2777,7 @@ type SuitesPaneView = "suites" | "runs";
 })
 export class ProcessesPageComponent implements OnInit, OnDestroy {
   readonly tab = input<string | undefined>(undefined);
+  readonly flow = input<string | undefined>(undefined);
   readonly new = input<string | undefined>(undefined);
   readonly launch = input<string | undefined>(undefined);
   readonly launchTemplate = input<string | undefined>(undefined);
@@ -2630,6 +2829,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly selectedSuiteId = signal<string | null>(null);
   protected readonly selectedSuiteRunId = signal<number | null>(null);
   protected readonly selectedDeclRepo = signal<string | null>(null);
+  protected readonly selectedQaFlowId = signal<string | null>(null);
   protected readonly mobileDetailOpen = signal(false);
 
   protected readonly scheduleComposition = signal<Composition | null>(null);
@@ -2726,6 +2926,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       raw === "templates" ||
       raw === "suites" ||
       raw === "declarations" ||
+      raw === "quality" ||
       raw === "schedules"
     ) {
       return raw;
@@ -2824,6 +3025,21 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       .filter((r) => !q || r.toLowerCase().includes(q));
   });
 
+  protected readonly filteredQaFlows = computed<QAFlowSpec[]>(() => {
+    const q = this.filter.query().trim().toLowerCase();
+    return this.store.qaFlows().filter((f) => {
+      if (!q) return true;
+      return `${f.id} ${f.label} ${f.summary}`.toLowerCase().includes(q);
+    });
+  });
+
+  protected readonly selectedQaFlow = computed<QAFlowSpec | null>(() => {
+    const visible = this.filteredQaFlows();
+    if (visible.length === 0) return null;
+    const id = this.selectedQaFlowId();
+    return visible.find((f) => f.id === id) ?? visible[0] ?? null;
+  });
+
   protected readonly selectedSchedule = computed(() => {
     const id = this.selectedScheduleId();
     return this.store.schedules().find((s) => s.id === id) ?? null;
@@ -2871,6 +3087,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       const tmpls = this.filteredTemplates();
       const suites = this.filteredSuites();
       const repos = this.filteredDeclRepos();
+      const qaFlows = this.filteredQaFlows();
       untracked(() => {
         if (!loaded) return;
         const isDesktop = (this.doc.defaultView?.innerWidth ?? 1280) >= 600;
@@ -2896,6 +3113,34 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
           repos[0]
         ) {
           this.selectDeclRepo(repos[0], false);
+        } else if (tab === "quality" && qaFlows.length > 0) {
+          const wanted = this.flow()?.trim();
+          const targetId =
+            wanted && qaFlows.some((f) => f.id === wanted)
+              ? wanted
+              : (this.selectedQaFlowId() ?? qaFlows[0].id);
+          if (this.selectedQaFlowId() !== targetId) {
+            this.selectedQaFlowId.set(targetId);
+          }
+        }
+      });
+    });
+
+    effect(() => {
+      const flowParam = this.flow()?.trim();
+      const tab = this.activeTab();
+      untracked(() => {
+        if (tab !== "quality") return;
+        const isDesktop = (this.doc.defaultView?.innerWidth ?? 1280) >= 600;
+        if (flowParam) {
+          this.selectedQaFlowId.set(flowParam);
+          if (!isDesktop) {
+            this.mobileDetailOpen.set(true);
+          }
+        } else if (isDesktop) {
+          this.selectedQaFlowId.set(this.filteredQaFlows()[0]?.id ?? null);
+        } else {
+          this.mobileDetailOpen.set(false);
         }
       });
     });
@@ -2973,7 +3218,43 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
           this.store.awaitingAcceptancesCount() ||
           this.store.knownRepos().length
         );
+      case "quality":
+        return this.store.qaFlows().length;
     }
+  }
+
+  protected selectQaFlow(id: string, fromClick: boolean): void {
+    this.selectedQaFlowId.set(id);
+    if (fromClick) {
+      this.mobileDetailOpen.set(true);
+      void this.router.navigate([], {
+        queryParams: { flow: id },
+        queryParamsHandling: "merge",
+      });
+    }
+  }
+
+  protected closeMobileQaDetail(): void {
+    this.mobileDetailOpen.set(false);
+    void this.router.navigate([], {
+      queryParams: { flow: null },
+      queryParamsHandling: "merge",
+    });
+  }
+
+  protected enabledRuleCount(flow: QAFlowSpec): number {
+    return (flow.rules ?? []).filter((r) => r.enabled).length;
+  }
+
+  protected isActiveQaFlow(id: string): boolean {
+    const r = this.store.qaRollout();
+    return !!(r?.enabled && r.flowId === id);
+  }
+
+  protected activeQaBadgeLabel(): string {
+    const r = this.store.qaRollout();
+    if (!r?.enabled) return "Available";
+    return `Active (${r.rolloutPct}%)`;
   }
 
   protected schedBadge = scheduleStatusBadge;

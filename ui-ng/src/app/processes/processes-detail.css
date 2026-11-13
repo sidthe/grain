@@ -173,6 +173,13 @@
   font-size: 13px;
 }
 
+.proc-qa-rule-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+}
+
 .g-dialog.is-drawer {
   width: min(680px, calc(100vw - 32px));
 }
@@ -207,7 +214,7 @@
 
 @media (max-width: 599.95px) {
   .proc-inspector {
-    padding: 14px 12px 24px;
+    padding: 14px 12px calc(var(--grain-bottombar-height, 92px) + 16px);
   }
 
   .g-dialog .segmented {

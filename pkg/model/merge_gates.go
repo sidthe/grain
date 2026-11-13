@@ -28,6 +28,7 @@ const (
 	GateCI             = "ci"
 	GateSecurityReview = "security-review"
 	GateReview         = "review"
+	GateQA             = "qa"
 	GateApproval       = "approval"
 )
 
@@ -45,6 +46,7 @@ var KnownOverrideGates = []string{
 	GateCI,
 	GateSecurityReview,
 	GateReview,
+	GateQA,
 }
 
 // MergeGateState is the current status of one merge gate on a task or PR.
@@ -321,7 +323,7 @@ func ComputeMergeGates(t Task, obs *Observation, targetStates map[string]State) 
 	if TaskPullRequest(t) == nil {
 		return nil
 	}
-	var secHold, secTask, reviewTask, pathTriggerHold, humanOnlyHold, brokenRulesHold string
+	var secHold, secTask, reviewTask, pathTriggerHold, humanOnlyHold, brokenRulesHold, qaHold string
 	var approvalMarker string
 	var triggerTasks []string
 	hasMergePolicyWithdrawn := false
@@ -329,6 +331,8 @@ func ComputeMergeGates(t Task, obs *Observation, targetStates map[string]State) 
 		switch l.Kind {
 		case LinkSecurityHold:
 			secHold = l.Target
+		case LinkQAHold:
+			qaHold = l.Target
 		case LinkSecurityReviewTask:
 			secTask = l.Target
 		case LinkReviewTask:
@@ -457,10 +461,33 @@ func ComputeMergeGates(t Task, obs *Observation, targetStates map[string]State) 
 		gates = append(gates, g)
 	}
 
+	// 2b. Pre-PR quality control gate (when held or carrying unresolved QA findings).
+	qaFindings := ReviewFindingsForGate(t, GateQA)
+	if qaHold != "" || len(qaFindings) > 0 {
+		g := MergeGate{ID: GateQA, Label: "Quality gate"}
+		switch {
+		case hasOv && GateOverriddenBy(GateQA, ovGates):
+			g.State = GateStateOverridden
+			g.Detail = formatOverrideDetail(ov)
+		case len(qaFindings) > 0:
+			g.State = GateStateFindings
+			g.Detail = qaFindings[len(qaFindings)-1].Summary
+			g.Overridable = true
+		case qaHold != "":
+			g.State = GateStateRunning
+			g.Detail = "pre-PR verification running"
+			g.Overridable = true
+		default:
+			g.State = GateStatePassed
+			g.Detail = "passed"
+		}
+		gates = append(gates, g)
+	}
+
 	// 3. Configured / trigger code review gate.
 	var codeFindings []ReviewFindingsRecord
 	for _, rf := range ReviewFindings(t) {
-		if rf.Gate != GateSecurityReview {
+		if rf.Gate != GateSecurityReview && rf.Gate != GateQA {
 			codeFindings = append(codeFindings, rf)
 		}
 	}

@@ -99,3 +99,9 @@ g-processes-page {
     display: inline-flex;
   }
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .proc-row {
+    transition: none;
+  }
+}
