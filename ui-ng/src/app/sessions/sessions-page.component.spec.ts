@@ -757,6 +757,41 @@ describe("SessionsPageComponent", () => {
     f.detectChanges();
     expect(q(f, '[data-testid="session-canvas"]')).not.toBeNull();
     expect(q(f, '[data-testid="canvas-html-iframe"]')).not.toBeNull();
+    expect(q(f, ".sessions-split.has-canvas")).not.toBeNull();
+    expect(q(f, '[data-testid="sessions-canvas-wrap"]')).not.toBeNull();
+    expect(
+      q(f, ".sessions-canvas-wrap .session-canvas .canvas-body"),
+    ).not.toBeNull();
+    expect(q(f, ".sessions-msg-wrap .msg-body")).not.toBeNull();
+  });
+
+  it("wraps settings team row and closes canvas overlay when navigating back to session list", async () => {
+    const api = new FakeApi();
+    const f = await render(api, "director");
+    expect(q(f, ".sessions-split.is-chat-open")).not.toBeNull();
+
+    (
+      q(f, '[data-testid="session-settings-toggle"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    f.detectChanges();
+    expect(q(f, ".session-team-row")).not.toBeNull();
+
+    (
+      q(f, '[data-testid="session-canvas-toggle"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    f.detectChanges();
+    expect(
+      q(f, ".sessions-split.is-chat-open.has-canvas .sessions-canvas-wrap"),
+    ).not.toBeNull();
+
+    f.componentRef.setInput("id", undefined);
+    await f.whenStable();
+    f.detectChanges();
+    expect(q(f, '[data-testid="sessions-canvas-wrap"]')).toBeNull();
+    expect(q(f, ".sessions-split.has-canvas")).toBeNull();
+    f.destroy();
   });
 
   it("rolls back created tasks when launchWorkstreamPlan fails mid-plan and keeps SessionsStore retained across drawer watch toggles", async () => {
