@@ -454,7 +454,9 @@ test("TaskDetail Pre-PR quality checks live-refreshes in-turn check-runs without
     }),
   });
   const qa1 = await (
-    await fetch(`${demoServer}/api/tasks/${taskId}/qa`, { headers: authHeaders })
+    await fetch(`${demoServer}/api/tasks/${taskId}/qa`, {
+      headers: authHeaders,
+    })
   ).json();
   const finding1Id = qa1.findings[0].id;
 
@@ -496,7 +498,9 @@ test("TaskDetail Pre-PR quality checks live-refreshes in-turn check-runs without
     }),
   });
   const qa2 = await (
-    await fetch(`${demoServer}/api/tasks/${taskId}/qa`, { headers: authHeaders })
+    await fetch(`${demoServer}/api/tasks/${taskId}/qa`, {
+      headers: authHeaders,
+    })
   ).json();
   const finding2Id = qa2.findings.find(
     (f) => f.ruleId === "golden:test-integrity-guard",
@@ -577,7 +581,9 @@ test("Feedback vote records signed-in access-code user identity rather than gene
     }),
   });
   const qaBefore = await (
-    await fetch(`${demoServer}/api/tasks/${taskId}/qa`, { headers: authHeaders })
+    await fetch(`${demoServer}/api/tasks/${taskId}/qa`, {
+      headers: authHeaders,
+    })
   ).json();
   const findingId = qaBefore.findings[0].id;
 
@@ -589,7 +595,9 @@ test("Feedback vote records signed-in access-code user identity rather than gene
   );
 
   const qaAfter = await (
-    await fetch(`${demoServer}/api/tasks/${taskId}/qa`, { headers: authHeaders })
+    await fetch(`${demoServer}/api/tasks/${taskId}/qa`, {
+      headers: authHeaders,
+    })
   ).json();
   expect(qaAfter.findings[0].votedBy).toContain("alice@example.com");
 });

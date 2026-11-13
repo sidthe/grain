@@ -744,9 +744,7 @@ describe("TelemetryPageComponent", () => {
   it("switches 24h / 7d / 30d windows and filters by WAI-ARIA GM3 repository popover", async () => {
     const { fixture, root, api } = await setup();
 
-    root
-      .querySelector('[data-testid="telemetry-window-24h"]')!
-      .click();
+    root.querySelector('[data-testid="telemetry-window-24h"]')!.click();
     await settle(fixture);
     expect(
       api.calls.some(
@@ -754,9 +752,7 @@ describe("TelemetryPageComponent", () => {
       ),
     ).toBe(true);
 
-    root
-      .querySelector('[data-testid="telemetry-window-30d"]')!
-      .click();
+    root.querySelector('[data-testid="telemetry-window-30d"]')!.click();
     await settle(fixture);
     expect(
       api.calls.some(
@@ -765,11 +761,7 @@ describe("TelemetryPageComponent", () => {
     ).toBe(true);
 
     // Open GM3 repo popover, verify role="none" on <li> wrappers, and pick acme/api.
-    root
-      .querySelector(
-        '[data-testid="telemetry-repo-trigger"]',
-      )!
-      .click();
+    root.querySelector('[data-testid="telemetry-repo-trigger"]')!.click();
     await settle(fixture);
     const repoMenu = root.querySelector('[data-testid="telemetry-repo-menu"]')!;
     expect(
@@ -778,11 +770,7 @@ describe("TelemetryPageComponent", () => {
       ),
     ).toBe(true);
 
-    root
-      .querySelector(
-        '[data-testid="telemetry-repo-opt-acme/api"]',
-      )!
-      .click();
+    root.querySelector('[data-testid="telemetry-repo-opt-acme/api"]')!.click();
     await settle(fixture);
 
     expect(
@@ -822,11 +810,7 @@ describe("TelemetryPageComponent", () => {
     expect(api.calls.some((c) => c.route === "GET /api/usage")).toBe(false);
 
     // "All repositories" option in listbox is disabled for repo-limited callers.
-    root
-      .querySelector(
-        '[data-testid="telemetry-repo-trigger"]',
-      )!
-      .click();
+    root.querySelector('[data-testid="telemetry-repo-trigger"]')!.click();
     await settle(fixture);
     const firstOpt = root.querySelector(
       '[data-testid="telemetry-repo-menu"] button[role="option"]',
@@ -841,21 +825,15 @@ describe("TelemetryPageComponent", () => {
     expect(usageCard.textContent).toContain("Claude Main");
     expect(usageCard.textContent).toContain("1.5M");
 
-    root
-      .querySelector('[data-testid="usage-editor-toggle"]')!
-      .click();
+    root.querySelector('[data-testid="usage-editor-toggle"]')!.click();
     await settle(fixture);
 
     expect(
       root.querySelector('[data-testid="usage-budget-editor"]'),
     ).not.toBeNull();
 
-    root
-      .querySelector('[data-testid="usage-mode-auto"]')!
-      .click();
-    root
-      .querySelector('[data-testid="usage-add-budget"]')!
-      .click();
+    root.querySelector('[data-testid="usage-mode-auto"]')!.click();
+    root.querySelector('[data-testid="usage-add-budget"]')!.click();
     await settle(fixture);
 
     const connInput = root.querySelector<HTMLInputElement>(
@@ -871,9 +849,7 @@ describe("TelemetryPageComponent", () => {
     tokInput.dispatchEvent(new Event("input"));
     await settle(fixture);
 
-    root
-      .querySelector('[data-testid="usage-save"]')!
-      .click();
+    root.querySelector('[data-testid="usage-save"]')!.click();
     await settle(fixture);
 
     const putCall = api.calls.find(
@@ -904,9 +880,7 @@ describe("TelemetryPageComponent", () => {
     };
     const { root } = await setup(api);
 
-    const toggle = root.querySelector(
-      '[data-testid="usage-editor-toggle"]',
-    )!;
+    const toggle = root.querySelector('[data-testid="usage-editor-toggle"]')!;
     expect(toggle.disabled).toBe(true);
   });
 
@@ -930,35 +904,63 @@ describe("TelemetryPageComponent", () => {
 
   it("supports keyboard navigation on the telemetry tabs", async () => {
     const { fixture, root } = await setup();
-    
-    const tabs = Array.from(root.querySelectorAll<HTMLButtonElement>(".tel-tab-btn"));
+
+    const tabs = Array.from(
+      root.querySelectorAll<HTMLButtonElement>(".tel-tab-btn"),
+    );
     expect(tabs.length).toBe(2);
     const [overviewTab, qualityTab] = tabs;
-    
+
     expect(overviewTab.getAttribute("aria-selected")).toBe("true");
     expect(overviewTab.getAttribute("tabindex")).toBe("0");
     expect(qualityTab.getAttribute("aria-selected")).toBe("false");
     expect(qualityTab.getAttribute("tabindex")).toBe("-1");
 
-    overviewTab.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true, cancelable: true }));
+    overviewTab.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowRight",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
     await settle(fixture);
     expect(overviewTab.getAttribute("aria-selected")).toBe("false");
     expect(overviewTab.getAttribute("tabindex")).toBe("-1");
     expect(qualityTab.getAttribute("aria-selected")).toBe("true");
     expect(qualityTab.getAttribute("tabindex")).toBe("0");
-    expect(root.querySelector('[data-testid="telemetry-panel-quality"]')).not.toBeNull();
+    expect(
+      root.querySelector('[data-testid="telemetry-panel-quality"]'),
+    ).not.toBeNull();
 
-    qualityTab.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true, cancelable: true }));
+    qualityTab.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Home",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
     await settle(fixture);
     expect(overviewTab.getAttribute("aria-selected")).toBe("true");
     expect(qualityTab.getAttribute("aria-selected")).toBe("false");
-    
-    overviewTab.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true }));
+
+    overviewTab.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "End",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
     await settle(fixture);
     expect(overviewTab.getAttribute("aria-selected")).toBe("false");
     expect(qualityTab.getAttribute("aria-selected")).toBe("true");
 
-    qualityTab.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true, cancelable: true }));
+    qualityTab.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "ArrowLeft",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
     await settle(fixture);
     expect(overviewTab.getAttribute("aria-selected")).toBe("true");
     expect(qualityTab.getAttribute("aria-selected")).toBe("false");
@@ -996,9 +998,7 @@ describe("TelemetryPageComponent", () => {
     await fixture.whenStable();
 
     // Switching window + repository must re-query GET /api/qa/summary with matching params.
-    root
-      .querySelector('[data-testid="telemetry-window-30d"]')!
-      .click();
+    root.querySelector('[data-testid="telemetry-window-30d"]')!.click();
     await settle(fixture);
     expect(
       api.calls.some(
@@ -1006,17 +1006,9 @@ describe("TelemetryPageComponent", () => {
       ),
     ).toBe(true);
 
-    root
-      .querySelector(
-        '[data-testid="telemetry-repo-trigger"]',
-      )!
-      .click();
+    root.querySelector('[data-testid="telemetry-repo-trigger"]')!.click();
     await settle(fixture);
-    root
-      .querySelector(
-        '[data-testid="telemetry-repo-opt-acme/api"]',
-      )!
-      .click();
+    root.querySelector('[data-testid="telemetry-repo-opt-acme/api"]')!.click();
     await settle(fixture);
     expect(
       api.calls.some(
@@ -1037,12 +1029,14 @@ describe("TelemetryPageComponent", () => {
       pairedRecall: 0.88,
     };
     const { fixture, root } = await setup(api);
-    
+
     root.querySelector('[data-testid="telemetry-tab-quality"]')?.click();
     await settle(fixture);
 
     let summary = root.querySelector('[data-testid="qa-shadow-summary"]');
-    expect(summary?.textContent).toContain("PR co-occurrence (not matched file:line findings): 88.0% of escapes.");
+    expect(summary?.textContent).toContain(
+      "PR co-occurrence (not matched file:line findings): 88.0% of escapes.",
+    );
     expect(summary?.textContent).not.toContain("42");
 
     api.qaSummaryBody.shadowRecall = {
@@ -1054,27 +1048,40 @@ describe("TelemetryPageComponent", () => {
       matchedRecall: 0.42,
       matchedEscapes: 5,
     } as unknown as QASummary;
-    
+
     root.querySelector('[data-testid="telemetry-refresh"]')?.click();
     await settle(fixture);
 
     summary = root.querySelector('[data-testid="qa-shadow-summary"]');
-    expect(summary?.textContent).toMatch(/They matched\s+5 of\s+10\s+escapes found later \(42\.0%\)\./);
+    expect(summary?.textContent).toMatch(
+      /They matched\s+5 of\s+10\s+escapes found later \(42\.0%\)\./,
+    );
     expect(summary?.textContent).not.toContain("88.0%");
   });
 
   it("hides the repository filter trigger on the Quality checks tab, replacing it with a read-only chip", async () => {
     const { fixture, root } = await setup();
-    
-    expect(root.querySelector('[data-testid="telemetry-repo-trigger"]')).not.toBeNull();
-    expect(root.querySelector('[data-testid="telemetry-repo-readonly"]')).toBeNull();
+
+    expect(
+      root.querySelector('[data-testid="telemetry-repo-trigger"]'),
+    ).not.toBeNull();
+    expect(
+      root.querySelector('[data-testid="telemetry-repo-readonly"]'),
+    ).toBeNull();
 
     root.querySelector('[data-testid="telemetry-tab-quality"]')?.click();
     await settle(fixture);
 
-    expect(root.querySelector('[data-testid="telemetry-repo-trigger"]')).toBeNull();
-    expect(root.querySelector('[data-testid="telemetry-repo-readonly"]')).not.toBeNull();
-    expect(root.querySelector('[data-testid="telemetry-repo-readonly"]')?.textContent).toContain("All repositories");
+    expect(
+      root.querySelector('[data-testid="telemetry-repo-trigger"]'),
+    ).toBeNull();
+    expect(
+      root.querySelector('[data-testid="telemetry-repo-readonly"]'),
+    ).not.toBeNull();
+    expect(
+      root.querySelector('[data-testid="telemetry-repo-readonly"]')
+        ?.textContent,
+    ).toContain("All repositories");
   });
 
   it("shows calm off-state guidance when QA is disabled and surfaces circuit-breaker banner when tripped", async () => {
@@ -1103,9 +1110,7 @@ describe("TelemetryPageComponent", () => {
     expect(
       root.querySelector('[data-testid="qa-rollout-empty"]')?.textContent,
     ).toContain("Quality control is off on this deployment");
-    expect(
-      root.querySelector('[data-testid="qa-checks-empty"]'),
-    ).toBeNull();
+    expect(root.querySelector('[data-testid="qa-checks-empty"]')).toBeNull();
 
     // Now simulate an auto-downgraded circuit breaker state on refresh.
     api.qaSummaryBody = {
@@ -1119,9 +1124,7 @@ describe("TelemetryPageComponent", () => {
         reasons: ["Fast-lane T0/T1 latency regression crossed mSPRT boundary"],
       },
     };
-    root
-      .querySelector('[data-testid="telemetry-refresh"]')!
-      .click();
+    root.querySelector('[data-testid="telemetry-refresh"]')!.click();
     await settle(fixture);
 
     const pill = root.querySelector('[data-testid="qa-rollout-pill"]');
@@ -1145,9 +1148,7 @@ describe("TelemetryPageComponent", () => {
         pairedRecall: 0,
       },
     };
-    root
-      .querySelector('[data-testid="telemetry-refresh"]')!
-      .click();
+    root.querySelector('[data-testid="telemetry-refresh"]')!.click();
     await settle(fixture);
     expect(
       root.querySelector('[data-testid="qa-shadow-summary"]')?.textContent,
