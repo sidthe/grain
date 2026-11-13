@@ -196,7 +196,9 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
                       </div>
                     </form>
                   }
-                  <div class="msg-body" [gMarkdown]="doc.markdown"></div>
+                  <div class="canvas-overflow-wrap">
+                    <div class="msg-body" [gMarkdown]="doc.markdown"></div>
+                  </div>
                 </div>
               }
             }
@@ -270,9 +272,12 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
                     [srcdoc]="safeSrcdoc()"
                   ></iframe>
                 } @else {
-                  <pre class="canvas-source" data-testid="canvas-html-source">{{
-                    mock.html
-                  }}</pre>
+                  <div class="canvas-overflow-wrap">
+                    <pre
+                      class="canvas-source"
+                      data-testid="canvas-html-source"
+                      >{{ mock.html }}</pre>
+                  </div>
                 }
               }
             }
@@ -428,7 +433,9 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
                       </div>
                     </form>
                   } @else {
-                    <div class="msg-body" [gMarkdown]="memText()"></div>
+                    <div class="canvas-overflow-wrap">
+                      <div class="msg-body" [gMarkdown]="memText()"></div>
+                    </div>
                   }
                 </div>
               }
