@@ -423,7 +423,9 @@ export function clock(iso: string | undefined, now = new Date()): string {
                       type="checkbox"
                       data-testid="session-tasks-approved"
                       [checked]="row.session.tasksApproved"
-                      [disabled]="store.isBusy('settings')"
+                      [disabled]="
+                        store.isBusy('settings') || !canApproveTasks()
+                      "
                       (change)="
                         store.updateSettings({
                           tasksApproved: $any($event.target).checked,
@@ -437,7 +439,9 @@ export function clock(iso: string | undefined, now = new Date()): string {
                       type="checkbox"
                       data-testid="session-reads-all"
                       [checked]="row.session.readsAll"
-                      [disabled]="store.isBusy('settings')"
+                      [disabled]="
+                        store.isBusy('settings') || !canWriteSettings()
+                      "
                       (change)="
                         store.updateSettings({
                           readsAll: $any($event.target).checked,
@@ -479,6 +483,7 @@ export function clock(iso: string | undefined, now = new Date()): string {
                     testid="session-grants"
                     [offered]="store.offered()"
                     [held]="row.session.capabilities ?? []"
+                    [repo]="selectedRepo()"
                     [disabled]="store.isBusy('grants')"
                     (heldChange)="onSessionGrantsChange($event)"
                   />
@@ -701,7 +706,7 @@ export function clock(iso: string | undefined, now = new Date()): string {
             >
               <g-session-canvas
                 [sessionTaskId]="row.session.taskId"
-                [repo]="store.selectedDetail()?.repo"
+                [repo]="selectedRepo()"
                 [comments]="comments()"
                 [requestedTab]="canvasTab()"
                 [requestedArtifactId]="canvasArtifactId()"
@@ -884,27 +889,50 @@ export class SessionsPageComponent implements OnInit, OnDestroy {
   private readonly composer =
     viewChild<ElementRef<HTMLTextAreaElement>>("composer");
 
-  protected readonly canWrite = computed(() =>
-    this.access.can(
-      "POST /api/tasks/{id}/comments",
-      this.store.selectedDetail()?.repo || undefined,
-    ),
+  protected readonly selectedRepo = computed(
+    () =>
+      (
+        this.store.selectedDetail()?.repo ?? this.store.selected()?.task?.repo
+      )?.trim() || undefined,
   );
+  // Comment writes check POST /api/tasks/{id}/comments with the session task's
+  // repo when scoped, and fall back to global scope when repo-less so
+  // repoLimits["tasks:write"] is enforced instead of skipped.
+  protected readonly canWrite = computed(() => {
+    const repo = this.selectedRepo();
+    return repo
+      ? this.access.can("POST /api/tasks/{id}/comments", repo)
+      : this.access.canGlobalScope("tasks:write");
+  });
+  // All /api/console-sessions* mutating routes extract no target repo on the
+  // server, so any repoLimits["sessions:write"] fails even for repo-scoped tasks.
   protected readonly canStop = computed(() =>
-    this.access.can("POST /api/console-sessions/{id}/cancel"),
+    this.access.canGlobalScope("sessions:write"),
   );
   protected readonly canRestart = computed(() =>
-    this.access.can("POST /api/console-sessions/{id}/restart"),
+    this.access.canGlobalScope("sessions:write"),
   );
   protected readonly canEditCaps = computed(() =>
-    this.access.can("PUT /api/console-sessions/{id}"),
+    this.access.canGlobalScope("sessions:write"),
   );
   protected readonly canDelete = computed(() =>
-    this.access.can("DELETE /api/console-sessions/{id}"),
+    this.access.canGlobalScope("sessions:write"),
   );
   protected readonly canCreate = computed(() =>
-    this.access.can("POST /api/console-sessions"),
+    this.access.canGlobalScope("sessions:write"),
   );
+  protected readonly canWriteSettings = computed(() =>
+    this.access.canGlobalScope("settings:write"),
+  );
+  protected readonly canApproveTasks = computed(() => {
+    if (!this.store.selected()?.session.taskId) {
+      return this.canWriteSettings();
+    }
+    const repo = this.selectedRepo();
+    return repo
+      ? this.access.can("POST /api/tasks/{id}/approve", repo)
+      : this.access.canGlobalScope("tasks:admin");
+  });
   protected readonly comments = computed<Comment[]>(
     () => this.store.selectedDetail()?.comments ?? [],
   );
