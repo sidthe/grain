@@ -109,6 +109,7 @@ export function clock(iso: string | undefined, now = new Date()): string {
     <section
       class="view-panel is-active sessions-panel"
       [class.is-chat-open]="!!id()"
+      [class.has-canvas]="canvasOpen() && !!store.selected()"
       aria-labelledby="sessions-headline"
       [attr.inert]="newOpen() || confirmDelete() ? '' : null"
     >
@@ -691,14 +692,19 @@ export function clock(iso: string | undefined, now = new Date()): string {
 
         @defer (when canvasOpen()) {
           @if (canvasOpen() && store.selected(); as row) {
-            <g-session-canvas
-              [sessionTaskId]="row.session.taskId"
-              [repo]="store.selectedDetail()?.repo"
-              [comments]="comments()"
-              [requestedTab]="canvasTab()"
-              [requestedArtifactId]="canvasArtifactId()"
-              (closed)="canvasOpen.set(false)"
-            />
+            <div
+              class="sessions-canvas-shell"
+              data-testid="session-canvas-shell"
+            >
+              <g-session-canvas
+                [sessionTaskId]="row.session.taskId"
+                [repo]="store.selectedDetail()?.repo"
+                [comments]="comments()"
+                [requestedTab]="canvasTab()"
+                [requestedArtifactId]="canvasArtifactId()"
+                (closed)="canvasOpen.set(false)"
+              />
+            </div>
           }
         }
       </div>
