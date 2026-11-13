@@ -17,9 +17,7 @@
 
 import { test, expect } from "./fixtures.js";
 
-test("[G-04] blocks deployment-wide reads, global dir/grep, and config:// bypasses", async ({
-  page,
-}) => {
+test("enforces deployment memory repoLimits", async ({ page }) => {
   const memResp = await page.request.get("/api/memory");
   expect(memResp.ok()).toBe(true);
   const existing = (await memResp.json()) ?? [];
