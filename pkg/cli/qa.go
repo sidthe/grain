@@ -24,7 +24,7 @@ import (
 	"github.com/ai-on-gke/grain/pkg/ui"
 )
 
-const qaUsage = "usage: grain qa <status|flow|enable|disable> [flags]"
+const qaUsage = "usage: grain qa <status|flow|exp|judge|enable|disable> [flags]"
 
 type qaStatusView struct {
 	Enabled         bool     `json:"enabled"`
@@ -108,6 +108,12 @@ func cmdQA(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) e
 
 	case "flow":
 		return cmdQAFlow(ctx, c, out, rest)
+
+	case "exp":
+		return cmdQAExp(ctx, c, out, rest)
+
+	case "judge":
+		return cmdQAJudge(ctx, c, out, rest)
 
 	case "enable":
 		fs := flag.NewFlagSet("grain qa enable", flag.ContinueOnError)

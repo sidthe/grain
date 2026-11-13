@@ -3345,8 +3345,8 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	pushBranch := task.BranchName()
 	var qaSkillPrompt string
 	qaStopNudge := false
-	if qaAssignment.ArmID == model.QAArmTreatment && model.TaskEligibleForQAStaging(task) {
-		if cfg.GitRemoteBase != "" {
+	if qaAssignment != nil && qaAssignment.IsEnforcedTreatment() && model.TaskEligibleForQAStaging(task) {
+		if cfg.GitRemoteBase != "" && (qaAssignment.Spec == nil || qaAssignment.Spec.StagingIsolation) {
 			pushBranch = model.QAStageBranchName(task.ID)
 		}
 		if qaAssignment.Spec != nil {
@@ -3802,20 +3802,25 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		if err := store.SetRunPrompt(ctx, d.RunID, prompt); err != nil {
 			log.Printf("orchestrator: run %s: recording the prompt it was given: %v", d.RunID, err)
 		}
-		if qaAssignment.ArmID == model.QAArmTreatment && qaSkillPrompt != "" {
+		if qaAssignment != nil && qaAssignment.IsEnforcedTreatment() && qaSkillPrompt != "" {
 			detailJSON, _ := json.Marshal(map[string]any{
-				"qaPromptBytes":  len(qaSkillPrompt),
-				"totalBytes":     len(prompt),
-				"flowId":         qaAssignment.FlowID,
+				"qaPromptBytes": len(qaSkillPrompt),
+				"totalBytes":    len(prompt),
+				"flowId":        qaAssignment.FlowID,
 			})
 			_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
-				TaskID:     task.ID,
-				RunID:      d.RunID,
-				Stage:      "S1",
-				CheckID:    "skill-inject",
-				Arm:        model.QAArmTreatment,
-				Verdict:    "pass",
-				DetailJSON: string(detailJSON),
+				TaskID:       task.ID,
+				RunID:        d.RunID,
+				Stage:        "S1",
+				CheckID:      "skill-inject",
+				Arm:          model.QAArmTreatment,
+				Verdict:      "pass",
+				DetailJSON:   string(detailJSON),
+				ExperimentID: qaAssignment.ExperimentID,
+				ArmID:        qaAssignment.ArmID,
+				FlowHash:     qaAssignment.FlowHash,
+				QAEngineRev:  qaAssignment.QAEngineRev,
+				Model:        task.Model,
 			}, nil)
 		}
 

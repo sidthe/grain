@@ -45,8 +45,13 @@ func resolveTaskQAAssignment(
 			qaCfg = mc.QA
 		}
 	}
-	if store == nil {
-		return &resolve.Resolution{Source: "none", ArmID: "baseline"}, nil
+	if !qaCfg.Enabled || store == nil {
+		return &resolve.Resolution{Source: "none", ArmID: model.QAArmOff}, nil
+	}
+
+	var qaOverride *model.QAConfig
+	if !cfg.QA.IsZero() {
+		qaOverride = &qaCfg
 	}
 
 	var assigned *resolve.Resolution
@@ -56,7 +61,7 @@ func resolveTaskQAAssignment(
 		Stage:   "S0",
 		CheckID: "arm-assign",
 	}, func() (string, error) {
-		a, _, err := resolve.EnsureQAResolutionAtDispatch(ctx, store, task, runID, now)
+		a, _, err := resolve.EnsureQAResolutionAtDispatchWithConfig(ctx, store, task, runID, qaOverride, now)
 		if err != nil {
 			return "error", err
 		}

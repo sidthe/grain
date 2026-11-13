@@ -890,8 +890,8 @@ func RunCycle(ctx context.Context, deps Deps, now time.Time) error {
 			timing.DispatchWait = wait
 		}
 	}
-	if deps.Store != nil && deps.Config.QA.Enabled && deps.Config.QA.RolloutPct > 0 && ctx.Err() == nil {
-		maybeEvaluateQACircuitBreakerThrottled(ctx, deps.Store, now)
+	if deps.Store != nil && deps.Config.QA.Enabled && ctx.Err() == nil {
+		maybeEvaluateQACircuitBreakerThrottled(ctx, deps.Store, deps.Client, now)
 	}
 	return errors.Join(errs...)
 }
@@ -3303,7 +3303,7 @@ func sweepStrandedQAStages(ctx context.Context, deps Deps, now time.Time) error 
 		}
 		// If task is not Active treatment, check if it has a stranded staging branch
 		assign, qaCfg, aErr := resolve.ActiveQAResolutionForTask(ctx, deps.Store, task.ID)
-		qaActive := aErr == nil && assign != nil && qaCfg.Enabled && assign.ArmID == model.QAArmTreatment
+		qaActive := aErr == nil && assign != nil && qaCfg.Enabled && assign.IsEnforcedTreatment()
 		if !qaActive {
 			// Fast check if stage exists
 			stageBranch := model.QAStageBranchName(task.ID)

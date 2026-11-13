@@ -143,13 +143,38 @@ func ActiveQAResolutionForTask(ctx context.Context, store *model.Store, taskID s
 // EnsureQAResolutionAtDispatch resolves or assigns QA exposure when a run is about to start.
 // It is the sole entry point allowed to write new QA assignments/enrollments.
 func EnsureQAResolutionAtDispatch(ctx context.Context, store *model.Store, task model.Task, runID string, now time.Time) (*Resolution, model.QAConfig, error) {
-	if store == nil || !model.TaskEligibleForQAStaging(task) {
+	return EnsureQAResolutionAtDispatchWithConfig(ctx, store, task, runID, nil, now)
+}
+
+// EnsureQAResolutionAtDispatchWithConfig resolves or assigns QA exposure at dispatch using an optional
+// in-memory QAConfig override when non-nil.
+func EnsureQAResolutionAtDispatchWithConfig(
+	ctx context.Context,
+	store *model.Store,
+	task model.Task,
+	runID string,
+	qaCfgOverride *model.QAConfig,
+	now time.Time,
+) (*Resolution, model.QAConfig, error) {
+	if store == nil {
+		return &Resolution{Source: "none", ArmID: "baseline"}, model.QAConfig{}, nil
+	}
+	if task.Target != nil && !model.TaskEligibleForQAStaging(task) {
+		return &Resolution{Source: "none", ArmID: "baseline"}, model.QAConfig{}, nil
+	}
+	if task.Target == nil && qaCfgOverride == nil {
 		return &Resolution{Source: "none", ArmID: "baseline"}, model.QAConfig{}, nil
 	}
 
-	qaCfg, err := store.ConfigQA(ctx)
-	if err != nil {
-		return nil, model.QAConfig{}, err
+	var qaCfg model.QAConfig
+	var err error
+	if qaCfgOverride != nil {
+		qaCfg = *qaCfgOverride
+	} else {
+		qaCfg, err = store.ConfigQA(ctx)
+		if err != nil {
+			return nil, model.QAConfig{}, err
+		}
 	}
 	if !qaCfg.Enabled {
 		return &Resolution{Source: "none", ArmID: "baseline"}, qaCfg, nil
@@ -188,7 +213,8 @@ func EnsureQAResolutionAtDispatch(ctx context.Context, store *model.Store, task 
 		if qaCfg.RolloutPct <= 0 {
 			return &Resolution{Source: "none", ArmID: "baseline"}, qaCfg, nil
 		}
-		created, err := qa.AssignOrLoadArm(ctx, store, root, "medium", qaCfg, now)
+		tier := qa.ClassifyTaskComplexity(task.Title, task.Body)
+		created, err := qa.AssignOrLoadArm(ctx, store, root, tier, qaCfg, now)
 		if err != nil {
 			return nil, qaCfg, err
 		}

@@ -488,6 +488,8 @@ var notSettings = []string{
 	"task_qa_assignment",
 	"task_qa_check_run",
 	"task_qa_finding",
+	"qa_experiment",
+	"qa_enrollment",
 }
 
 // The converse of TestSettingsTablesAllExist, and the one that catches a

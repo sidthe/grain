@@ -312,12 +312,11 @@ func (s *Server) simulateDryRun(ctx context.Context, resolved qa.FlowSpec, hash 
 
 func (s *Server) handlePostQAFlowVersion(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	user, _ := PrincipalFromContext(ctx)
+	actor := s.tasks.requestActor(ctx)
 	isDryRun := r.URL.Query().Get("dryRun") == "1"
 
 	var req postFlowVersionReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if !readJSON(w, r, &req) {
 		return
 	}
 
@@ -339,15 +338,17 @@ func (s *Server) handlePostQAFlowVersion(w http.ResponseWriter, r *http.Request)
 			writeJSON(w, http.StatusOK, map[string]any{"dryRun": true, "valid": true, "hash": b.Hash})
 			return
 		}
-		now := time.Now().UTC()
+		now := s.tasks.now()
 		if err := s.tasks.Store.RetireQAFlowVersion(ctx, b.Hash, now); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		s.tasks.Store.RecordConfigAudit(ctx, model.ConfigAuditEntry{
-			By:      user,
-			Surface: "qa_flow_version",
-			Summary: fmt.Sprintf("retire %s@%d (%s)", b.Key, b.Version, b.Hash),
+		_, _ = s.tasks.Store.RecordConfigAudit(ctx, model.ConfigAuditEntry{
+			At:         now,
+			By:         actor.Actor,
+			OnBehalfOf: actor.OnBehalfOf,
+			Surface:    "qa_flow_version",
+			Summary:    fmt.Sprintf("retire %s@%d (%s)", b.Key, b.Version, b.Hash),
 		})
 		retired := now.Format(time.RFC3339)
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -427,6 +428,14 @@ func (s *Server) handlePostQAFlowVersion(w http.ResponseWriter, r *http.Request)
 
 	// Idempotent publish if identical canonical hash already exists.
 	if existing, err := s.tasks.Store.GetQAFlowVersion(ctx, bundle.Hash); err == nil {
+		now := s.tasks.now()
+		_, _ = s.tasks.Store.RecordConfigAudit(ctx, model.ConfigAuditEntry{
+			At:         now,
+			By:         actor.Actor,
+			OnBehalfOf: actor.OnBehalfOf,
+			Surface:    "qa_flow_version",
+			Summary:    fmt.Sprintf("re-publish %s@%d (%s)", existing.Key, existing.Version, existing.Hash),
+		})
 		created := existing.CreatedAt
 		bundle.Version = existing.Version
 		writeJSON(w, http.StatusOK, map[string]any{
@@ -436,7 +445,7 @@ func (s *Server) handlePostQAFlowVersion(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	now := time.Now().UTC()
+	now := s.tasks.now()
 	fv := model.QAFlowVersion{
 		Hash:        bundle.Hash,
 		Key:         bundle.Key,
@@ -447,7 +456,7 @@ func (s *Server) handlePostQAFlowVersion(w http.ResponseWriter, r *http.Request)
 		SpecJSON:    bundle.SpecJSON,
 		SourceYAML:  yamlSrc,
 		QAEngineRev: qa.QAEngineRev,
-		CreatedBy:   user.ID,
+		CreatedBy:   actor.Actor.ID,
 		CreatedAt:   now,
 	}
 	if err := s.tasks.Store.InsertQAFlowVersion(ctx, fv); err != nil {
@@ -455,10 +464,12 @@ func (s *Server) handlePostQAFlowVersion(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	s.tasks.Store.RecordConfigAudit(ctx, model.ConfigAuditEntry{
-		By:      user,
-		Surface: "qa_flow_version",
-		Summary: fmt.Sprintf("publish %s@%d (%s)", fv.Key, fv.Version, fv.Hash),
+	_, _ = s.tasks.Store.RecordConfigAudit(ctx, model.ConfigAuditEntry{
+		At:         now,
+		By:         actor.Actor,
+		OnBehalfOf: actor.OnBehalfOf,
+		Surface:    "qa_flow_version",
+		Summary:    fmt.Sprintf("publish %s@%d (%s)", fv.Key, fv.Version, fv.Hash),
 	})
 
 	writeJSON(w, http.StatusCreated, map[string]any{

@@ -1088,6 +1088,22 @@ var Migrations = []Migration{
 			"CREATE INDEX IF NOT EXISTS `task_origin_ref` ON `task` (`origin_ref`)",
 		},
 	},
+	{
+		Version:     148,
+		Description: "add qa_experiment and qa_enrollment tables and provenance columns on task_qa_check_run",
+		Statements: []string{
+			qaExperimentTable,
+			qaExperimentRunningIndex,
+			qaEnrollmentTable,
+			qaEnrollmentExpIndex,
+			"ALTER TABLE `task_qa_check_run` ADD COLUMN `experiment_id` TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE `task_qa_check_run` ADD COLUMN `arm_id` TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE `task_qa_check_run` ADD COLUMN `flow_hash` TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE `task_qa_check_run` ADD COLUMN `qa_engine_rev` INTEGER NOT NULL DEFAULT 0",
+			"ALTER TABLE `task_qa_check_run` ADD COLUMN `model` TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE `task_qa_check_run` ADD COLUMN `base_sha` TEXT NOT NULL DEFAULT ''",
+		},
+	},
 }
 
 // schema99AutoUpgradeReleaseTable is auto_upgrade_release as schema 99

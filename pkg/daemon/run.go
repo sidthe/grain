@@ -48,6 +48,7 @@ import (
 	"github.com/ai-on-gke/grain/pkg/pkgcache"
 	"github.com/ai-on-gke/grain/pkg/policy"
 	"github.com/ai-on-gke/grain/pkg/qa"
+	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 	"github.com/ai-on-gke/grain/pkg/sandboxaddr"
 	"github.com/ai-on-gke/grain/pkg/sandboximage"
 	"github.com/ai-on-gke/grain/pkg/secrets"
@@ -1488,6 +1489,45 @@ func runDaemon(ctx context.Context, cfg Config, store *model.Store, sandboxes or
 			return res.FinalText, res.Usage.InputTokens, res.Usage.OutputTokens, nil
 		},
 	})
+	resolve.SetRuntimeHooks(&resolve.RuntimeHooks{
+		DataDir: cfg.DataDir,
+		PromoteExperimentStages: func(pCtx context.Context, experimentID, reason string) {
+			orchestrator.PromoteStrandedQAStagesForExperiment(pCtx, store, githubClient, experimentID, reason)
+		},
+		RunJudgeModel: func(jCtx context.Context, modelID, prompt string) (string, int64, int64, error) {
+			fw, err := buildFramework(jCtx, orchestrator.AgentChoice{
+				Model: strings.TrimSpace(modelID),
+			})
+			if err != nil || fw == nil {
+				return "", 0, 0, fmt.Errorf("qa judge model %q unavailable: %w", modelID, err)
+			}
+			if held, ok := fw.(*BackendFramework); ok {
+				defer held.Release()
+			}
+			res, err := fw.Run(jCtx, agent.RunConfig{
+				Prompt:   prompt,
+				NoTools:  true,
+				RunID:    fmt.Sprintf("qa-judge-%d", time.Now().UnixNano()),
+				MaxTurns: 2,
+			})
+			if err != nil || res == nil {
+				return "", 0, 0, err
+			}
+			return res.FinalText, res.Usage.InputTokens, res.Usage.OutputTokens, nil
+		},
+	})
+	if heldExp, hErr := store.HoldRunningExperimentForEngineRev(ctx, qa.QAEngineRev); hErr == nil && heldExp != nil {
+		_, _ = store.RecordConfigAudit(ctx, model.ConfigAuditEntry{
+			At: time.Now().UTC(),
+			By: model.Principal{
+				Kind:   model.PrincipalAutomation,
+				ID:     "qa-engine-rev-guard",
+				Source: model.SourceInternal,
+			},
+			Surface: "qa-experiment:" + heldExp.ID,
+			Summary: fmt.Sprintf("held enrollment on running experiment %s after QAEngineRev changed to %d", heldExp.ID, qa.QAEngineRev),
+		})
+	}
 	LivePullRequests.Store(&PullRequestOpener{Store: store, Client: githubClient})
 
 	// The same publication for the same reason, one question narrower:

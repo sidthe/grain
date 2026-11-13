@@ -16,7 +16,6 @@ package judge
 
 import (
 	"encoding/json"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 )
@@ -51,7 +50,7 @@ func WriteReadoutBundle(readoutDir string, manifest ReadoutManifest, scores []Pa
 	if err != nil {
 		return err
 	}
-	if err := ioutil.WriteFile(filepath.Join(readoutDir, "manifest.json"), b, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(readoutDir, "manifest.json"), b, 0644); err != nil {
 		return err
 	}
 
@@ -59,7 +58,7 @@ func WriteReadoutBundle(readoutDir string, manifest ReadoutManifest, scores []Pa
 	if err != nil {
 		return err
 	}
-	if err := ioutil.WriteFile(filepath.Join(readoutDir, "probe.json"), b, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(readoutDir, "probe.json"), b, 0644); err != nil {
 		return err
 	}
 
@@ -92,7 +91,7 @@ func WriteReadoutBundle(readoutDir string, manifest ReadoutManifest, scores []Pa
 		if err != nil {
 			return err
 		}
-		if err := ioutil.WriteFile(filepath.Join(readoutDir, "packets", p.PacketID+".json"), b, 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(readoutDir, "packets", p.PacketID+".json"), b, 0644); err != nil {
 			return err
 		}
 	}
@@ -102,7 +101,7 @@ func WriteReadoutBundle(readoutDir string, manifest ReadoutManifest, scores []Pa
 
 func LoadReadoutBundle(readoutDir string) (ReadoutManifest, []PacketScore, []FindingSeverityRecord, ProbeReport, []JudgePacket, error) {
 	var manifest ReadoutManifest
-	b, err := ioutil.ReadFile(filepath.Join(readoutDir, "manifest.json"))
+	b, err := os.ReadFile(filepath.Join(readoutDir, "manifest.json"))
 	if err != nil {
 		return manifest, nil, nil, ProbeReport{}, nil, err
 	}
@@ -111,7 +110,7 @@ func LoadReadoutBundle(readoutDir string) (ReadoutManifest, []PacketScore, []Fin
 	}
 
 	var probe ProbeReport
-	b, err = ioutil.ReadFile(filepath.Join(readoutDir, "probe.json"))
+	b, err = os.ReadFile(filepath.Join(readoutDir, "probe.json"))
 	if err != nil {
 		return manifest, nil, nil, ProbeReport{}, nil, err
 	}
@@ -150,13 +149,13 @@ func LoadReadoutBundle(readoutDir string) (ReadoutManifest, []PacketScore, []Fin
 	}
 
 	var packets []JudgePacket
-	files, err := ioutil.ReadDir(filepath.Join(readoutDir, "packets"))
+	files, err := os.ReadDir(filepath.Join(readoutDir, "packets"))
 	if err != nil {
 		return manifest, scores, severities, probe, nil, err
 	}
 	for _, fi := range files {
 		if filepath.Ext(fi.Name()) == ".json" {
-			b, err := ioutil.ReadFile(filepath.Join(readoutDir, "packets", fi.Name()))
+			b, err := os.ReadFile(filepath.Join(readoutDir, "packets", fi.Name()))
 			if err != nil {
 				return manifest, scores, severities, probe, nil, err
 			}

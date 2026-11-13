@@ -920,6 +920,102 @@ _No flags._
 _No flags._
 <!-- END GENERATED FLAGS -->
 
+- `qa exp list [-state string] [-limit n]` lists quality experiments.
+- `qa exp show <ID> [-json]` shows an experiment's configuration, power preview and audit trail.
+- `qa exp create -f <FILE>` creates a draft experiment from JSON or YAML.
+- `qa exp edit <ID> -f <FILE>` edits a draft experiment.
+- `qa exp start <ID> [-override-notes string]` starts a draft experiment.
+- `qa exp halt-arm <ID> <ARM> -reason <TEXT>` halts one treatment arm on a multi-treatment experiment.
+- `qa exp resume-enrollment <ID>` resumes enrollment in a new segment after an engine-rev hold.
+- `qa exp stop <ID> -decision <ship|reject|inconclusive|invalid> [-arm <ARM>] -reason <TEXT>` stops a running experiment with a decision.
+- `qa exp archive <ID>` archives a draft or stopped experiment.
+- `qa exp results <ID> [-json]` reads an experiment's statistical readout.
+- `qa exp keys <ID>` prints opaque explicit allocation keys.
+- `qa judge run -experiment <ID> -judge-model <MODEL> [-raters n] [-budget-tokens n] [-dry-run] [-out-dir DIR] [-checkout DIR]` runs the blind cross-family readout judge batch.
+- `qa judge label -experiment <ID> [-readout-dir DIR]` records blind human calibration labels.
+
+<!-- BEGIN GENERATED FLAGS: grain qa exp list -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-limit` | int | `50` |  | maximum experiments to return |
+| `-state` | string |  |  | filter by state (draft, running, stopped, archived) |
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa exp show -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-json` | bool |  |  | output raw JSON |
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa exp create -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-f` | string |  |  | experiment definition file (JSON or YAML) |
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa exp edit -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-f` | string |  |  | updated draft experiment fields (JSON or YAML) |
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa exp start -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-override-notes` | string |  |  | reason for overriding prior not-helpful warning |
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa exp halt-arm -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-reason` | string |  |  | reason for halting the treatment arm |
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa exp resume-enrollment -->
+_No flags._
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa exp stop -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-arm` | string |  |  | winning/referenced arm id |
+| `-decision` | string |  |  | terminal decision (ship\|reject\|inconclusive\|invalid) |
+| `-reason` | string |  |  | decision rationale |
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa exp archive -->
+_No flags._
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa exp results -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-json` | bool |  |  | output raw JSON |
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa exp keys -->
+_No flags._
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa judge run -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-budget-tokens` | int | `3000000` |  | maximum token budget across all judge calls |
+| `-checkout` | string |  |  | optional local git checkout directory for reading full diffs |
+| `-dry-run` | bool |  |  | print packet/chunk counts and token estimate without invoking models |
+| `-experiment` | string |  |  | experiment ID to evaluate |
+| `-judge-model` | string |  |  | judge model ID (must be from a different model family than coding models) |
+| `-out-dir` | string |  |  | directory to write readout bundle (defaults to ./qa-readout-<experiment>) |
+| `-raters` | int | `3` |  | number of independent blind raters per packet |
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa judge label -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-experiment` | string |  |  | experiment ID |
+| `-readout-dir` | string |  |  | readout directory holding blind packets |
+<!-- END GENERATED FLAGS -->
+
 
 **Pinned by:** `pkg/cli/qa_test.go`: `TestQACommandStatusEnableDisableAndFlagPreservation`.
 

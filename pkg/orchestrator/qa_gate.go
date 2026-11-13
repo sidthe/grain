@@ -30,8 +30,9 @@ import (
 	"github.com/ai-on-gke/grain/pkg/metrics"
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/qa"
-	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 	"github.com/ai-on-gke/grain/pkg/qa/checks"
+	"github.com/ai-on-gke/grain/pkg/qa/expstats"
+	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 )
 
 // QAOpenPROptions carries optional pre-PR quality verification metadata from `open_pull_request`.
@@ -89,15 +90,15 @@ func OpenPullRequestForTaskWithQA(
 	if assign.ArmID == model.QAArmControl {
 		status, err := OpenPullRequestForTask(ctx, store, client, task)
 		if err == nil {
-			if qaCfg.ShadowOnControlEnabled() {
-				maybeRunControlShadowS3(store, client, task, assign.FlowID, assign.Spec)
+			if assign.Shadow || (assign.Source == "legacy" && qaCfg.ShadowOnControlEnabled()) {
+				maybeRunControlShadowS3(store, client, task, assign)
 			}
-			maybeEvaluateQACircuitBreakerThrottled(ctx, store, time.Now().UTC())
+			maybeEvaluateQACircuitBreakerThrottled(ctx, store, client, time.Now().UTC())
 		}
 		return status, err
 	}
 
-	if assign.ArmID != model.QAArmTreatment {
+	if !assign.IsEnforcedTreatment() {
 		return OpenPullRequestForTask(ctx, store, client, task)
 	}
 
@@ -138,7 +139,7 @@ func OpenPullRequestForTaskWithQA(
 		s3Passed, s3Ran, blastTier, s3Summary = loadRecordedS3Outcome(ctx, store, task.ID, headSHA)
 	}
 	if headSHA != "" && (!s3Ran || (!s3Passed && strings.TrimSpace(opts.CallerNotes) != "")) {
-		rep, ran, s3Err := runMirrorS3IfConfigured(ctx, store, task, assign.FlowID, model.QAArmTreatment, false, checkBranch, opts.CallerNotes, assign.Spec)
+		rep, ran, s3Err := runMirrorS3IfConfigured(ctx, store, task, assign, false, checkBranch, opts.CallerNotes)
 		if s3Err != nil {
 			if rt := LiveQARuntime(); rt != nil && rt.DataDir != "" {
 				return PullRequestStatus{}, fmt.Errorf("orchestrator: running pre-PR S3 checks on %s: %w", checkBranch, s3Err)
@@ -174,14 +175,14 @@ func OpenPullRequestForTaskWithQA(
 		}
 		status, err := OpenPullRequestForTask(ctx, store, client, task)
 		if err == nil {
-			maybeEvaluateQACircuitBreakerThrottled(ctx, store, time.Now().UTC())
+			maybeEvaluateQACircuitBreakerThrottled(ctx, store, client, time.Now().UTC())
 		}
 		return status, err
 	}
 
-	// On T2/T3 diffs under a flow with EnableS4, defer live PR branch promotion so the
+	// On configured blast tiers under a flow with EnableS4, defer live PR branch promotion so the
 	// orchestrator can run 1 fresh-context S4 verification pass once the coding turn exits.
-	if stageExists && flow.EnableS4 && blastTier.RequiresS4() && !hasTaskLink(task, model.LinkQAS4Attempted) {
+	if stageExists && flow.RequiresS4ForTier(blastTier) && !hasTaskLink(task, model.LinkQAS4Attempted) {
 		_ = store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
 			t.Links = withoutTaskLinkKinds(t.Links, model.LinkQAHold)
 			t.Links = append(t.Links, model.Link{Kind: model.LinkQAHold, Target: headSHA})
@@ -204,7 +205,7 @@ func OpenPullRequestForTaskWithQA(
 	clearTaskQAHold(ctx, store, task.ID)
 	status, err := OpenPullRequestForTask(ctx, store, client, task)
 	if err == nil {
-		maybeEvaluateQACircuitBreakerThrottled(ctx, store, time.Now().UTC())
+		maybeEvaluateQACircuitBreakerThrottled(ctx, store, client, time.Now().UTC())
 	}
 	return status, err
 }
@@ -226,7 +227,7 @@ func salvageQAStageIfPresent(
 		return false, nil
 	}
 	assign, qaCfg, aErr := resolve.ActiveQAResolutionForTask(ctx, store, task.ID)
-	qaActive := aErr == nil && assign != nil && qaCfg.Enabled && assign.ArmID == model.QAArmTreatment
+	qaActive := aErr == nil && assign != nil && qaCfg.Enabled && assign.IsEnforcedTreatment()
 
 	stageBranch := model.QAStageBranchName(task.ID)
 	stageExists, err := targetBranchExists(client, *task.Target, stageBranch)
@@ -284,7 +285,7 @@ func salvageQAStageIfPresent(
 	var mirrorWS *checks.MirrorWorkspace
 	var s3HazardSites map[string][]int
 	if !s3Ran {
-		rep, ws, ran, mErr := runMirrorS3WithWorkspace(ctx, store, task, assign.FlowID, model.QAArmTreatment, false, checkBranch, "", assign.Spec)
+		rep, ws, ran, mErr := runMirrorS3WithWorkspace(ctx, store, task, assign, false, checkBranch, "")
 		if mErr == nil && ran {
 			s3Ran = true
 			s3Passed = rep.Passed
@@ -344,10 +345,10 @@ func salvageQAStageIfPresent(
 		return false, nil
 	}
 
-	// 2. S3 passed! Run bounded 1-round fresh-context S4 verifier on T2/T3 when enabled and not yet attempted.
+	// 2. S3 passed! Run bounded 1-round fresh-context S4 verifier when required for this blast tier and not yet attempted.
 	flow := *assign.Spec
-	if flow.EnableS4 && blastTier.RequiresS4() && !hasTaskLink(task, model.LinkQAS4Attempted) {
-		s4Findings, s4Err := runFreshContextS4(ctx, store, task, headSHA, checkBranch, mirrorWS, s3HazardSites)
+	if flow.RequiresS4ForTier(blastTier) && !hasTaskLink(task, model.LinkQAS4Attempted) {
+		s4Findings, s4Err := runFreshContextS4(ctx, store, task, assign, headSHA, checkBranch, mirrorWS, s3HazardSites)
 		if s4Err != nil {
 			log.Printf("orchestrator: task %s S4 verification degraded to S3-pass: %v", task.ID, s4Err)
 		} else {
@@ -426,7 +427,7 @@ func effectiveTaskPushHead(ctx context.Context, store *model.Store, client githu
 		return nil, nil
 	}
 	if store != nil {
-		if assign, qaCfg, err := resolve.ActiveQAResolutionForTask(ctx, store, task.ID); err == nil && qaCfg.Enabled && assign != nil && assign.ArmID == model.QAArmTreatment {
+		if assign, qaCfg, err := resolve.ActiveQAResolutionForTask(ctx, store, task.ID); err == nil && qaCfg.Enabled && assign != nil && assign.IsEnforcedTreatment() {
 			if stageHead, sErr := client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, model.QAStageBranchName(task.ID)); sErr == nil && stageHead != nil {
 				return stageHead, nil
 			}
@@ -435,12 +436,13 @@ func effectiveTaskPushHead(ctx context.Context, store *model.Store, client githu
 	return client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, task.BranchName())
 }
 
-func maybeRunControlShadowS3(store *model.Store, client github.Client, task model.Task, flowID string, spec *qa.FlowSpec) {
+func maybeRunControlShadowS3(store *model.Store, client github.Client, task model.Task, assign *resolve.Resolution) {
 	rt := LiveQARuntime()
-	if rt == nil || rt.DataDir == "" || rt.ResolveRemote == nil || store == nil || client == nil || task.Target == nil {
+	if rt == nil || rt.DataDir == "" || rt.ResolveRemote == nil || store == nil || client == nil || task.Target == nil || assign == nil {
 		return
 	}
 	taskCopy := task
+	assignCopy := *assign
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 		defer cancel()
@@ -456,7 +458,7 @@ func maybeRunControlShadowS3(store *model.Store, client github.Client, task mode
 				}
 			}
 		}
-		_, _, _ = runMirrorS3IfConfigured(ctx, store, taskCopy, flowID, model.QAArmControl, true, taskCopy.BranchName(), "", spec)
+		_, _, _ = runMirrorS3IfConfigured(ctx, store, taskCopy, &assignCopy, true, taskCopy.BranchName(), "")
 	}()
 }
 
@@ -464,12 +466,11 @@ func runMirrorS3IfConfigured(
 	ctx context.Context,
 	store *model.Store,
 	task model.Task,
-	flowID, arm string,
+	assign *resolve.Resolution,
 	shadow bool,
 	branch, callerNotes string,
-	spec *qa.FlowSpec,
 ) (checks.Report, bool, error) {
-	rep, _, ran, err := runMirrorS3WithWorkspace(ctx, store, task, flowID, arm, shadow, branch, callerNotes, spec)
+	rep, _, ran, err := runMirrorS3WithWorkspace(ctx, store, task, assign, shadow, branch, callerNotes)
 	return rep, ran, err
 }
 
@@ -477,13 +478,12 @@ func runMirrorS3WithWorkspace(
 	ctx context.Context,
 	store *model.Store,
 	task model.Task,
-	flowID, arm string,
+	assign *resolve.Resolution,
 	shadow bool,
 	branch, callerNotes string,
-	spec *qa.FlowSpec,
 ) (checks.Report, *checks.MirrorWorkspace, bool, error) {
 	rt := LiveQARuntime()
-	if rt == nil || rt.DataDir == "" || rt.ResolveRemote == nil || task.Target == nil {
+	if rt == nil || rt.DataDir == "" || rt.ResolveRemote == nil || task.Target == nil || assign == nil {
 		return checks.Report{}, nil, false, nil
 	}
 	remoteURL, bearer, err := rt.ResolveRemote(ctx, *task.Target)
@@ -495,29 +495,36 @@ func runMirrorS3WithWorkspace(
 		return checks.Report{}, nil, false, err
 	}
 	var flow qa.FlowSpec
-	if spec != nil {
-		flow = *spec
+	if assign.Spec != nil {
+		flow = *assign.Spec
+	}
+	armLabel := model.QAArmTreatment
+	if shadow || assign.ArmID == model.QAArmControl {
+		armLabel = model.QAArmControl
 	}
 	rep, err := checks.RunS3(ctx, ws, flow, checks.RunOptions{
-		TaskID:      task.ID,
-		Arm:         arm,
-		Shadow:      shadow,
-		Attempt:     1,
-		CallerNotes: callerNotes,
+		TaskID:        task.ID,
+		Arm:           armLabel,
+		Shadow:        shadow,
+		Attempt:       1,
+		CallerNotes:   callerNotes,
+		TaskSpecBytes: len(task.Title) + len(task.Body),
 	}, rt.Profiler)
 	if err != nil {
 		return checks.Report{}, ws, false, err
 	}
-	persistS3ReportToStore(ctx, store, task.ID, "", arm, shadow, callerNotes, rep)
+	persistS3ReportToStore(ctx, store, task, "", assign, shadow, callerNotes, ws.BaseSHA, rep)
 	return rep, ws, true, nil
 }
 
 func persistS3ReportToStore(
 	ctx context.Context,
 	store *model.Store,
-	taskID, runID, arm string,
+	task model.Task,
+	runID string,
+	assign *resolve.Resolution,
 	shadow bool,
-	callerNotes string,
+	callerNotes, baseSHA string,
 	rep checks.Report,
 ) {
 	if store == nil {
@@ -531,12 +538,33 @@ func persistS3ReportToStore(
 	}
 	detailBytes, _ := json.Marshal(detailMap)
 
+	armCol := model.QAArmTreatment
+	if shadow || (assign != nil && assign.ArmID == model.QAArmControl) {
+		armCol = model.QAArmControl
+	}
+	var expID, armID, flowHash string
+	var engineRev int
+	if assign != nil {
+		expID = assign.ExperimentID
+		armID = assign.ArmID
+		flowHash = assign.FlowHash
+		engineRev = assign.QAEngineRev
+	}
+
 	for _, cr := range rep.Results {
+		stage := cr.Stage
+		if strings.TrimSpace(stage) == "" {
+			stage = "S3"
+		}
 		var modelFindings []model.QAFinding
 		for _, f := range cr.Findings {
+			fStage := f.Stage
+			if strings.TrimSpace(fStage) == "" {
+				fStage = stage
+			}
 			modelFindings = append(modelFindings, model.QAFinding{
-				TaskID:   taskID,
-				Stage:    "S3",
+				TaskID:   task.ID,
+				Stage:    fStage,
 				RuleID:   f.RuleID,
 				Severity: f.Severity,
 				FilePath: f.FilePath,
@@ -546,17 +574,23 @@ func persistS3ReportToStore(
 			})
 		}
 		_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
-			TaskID:     taskID,
-			RunID:      runID,
-			CommitSHA:  rep.HeadSHA,
-			Stage:      "S3",
-			CheckID:    cr.CheckID,
-			Arm:        arm,
-			Shadow:     shadow,
-			Verdict:    cr.Verdict,
-			DurationMS: cr.DurationMS,
-			AllocBytes: cr.AllocBytes,
-			DetailJSON: string(detailBytes),
+			TaskID:       task.ID,
+			RunID:        runID,
+			CommitSHA:    rep.HeadSHA,
+			Stage:        stage,
+			CheckID:      cr.CheckID,
+			Arm:          armCol,
+			Shadow:       shadow,
+			Verdict:      cr.Verdict,
+			DurationMS:   cr.DurationMS,
+			AllocBytes:   cr.AllocBytes,
+			DetailJSON:   string(detailBytes),
+			ExperimentID: expID,
+			ArmID:        armID,
+			FlowHash:     flowHash,
+			QAEngineRev:  engineRev,
+			Model:        task.Model,
+			BaseSHA:      baseSHA,
 		}, modelFindings)
 	}
 }
@@ -612,6 +646,7 @@ func runFreshContextS4(
 	ctx context.Context,
 	store *model.Store,
 	task model.Task,
+	assign *resolve.Resolution,
 	headSHA, branch string,
 	ws *checks.MirrorWorkspace,
 	hazardSites map[string][]int,
@@ -656,8 +691,17 @@ func runFreshContextS4(
 		}
 	}
 
-	prompt := buildS4VerifierPrompt(task, rawDiff, hazardSites)
-	s4Ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	var checklistID string
+	s4Timeout := 90 * time.Second
+	if assign != nil && assign.Spec != nil {
+		checklistID = assign.Spec.VerifierChecklist
+		if assign.Spec.MaxS4Seconds > 0 {
+			s4Timeout = time.Duration(assign.Spec.MaxS4Seconds) * time.Second
+		}
+	}
+
+	prompt := buildS4VerifierPrompt(task, rawDiff, hazardSites, checklistID)
+	s4Ctx, cancel := context.WithTimeout(ctx, s4Timeout)
 	defer cancel()
 
 	var rawOut string
@@ -713,25 +757,39 @@ func runFreshContextS4(
 			Evidence: f.Evidence,
 		})
 	}
+	var expID, armID, flowHash string
+	var engineRev int
+	if assign != nil {
+		expID = assign.ExperimentID
+		armID = assign.ArmID
+		flowHash = assign.FlowHash
+		engineRev = assign.QAEngineRev
+	}
 	_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
-		TaskID:     task.ID,
-		CommitSHA:  headSHA,
-		Stage:      "S4",
-		CheckID:    qa.RuleS4OrthogonalVerifier,
-		Arm:        model.QAArmTreatment,
-		Shadow:     false,
-		Verdict:    sample.Verdict,
-		DurationMS: sample.DurationMS,
-		TokensIn:   tokIn,
-		TokensOut:  tokOut,
-		AllocBytes: sample.AllocBytes,
-		DetailJSON: string(detailBytes),
+		TaskID:       task.ID,
+		CommitSHA:    headSHA,
+		Stage:        "S4",
+		CheckID:      qa.RuleS4OrthogonalVerifier,
+		Arm:          model.QAArmTreatment,
+		Shadow:       false,
+		Verdict:      sample.Verdict,
+		DurationMS:   sample.DurationMS,
+		TokensIn:     tokIn,
+		TokensOut:    tokOut,
+		AllocBytes:   sample.AllocBytes,
+		DetailJSON:   string(detailBytes),
+		ExperimentID: expID,
+		ArmID:        armID,
+		FlowHash:     flowHash,
+		QAEngineRev:  engineRev,
+		Model:        task.Model,
+		BaseSHA:      ws.BaseSHA,
 	}, modelFindings)
 
 	return kept, nil
 }
 
-func buildS4VerifierPrompt(task model.Task, rawDiff string, hazardSites map[string][]int) string {
+func buildS4VerifierPrompt(task model.Task, rawDiff string, hazardSites map[string][]int, checklistID string) string {
 	const maxDiffPromptBytes = 48 * 1024
 	diffExcerpt := rawDiff
 	if len(diffExcerpt) > maxDiffPromptBytes {
@@ -741,6 +799,11 @@ func buildS4VerifierPrompt(task model.Task, rawDiff string, hazardSites map[stri
 	b.WriteString("You are an orthogonal pre-PR defect verifier inspecting a candidate diff with zero author context.\n")
 	b.WriteString("Report ONLY concrete, reproducible logic bugs, missed sibling caller breakages, concurrency/state bugs, or spec violations introduced by this diff.\n")
 	b.WriteString("Do NOT report style nits, defensive boilerplate, hypothetical architecture wishes, or pre-existing code outside the diff.\n\n")
+	if checklistID == qa.ChecklistEscapeClassesV1 {
+		b.WriteString("## Verification Checklist\n")
+		b.WriteString(qa.EscapeClassesV1ChecklistText)
+		b.WriteString("\n\n")
+	}
 	fmt.Fprintf(&b, "## Task Specification\nTitle: %s\n\n%s\n\n", task.Title, strings.TrimSpace(task.Body))
 	if len(hazardSites) > 0 {
 		b.WriteString("## Untouched Sibling Caller Sites\n")
@@ -837,7 +900,7 @@ var (
 
 const qaCircuitBreakerEvalWindow = 30 * 24 * time.Hour
 
-func maybeEvaluateQACircuitBreakerThrottled(ctx context.Context, store *model.Store, now time.Time) {
+func maybeEvaluateQACircuitBreakerThrottled(ctx context.Context, store *model.Store, client github.Client, now time.Time) {
 	if store == nil {
 		return
 	}
@@ -858,9 +921,176 @@ func maybeEvaluateQACircuitBreakerThrottled(ctx context.Context, store *model.St
 	qaLastEvalAt = now
 	qaCircuitBreakerThrottleMu.Unlock()
 
+	if _, err := EvaluateRunningExperimentHarm(ctx, store, client, now); err != nil {
+		log.Printf("orchestrator: evaluating QA experiment harm guardrail: %v", err)
+	}
 	if _, _, err := MaybeAutoDowngradeQARollout(ctx, store, now); err != nil {
 		log.Printf("orchestrator: evaluating QA circuit breaker: %v", err)
 	}
+}
+
+// EvaluateRunningExperimentHarm evaluates the pre-registered one-sided mSPRT harm rule
+// (alpha = 0.01, Hodges-Lehmann shift > +25%, >= 15 work trees per arm) on work-tree median
+// flow.time_to_pr for a running experiment. When triggered, it halts the offending arm
+// (if >= 2 active treatments) or stops the experiment (if 1 active treatment) and promotes
+// stranded QA staging branches fail-open.
+func EvaluateRunningExperimentHarm(ctx context.Context, store *model.Store, client github.Client, now time.Time) (bool, error) {
+	if store == nil {
+		return false, nil
+	}
+	running, err := store.GetRunningQAExperiment(ctx)
+	if err != nil || running == nil {
+		return false, err
+	}
+	enrollments, err := store.ListQAEnrollments(ctx, running.ID)
+	if err != nil || len(enrollments) == 0 {
+		return false, err
+	}
+	armByOrigin := map[string]string{}
+	for _, e := range enrollments {
+		if e.ArmID != "excluded" && e.ArmID != "" {
+			armByOrigin[e.RootOrigin] = e.ArmID
+		}
+	}
+	if len(armByOrigin) < 30 {
+		return false, nil
+	}
+
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		return false, err
+	}
+	timings, err := store.TaskTimings(ctx)
+	if err != nil {
+		return false, err
+	}
+	runs, err := store.RunTimings(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	firstRunByTask := map[string]time.Time{}
+	for _, r := range runs {
+		if r.StartedAt.IsZero() {
+			continue
+		}
+		if prev, ok := firstRunByTask[r.TaskID]; !ok || r.StartedAt.Before(prev) {
+			firstRunByTask[r.TaskID] = r.StartedAt
+		}
+	}
+	prOpenedByTask := map[string]time.Time{}
+	for _, tm := range timings {
+		if tm.PrOpenedAt != nil && !tm.PrOpenedAt.IsZero() {
+			prOpenedByTask[tm.TaskID] = *tm.PrOpenedAt
+		}
+	}
+
+	originDurations := map[string][]float64{}
+	for _, t := range tasks {
+		root := model.ResolveQARootOrigin(t.WorkOrigin, t.ID)
+		if armByOrigin[root] == "" {
+			continue
+		}
+		started, okS := firstRunByTask[t.ID]
+		opened, okP := prOpenedByTask[t.ID]
+		if okS && okP && !opened.Before(started) {
+			originDurations[root] = append(originDurations[root], opened.Sub(started).Seconds())
+		}
+	}
+
+	timesByArm := map[string][]float64{}
+	for root, durs := range originDurations {
+		if len(durs) == 0 {
+			continue
+		}
+		slices.Sort(durs)
+		med := durs[len(durs)/2]
+		if len(durs)%2 == 0 {
+			med = 0.5 * (durs[len(durs)/2-1] + durs[len(durs)/2])
+		}
+		timesByArm[armByOrigin[root]] = append(timesByArm[armByOrigin[root]], med)
+	}
+
+	ctrlTimes := timesByArm[model.QAArmControl]
+	if len(ctrlTimes) < 15 {
+		return false, nil
+	}
+	tau := running.Plan.HarmRefTau
+	if tau <= 0 {
+		tau = 300.0
+	}
+
+	activeTreatments := 0
+	for _, a := range running.Arms {
+		if a.ID != model.QAArmControl && !a.Halted {
+			activeTreatments++
+		}
+	}
+	if activeTreatments == 0 {
+		return false, nil
+	}
+
+	for _, arm := range running.Arms {
+		if arm.ID == model.QAArmControl || arm.Halted {
+			continue
+		}
+		treatTimes := timesByArm[arm.ID]
+		if len(treatTimes) < 15 {
+			continue
+		}
+		_, _, harmed, hlShiftPct := expstats.NormalMixtureSPRTOneSided(treatTimes, ctrlTimes, tau, 0.01)
+		if !harmed || hlShiftPct <= 0.25 {
+			continue
+		}
+
+		reason := fmt.Sprintf("auto-tripped flow.time_to_pr harm rule on arm %s (+%.1f%% HL shift, alpha=0.01)", arm.ID, hlShiftPct*100)
+		if activeTreatments >= 2 {
+			_, uErr := store.UpdateQAExperiment(ctx, running.ID, 0, func(e *model.QAExperiment) error {
+				for i := range e.Arms {
+					if e.Arms[i].ID == arm.ID && !e.Arms[i].Halted {
+						e.Arms[i].Halted = true
+						e.Arms[i].HaltReason = reason
+						e.Arms[i].HaltedAt = now.Format(time.RFC3339)
+					}
+				}
+				return nil
+			})
+			if uErr != nil {
+				return false, uErr
+			}
+		} else {
+			_, uErr := store.UpdateQAExperiment(ctx, running.ID, 0, func(e *model.QAExperiment) error {
+				if e.State == model.QAExpStateRunning {
+					e.State = model.QAExpStateStopped
+					e.StoppedAt = &now
+					e.Decision = &model.QAExperimentDecision{
+						Outcome:   "reject",
+						Arm:       arm.ID,
+						Reason:    reason,
+						DecidedBy: "qa-harm-guardrail",
+						DecidedAt: now.Format(time.RFC3339),
+					}
+				}
+				return nil
+			})
+			if uErr != nil {
+				return false, uErr
+			}
+		}
+		_, _ = store.RecordConfigAudit(ctx, model.ConfigAuditEntry{
+			At: now,
+			By: model.Principal{
+				Kind:   model.PrincipalAutomation,
+				ID:     "qa-harm-guardrail",
+				Source: model.SourceInternal,
+			},
+			Surface: "qa-experiment:" + running.ID,
+			Summary: reason,
+		})
+		PromoteStrandedQAStagesForExperiment(ctx, store, client, running.ID, reason)
+		return true, nil
+	}
+	return false, nil
 }
 
 // MaybeAutoDowngradeQARollout evaluates mSPRT latency/escape, context ThreadCut, and operator
@@ -1030,6 +1260,9 @@ func MaybeAutoDowngradeQARollout(ctx context.Context, store *model.Store, now ti
 // PromoteStrandedQAStage promotes a stranded QA stage branch to the task's live PR branch, if it exists,
 // and records a fail-open check run.
 func PromoteStrandedQAStage(ctx context.Context, store *model.Store, client github.Client, task model.Task, reason string) error {
+	if store == nil || client == nil || task.Target == nil {
+		return nil
+	}
 	stageRef := model.QAStageBranchName(task.ID)
 	head, err := client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, stageRef)
 	if err != nil || head == nil || head.SHA == "" {
@@ -1040,7 +1273,7 @@ func PromoteStrandedQAStage(ctx context.Context, store *model.Store, client gith
 	if err != nil {
 		return err
 	}
-	if qaCfg.Enabled && assign != nil && assign.ArmID == model.QAArmTreatment {
+	if qaCfg.Enabled && assign != nil && assign.IsEnforcedTreatment() {
 		return nil // Task is actively in treatment, not stranded.
 	}
 
@@ -1048,6 +1281,7 @@ func PromoteStrandedQAStage(ctx context.Context, store *model.Store, client gith
 	if err != nil {
 		return fmt.Errorf("promoting stranded QA stage: %w", err)
 	}
+	clearTaskQAHold(ctx, store, task.ID)
 
 	status, err := OpenPullRequestForTask(ctx, store, client, task)
 	if err != nil {
@@ -1056,23 +1290,57 @@ func PromoteStrandedQAStage(ctx context.Context, store *model.Store, client gith
 
 	if status.PullRequest.Number > 0 {
 		note := "Quality checks did not run: " + reason
-		// Actually the prompt said "append PR note 'Quality checks did not run: ' + reason".
-		// But if appendOrUpdatePRNote is not defined, maybe it's appendPRNote or similar. Let's look for it.
-		// Wait, I can just use client.CreateComment?
-		// No, let me leave appendOrUpdatePRNote if it was defined, or maybe I should check the methods on client.
 		_, _ = client.CreateComment(task.Target.StoredOwner(), task.Target.Name, status.PullRequest.Number, note)
 	}
 
+	var expID, armID string
+	if assign != nil {
+		expID = assign.ExperimentID
+		armID = assign.ArmID
+	}
 	detailBytes, _ := json.Marshal(map[string]string{"reason": reason})
 	run := model.QACheckRun{
-		TaskID:     task.ID,
-		CommitSHA:  promotedSHA,
-		Stage:      "S-promote",
-		CheckID:    "qa:fail-open-promote",
-		Arm:        "control",
-		Verdict:    "unchecked",
-		DetailJSON: string(detailBytes),
+		TaskID:       task.ID,
+		CommitSHA:    promotedSHA,
+		Stage:        "S-promote",
+		CheckID:      "qa:fail-open-promote",
+		Arm:          "control",
+		Verdict:      "unchecked",
+		DetailJSON:   string(detailBytes),
+		ExperimentID: expID,
+		ArmID:        armID,
+		QAEngineRev:  qa.QAEngineRev,
+		Model:        task.Model,
 	}
 	_, err = store.RecordQACheckRun(ctx, run, nil)
 	return err
+}
+
+// PromoteStrandedQAStagesForExperiment sweeps all tasks enrolled in experimentID and promotes any
+// stranded staging branches whose arm is no longer actively enforced.
+func PromoteStrandedQAStagesForExperiment(ctx context.Context, store *model.Store, client github.Client, experimentID, reason string) {
+	if store == nil || client == nil || strings.TrimSpace(experimentID) == "" {
+		return
+	}
+	enrollments, err := store.ListQAEnrollments(ctx, experimentID)
+	if err != nil || len(enrollments) == 0 {
+		return
+	}
+	enrolledOrigins := make(map[string]bool, len(enrollments))
+	for _, e := range enrollments {
+		enrolledOrigins[e.RootOrigin] = true
+	}
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		return
+	}
+	for _, t := range tasks {
+		if t.Target == nil || !model.TaskEligibleForQAStaging(t) {
+			continue
+		}
+		if !enrolledOrigins[model.ResolveQARootOrigin(t.WorkOrigin, t.ID)] {
+			continue
+		}
+		_ = PromoteStrandedQAStage(ctx, store, client, t, reason)
+	}
 }

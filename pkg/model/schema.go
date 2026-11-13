@@ -681,7 +681,54 @@ import "strconv"
 // and defaulting to empty (engine off).
 // 147 adds `qa_flow_version` to track quality-control execution flow snapshots,
 // and indexes `task(origin_ref)` to quickly find prior runs of an origin.
-const SchemaVersion = 147
+// 148 adds `qa_experiment` and `qa_enrollment` for pre-registered quality
+// experiments and extends `task_qa_check_run` with experiment/engine provenance.
+const SchemaVersion = 148
+
+const qaExperimentTable = `CREATE TABLE IF NOT EXISTS ` + "`qa_experiment`" + ` (
+  ` + "`id`" + `                   TEXT     NOT NULL PRIMARY KEY,
+  ` + "`revision`" + `             INTEGER  NOT NULL DEFAULT 1,
+  ` + "`name`" + `                 TEXT     NOT NULL,
+  ` + "`hypothesis`" + `           TEXT     NOT NULL DEFAULT '',
+  ` + "`state`" + `                TEXT     NOT NULL DEFAULT 'draft',
+  ` + "`arms_json`" + `            TEXT     NOT NULL,
+  ` + "`scope_json`" + `           TEXT     NOT NULL,
+  ` + "`allocation_json`" + `      TEXT     NOT NULL,
+  ` + "`salt`" + `                 TEXT     NOT NULL DEFAULT '',
+  ` + "`allocation_list_json`" + ` TEXT     NOT NULL DEFAULT '',
+  ` + "`metrics_json`" + `         TEXT     NOT NULL,
+  ` + "`plan_json`" + `            TEXT     NOT NULL,
+  ` + "`options_json`" + `         TEXT     NOT NULL DEFAULT '{}',
+  ` + "`engine_json`" + `          TEXT     NOT NULL DEFAULT '{}',
+  ` + "`segment`" + `              INTEGER  NOT NULL DEFAULT 1,
+  ` + "`enrollment_held`" + `      TEXT     NOT NULL DEFAULT '',
+  ` + "`decision_json`" + `        TEXT     NOT NULL DEFAULT '',
+  ` + "`readout_json`" + `         TEXT     NOT NULL DEFAULT '',
+  ` + "`created_by`" + `           TEXT     NOT NULL DEFAULT '',
+  ` + "`created_at`" + `           DATETIME NOT NULL,
+  ` + "`started_at`" + `           DATETIME NULL,
+  ` + "`stopped_at`" + `           DATETIME NULL,
+  ` + "`archived_at`" + `          DATETIME NULL
+)`
+
+const qaExperimentRunningIndex = `CREATE UNIQUE INDEX IF NOT EXISTS ` + "`qa_experiment_one_running`" + ` ON ` + "`qa_experiment`" + ` (` + "`state`" + `) WHERE ` + "`state`" + ` = 'running'`
+
+const qaEnrollmentTable = `CREATE TABLE IF NOT EXISTS ` + "`qa_enrollment`" + ` (
+  ` + "`root_origin`" + `     TEXT     NOT NULL PRIMARY KEY,
+  ` + "`experiment_id`" + `   TEXT     NOT NULL,
+  ` + "`segment`" + `         INTEGER  NOT NULL DEFAULT 1,
+  ` + "`arm_id`" + `          TEXT     NOT NULL,
+  ` + "`flow_hash`" + `       TEXT     NOT NULL DEFAULT '',
+  ` + "`qa_engine_rev`" + `   INTEGER  NOT NULL DEFAULT 0,
+  ` + "`model`" + `           TEXT     NOT NULL DEFAULT '',
+  ` + "`grain_build`" + `     TEXT     NOT NULL DEFAULT '',
+  ` + "`allocation_key`" + `  TEXT     NOT NULL DEFAULT '',
+  ` + "`bucket`" + `          INTEGER  NULL,
+  ` + "`excluded_reason`" + ` TEXT     NOT NULL DEFAULT '',
+  ` + "`assigned_at`" + `     DATETIME NOT NULL
+)`
+
+const qaEnrollmentExpIndex = `CREATE INDEX IF NOT EXISTS ` + "`qa_enrollment_exp`" + ` ON ` + "`qa_enrollment`" + ` (` + "`experiment_id`" + `, ` + "`assigned_at`" + `)`
 
 const qaFlowVersionTable = `CREATE TABLE IF NOT EXISTS ` + "`qa_flow_version`" + ` (
   ` + "`hash`" + `          TEXT     NOT NULL PRIMARY KEY,
@@ -712,21 +759,27 @@ const taskQAAssignmentTable = `CREATE TABLE IF NOT EXISTS ` + "`task_qa_assignme
 )`
 
 const taskQACheckRunTable = `CREATE TABLE IF NOT EXISTS ` + "`task_qa_check_run`" + ` (
-  ` + "`id`" + `          INTEGER  PRIMARY KEY AUTOINCREMENT,
-  ` + "`task_id`" + `     TEXT     NOT NULL,
-  ` + "`run_id`" + `      TEXT     NOT NULL DEFAULT '',
-  ` + "`commit_sha`" + `  TEXT     NOT NULL DEFAULT '',
-  ` + "`stage`" + `       TEXT     NOT NULL,
-  ` + "`check_id`" + `    TEXT     NOT NULL,
-  ` + "`arm`" + `         TEXT     NOT NULL DEFAULT 'control',
-  ` + "`shadow`" + `      INTEGER  NOT NULL DEFAULT 0,
-  ` + "`verdict`" + `     TEXT     NOT NULL,
-  ` + "`duration_ms`" + ` INTEGER  NOT NULL DEFAULT 0,
-  ` + "`tokens_in`" + `   INTEGER  NOT NULL DEFAULT 0,
-  ` + "`tokens_out`" + `  INTEGER  NOT NULL DEFAULT 0,
-  ` + "`alloc_bytes`" + ` INTEGER  NOT NULL DEFAULT 0,
-  ` + "`detail_json`" + ` TEXT     NOT NULL DEFAULT '',
-  ` + "`created_at`" + `  DATETIME NOT NULL
+  ` + "`id`" + `            INTEGER  PRIMARY KEY AUTOINCREMENT,
+  ` + "`task_id`" + `       TEXT     NOT NULL,
+  ` + "`run_id`" + `        TEXT     NOT NULL DEFAULT '',
+  ` + "`commit_sha`" + `    TEXT     NOT NULL DEFAULT '',
+  ` + "`stage`" + `         TEXT     NOT NULL,
+  ` + "`check_id`" + `      TEXT     NOT NULL,
+  ` + "`arm`" + `           TEXT     NOT NULL DEFAULT 'control',
+  ` + "`shadow`" + `        INTEGER  NOT NULL DEFAULT 0,
+  ` + "`verdict`" + `       TEXT     NOT NULL,
+  ` + "`duration_ms`" + `   INTEGER  NOT NULL DEFAULT 0,
+  ` + "`tokens_in`" + `     INTEGER  NOT NULL DEFAULT 0,
+  ` + "`tokens_out`" + `    INTEGER  NOT NULL DEFAULT 0,
+  ` + "`alloc_bytes`" + `   INTEGER  NOT NULL DEFAULT 0,
+  ` + "`detail_json`" + `   TEXT     NOT NULL DEFAULT '',
+  ` + "`experiment_id`" + ` TEXT     NOT NULL DEFAULT '',
+  ` + "`arm_id`" + `        TEXT     NOT NULL DEFAULT '',
+  ` + "`flow_hash`" + `     TEXT     NOT NULL DEFAULT '',
+  ` + "`qa_engine_rev`" + ` INTEGER  NOT NULL DEFAULT 0,
+  ` + "`model`" + `         TEXT     NOT NULL DEFAULT '',
+  ` + "`base_sha`" + `      TEXT     NOT NULL DEFAULT '',
+  ` + "`created_at`" + `    DATETIME NOT NULL
 )`
 
 const taskQAFindingTable = `CREATE TABLE IF NOT EXISTS ` + "`task_qa_finding`" + ` (
@@ -4618,6 +4671,10 @@ var Tables = []string{
 	taskQAFindingTable,
 	`CREATE INDEX IF NOT EXISTS ` + "`task_qa_finding_task`" + ` ON ` + "`task_qa_finding`" + ` (` + "`task_id`" + `, ` + "`id`" + `)`,
 	qaFlowVersionTable,
+	qaExperimentTable,
+	qaExperimentRunningIndex,
+	qaEnrollmentTable,
+	qaEnrollmentExpIndex,
 	`CREATE INDEX IF NOT EXISTS ` + "`task_origin_ref`" + ` ON ` + "`task`" + ` (` + "`origin_ref`" + `)`,
 }
 

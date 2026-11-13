@@ -974,8 +974,8 @@ func salvagePushedBranch(ctx context.Context, store *model.Store, client github.
 		}
 		return true, err
 	}
-	if assign, qaCfg, aErr := resolve.ActiveQAResolutionForTask(ctx, store, task.ID); aErr == nil && qaCfg.Enabled && assign != nil && assign.ArmID == model.QAArmControl && qaCfg.ShadowOnControlEnabled() {
-		maybeRunControlShadowS3(store, client, task, assign.FlowID, assign.Spec)
+	if assign, qaCfg, aErr := resolve.ActiveQAResolutionForTask(ctx, store, task.ID); aErr == nil && qaCfg.Enabled && assign != nil && assign.ArmID == model.QAArmControl && (assign.Shadow || qaCfg.ShadowOnControlEnabled()) {
+		maybeRunControlShadowS3(store, client, task, assign)
 	}
 	return true, noteOrphanedIfClosed(ctx, store, client, task.ID, now)
 }

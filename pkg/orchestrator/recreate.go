@@ -574,7 +574,7 @@ func (s *sandboxRecreation) restoreCheckout(ctx context.Context, out *SandboxRec
 	pushBranch := s.task.BranchName()
 	if s.store != nil {
 		if assign, qaCfg, aErr := resolve.ActiveQAResolutionForTask(ctx, s.store, s.task.ID); aErr == nil &&
-			qaCfg.Enabled && assign != nil && assign.ArmID == model.QAArmTreatment {
+			qaCfg.Enabled && assign != nil && assign.IsEnforcedTreatment() && (assign.Spec == nil || assign.Spec.StagingIsolation) {
 			pushBranch = model.QAStageBranchName(s.task.ID)
 		}
 	}
