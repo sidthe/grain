@@ -19,6 +19,7 @@ import { NEVER } from "rxjs";
 import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import type { GrainConfig, Task } from "../api/models";
+import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
 import { ProcessesPageComponent } from "./processes-page.component";
 import {
@@ -350,7 +351,10 @@ class FakeProcessesApi {
       return Promise.resolve(structuredClone(this.compositionSample));
     }
     if (route === "GET /api/suite-runs/{id}") {
-      return Promise.resolve(structuredClone(this.suiteRuns[0]));
+      const id = Number(params?.["id"]);
+      const found =
+        this.suiteRuns.find((r) => r.id === id) ?? this.suiteRuns[0];
+      return Promise.resolve(structuredClone(found));
     }
     if (route === "GET /api/repos/{owner}/{name}/declarations") {
       return Promise.resolve(structuredClone(this.repoDecl));
@@ -1616,5 +1620,574 @@ describe("ProcessesPageComponent (D-9)", () => {
     ).toEqual({
       everyNMinutes: "Interval in minutes must be at least 10.",
     });
+  });
+});
+
+describe("ProcessesPageComponent RBAC (G-06)", () => {
+  let api: FakeProcessesApi;
+
+  beforeEach(() => {
+    localStorage.clear();
+    Object.defineProperty(window, "innerWidth", {
+      value: 1440,
+      configurable: true,
+      writable: true,
+    });
+    api = new FakeProcessesApi();
+    TestBed.configureTestingModule({
+      providers: [
+        provideRouter(
+          [
+            { path: "processes", component: ProcessesPageComponent },
+            { path: "processes/:tab", component: ProcessesPageComponent },
+            { path: "task/:id", component: ProcessesPageComponent },
+          ],
+          withComponentInputBinding(),
+        ),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => NEVER } },
+      ],
+    });
+  });
+
+  afterEach(() => {
+    TestBed.resetTestingModule();
+  });
+
+  async function mount(
+    url: string,
+    accessConfig: GrainConfig["access"],
+    targetRepos?: string[],
+  ) {
+    api.configBody = {
+      ...api.configBody,
+      access: accessConfig,
+      ...(targetRepos !== undefined ? { targetRepos } : {}),
+    };
+    const harness = await RouterTestingHarness.create(url);
+    const access = TestBed.inject(AccessService);
+    access.setConfig(api.configBody);
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+    const setInput = async (testId: string, val: string) => {
+      const el = root.querySelector<HTMLInputElement>(
+        `[data-testid="${testId}"]`,
+      )!;
+      el.value = val;
+      el.dispatchEvent(new Event("input"));
+      await flush(harness);
+    };
+    const btn = (testId: string) =>
+      root.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`);
+    return { harness, root, access, setInput, btn };
+  }
+
+  it("disables or hides all mutation buttons and blocks deep links for grain/viewer across every tab", async () => {
+    const viewerAccess: GrainConfig["access"] = {
+      role: "grain/viewer",
+      roles: ["grain/viewer"],
+      full: false,
+      scopes: [
+        "schedules:read",
+        "templates:read",
+        "suites:read",
+        "repos:read",
+        "tasks:read",
+      ],
+    };
+
+    const { harness, root, btn } = await mount(
+      "/processes/schedules?new=1",
+      viewerAccess,
+    );
+
+    // Schedules: ?new=1 blocked, New schedule hidden, all row actions disabled
+    expect(root.querySelector('[data-testid="schedule-dialog"]')).toBeNull();
+    expect(btn("proc-new-schedule-btn")).toBeNull();
+    expect(btn("sched-run-now-btn")!.disabled).toBe(true);
+    expect(btn("sched-toggle-enabled-btn")!.disabled).toBe(true);
+    expect(btn("sched-edit-btn")!.disabled).toBe(true);
+    expect(btn("sched-delete-btn")!.disabled).toBe(true);
+    btn("sched-run-now-btn")!.click();
+    await flush(harness);
+
+    // Templates: ?launch=1 blocked, header actions hidden, Launch/Edit/Delete disabled
+    await harness.navigateByUrl("/processes/templates?launch=1");
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="launch-template-dialog"]'),
+    ).toBeNull();
+    expect(btn("proc-launch-template-btn")).toBeNull();
+    expect(btn("proc-new-template-btn")).toBeNull();
+    btn("tmpl-row-tmpl-deploy-1")!.click();
+    await flush(harness);
+    expect(btn("tmpl-launch-btn")!.disabled).toBe(true);
+    expect(btn("tmpl-edit-btn")!.disabled).toBe(true);
+    expect(btn("tmpl-delete-btn")!.disabled).toBe(true);
+
+    // Suites: ?run=1 blocked, header actions hidden, Run/Edit/Delete/Cancel disabled
+    await harness.navigateByUrl("/processes/suites?run=1");
+    await flush(harness);
+    expect(root.querySelector('[data-testid="run-suite-dialog"]')).toBeNull();
+    expect(btn("proc-run-suite-btn")).toBeNull();
+    expect(btn("proc-new-suite-btn")).toBeNull();
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(true);
+    expect(btn("suite-edit-btn")!.disabled).toBe(true);
+    expect(btn("suite-delete-btn")!.disabled).toBe(true);
+
+    btn("suites-subview-runs")!.click();
+    await flush(harness);
+    btn("suite-run-row-7")!.click();
+    await flush(harness);
+    expect(btn("suite-run-cancel-btn")!.disabled).toBe(true);
+
+    // Declarations: toggle switch & accept disabled, add-workflow hidden, inspect remains clickable
+    btn("proc-tab-declarations")!.click();
+    await flush(harness);
+    expect(btn("decl-toggle-switch")!.disabled).toBe(true);
+    const acceptBtns = root.querySelectorAll<HTMLButtonElement>(
+      '[data-testid^="decl-accept-btn-"]',
+    );
+    expect(acceptBtns.length).toBeGreaterThan(0);
+    for (const ab of Array.from(acceptBtns)) {
+      expect(ab.disabled).toBe(true);
+    }
+    expect(btn("decl-add-workflow-btn")).toBeNull();
+    const inspectBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid^="decl-inspect-wf-"]',
+    );
+    expect(inspectBtn).not.toBeNull();
+    expect(inspectBtn!.disabled).toBe(false);
+
+    const writeCalls = api.calls.filter(
+      (c) =>
+        c.method === "POST" ||
+        c.method === "PATCH" ||
+        c.method === "DELETE" ||
+        c.method === "PUT",
+    );
+    expect(writeCalls).toEqual([]);
+  });
+
+  it("enforces repoLimits vs canGlobalScope('suites:write') for cross-repo, unbound, and single-repo suites", async () => {
+    api.templates = [
+      {
+        id: "tmpl-a",
+        name: "A1",
+        title: "A1",
+        description: "",
+        repo: "acme/widgets",
+        autoMerge: false,
+        capabilities: [],
+      },
+      {
+        id: "tmpl-a2",
+        name: "A2",
+        title: "A2",
+        description: "",
+        repo: "acme/widgets",
+        autoMerge: false,
+        capabilities: [],
+      },
+      {
+        id: "tmpl-decl-a",
+        name: "Decl A",
+        title: "Decl A",
+        description: "",
+        declaredIn: {
+          repo: "acme/widgets",
+          path: ".grain/templates/a.yml",
+        },
+        autoMerge: false,
+        capabilities: [],
+      },
+      {
+        id: "tmpl-b",
+        name: "B1",
+        title: "B1",
+        description: "",
+        repo: "acme/other",
+        autoMerge: false,
+        capabilities: [],
+      },
+      {
+        id: "tmpl-any",
+        name: "Any repo",
+        title: "Any",
+        description: "",
+        autoMerge: false,
+        capabilities: [],
+      },
+    ];
+    api.suites = [
+      {
+        id: "suite-multi",
+        name: "Multi-repo sweep",
+        mode: "count",
+        count: 1,
+        items: [{ templateId: "tmpl-a" }, { templateId: "tmpl-b" }],
+      },
+      {
+        id: "suite-any",
+        name: "Unbound sweep",
+        mode: "count",
+        count: 1,
+        items: [{ templateId: "tmpl-any" }],
+      },
+      {
+        id: "suite-other",
+        name: "Other repo sweep",
+        mode: "count",
+        count: 1,
+        items: [{ templateId: "tmpl-b" }],
+      },
+      {
+        id: "suite-allowed",
+        name: "Allowed single-repo sweep",
+        mode: "count",
+        count: 1,
+        items: [{ templateId: "tmpl-a" }, { templateId: "tmpl-a2" }],
+      },
+      {
+        id: "suite-decl-allowed",
+        name: "Allowed declared single-repo sweep",
+        mode: "count",
+        count: 1,
+        declaredIn: {
+          repo: "acme/widgets",
+          path: ".grain/suites/a.yml",
+        },
+        items: [{ templateId: "tmpl-decl-a" }],
+      },
+    ];
+
+    const { harness, root, access, setInput, btn } = await mount(
+      "/processes/suites",
+      {
+        role: "repo-suite-runner",
+        roles: ["repo-suite-runner"],
+        full: false,
+        scopes: ["suites:read", "suites:write", "templates:read", "repos:read"],
+        repoLimits: { "suites:write": ["acme/widgets"] },
+      },
+      ["acme/other", "acme/widgets"],
+    );
+
+    // Global suite creation/editing/deletion stays disabled
+    expect(btn("proc-new-suite-btn")).toBeNull();
+    // Cross-repo (suite-multi), unbound (suite-any), and other-repo (suite-other) cannot run
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(true);
+    expect(btn("suite-edit-btn")!.disabled).toBe(true);
+    expect(btn("suite-delete-btn")!.disabled).toBe(true);
+
+    btn("suite-row-suite-any")!.click();
+    await flush(harness);
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(true);
+
+    btn("suite-row-suite-other")!.click();
+    await flush(harness);
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(true);
+
+    // Single-repo suites bound to allowed repo ARE runnable, while edit/delete stay global-gated
+    btn("suite-row-suite-decl-allowed")!.click();
+    await flush(harness);
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(false);
+
+    btn("suite-row-suite-allowed")!.click();
+    await flush(harness);
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(false);
+    expect(btn("suite-edit-btn")!.disabled).toBe(true);
+    expect(btn("suite-delete-btn")!.disabled).toBe(true);
+
+    // Header Run suite button selects first runnable suite even when cross-repo suite is selected
+    btn("suite-row-suite-multi")!.click();
+    await flush(harness);
+    expect(btn("proc-run-suite-btn")).not.toBeNull();
+    btn("proc-run-suite-btn")!.click();
+    await flush(harness);
+
+    expect(
+      root.querySelector('[data-testid="run-suite-dialog"]'),
+    ).not.toBeNull();
+    expect(
+      root.querySelector<HTMLInputElement>(
+        '[data-testid="run-suite-repo-input"]',
+      )!.value,
+    ).toBe("acme/widgets");
+    expect(btn("run-suite-submit")!.disabled).toBe(false);
+
+    // Unrunnable suites are disabled inside the Run suite picker
+    btn("run-suite-picker")!.click();
+    await flush(harness);
+    const pickerOptions = Array.from(
+      root.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="run-suite-dialog"] [role="option"]',
+      ),
+    );
+    expect(
+      pickerOptions.find((o) => o.textContent?.includes("Multi-repo sweep"))!
+        .disabled,
+    ).toBe(true);
+    expect(
+      pickerOptions.find((o) => o.textContent?.includes("Unbound sweep"))!
+        .disabled,
+    ).toBe(true);
+    expect(
+      pickerOptions.find((o) => o.textContent?.includes("Other repo sweep"))!
+        .disabled,
+    ).toBe(true);
+    expect(
+      pickerOptions.find((o) =>
+        o.textContent?.includes("Allowed single-repo sweep"),
+      )!.disabled,
+    ).toBe(false);
+    btn("run-suite-picker")!.click();
+    await flush(harness);
+
+    // Changing target repo outside repoLimits blocks submission
+    await setInput("run-suite-repo-input", "acme/other");
+    expect(btn("run-suite-submit")!.disabled).toBe(true);
+    await setInput("run-suite-repo-input", "acme/widgets");
+    expect(btn("run-suite-submit")!.disabled).toBe(false);
+    root.querySelector<HTMLElement>(".scrim")!.click();
+    await flush(harness);
+
+    // Granting global suites:write unlocks New suite, cross-repo Run suite, and Edit/Delete
+    access.setConfig({
+      access: {
+        role: "global-suite-admin",
+        roles: ["global-suite-admin"],
+        full: false,
+        scopes: ["suites:read", "suites:write", "templates:read", "repos:read"],
+      },
+    });
+    await flush(harness);
+    expect(btn("proc-new-suite-btn")).not.toBeNull();
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(false);
+    expect(btn("suite-edit-btn")!.disabled).toBe(false);
+    expect(btn("suite-delete-btn")!.disabled).toBe(false);
+
+    btn("suite-row-suite-any")!.click();
+    await flush(harness);
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(false);
+  });
+
+  it("hides proc-run-suite-btn and ignores ?run=1 when repo-scoped user has no single-repo runnable suite", async () => {
+    api.templates = [
+      {
+        id: "tmpl-a",
+        name: "A",
+        title: "A",
+        description: "",
+        repo: "acme/widgets",
+        autoMerge: false,
+        capabilities: [],
+      },
+      {
+        id: "tmpl-b",
+        name: "B",
+        title: "B",
+        description: "",
+        repo: "acme/other",
+        autoMerge: false,
+        capabilities: [],
+      },
+    ];
+    api.suites = [
+      {
+        id: "suite-multi",
+        name: "Multi",
+        mode: "count",
+        count: 1,
+        items: [{ templateId: "tmpl-a" }, { templateId: "tmpl-b" }],
+      },
+    ];
+
+    const { root, btn } = await mount("/processes/suites?run=1", {
+      role: "repo-suite-runner",
+      roles: ["repo-suite-runner"],
+      full: false,
+      scopes: ["suites:read", "suites:write", "templates:read"],
+      repoLimits: { "suites:write": ["acme/widgets"] },
+    });
+
+    expect(btn("proc-run-suite-btn")).toBeNull();
+    expect(root.querySelector('[data-testid="run-suite-dialog"]')).toBeNull();
+    expect(btn("suite-open-run-dialog-btn")!.disabled).toBe(true);
+  });
+
+  it("enforces global scope vs repoLimits across schedules:write, templates:write, and tasks:write", async () => {
+    api.templates = [
+      ...api.templates,
+      {
+        id: "tmpl-sys",
+        name: "System",
+        title: "System workflow",
+        description: "",
+        system: true,
+        autoMerge: false,
+        capabilities: [],
+      },
+      {
+        id: "tmpl-other",
+        name: "Other",
+        title: "Other repo template",
+        description: "",
+        repo: "acme/other",
+        autoMerge: false,
+        capabilities: [],
+      },
+    ];
+    api.suiteRuns = [
+      { ...api.suiteRuns[0], id: 7, repo: "acme/widgets" },
+      { ...api.suiteRuns[0], id: 8, repo: "acme/other" },
+      { ...api.suiteRuns[0], id: 9, repo: "" },
+    ];
+
+    const repoLimitedAccess: GrainConfig["access"] = {
+      role: "repo-dev",
+      roles: ["repo-dev"],
+      full: false,
+      scopes: [
+        "schedules:read",
+        "schedules:write",
+        "templates:read",
+        "templates:write",
+        "suites:read",
+        "tasks:read",
+        "tasks:write",
+        "repos:read",
+      ],
+      repoLimits: {
+        "schedules:write": ["acme/widgets"],
+        "templates:write": ["acme/widgets"],
+        "tasks:write": ["acme/widgets"],
+      },
+    };
+
+    const { harness, root, access, setInput, btn } = await mount(
+      "/processes/schedules",
+      repoLimitedAccess,
+      ["acme/other", "acme/widgets"],
+    );
+
+    // Schedules: {id} routes require global schedules:write; POST allows repo-scoped creation
+    expect(btn("sched-run-now-btn")!.disabled).toBe(true);
+    expect(btn("sched-toggle-enabled-btn")!.disabled).toBe(true);
+    expect(btn("sched-edit-btn")!.disabled).toBe(true);
+    expect(btn("sched-delete-btn")!.disabled).toBe(true);
+    expect(btn("proc-new-schedule-btn")).not.toBeNull();
+
+    btn("proc-new-schedule-btn")!.click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="sched-repo-input"]')!
+        .value,
+    ).toBe("acme/widgets");
+    expect(btn("sched-save-btn")!.disabled).toBe(false);
+    await setInput("sched-repo-input", "acme/other");
+    expect(btn("sched-save-btn")!.disabled).toBe(true);
+    await setInput("sched-repo-input", "");
+    expect(btn("sched-save-btn")!.disabled).toBe(true);
+    root.querySelector<HTMLElement>(".scrim")!.click();
+    await flush(harness);
+
+    // Templates: {id} routes & repoless system launch require global scope
+    btn("proc-tab-templates")!.click();
+    await flush(harness);
+
+    btn("tmpl-row-tmpl-sys")!.click();
+    await flush(harness);
+    expect(btn("tmpl-launch-btn")!.disabled).toBe(true);
+
+    btn("tmpl-row-tmpl-other")!.click();
+    await flush(harness);
+    expect(btn("tmpl-launch-btn")!.disabled).toBe(true);
+    expect(btn("tmpl-edit-btn")!.disabled).toBe(true);
+    expect(btn("tmpl-delete-btn")!.disabled).toBe(true);
+
+    btn("tmpl-row-repo:template:acme/widgets:release-notes")!.click();
+    await flush(harness);
+    expect(btn("tmpl-launch-btn")!.disabled).toBe(false);
+
+    btn("tmpl-row-tmpl-deploy-1")!.click();
+    await flush(harness);
+    expect(btn("tmpl-launch-btn")!.disabled).toBe(false);
+    expect(btn("tmpl-edit-btn")!.disabled).toBe(true);
+    expect(btn("tmpl-delete-btn")!.disabled).toBe(true);
+
+    btn("tmpl-launch-btn")!.click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="launch-repo-input"]')!
+        .value,
+    ).toBe("acme/widgets");
+    expect(btn("launch-template-submit")!.disabled).toBe(false);
+    await setInput("launch-repo-input", "acme/other");
+    expect(btn("launch-template-submit")!.disabled).toBe(true);
+    root.querySelector<HTMLElement>(".scrim")!.click();
+    await flush(harness);
+
+    // Creating a template pre-selects permitted repo and blocks empty/other repo
+    btn("proc-new-template-btn")!.click();
+    await flush(harness);
+    await setInput("tmpl-name-input", "Repo tmpl");
+    await setInput("tmpl-title-input", "Title");
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="tmpl-repo-input"]')!
+        .value,
+    ).toBe("acme/widgets");
+    expect(btn("tmpl-save-btn")!.disabled).toBe(false);
+    await setInput("tmpl-repo-input", "");
+    expect(btn("tmpl-save-btn")!.disabled).toBe(true);
+    await setInput("tmpl-repo-input", "acme/other");
+    expect(btn("tmpl-save-btn")!.disabled).toBe(true);
+    root.querySelector<HTMLElement>(".scrim")!.click();
+    await flush(harness);
+
+    // Suite runs cancel: checks sr.repo or global tasks:write when repo is empty
+    btn("proc-tab-suites")!.click();
+    await flush(harness);
+    btn("suites-subview-runs")!.click();
+    await flush(harness);
+
+    btn("suite-run-row-7")!.click();
+    await flush(harness);
+    expect(btn("suite-run-cancel-btn")!.disabled).toBe(false);
+
+    btn("suite-run-row-8")!.click();
+    await flush(harness);
+    expect(btn("suite-run-cancel-btn")!.disabled).toBe(true);
+
+    btn("suite-run-row-9")!.click();
+    await flush(harness);
+    expect(btn("suite-run-cancel-btn")!.disabled).toBe(true);
+
+    // Global permissions unlock repo-less cancel, schedule {id} actions, template edit/delete & system launch
+    access.setConfig({
+      access: {
+        ...repoLimitedAccess,
+        role: "global-writer",
+        roles: ["global-writer"],
+        repoLimits: undefined,
+      },
+    });
+    await flush(harness);
+    expect(btn("suite-run-cancel-btn")!.disabled).toBe(false);
+
+    btn("proc-tab-templates")!.click();
+    await flush(harness);
+    expect(btn("tmpl-edit-btn")!.disabled).toBe(false);
+    expect(btn("tmpl-delete-btn")!.disabled).toBe(false);
+    btn("tmpl-row-tmpl-sys")!.click();
+    await flush(harness);
+    expect(btn("tmpl-launch-btn")!.disabled).toBe(false);
+
+    btn("proc-tab-schedules")!.click();
+    await flush(harness);
+    expect(btn("sched-run-now-btn")!.disabled).toBe(false);
+    expect(btn("sched-toggle-enabled-btn")!.disabled).toBe(false);
+    expect(btn("sched-edit-btn")!.disabled).toBe(false);
+    expect(btn("sched-delete-btn")!.disabled).toBe(false);
   });
 });
