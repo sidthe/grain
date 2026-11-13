@@ -370,7 +370,19 @@ function saveView(v: WsView): void {
           <div class="ws-cards" data-testid="ws-cards">
             @for (s of filtered().visible; track s.key) {
               @let th = thumbOf(s);
-              <article class="ws-card">
+              <article
+                class="ws-card"
+                data-ws-row-trigger
+                [attr.data-ws-key]="s.key"
+                [attr.data-testid]="'ws-card-' + s.key"
+                [class.is-selected]="selectedKey() === s.key"
+                [attr.aria-current]="selectedKey() === s.key ? 'true' : null"
+                [attr.aria-labelledby]="'ws-card-title-' + $index"
+                tabindex="0"
+                (click)="pick($event, s.key)"
+                (keydown.enter)="pickKey($event, s.key)"
+                (keydown.space)="pickKey($event, s.key)"
+              >
                 <div class="ws-ctop">
                   <span [class]="markClass(s, true)" [gTip]="markTip(s)">{{
                     markText(s)
@@ -383,16 +395,8 @@ function saveView(v: WsView): void {
                   }
                   <span style="margin-left:auto">{{ lastText(s) }}</span>
                 </div>
-                <h2 class="ws-ctitle">
-                  <button
-                    type="button"
-                    class="ws-stretch-btn"
-                    data-ws-row-trigger
-                    [attr.data-testid]="'ws-card-' + s.key"
-                    (click)="openStream(s.key)"
-                  >
-                    {{ s.title }}
-                  </button>
+                <h2 class="ws-ctitle" [id]="'ws-card-title-' + $index">
+                  {{ s.title }}
                 </h2>
                 <svg class="ws-thumb" viewBox="0 0 280 64" aria-hidden="true">
                   @for (e of th.edges; track $index) {
@@ -512,22 +516,23 @@ function saveView(v: WsView): void {
                 <span class="muted tabular">{{ grp.streams.length }}</span>
               </div>
               @for (s of grp.streams; track s.key) {
-                <div class="ws-row">
+                <div
+                  class="ws-row"
+                  data-ws-row-trigger
+                  [attr.data-ws-key]="s.key"
+                  [attr.data-testid]="'ws-row-' + s.key"
+                  [class.is-selected]="selectedKey() === s.key"
+                  [attr.aria-current]="selectedKey() === s.key ? 'true' : null"
+                  tabindex="0"
+                  (click)="pick($event, s.key)"
+                  (keydown.enter)="pickKey($event, s.key)"
+                  (keydown.space)="pickKey($event, s.key)"
+                >
                   <span [class]="markClass(s, false)" [gTip]="markTip(s)">{{
                     markText(s)
                   }}</span>
                   <div style="min-width:0">
-                    <div class="ws-ttl">
-                      <button
-                        type="button"
-                        class="ws-stretch-btn"
-                        data-ws-row-trigger
-                        [attr.data-testid]="'ws-row-' + s.key"
-                        (click)="openStream(s.key)"
-                      >
-                        {{ s.title }}
-                      </button>
-                    </div>
+                    <div class="ws-ttl">{{ s.title }}</div>
                     <div class="ws-rmeta">
                       <span>{{ whoShort(s) }}</span>
                       @if (
@@ -687,6 +692,7 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
 
   readonly key = input<string>();
   readonly ws = input<string>();
+  readonly selected = input<string>();
   readonly view = input<string>();
   readonly scope = input<string>();
   readonly mine = input<string>();
@@ -711,6 +717,14 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
 
   protected readonly activeKey = computed(
     () => this.key() || this.ws() || null,
+  );
+  private readonly localSelected = signal<string | null>(null);
+  protected readonly selectedKey = computed(
+    () =>
+      this.localSelected() ??
+      this.selected() ??
+      this.store.lastSelectedKey() ??
+      null,
   );
   protected readonly activeView = computed<WsView>(() => {
     const v = this.view();
@@ -824,7 +838,16 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
   constructor() {
     effect(() => {
       const k = this.activeKey();
-      untracked(() => this.store.selectedKey.set(k));
+      untracked(() => {
+        this.store.selectedKey.set(k);
+        if (k) this.store.lastSelectedKey.set(k);
+      });
+    });
+    effect(() => {
+      const s = this.selected();
+      untracked(() => {
+        if (s !== undefined) this.localSelected.set(s || null);
+      });
     });
   }
 
@@ -870,6 +893,8 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
   }
 
   protected resetFilters(): void {
+    this.localSelected.set(null);
+    this.store.lastSelectedKey.set(null);
     void this.router.navigate(["/workstreams"], { replaceUrl: true });
   }
 
@@ -886,13 +911,38 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
   }
 
   protected openStream(key: string, nodeId?: string): void {
+    this.localSelected.set(key);
+    this.store.lastSelectedKey.set(key);
     void this.router.navigate(["/workstreams", key], {
       queryParams: { node: nodeId ?? null },
       queryParamsHandling: "merge",
     });
   }
 
+  // pick selects and opens a workstream from a click, leaving any link
+  // or button inside the card or row to that control.
+  protected pick(ev: MouseEvent, key: string): void {
+    const t = ev.target as Element | null;
+    const cur = ev.currentTarget as Element | null;
+    const control = t?.closest("a, button");
+    if (control && control !== cur && cur?.contains(control)) return;
+    this.openStream(key);
+  }
+
+  // pickKey handles Enter or Space on the focused card or row itself,
+  // consuming the key so Space does not scroll and page shortcuts do not
+  // fire alongside it.
+  protected pickKey(ev: Event, key: string): void {
+    if (ev.target !== ev.currentTarget) return;
+    ev.preventDefault();
+    this.openStream(key);
+  }
+
   protected closeStream(): void {
+    if (!this.activeStream()) {
+      this.localSelected.set(null);
+      this.store.lastSelectedKey.set(null);
+    }
     void this.router.navigate(["/workstreams"], {
       queryParams: {
         ws: null,
@@ -992,17 +1042,25 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
 
   private stepStreamFocus(delta: number): void {
     const triggers = Array.from(
-      this.host.nativeElement.querySelectorAll<HTMLButtonElement>(
+      this.host.nativeElement.querySelectorAll<HTMLElement>(
         "[data-ws-row-trigger]",
       ),
     );
     if (!triggers.length) return;
-    const active = document.activeElement as HTMLButtonElement | null;
-    const idx = active ? triggers.indexOf(active) : -1;
+    const active = document.activeElement as HTMLElement | null;
+    let idx = active ? triggers.indexOf(active) : -1;
+    if (idx < 0) {
+      const sel = this.selectedKey();
+      if (sel) {
+        idx = triggers.findIndex((el) => el.dataset["wsKey"] === sel);
+      }
+    }
     const next =
       idx < 0
         ? triggers[delta > 0 ? 0 : triggers.length - 1]
         : triggers[Math.max(0, Math.min(triggers.length - 1, idx + delta))];
+    const key = next?.dataset["wsKey"];
+    if (key) this.localSelected.set(key);
     next?.focus();
     next?.scrollIntoView?.({ block: "nearest" });
   }
@@ -1035,6 +1093,17 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
     } else if ((letters && ev.key === "k") || ev.key === "ArrowUp") {
       ev.preventDefault();
       this.stepStreamFocus(-1);
+    } else if (ev.key === "Enter") {
+      const sel = this.selectedKey();
+      const target = ev.target as Element | null;
+      if (
+        sel &&
+        this.filtered().visible.some((s) => s.key === sel) &&
+        !target?.closest?.("a, button, [data-ws-row-trigger]")
+      ) {
+        ev.preventDefault();
+        this.openStream(sel);
+      }
     }
   }
 }

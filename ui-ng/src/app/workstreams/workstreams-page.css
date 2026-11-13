@@ -66,6 +66,10 @@ g-workstreams-page {
     animation: none;
     background-position: 0 0;
   }
+  .ws-row,
+  .ws-card {
+    transition: none;
+  }
 }
 
 .ws-filters {
@@ -141,35 +145,23 @@ g-workstreams-page {
   color: inherit;
   text-align: left;
   cursor: pointer;
-}
-
-.ws-stretch-btn {
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  padding: 0;
-  text-align: inherit;
-  cursor: pointer;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.ws-stretch-btn::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-}
-
-.ws-stretch-btn:focus-visible {
-  outline: 2px solid var(--md-sys-color-primary);
-  outline-offset: 2px;
-  border-radius: 4px;
+  transition: background-color 220ms var(--md-sys-motion-effects);
 }
 
 .ws-row:hover {
   background: var(--md-sys-color-surface-container-low);
+}
+
+.ws-row:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: -2px;
+}
+
+.ws-row.is-selected {
+  background: var(--md-sys-color-surface-container);
+  box-shadow: inset 3px 0 0 var(--md-sys-color-primary);
 }
 
 .ws-ttl {
@@ -213,14 +205,41 @@ g-workstreams-page {
   padding: 14px 16px 12px;
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: 16px;
-  background: var(--md-sys-color-surface-container-low);
+  background: var(--md-sys-color-surface);
   text-align: left;
   color: inherit;
   cursor: pointer;
+  transition:
+    border-color 220ms var(--md-sys-motion-effects),
+    background-color 220ms var(--md-sys-motion-effects);
+}
+
+:root[data-theme="dark"] .ws-card {
+  background: var(--md-sys-color-surface-container-low);
 }
 
 .ws-card:hover {
+  background: var(--md-sys-color-surface-container-low);
   border-color: var(--md-sys-color-outline);
+}
+
+:root[data-theme="dark"] .ws-card:hover {
+  background: var(--md-sys-color-surface-container);
+}
+
+.ws-card:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
+}
+
+.ws-card.is-selected {
+  background: var(--md-sys-color-surface-container);
+  border-color: var(--md-sys-color-primary);
+  box-shadow: inset 3px 0 0 var(--md-sys-color-primary);
+}
+
+:root[data-theme="dark"] .ws-card.is-selected {
+  background: var(--md-sys-color-surface-container-high);
 }
 
 .ws-ctop {
