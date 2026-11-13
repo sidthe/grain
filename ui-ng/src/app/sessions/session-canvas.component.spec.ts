@@ -18,6 +18,7 @@ import { NEVER } from "rxjs";
 import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import type { Comment } from "../api/models";
+import { AccessService } from "../services/access.service";
 import { SessionCanvasComponent } from "./session-canvas.component";
 
 class FakeApi {
@@ -34,12 +35,22 @@ class FakeApi {
       return Promise.resolve({
         documents: [
           {
-            name: "architecture",
+            name: "architecture-with-long-unbroken-identifier",
+            repo: "acme/widgets",
             summary: "Core boundaries",
             text: "Use REST.",
             length: 9,
           },
         ],
+      });
+    }
+    if (route === "GET /api/memory/documents/{name}") {
+      return Promise.resolve({
+        name: "architecture-with-long-unbroken-identifier",
+        repo: "acme/widgets",
+        summary: "Core boundaries",
+        text: "# Architecture\n\n| Key | Value |\n|---|---|\n| endpoint | https://example.com/very/long/path/without/spaces |",
+        length: 105,
       });
     }
     return Promise.resolve({ sessions: [] });
@@ -159,6 +170,117 @@ describe("SessionCanvasComponent", () => {
       origin: "task:101",
       dependsOn: ["102"],
       approved: true,
+    });
+    f.destroy();
+  });
+
+  it("renders overflow wrapper classes across Docs, HTML Mock, Workstream, and read-only Memory tabs", async () => {
+    const api = new FakeApi();
+    TestBed.configureTestingModule({
+      imports: [SessionCanvasComponent],
+      providers: [
+        provideRouter([{ path: "**", children: [] }]),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => NEVER } },
+      ],
+    });
+    TestBed.inject(AccessService).setConfig({
+      access: {
+        role: "viewer",
+        roles: ["viewer"],
+        full: false,
+        scopes: ["memory:read"],
+      },
+    });
+
+    const comments: Comment[] = [
+      {
+        id: 20,
+        author: "grain",
+        authorKind: "automation",
+        body: [
+          "## Wide Spec",
+          "",
+          "Detailed architectural notes covering mobile canvas containment, horizontal scroll isolation, and narrow-viewport wrapping behavior across tables and blocks.",
+          "",
+          "| Column | URL |",
+          "|---|---|",
+          "| alpha | https://example.com/a/very/long/unbroken/segment/for/390px |",
+          "",
+          "```html",
+          "<title>Wide Mock</title><div>Preview</div>",
+          "```",
+        ].join("\n"),
+      },
+    ];
+
+    const f = TestBed.createComponent(SessionCanvasComponent);
+    f.componentRef.setInput("sessionTaskId", "1");
+    f.componentRef.setInput("repo", "acme/widgets");
+    f.componentRef.setInput("comments", comments);
+    f.autoDetectChanges();
+    await f.whenStable();
+    f.detectChanges();
+
+    const el = f.nativeElement as HTMLElement;
+    const aside = el.querySelector("aside.session-canvas");
+    expect(aside).not.toBeNull();
+    expect(aside?.querySelector(".canvas-head .canvas-tabs")).not.toBeNull();
+    const body = aside?.querySelector(".canvas-body");
+    expect(body).not.toBeNull();
+
+    // Docs tab wraps rendered markdown inside .canvas-markdown-wrap within .canvas-card.
+    const docWrap = body?.querySelector(
+      '.canvas-card .canvas-markdown-wrap[data-testid="canvas-doc-markdown"]',
+    );
+    expect(docWrap).not.toBeNull();
+    expect(docWrap?.querySelector(".msg-body table")).not.toBeNull();
+
+    // HTML Mock preview wraps the sandboxed iframe inside .canvas-preview-wrap.
+    (
+      el.querySelector('[data-testid="canvas-tab-html"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    f.detectChanges();
+    const previewWrap = body?.querySelector(
+      '.canvas-preview-wrap[data-testid="canvas-preview-wrap"]',
+    );
+    expect(previewWrap).not.toBeNull();
+    expect(
+      previewWrap?.querySelector(
+        'iframe.canvas-iframe[data-testid="canvas-html-iframe"]',
+      ),
+    ).not.toBeNull();
+
+    (
+      el.querySelector('[data-testid="html-mode-source"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    f.detectChanges();
+    expect(
+      body?.querySelector(
+        'pre.canvas-source[data-testid="canvas-html-source"]',
+      ),
+    ).not.toBeNull();
+
+    // Memory tab renders selector chips and wraps read-only markdown in .canvas-markdown-wrap.
+    (
+      el.querySelector('[data-testid="canvas-tab-memory"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    f.detectChanges();
+    const memChip = body?.querySelector(
+      ".canvas-selector .canvas-chip",
+    ) as HTMLButtonElement;
+    expect(memChip).not.toBeNull();
+    memChip.click();
+    await vi.waitFor(() => {
+      f.detectChanges();
+      expect(
+        body?.querySelector(
+          '[data-testid="canvas-memory-editor"].canvas-card .canvas-markdown-wrap[data-testid="canvas-memory-markdown"] .msg-body table',
+        ),
+      ).not.toBeNull();
     });
     f.destroy();
   });
