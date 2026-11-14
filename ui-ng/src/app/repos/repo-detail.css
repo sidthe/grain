@@ -266,8 +266,114 @@
   color: var(--md-sys-color-on-surface);
 }
 
-@media (max-width: 767px) {
+.repo-note {
+  margin: 0;
+  font-size: 13px;
+  line-height: 19px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.repo-empty-box {
+  padding: 14px 16px;
+  border: 1px dashed var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-medium);
+  background: var(--md-sys-color-surface-container-low);
+  font-size: 13px;
+  line-height: 19px;
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.unfixable-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.unfixable-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-full);
+  background: var(--md-sys-color-surface-container-low);
+  color: var(--md-sys-color-on-surface);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+
+.unfixable-chip.has-remove {
+  padding-right: 6px;
+}
+
+.unfixable-chip-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.unfixable-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: var(--md-sys-shape-corner-full);
+  background: transparent;
+  color: var(--md-sys-color-on-surface-variant);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.unfixable-chip-remove:hover:not(:disabled) {
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+}
+
+.unfixable-chip-remove:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 1px;
+}
+
+.unfixable-chip-remove:disabled {
+  cursor: not-allowed;
+  color: var(--md-sys-color-outline);
+}
+
+.unfixable-form {
+  display: flex;
+  flex-direction: column;
+}
+
+.unfixable-form-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.unfixable-input {
+  flex: 1 1 200px;
+  min-width: 0;
+}
+
+.unfixable-form-row > .s-btn-sm {
+  height: 40px;
+  min-height: 40px;
+  flex-shrink: 0;
+}
+
+@media (max-width: 767px), (max-height: 480px) and (orientation: landscape) {
   .repo-page-scroll {
-    padding: 16px 16px 64px;
+    padding: 16px 16px 120px;
   }
 }

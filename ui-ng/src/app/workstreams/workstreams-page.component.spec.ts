@@ -26,6 +26,7 @@ import { GrainEvents } from "../api/grain-events.service";
 import type { Task, TaskDetail } from "../api/models";
 import { CreateTaskService } from "../create/create-task.service";
 import { AccessService } from "../services/access.service";
+import { PHONE_QUERY } from "../shared/split";
 import {
   WS_VIEW_STORAGE_KEY,
   WorkstreamsPageComponent,
@@ -978,6 +979,214 @@ describe("WorkstreamsPageComponent", () => {
     } finally {
       window.removeEventListener("keydown", winKeySpy);
       document.removeEventListener("keydown", docKeySpy);
+    }
+  });
+
+  it("toggles is-mobile class across < 600px matchMedia changes and window resize boundaries", async () => {
+    const origWidth = Object.getOwnPropertyDescriptor(window, "innerWidth");
+    const setWidth = (w: number) => {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        writable: true,
+        value: w,
+      });
+    };
+
+    try {
+      // Initial desktop width (>= 600px) and non-matching media query: no is-mobile.
+      setWidth(1024);
+      const listeners = new Set<(ev: MediaQueryListEvent) => void>();
+      let mqlMatches = false;
+      const removeSpy = vi.fn(
+        (type: string, cb: EventListenerOrEventListenerObject) => {
+          if (type === "change" && typeof cb === "function") {
+            listeners.delete(cb as (ev: MediaQueryListEvent) => void);
+          }
+        },
+      );
+      Object.defineProperty(window, "matchMedia", {
+        writable: true,
+        value: (query: string) => ({
+          get matches() {
+            return query === PHONE_QUERY ? mqlMatches : false;
+          },
+          media: query,
+          onchange: null,
+          addListener: () => {},
+          removeListener: () => {},
+          addEventListener: (
+            type: string,
+            cb: EventListenerOrEventListenerObject,
+          ) => {
+            if (type === "change" && typeof cb === "function") {
+              listeners.add(cb as (ev: MediaQueryListEvent) => void);
+            }
+          },
+          removeEventListener: removeSpy,
+          dispatchEvent: () => false,
+        }),
+      });
+
+      const { fixture, harness } = await mount("/workstreams");
+      const host = harness.routeNativeElement as HTMLElement;
+      const page = () =>
+        host.querySelector<HTMLElement>('[data-testid="ws-page"]')!;
+
+      expect(host.tagName.toLowerCase()).toBe("g-workstreams-page");
+      expect(host.classList.contains("is-mobile")).toBe(false);
+      expect(page().classList.contains("is-mobile")).toBe(false);
+
+      // MediaQueryList change -> true applies is-mobile to host and .ws-page.
+      mqlMatches = true;
+      for (const cb of listeners) {
+        cb({ matches: true, media: PHONE_QUERY } as MediaQueryListEvent);
+      }
+      fixture.detectChanges();
+      expect(host.classList.contains("is-mobile")).toBe(true);
+      expect(page().classList.contains("is-mobile")).toBe(true);
+
+      // MediaQueryList change -> false clears is-mobile when width >= 600px.
+      mqlMatches = false;
+      for (const cb of listeners) {
+        cb({ matches: false, media: PHONE_QUERY } as MediaQueryListEvent);
+      }
+      fixture.detectChanges();
+      expect(host.classList.contains("is-mobile")).toBe(false);
+      expect(page().classList.contains("is-mobile")).toBe(false);
+
+      // Window resize across the 600px boundary (599 -> 600 -> 390).
+      setWidth(599);
+      window.dispatchEvent(new Event("resize"));
+      fixture.detectChanges();
+      expect(host.classList.contains("is-mobile")).toBe(true);
+      expect(page().classList.contains("is-mobile")).toBe(true);
+
+      setWidth(600);
+      window.dispatchEvent(new Event("resize"));
+      fixture.detectChanges();
+      expect(host.classList.contains("is-mobile")).toBe(false);
+      expect(page().classList.contains("is-mobile")).toBe(false);
+
+      setWidth(390);
+      window.dispatchEvent(new Event("resize"));
+      fixture.detectChanges();
+      expect(host.classList.contains("is-mobile")).toBe(true);
+      expect(page().classList.contains("is-mobile")).toBe(true);
+
+      // Not-found .ws-page variant also receives is-mobile on < 600px.
+      await harness.navigateByUrl(
+        "/workstreams/task:999999",
+        WorkstreamsPageComponent,
+      );
+      harness.detectChanges();
+      await fixture.whenStable();
+      harness.detectChanges();
+      const notFoundHost = harness.routeNativeElement as HTMLElement;
+      const notFound = notFoundHost.querySelector<HTMLElement>(
+        '[data-testid="ws-not-found"]',
+      )!;
+      expect(notFoundHost.classList.contains("is-mobile")).toBe(true);
+      expect(notFound.classList.contains("is-mobile")).toBe(true);
+
+      fixture.destroy();
+      expect(removeSpy).toHaveBeenCalledWith("change", expect.any(Function));
+      expect(listeners.size).toBe(0);
+    } finally {
+      if (origWidth) {
+        Object.defineProperty(window, "innerWidth", origWidth);
+      } else {
+        setWidth(1024);
+      }
+    }
+  });
+
+  it("applies is-mobile on initial mount when viewport starts < 600px across loading, list, and detail views", async () => {
+    const origWidth = Object.getOwnPropertyDescriptor(window, "innerWidth");
+    const win = window as { matchMedia?: unknown };
+    const origMatchMedia = win.matchMedia;
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: 390,
+    });
+    win.matchMedia = undefined;
+    api.open = [
+      t("10", { title: "Mobile stream", state: "running" }),
+      t("11", {
+        title: "Mobile subtask",
+        state: "queued",
+        origin: "task:10",
+        generatedFrom: "10",
+      }),
+    ];
+    let releaseLoad!: () => void;
+    const holdLoad = new Promise<void>((r) => {
+      releaseLoad = r;
+    });
+    const origGetIfChanged = api.getIfChanged;
+    api.getIfChanged = vi.fn(async (route: string) => {
+      await holdLoad;
+      return origGetIfChanged(route);
+    });
+    try {
+      // Loading view before store refresh completes still marks host and ws-loading.
+      TestBed.configureTestingModule({
+        imports: [WorkstreamsPageComponent],
+        providers: [
+          provideRouter(
+            [
+              { path: "workstreams", component: WorkstreamsPageComponent },
+              { path: "workstreams/:key", component: WorkstreamsPageComponent },
+              { path: "**", children: [] },
+            ],
+            withComponentInputBinding(),
+          ),
+          { provide: GrainApi, useValue: api },
+          { provide: GrainEvents, useValue: { events: () => NEVER } },
+        ],
+      });
+      TestBed.inject(AccessService).setConfig({
+        access: null,
+        viewerOwner: "alice",
+      });
+      const harness = await RouterTestingHarness.create(
+        "/workstreams/task:10",
+        WorkstreamsPageComponent,
+      );
+      harness.detectChanges();
+      const loadingHost = harness.routeNativeElement as HTMLElement;
+      const loadingEl = loadingHost.querySelector<HTMLElement>(
+        '[data-testid="ws-loading"]',
+      )!;
+      expect(loadingHost.classList.contains("is-mobile")).toBe(true);
+      expect(loadingEl.classList.contains("is-mobile")).toBe(true);
+
+      // Once loaded on detail route, host keeps is-mobile around g-workstream-detail.
+      releaseLoad();
+      await TestBed.inject(WorkstreamsStore).refresh(true);
+      harness.detectChanges();
+      await harness.fixture.whenStable();
+      harness.detectChanges();
+      expect(loadingHost.classList.contains("is-mobile")).toBe(true);
+      expect(loadingHost.querySelector("g-workstream-detail")).not.toBeNull();
+
+      // List view (/workstreams) applies is-mobile to both host and .ws-page.
+      await harness.navigateByUrl("/workstreams", WorkstreamsPageComponent);
+      harness.detectChanges();
+      await harness.fixture.whenStable();
+      harness.detectChanges();
+      const listHost = harness.routeNativeElement as HTMLElement;
+      const page = listHost.querySelector<HTMLElement>(
+        '[data-testid="ws-page"]',
+      )!;
+      expect(listHost.tagName.toLowerCase()).toBe("g-workstreams-page");
+      expect(listHost.classList.contains("is-mobile")).toBe(true);
+      expect(page.classList.contains("is-mobile")).toBe(true);
+    } finally {
+      if (origWidth) {
+        Object.defineProperty(window, "innerWidth", origWidth);
+      }
+      win.matchMedia = origMatchMedia;
     }
   });
 });

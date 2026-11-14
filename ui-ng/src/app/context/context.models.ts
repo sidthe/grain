@@ -76,6 +76,19 @@ export interface FsGrepHit {
   text: string;
 }
 
+export interface FsGrepResult {
+  hits: FsGrepHit[];
+  truncated: boolean;
+  walkTruncated: boolean;
+  notices: string[];
+}
+
+export interface FsGrepResponseMeta {
+  truncatedHeader?: boolean;
+  walkTruncatedHeader?: boolean;
+  subtreeLabel?: string;
+}
+
 export function utf8ByteLength(text: string | undefined | null): number {
   if (!text) return 0;
   return UTF8_ENCODER.encode(text).length;
@@ -267,11 +280,41 @@ export function buildMemoryScopes(
   });
 }
 
-export function parseGrepOutput(raw: string, basePath: string): FsGrepHit[] {
+const TRUNCATED_LINE_RE = /^\[truncated(?:[\s:\]]|$)/;
+
+function formatTruncatedNotice(notice: string, subtreeLabel?: string): string {
+  const clean = notice.trim();
+  return subtreeLabel ? `${subtreeLabel}: ${clean}` : clean;
+}
+
+/**
+ * Parses namespace `?grep=` plain-text output and header flags into matched
+ * rows plus truncation state and footer notices.
+ */
+export function parseGrepResponse(
+  raw: string,
+  basePath: string,
+  meta: FsGrepResponseMeta = {},
+): FsGrepResult {
   const lines = (raw || "").split("\n").filter((l) => l.trim().length > 0);
   const hits: FsGrepHit[] = [];
+  const notices: string[] = [];
+  let truncated = Boolean(meta.truncatedHeader || meta.walkTruncatedHeader);
+  let walkTruncated = Boolean(meta.walkTruncatedHeader);
+
   for (const row of lines) {
-    if (row.startsWith("[truncated")) continue;
+    const trimmed = row.trim();
+    if (TRUNCATED_LINE_RE.test(trimmed)) {
+      truncated = true;
+      if (/\bwalked\b/i.test(trimmed)) {
+        walkTruncated = true;
+      }
+      const msg = formatTruncatedNotice(trimmed, meta.subtreeLabel);
+      if (!notices.includes(msg)) {
+        notices.push(msg);
+      }
+      continue;
+    }
     const m = /^([^:\n]+):(\d+):(.*)$/.exec(row);
     if (m) {
       const rel = m[1].trim();
@@ -292,7 +335,19 @@ export function parseGrepOutput(raw: string, basePath: string): FsGrepHit[] {
       }
     }
   }
-  return hits;
+
+  if (truncated && notices.length === 0) {
+    const fallback = walkTruncated
+      ? "[truncated: walked directory limit reached before every entry was searched; narrow the path]"
+      : "[truncated: search results exceeded the match limit; narrow the path or refine the pattern]";
+    notices.push(formatTruncatedNotice(fallback, meta.subtreeLabel));
+  }
+
+  return { hits, truncated, walkTruncated, notices };
+}
+
+export function parseGrepOutput(raw: string, basePath: string): FsGrepHit[] {
+  return parseGrepResponse(raw, basePath).hits;
 }
 
 function escapeHtml(s: string): string {
