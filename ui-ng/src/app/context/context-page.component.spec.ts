@@ -650,27 +650,31 @@ describe("ContextPageComponent", () => {
 
     const { fixture, root } = await setup(api);
 
-    // Deployment scope remains readable, so ensurePermittedRepoSelected does not switch away.
+    // Deployment scope remains readable, so ensurePermittedRepoSelected does not switch away,
+    // while all write/edit controls stay hidden without deployment memory:write.
     expect(
       root.querySelector('[data-testid="memory-scope-title"]')?.textContent,
     ).toContain("This deployment");
-    const memTextarea = root.querySelector<HTMLTextAreaElement>(
-      '[data-testid="memory-textarea"]',
-    )!;
-    expect(memTextarea.readOnly).toBe(true);
+    expect(
+      root.querySelector('[data-testid="context-add-repo-btn"]'),
+    ).toBeNull();
+    expect(root.querySelector('[data-testid="memory-textarea"]')).toBeNull();
+    expect(root.querySelector('[data-testid="memory-mode-edit"]')).toBeNull();
+    expect(root.querySelector('[data-testid="memory-revert-btn"]')).toBeNull();
     expect(root.querySelector('[data-testid="memory-save-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="memory-preview"]')).not.toBeNull();
+    expect(
+      root.querySelector('[data-testid="memory-write-denied"]')?.textContent,
+    ).toContain("repo-writer");
 
-    // Documents tab: + New pack and deployment document edits are blocked.
+    // Documents tab: + New pack and deployment document edits are hidden.
     root
       .querySelector<HTMLButtonElement>(
         '[data-testid="context-tab-documents"]',
       )!
       .click();
     await settle(fixture);
-    expect(
-      root.querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
-        .disabled,
-    ).toBe(true);
+    expect(root.querySelector('[data-testid="doc-new-btn"]')).toBeNull();
 
     root
       .querySelector<HTMLButtonElement>(
@@ -678,14 +682,21 @@ describe("ContextPageComponent", () => {
       )!
       .click();
     await settle(fixture);
+    expect(root.querySelector('[data-testid="doc-summary-input"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-text-input"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-mode-edit"]')).toBeNull();
     expect(
-      root.querySelector<HTMLInputElement>('[data-testid="doc-summary-input"]')!
-        .readOnly,
-    ).toBe(true);
+      root.querySelector('[data-testid="doc-summary-readonly"]'),
+    ).not.toBeNull();
+    expect(root.querySelector('[data-testid="doc-preview"]')).not.toBeNull();
     expect(root.querySelector('[data-testid="doc-save-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-revert-btn"]')).toBeNull();
     expect(root.querySelector('[data-testid="doc-delete-btn"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="doc-write-denied"]')?.textContent,
+    ).toContain("repo-writer");
 
-    // Switch to permitted acme/api: write controls enable and a repo doc opens editable.
+    // Switch to permitted acme/api: write controls appear and a repo doc opens editable.
     root
       .querySelector<HTMLButtonElement>('[data-testid="context-repo-trigger"]')!
       .click();
@@ -696,6 +707,7 @@ describe("ContextPageComponent", () => {
       )!
       .click();
     await settle(fixture);
+    expect(root.querySelector('[data-testid="doc-new-btn"]')).not.toBeNull();
     expect(
       root.querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
         .disabled,
@@ -708,9 +720,11 @@ describe("ContextPageComponent", () => {
       .click();
     await settle(fixture);
     expect(
-      root.querySelector<HTMLInputElement>('[data-testid="doc-summary-input"]')!
-        .readOnly,
-    ).toBe(false);
+      root.querySelector<HTMLInputElement>('[data-testid="doc-summary-input"]'),
+    ).not.toBeNull();
+    expect(
+      root.querySelector<HTMLTextAreaElement>('[data-testid="doc-text-input"]'),
+    ).not.toBeNull();
     expect(root.querySelector('[data-testid="doc-save-btn"]')).not.toBeNull();
 
     // Switching back to Deployment resets selectedDocRepo so canWriteDoc cannot stay stale.
@@ -726,10 +740,7 @@ describe("ContextPageComponent", () => {
     };
     expect(cmpWrite.canCreateDoc()).toBe(false);
     expect(cmpWrite.canWriteDoc()).toBe(false);
-    expect(
-      root.querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
-        .disabled,
-    ).toBe(true);
+    expect(root.querySelector('[data-testid="doc-new-btn"]')).toBeNull();
   });
 
   it("denies config:// when settings:read itself has repoLimits and explains why", async () => {
@@ -1555,5 +1566,174 @@ describe("ContextPageComponent", () => {
     const afterLeaveUnload = new Event("beforeunload", { cancelable: true });
     window.dispatchEvent(afterLeaveUnload);
     expect(afterLeaveUnload.defaultPrevented).toBe(false);
+  });
+
+  it("hides all interactive write/edit/add actions for grain/viewer and blocks handler mutations", async () => {
+    localStorage.setItem("grain.next.contextMode.v1", "edit");
+    const api = new FakeContextApi();
+    api.configBody = {
+      version: "v3.5.0-test",
+      targetRepos: ["acme/api", "acme/web"],
+      access: {
+        role: "grain/viewer",
+        roles: ["grain/viewer"],
+        full: false,
+        scopes: [
+          "agents:read",
+          "ci:read",
+          "config:read",
+          "memory:read",
+          "repos:read",
+          "settings:read",
+        ],
+      },
+    };
+
+    const { fixture, root } = await setup(api);
+
+    // Toolbar add-repo scope control is hidden for viewers.
+    expect(
+      root.querySelector('[data-testid="context-add-repo-btn"]'),
+    ).toBeNull();
+    expect(
+      root.querySelector('[data-testid="context-add-repo-input"]'),
+    ).toBeNull();
+
+    // Standing Instructions shows read-only Markdown preview even if localStorage preferred "edit".
+    expect(root.querySelector('[data-testid="memory-mode-edit"]')).toBeNull();
+    expect(root.querySelector('[data-testid="memory-mode-split"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="memory-mode-preview"]'),
+    ).toBeNull();
+    expect(root.querySelector('[data-testid="memory-textarea"]')).toBeNull();
+    expect(root.querySelector('[data-testid="memory-revert-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="memory-save-btn"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="memory-preview"]')?.textContent,
+    ).toContain("go test");
+    expect(
+      root.querySelector('[data-testid="memory-write-denied"]')?.textContent,
+    ).toContain("grain/viewer");
+
+    // Memory Documents hides + New pack and renders read-only summary & Markdown preview.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-tab-documents"]',
+      )!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="doc-new-btn"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="doc-placeholder"]')?.textContent,
+    ).not.toContain("create a new pack");
+
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="doc-row-db-migrations"] button',
+      )!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="doc-mode-edit"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-name-input"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-summary-input"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-text-input"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-save-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-revert-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-delete-btn"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="doc-summary-readonly"]')?.textContent,
+    ).toContain("Zero-downtime PostgreSQL migration rules");
+    expect(
+      root.querySelector('[data-testid="doc-preview"]')?.textContent,
+    ).toContain("lock_timeout");
+    expect(
+      root.querySelector('[data-testid="doc-write-denied"]')?.textContent,
+    ).toContain("grain/viewer");
+
+    // Programmatic handler invocations must remain no-ops with zero PUT calls.
+    const cmp = fixture.componentInstance as unknown as {
+      openAddRepo: () => void;
+      commitAddRepo: () => void;
+      addingRepo: () => boolean;
+      newRepoDraft: { set: (v: string) => void };
+      onMemoryInput: (v: string) => void;
+      saveMemory: () => void;
+      startNewDocument: () => Promise<void>;
+      onNewDocNameInput: (v: string) => void;
+      onDocSummaryInput: (v: string) => void;
+      onDocTextInput: (v: string) => void;
+      saveDocument: () => Promise<void>;
+      confirmDeleteDocument: () => void;
+      creatingDoc: () => boolean;
+      memoryDraft: () => string;
+      confirmReq: () => unknown;
+    };
+    const originalDraft = cmp.memoryDraft();
+    cmp.openAddRepo();
+    expect(cmp.addingRepo()).toBe(false);
+    cmp.newRepoDraft.set("evil/repo");
+    cmp.commitAddRepo();
+    cmp.onMemoryInput("tampered");
+    expect(cmp.memoryDraft()).toBe(originalDraft);
+    cmp.saveMemory();
+    await cmp.startNewDocument();
+    expect(cmp.creatingDoc()).toBe(false);
+    cmp.onNewDocNameInput("bad-doc");
+    cmp.onDocSummaryInput("bad summary");
+    cmp.onDocTextInput("bad text");
+    await cmp.saveDocument();
+    cmp.confirmDeleteDocument();
+    expect(cmp.confirmReq()).toBeNull();
+    expect(api.calls.filter((c) => c.method === "PUT")).toEqual([]);
+  });
+
+  it("fails closed before /api/config loads and clears transient write UI for viewers", async () => {
+    const api = new FakeContextApi();
+    let resolveCfg!: (cfg: ConfigResponse) => void;
+    api.config = () =>
+      new Promise<ConfigResponse>((resolve) => {
+        resolveCfg = resolve;
+      });
+    api.configBody = {
+      version: "v3.5.0-test",
+      targetRepos: ["acme/api"],
+      access: {
+        role: "grain/viewer",
+        roles: ["grain/viewer"],
+        full: false,
+        scopes: ["memory:read", "settings:read", "repos:read"],
+      },
+    };
+
+    TestBed.configureTestingModule({
+      imports: [ContextPageComponent],
+      providers: [
+        provideRouter([{ path: "**", component: ContextPageComponent }]),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => NEVER } },
+      ],
+    });
+    const fixture = TestBed.createComponent(ContextPageComponent);
+    fixture.autoDetectChanges();
+    await settle(fixture);
+    const root = fixture.nativeElement as HTMLElement;
+
+    // While /api/config is still pending (configLoaded === false), write actions stay hidden.
+    expect(
+      root.querySelector('[data-testid="context-add-repo-btn"]'),
+    ).toBeNull();
+    expect(root.querySelector('[data-testid="memory-textarea"]')).toBeNull();
+    expect(root.querySelector('[data-testid="memory-save-btn"]')).toBeNull();
+
+    // Resolve config as grain/viewer -> remains read-only with zero transient flash.
+    resolveCfg(api.configBody);
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="context-add-repo-btn"]'),
+    ).toBeNull();
+    expect(root.querySelector('[data-testid="memory-textarea"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="memory-write-denied"]')?.textContent,
+    ).toContain("grain/viewer");
   });
 });
