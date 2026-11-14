@@ -60,13 +60,24 @@
 }
 
 .grant-held-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
   border: none;
+  border-radius: var(--md-sys-shape-corner-full);
   background: transparent;
   color: inherit;
   cursor: pointer;
   font-size: 14px;
   line-height: 1;
-  padding: 2px 4px;
+  padding: 0;
+}
+
+.grant-held-remove:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 1px;
 }
 
 .grants-builder {
