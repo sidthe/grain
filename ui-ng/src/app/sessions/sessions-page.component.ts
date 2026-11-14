@@ -159,6 +159,9 @@ export function clock(iso: string | undefined, now = new Date()): string {
                   [routerLink]="['/sessions', r.session.id]"
                   [attr.aria-current]="id() === r.session.id ? 'page' : null"
                   [attr.data-testid]="'session-' + r.session.id"
+                  (click)="
+                    onSessionNavClick($event, ['/sessions', r.session.id])
+                  "
                 >
                   <span class="session-item-top">
                     <span class="s-name">{{ r.session.title }}</span>
@@ -197,6 +200,7 @@ export function clock(iso: string | undefined, now = new Date()): string {
                 class="icon-btn chat-back"
                 routerLink="/sessions"
                 aria-label="Back to sessions"
+                (click)="onSessionNavClick($event, ['/sessions'])"
                 >←</a
               >
               <h2 class="chat-title" id="chat-title" tabindex="-1" #chatTitle>
@@ -253,7 +257,7 @@ export function clock(iso: string | undefined, now = new Date()): string {
                 data-testid="session-canvas-toggle"
                 [attr.aria-pressed]="canvasOpen()"
                 gTip="Inspect specs, interactive HTML mocks, workstream plans, and Memory beside this session"
-                (click)="canvasOpen.set(!canvasOpen())"
+                (click)="toggleCanvas($event)"
               >
                 Canvas{{
                   artifactCount() > 0 ? " (" + artifactCount() + ")" : ""
@@ -635,7 +639,7 @@ export function clock(iso: string | undefined, now = new Date()): string {
                           type="button"
                           class="artifact-chip"
                           [attr.data-testid]="'open-artifact-' + a.id"
-                          (click)="openInCanvas(a.tab, a.id)"
+                          (click)="openInCanvas(a.tab, a.id, $event)"
                         >
                           {{ a.label }}
                         </button>
@@ -734,12 +738,14 @@ export function clock(iso: string | undefined, now = new Date()): string {
               data-testid="sessions-canvas-wrap"
             >
               <g-session-canvas
+                #sessionCanvas
                 [sessionTaskId]="row.session.taskId"
                 [repo]="selectedRepo()"
                 [comments]="comments()"
                 [requestedTab]="canvasTab()"
                 [requestedArtifactId]="canvasArtifactId()"
-                (closed)="canvasOpen.set(false)"
+                [returnFocus]="canvasReturnFocus()"
+                (closed)="closeCanvas()"
               />
             </div>
           }
@@ -905,7 +911,10 @@ export class SessionsPageComponent implements OnInit, OnDestroy {
   protected readonly canvasOpen = signal(false);
   protected readonly canvasTab = signal<CanvasTab | null>(null);
   protected readonly canvasArtifactId = signal<string | null>(null);
+  protected readonly canvasReturnFocus = signal<HTMLElement | null>(null);
 
+  private readonly canvasRef =
+    viewChild<SessionCanvasComponent>("sessionCanvas");
   private readonly log = viewChild<ElementRef<HTMLElement>>("log");
   private readonly newTitle =
     viewChild<ElementRef<HTMLInputElement>>("newTitle");
@@ -1065,10 +1074,75 @@ export class SessionsPageComponent implements OnInit, OnDestroy {
     return out;
   }
 
-  protected openInCanvas(tab: CanvasTab, id: string): void {
+  protected toggleCanvas(ev?: Event): void {
+    if (this.canvasOpen()) {
+      const canvas = this.canvasRef();
+      if (canvas) {
+        canvas.requestClose();
+      } else {
+        this.closeCanvas();
+      }
+      return;
+    }
+    this.captureCanvasOpener(ev);
+    this.canvasOpen.set(true);
+  }
+
+  protected openInCanvas(tab: CanvasTab, id: string, ev?: Event): void {
+    const canvas = this.canvasOpen() ? this.canvasRef() : undefined;
+    if (canvas) {
+      canvas.openArtifact(tab, id);
+      return;
+    }
+    this.captureCanvasOpener(ev);
     this.canvasTab.set(tab);
     this.canvasArtifactId.set(id);
     this.canvasOpen.set(true);
+  }
+
+  protected closeCanvas(): void {
+    const back = this.canvasReturnFocus();
+    this.canvasOpen.set(false);
+    this.canvasReturnFocus.set(null);
+    if (back?.isConnected) {
+      queueMicrotask(() => {
+        const active = this.doc.activeElement;
+        if (back.isConnected && (!active || active === this.doc.body)) {
+          back.focus();
+        }
+      });
+    }
+  }
+
+  protected onSessionNavClick(ev: MouseEvent, commands: string[]): void {
+    if (
+      ev.defaultPrevented ||
+      ev.button !== 0 ||
+      ev.metaKey ||
+      ev.ctrlKey ||
+      ev.shiftKey ||
+      ev.altKey
+    ) {
+      return;
+    }
+    if (commands.length === 2 && commands[1] === this.store.selectedId()) {
+      return;
+    }
+    const canvas = this.canvasOpen() ? this.canvasRef() : undefined;
+    if (!canvas?.hasUnsavedChanges()) return;
+    ev.preventDefault();
+    canvas.confirmLeave(() => this.router.navigate(commands));
+  }
+
+  private captureCanvasOpener(ev?: Event): void {
+    const active = this.doc.activeElement;
+    const target =
+      ev?.currentTarget instanceof HTMLElement ? ev.currentTarget : null;
+    this.canvasReturnFocus.set(
+      active instanceof HTMLElement && active !== this.doc.body
+        ? active
+        : target,
+    );
   }
   protected readonly networkOptions = computed<PillOption[]>(() => [
     { value: "", label: "Deployment default" },
@@ -1100,6 +1174,7 @@ export class SessionsPageComponent implements OnInit, OnDestroy {
       untracked(() => {
         if (this.hasSeenRoute && routeId !== this.lastRouteId) {
           this.canvasOpen.set(false);
+          this.canvasReturnFocus.set(null);
         }
         this.hasSeenRoute = true;
         this.lastRouteId = routeId;
@@ -1332,13 +1407,18 @@ export class SessionsPageComponent implements OnInit, OnDestroy {
   protected onEscape(ev: Event): void {
     if (ev.defaultPrevented) return;
     const outer = this.doc.querySelector('[aria-modal="true"]');
-    if (outer && !outer.closest("g-sessions-page")) return;
+    if (outer) {
+      if (!outer.closest("g-sessions-page")) return;
+      if (!this.newOpen() && !this.confirmDelete()) return;
+    }
     if (this.newOpen()) {
       ev.preventDefault();
       this.closeNew();
     } else if (this.confirmDelete()) {
       ev.preventDefault();
       this.cancelDelete();
+    } else if (this.canvasRef()?.containsFocus()) {
+      return;
     } else if (this.freshOpen()) {
       ev.preventDefault();
       this.freshOpen.set(false);
@@ -1355,10 +1435,11 @@ export class SessionsPageComponent implements OnInit, OnDestroy {
   });
 
   protected onTab(ev: KeyboardEvent): void {
+    if (ev.defaultPrevented) return;
     const dialog = this.doc.querySelector<HTMLElement>(
       'g-sessions-page [aria-modal="true"]',
     );
-    if (!dialog) return;
+    if (!dialog || dialog.closest("g-session-canvas")) return;
     const items = Array.from(
       dialog.querySelectorAll<HTMLElement>(
         'button:not([disabled]), input, textarea, a[href], [tabindex]:not([tabindex="-1"])',
