@@ -24,10 +24,23 @@ test("M16 Director overlay: top-bar toggle, d/Alt+D/Escape, coplanar selection c
   await page.waitForSelector(".main-stage > *:not(router-outlet)");
 
   // Top-bar trigger opens coplanar Director drawer without blocking .main-stage.
-  await page.getByTestId("director-trigger").click();
+  const trigger = page.getByTestId("director-trigger");
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await trigger.click();
   const drawer = page.getByTestId("director-drawer");
   await expect(drawer).toBeVisible();
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  await expect(drawer).toHaveAttribute("aria-expanded", "true");
+  await expect(drawer).toHaveAttribute("aria-hidden", "false");
   await expect(page.locator("#main")).not.toHaveAttribute("inert", "");
+
+  // Wide toggle updates aria-expanded on the drawer control.
+  const wideBtn = page.getByTestId("director-drawer-wide");
+  await expect(wideBtn).toHaveAttribute("aria-expanded", "false");
+  await wideBtn.click();
+  await expect(wideBtn).toHaveAttribute("aria-expanded", "true");
+  await wideBtn.click();
+  await expect(wideBtn).toHaveAttribute("aria-expanded", "false");
 
   // Selecting rows in Tasks updates the drawer context toggle live.
   const rows = page.locator('[data-testid^="open-"]');
@@ -57,6 +70,7 @@ test("M16 Director overlay: top-bar toggle, d/Alt+D/Escape, coplanar selection c
   // Escape closes, d opens, Alt+D toggles even while typing in the search box.
   await page.keyboard.press("Escape");
   await expect(drawer).toHaveCount(0);
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
 
   await page.getByTestId("view-filter").blur();
   await page.keyboard.press("d");
@@ -102,4 +116,110 @@ test("M16 Director overlay: top-bar toggle, d/Alt+D/Escape, coplanar selection c
   await expect(editPanel).toBeVisible();
   await page.getByTestId("edit-shape-director").click();
   await expect(editPanel.getByTestId("director-shaper-pane")).toBeVisible();
+});
+
+test("Director drawer accessibility, focus trap, and layout geometry across desktop/phone and light/dark", async ({
+  page,
+  axe,
+}) => {
+  test.setTimeout(90_000);
+  const cases = [
+    { name: "desktop-light", width: 1440, height: 900, theme: "light" },
+    { name: "desktop-dark", width: 1440, height: 900, theme: "dark" },
+    { name: "phone-light", width: 390, height: 844, theme: "light" },
+    { name: "phone-dark", width: 390, height: 844, theme: "dark" },
+  ];
+
+  for (const c of cases) {
+    await page.setViewportSize({ width: c.width, height: c.height });
+    await page.addInitScript(
+      (t) => localStorage.setItem("grain.themeMode", t),
+      c.theme,
+    );
+    await page.goto("/next/tasks");
+    await page.waitForSelector(".main-stage > *:not(router-outlet)");
+    await expect(page.locator("html")).toHaveAttribute("data-theme", c.theme);
+
+    const trigger = page.getByTestId("director-trigger");
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await trigger.click();
+
+    const drawer = page.getByTestId("director-drawer");
+    await expect(drawer).toBeVisible();
+    await expect(drawer).toHaveAttribute("aria-expanded", "true");
+    await expect(drawer).toHaveAttribute("aria-hidden", "false");
+    await expect
+      .poll(() =>
+        page.evaluate(() =>
+          Boolean(
+            document.activeElement?.closest('[data-testid="director-drawer"]'),
+          ),
+        ),
+      )
+      .toBe(true);
+
+    // Tab and Shift+Tab keep focus trapped inside the open drawer.
+    for (let i = 0; i < 6; i++) {
+      await page.keyboard.press("Tab");
+      const inside = await page.evaluate(() =>
+        Boolean(
+          document.activeElement?.closest('[data-testid="director-drawer"]'),
+        ),
+      );
+      expect(inside, `${c.name} Tab #${i}`).toBe(true);
+    }
+    for (let i = 0; i < 6; i++) {
+      await page.keyboard.press("Shift+Tab");
+      const inside = await page.evaluate(() =>
+        Boolean(
+          document.activeElement?.closest('[data-testid="director-drawer"]'),
+        ),
+      );
+      expect(inside, `${c.name} Shift+Tab #${i}`).toBe(true);
+    }
+
+    // Bounding-box layout geometry and hit target invariants.
+    const geo = await drawer.evaluate((el) => {
+      const r = el.getBoundingClientRect();
+      const head = el.querySelector(".drawer-head");
+      const headActions = [...el.querySelectorAll(".drawer-head-actions > *")]
+        .map((n) => n.getBoundingClientRect())
+        .filter((b) => b.width > 0 && b.height > 0);
+      const tops = headActions.map((b) => Math.round(b.top + b.height / 2));
+      const minHit = headActions.reduce(
+        (m, b) => Math.min(m, b.width, b.height),
+        Infinity,
+      );
+      return {
+        left: Math.round(r.left),
+        right: Math.round(r.right),
+        top: Math.round(r.top),
+        bottom: Math.round(r.bottom),
+        width: Math.round(r.width),
+        height: Math.round(r.height),
+        vw: window.innerWidth,
+        vh: window.innerHeight,
+        docScrollW: document.documentElement.scrollWidth,
+        headRight: head ? Math.round(head.getBoundingClientRect().right) : 0,
+        rowSpread: tops.length ? Math.max(...tops) - Math.min(...tops) : 0,
+        minHit: Math.round(minHit),
+      };
+    });
+    expect(geo.width, c.name).toBeGreaterThan(280);
+    expect(geo.left, c.name).toBeGreaterThanOrEqual(0);
+    expect(geo.right, c.name).toBeLessThanOrEqual(geo.vw);
+    expect(geo.bottom, c.name).toBeLessThanOrEqual(geo.vh);
+    expect(geo.docScrollW, c.name).toBeLessThanOrEqual(geo.vw);
+    expect(geo.rowSpread, c.name).toBeLessThanOrEqual(4);
+    expect(geo.minHit, c.name).toBeGreaterThanOrEqual(24);
+
+    // Zero serious or critical axe violations while drawer is open.
+    const violations = await axe();
+    expect(violations, `${c.name} axe`).toEqual([]);
+
+    await page.keyboard.press("Escape");
+    await expect(drawer).toHaveCount(0);
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await expect(trigger).toBeFocused();
+  }
 });

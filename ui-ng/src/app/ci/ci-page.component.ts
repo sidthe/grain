@@ -1358,6 +1358,72 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
       </div>
     }
 
+    @if (cancelDialogRun(); as run) {
+      <div class="scrim" aria-hidden="true" (click)="closeCancelDialog()"></div>
+      <div
+        class="g-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ci-cancel-dialog-title"
+        aria-describedby="ci-cancel-dialog-desc"
+        data-testid="ci-cancel-dialog"
+        gDialogTrap
+        (gDialogClose)="closeCancelDialog()"
+      >
+        <h2 id="ci-cancel-dialog-title">Cancel CI run?</h2>
+        <p id="ci-cancel-dialog-desc" class="ci-cancel-desc">
+          Stop <strong>{{ titleOf(run) }}</strong> on
+          <strong>{{ run.repo }}</strong> ({{ branchOf(run) || run.id }})? Jobs
+          in flight are told to stop and their sandboxes are destroyed.
+        </p>
+        <label class="field">
+          <span>Reason (optional)</span>
+          <textarea
+            rows="2"
+            class="ci-cancel-reason-input"
+            data-testid="ci-cancel-reason-input"
+            placeholder="Optional — shown to readers and any agent waiting on this branch"
+            [value]="cancelReason()"
+            (input)="cancelReason.set($any($event.target).value)"
+          ></textarea>
+        </label>
+        @if (cancelError(); as err) {
+          <p
+            class="banner banner-error ci-cancel-error"
+            role="alert"
+            data-testid="ci-cancel-error"
+          >
+            {{ err }}
+          </p>
+        }
+        <div class="dialog-actions ci-cancel-actions">
+          <button
+            type="button"
+            class="btn-text"
+            data-testid="ci-cancel-dismiss"
+            [disabled]="submitting()"
+            (click)="closeCancelDialog()"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="btn-primary is-destructive"
+            data-testid="ci-cancel-confirm"
+            [disabled]="
+              submitting() || !access.can('DELETE /api/ci/runs/{id}', run.repo)
+            "
+            [gTip]="
+              access.deniedReason('DELETE /api/ci/runs/{id}', run.repo) || ''
+            "
+            (click)="submitCancelRun()"
+          >
+            {{ submitting() ? "Stopping…" : "Stop run" }}
+          </button>
+        </div>
+      </div>
+    }
+
     @if (confirming(); as req) {
       <g-confirm-dialog [request]="req" (done)="onConfirmDone($event)" />
     }
@@ -1421,6 +1487,10 @@ export class CIPageComponent implements OnInit, OnDestroy {
     null,
   );
 
+  protected readonly cancelDialogRun = signal<CIRun | null>(null);
+  protected readonly cancelReason = signal("");
+  protected readonly cancelError = signal<string | null>(null);
+
   protected readonly submitting = signal(false);
   protected readonly confirming = signal<ConfirmRequest | null>(null);
 
@@ -1428,6 +1498,7 @@ export class CIPageComponent implements OnInit, OnDestroy {
     () =>
       this.runDialogOpen() ||
       this.quarantineDialogOpen() ||
+      !!this.cancelDialogRun() ||
       !!this.confirming(),
   );
 
@@ -1916,16 +1987,40 @@ export class CIPageComponent implements OnInit, OnDestroy {
   }
 
   protected confirmCancelRun(run: CIRun): void {
-    this.confirming.set({
-      title: "Cancel CI run?",
-      message: `Stop ${runTitle(run)} on ${run.repo} (${runBranch(run) || run.id})?`,
-      accept: "Cancel run",
-      destructive: true,
-      run: async () => {
-        await this.store.cancelRun(run.id, "Cancelled from CI workspace");
-        this.snackbar.show("CI run cancelled.");
-      },
-    });
+    this.cancelError.set(null);
+    this.cancelReason.set("");
+    this.cancelDialogRun.set(run);
+  }
+
+  protected closeCancelDialog(): void {
+    if (this.submitting()) return;
+    this.cancelDialogRun.set(null);
+    this.cancelReason.set("");
+    this.cancelError.set(null);
+  }
+
+  protected async submitCancelRun(): Promise<void> {
+    const run = this.cancelDialogRun();
+    if (
+      !run ||
+      this.submitting() ||
+      !this.access.can("DELETE /api/ci/runs/{id}", run.repo)
+    ) {
+      return;
+    }
+    this.submitting.set(true);
+    this.cancelError.set(null);
+    try {
+      const reason = this.cancelReason().trim();
+      await this.store.cancelRun(run.id, reason || undefined);
+      this.cancelDialogRun.set(null);
+      this.cancelReason.set("");
+      this.snackbar.show("CI run cancelled.");
+    } catch (err) {
+      this.cancelError.set(errorText(err));
+    } finally {
+      this.submitting.set(false);
+    }
   }
 
   protected confirmFlushCache(kind: "ci" | "actions" | "package"): void {
