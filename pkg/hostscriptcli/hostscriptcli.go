@@ -38,6 +38,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Dir is where a grant places its descriptor in the sandbox.
@@ -93,6 +95,48 @@ func (d Descriptor) Help() string {
 }
 
 var scriptName = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+
+const (
+	minScriptNameLen = 3
+	maxScriptNameLen = 32
+)
+
+// ValidateScriptName checks that name is a valid script name: non-empty,
+// free of whitespace and path separators ('/' or '\\'), 3 to 32 characters
+// inclusive, and composed solely of ASCII alphanumeric characters, '-', and '_'.
+func ValidateScriptName(name string) error {
+	if name == "" {
+		return errors.New("script name must not be empty")
+	}
+	if len(name) > maxScriptNameLen*utf8.UTFMax {
+		return fmt.Errorf("script name must be between %d and %d characters", minScriptNameLen, maxScriptNameLen)
+	}
+	for _, r := range name {
+		if unicode.IsSpace(r) {
+			return errors.New("script name must not contain whitespace")
+		}
+	}
+	if strings.ContainsAny(name, `/\`) {
+		return errors.New("script name must not contain '/' or '\\'")
+	}
+	if n := utf8.RuneCountInString(name); n < minScriptNameLen || n > maxScriptNameLen {
+		return fmt.Errorf("script name must be between %d and %d characters (got %d)", minScriptNameLen, maxScriptNameLen, n)
+	}
+	for i := 0; i < len(name); i++ {
+		if !isScriptNameByte(name[i]) {
+			return fmt.Errorf("script name contains invalid byte 0x%02x; only ASCII alphanumeric characters, '-', and '_' are allowed", name[i])
+		}
+	}
+	return nil
+}
+
+func isScriptNameByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') ||
+		(b >= 'A' && b <= 'Z') ||
+		(b >= '0' && b <= '9') ||
+		b == '-' ||
+		b == '_'
+}
 
 const usage = `usage: grain host-script [--stdin] <name> [arguments...]
        grain host-script <name> --grain-help   print the script's description and usage
