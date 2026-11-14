@@ -5,6 +5,7 @@ g-workstreams-page {
 }
 
 .ws-page {
+  box-sizing: border-box;
   height: 100%;
   overflow: auto;
   padding: 16px 24px 56px;
@@ -202,6 +203,7 @@ g-workstreams-page {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
   padding: 14px 16px 12px;
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: 16px;
@@ -303,9 +305,25 @@ g-workstreams-page {
   }
 }
 
+/* Clear the fixed 56px phone FAB above the bottom bar; border-box keeps
+   height: 100% inside .main-stage so bottom padding is never clipped. */
+.ws-page.is-mobile {
+  padding: 12px 16px calc(var(--grain-bottombar-height, 92px) + 16px);
+}
+
+g-workstreams-page.is-mobile .ws-dbody .ws-tpane,
+g-workstreams-page.is-mobile .ws-dbody.mode-graph .ws-gpane {
+  padding-bottom: calc(var(--grain-bottombar-height, 92px) + 16px);
+}
+
 @media (max-width: 599.95px) {
   .ws-page {
-    padding: 12px 16px 88px;
+    padding: 12px 16px calc(var(--grain-bottombar-height, 92px) + 16px);
+  }
+  g-workstreams-page .ws-dbody .ws-tpane,
+  g-workstreams-page .ws-dbody.mode-split.is-collapsed .ws-tpane,
+  g-workstreams-page .ws-dbody.mode-graph .ws-gpane {
+    padding-bottom: calc(var(--grain-bottombar-height, 92px) + 16px);
   }
   .ws-row {
     grid-template-columns: 28px minmax(0, 1fr);
@@ -319,9 +337,23 @@ g-workstreams-page {
     flex-wrap: wrap;
   }
   .ws-cards {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .ws-search {
     width: 100%;
+  }
+}
+
+@media (max-height: 480px) and (orientation: landscape) {
+  .ws-page,
+  .ws-page.is-mobile {
+    padding-bottom: calc(var(--grain-bottombar-height, 52px) + 36px);
+  }
+  g-workstreams-page .ws-dbody .ws-tpane,
+  g-workstreams-page .ws-dbody.mode-split.is-collapsed .ws-tpane,
+  g-workstreams-page .ws-dbody.mode-graph .ws-gpane,
+  g-workstreams-page.is-mobile .ws-dbody .ws-tpane,
+  g-workstreams-page.is-mobile .ws-dbody.mode-graph .ws-gpane {
+    padding-bottom: calc(var(--grain-bottombar-height, 52px) + 36px);
   }
 }
