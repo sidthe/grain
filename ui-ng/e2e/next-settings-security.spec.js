@@ -259,3 +259,62 @@ test("Settings Security - displays clear missing-scope and missing-key states wh
   await assertNoOverflowAndFitsCards(page, "audit partial scopes");
   await assertWcagClean(page, "audit partial scopes");
 });
+
+test("Settings Security - external agent tokens switch exposes accessible ARIA state across keyboard toggle and persistence", async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/next/settings/access");
+  await settleSettings(page);
+
+  const toggle = page.getByRole("switch", {
+    name: "Accept external agent tokens",
+  });
+  await expect(toggle).toBeVisible();
+  await expect(toggle).toHaveAttribute(
+    "aria-describedby",
+    "external-agent-api-hint",
+  );
+  await expect(toggle).toHaveAccessibleDescription(/gma_ tokens/);
+
+  const box = await toggle.boundingBox();
+  const rowBox = await page
+    .locator(".s-toggle-row", { has: toggle })
+    .boundingBox();
+  expect(box).not.toBeNull();
+  expect(rowBox).not.toBeNull();
+  expect(box.width).toBeGreaterThanOrEqual(24);
+  expect(box.height).toBeGreaterThanOrEqual(24);
+  expect(box.x + box.width).toBeLessThanOrEqual(rowBox.x + rowBox.width + 1);
+  expect(box.x).toBeGreaterThanOrEqual(rowBox.x);
+
+  const initial = await toggle.getAttribute("aria-checked");
+  expect(["true", "false"]).toContain(initial);
+  const toggled = initial === "true" ? "false" : "true";
+
+  await toggle.focus();
+  await page.keyboard.press("Space");
+  await expect(toggle).toHaveAttribute("aria-checked", toggled);
+  await expect(page.getByTestId("settings-save-bar")).toBeVisible();
+
+  await page.getByTestId("settings-save-btn").click();
+  await expect(page.getByTestId("settings-save-bar")).toHaveCount(0);
+  await page.reload();
+  await settleSettings(page);
+
+  await expect(
+    page.getByRole("switch", { name: "Accept external agent tokens" }),
+  ).toHaveAttribute("aria-checked", toggled);
+  await assertWcagClean(page, "security toggle toggled");
+
+  // Restore initial setting so demo state remains clean.
+  await page
+    .getByRole("switch", { name: "Accept external agent tokens" })
+    .click();
+  await expect(
+    page.getByRole("switch", { name: "Accept external agent tokens" }),
+  ).toHaveAttribute("aria-checked", initial);
+  await page.getByTestId("settings-save-btn").click();
+  await expect(page.getByTestId("settings-save-bar")).toHaveCount(0);
+});
