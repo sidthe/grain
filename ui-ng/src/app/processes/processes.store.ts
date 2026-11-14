@@ -181,7 +181,7 @@ export class ProcessesStore {
         this.access.can("GET /api/suite-runs")
           ? this.api.getIfChanged<unknown>("GET /api/suite-runs")
           : Promise.resolve({ body: [], changed: false }),
-        this.access.can("GET /api/declarations")
+        this.access.canGlobalScope(routeScope("GET /api/declarations"))
           ? this.api
               .getIfChanged<unknown>("GET /api/declarations")
               .catch(() => ({ body: [], changed: false }))

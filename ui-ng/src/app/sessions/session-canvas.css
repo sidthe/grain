@@ -283,6 +283,21 @@ g-session-canvas {
   overflow-wrap: anywhere;
 }
 
+.sessions-split.has-canvas .sessions-canvas-wrap:has(g-confirm-dialog) {
+  z-index: 100;
+}
+
+g-session-canvas g-confirm-dialog .modal-dialog {
+  box-sizing: border-box;
+}
+
+g-session-canvas g-confirm-dialog .modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 @media (max-width: 599.95px) {
   .session-canvas {
     border-left: none;
