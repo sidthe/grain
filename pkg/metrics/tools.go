@@ -39,9 +39,9 @@ import (
 	"math"
 	"slices"
 	"sort"
+	"strings"
 	"time"
 
-	"github.com/ai-on-gke/grain/pkg/agent"
 	"github.com/ai-on-gke/grain/pkg/model"
 )
 
@@ -95,11 +95,11 @@ type Sizes struct {
 // ToolUse is one tool's numbers across the window.
 type ToolUse struct {
 	Name string
-	// Surface is which of a run's two surfaces the tool is on
-	// (agent.ToolSurface): agent.SurfaceControl for a tool on the MCP
-	// control roster, agent.SurfaceCLI for a `grain` command the sandbox
-	// proxy recorded under the tool name it replaced, and "" for a name
-	// grain does not publish.
+	// Surface is which of a run's two surfaces the tool is on (matching
+	// agent.ToolSurface): "control" (agent.SurfaceControl) for a tool on
+	// the MCP control roster, "cli" (agent.SurfaceCLI) for a `grain`
+	// command the sandbox proxy recorded under the tool name it replaced,
+	// and "" for a name grain does not publish.
 	Surface string
 	// Runs is how many of the window's runs called this tool at all --
 	// the difference between a tool every run uses twice and one that a
@@ -331,7 +331,7 @@ func toolsOf(w Window, runs []model.RunTiming, uses []model.RunToolUse) Tools {
 		entry, ok := byName[use.Tool]
 		if !ok {
 			entry = &series{
-				use:     ToolUse{Name: use.Tool, Surface: agent.ToolSurface(use.Tool)},
+				use:     ToolUse{Name: use.Tool, Surface: toolSurface(use.Tool)},
 				sizes:   model.SizeHistogram{},
 				dropped: model.SizeHistogram{},
 			}
@@ -354,9 +354,9 @@ func toolsOf(w Window, runs []model.RunTiming, uses []model.RunToolUse) Tools {
 		out.Errored += use.Errored
 		out.Cut += use.Elided
 		switch entry.use.Surface {
-		case agent.SurfaceControl:
+		case surfaceControl:
 			out.ControlCalls += use.Calls
-		case agent.SurfaceCLI:
+		case surfaceCLI:
 			out.CLICalls += use.Calls
 		}
 		callsPerRun[use.RunID] += int64(use.Calls)
@@ -499,6 +499,86 @@ func checksOf(w Window, runs []model.RunTiming, waits []model.RunCheckWait) Chec
 // column is the contract between them, and a verdict this build does not
 // know still counts under its own name in Verdicts.
 const waitVerdictPassed = "passed"
+
+// surfaceControl, surfaceCLI and toolSurfaceNames mirror agent.SurfaceControl,
+// agent.SurfaceCLI and agent.ToolSurface so pkg/metrics does not pull in
+// pkg/agent -> pkg/mcp -> pkg/ci (which would block pkg/ci from importing
+// pkg/metrics). pkg/agent's TestPublishedSurfacesMatchMetrics verifies the
+// classification matches agent.ToolSurface for every published tool.
+const (
+	surfaceControl = "control"
+	surfaceCLI     = "cli"
+)
+
+var toolSurfaceNames = map[string]string{
+	"run_command":                   surfaceControl,
+	"read_file":                     surfaceControl,
+	"edit_file":                     surfaceControl,
+	"write_file":                    surfaceControl,
+	"ask_question":                  surfaceControl,
+	"request_secret":                surfaceControl,
+	"request_access":                surfaceControl,
+	"propose_config_change":         surfaceControl,
+	"comment_on_issue":              surfaceControl,
+	"nothing_needed":                surfaceControl,
+	"propose_task":                  surfaceControl,
+	"wait_for_task":                 surfaceControl,
+	"resume_later":                  surfaceControl,
+	"recreate_sandbox":              surfaceControl,
+	"chat":                          surfaceControl,
+	"rename_session":                surfaceControl,
+	"request_human_review":          surfaceControl,
+	"execute_grain_db":              surfaceControl,
+	"run_host_command":              surfaceControl,
+	"write_handover":                surfaceCLI,
+	"compact_context":               surfaceCLI,
+	"update_brief":                  surfaceCLI,
+	"add_review_comment":            surfaceCLI,
+	"pull_request_status":           surfaceCLI,
+	"base_branch_status":            surfaceCLI,
+	"reply_to_pull_request_comment": surfaceCLI,
+	"resolve_review_thread":         surfaceCLI,
+	"wait_for_checks":               surfaceCLI,
+	"list_ci_runs":                  surfaceCLI,
+	"get_ci_log":                    surfaceCLI,
+	"retrigger_ci":                  surfaceCLI,
+	"query_test_history":            surfaceCLI,
+	"run_ci_job":                    surfaceCLI,
+	"get_ci_artifact":               surfaceCLI,
+	"grain_ls":                      surfaceCLI,
+	"grain_read":                    surfaceCLI,
+	"grain_grep":                    surfaceCLI,
+	"grain_copy":                    surfaceCLI,
+	"open_pull_request":             surfaceCLI,
+	"update_status":                 surfaceCLI,
+	"notify_operator":               surfaceCLI,
+	"message_task":                  surfaceCLI,
+	"query_merge_queue":             surfaceCLI,
+	"revert_task":                   surfaceCLI,
+	"revert_merge":                  surfaceCLI,
+	"list_issues":                   surfaceCLI,
+	"read_issue":                    surfaceCLI,
+	"list_grain_tasks":              surfaceCLI,
+	"read_grain_task":               surfaceCLI,
+	"read_grain_task_prompt":        surfaceCLI,
+	"read_grain_task_transcript":    surfaceCLI,
+	"read_pipeline_changes":         surfaceCLI,
+	"read_grain_metrics":            surfaceCLI,
+	"read_grain_log":                surfaceCLI,
+	"read_deployment_health":        surfaceCLI,
+	"read_deployment_state":         surfaceCLI,
+	"query_grain_db":                surfaceCLI,
+}
+
+func toolSurface(name string) string {
+	if s, ok := toolSurfaceNames[name]; ok {
+		return s
+	}
+	if strings.HasPrefix(name, "cap__") {
+		return surfaceCLI
+	}
+	return ""
+}
 
 // finishedInWindow is the set of runs whose ending falls inside the
 // window -- the same rule every other measurement here follows, applied

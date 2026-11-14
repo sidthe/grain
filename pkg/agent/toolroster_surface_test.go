@@ -17,6 +17,10 @@ package agent
 import (
 	"slices"
 	"testing"
+	"time"
+
+	"github.com/ai-on-gke/grain/pkg/metrics"
+	"github.com/ai-on-gke/grain/pkg/model"
 )
 
 // The two surfaces partition PublishedToolNames: every published tool is
@@ -46,5 +50,45 @@ func TestPublishedSurfacesPartitionTheRoster(t *testing.T) {
 	}
 	if got := ToolSurface("Bash"); got != "" {
 		t.Errorf("ToolSurface(Bash) = %q, want empty for a name grain does not publish", got)
+	}
+}
+
+// TestPublishedSurfacesMatchMetrics holds pkg/metrics's local toolSurface
+// classification to agent.ToolSurface so pkg/metrics need not import pkg/agent
+// (which would create a pkg/ci -> pkg/metrics -> pkg/agent -> pkg/mcp -> pkg/ci
+// import cycle). Any tool added or reclassified in PublishedToolNames fails
+// here if pkg/metrics's table drifts.
+func TestPublishedSurfacesMatchMetrics(t *testing.T) {
+	since := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	until := since.Add(24 * time.Hour)
+
+	finished := since.Add(2 * time.Hour)
+
+	names := append(PublishedToolNames(), "cap__widgets__ping", "Bash")
+	uses := make([]model.RunToolUse, 0, len(names))
+	for _, name := range names {
+		uses = append(uses, model.RunToolUse{RunID: "r1", Tool: name, Calls: 1})
+	}
+
+	rep := metrics.Compute(metrics.Input{
+		Window: metrics.Window{Since: since, Until: until},
+		Runs: []model.RunTiming{{
+			RunID:      "r1",
+			TaskID:     "t1",
+			Attempt:    1,
+			StartedAt:  since.Add(time.Hour),
+			FinishedAt: &finished,
+			Outcome:    "succeeded",
+		}},
+		ToolUses: uses,
+	})
+
+	if len(rep.Tools.ByTool) != len(names) {
+		t.Fatalf("metrics reported %d tools, want %d", len(rep.Tools.ByTool), len(names))
+	}
+	for _, use := range rep.Tools.ByTool {
+		if want := ToolSurface(use.Name); use.Surface != want {
+			t.Errorf("metrics Surface(%q) = %q, want %q (agent.ToolSurface drifted from pkg/metrics)", use.Name, use.Surface, want)
+		}
 	}
 }
