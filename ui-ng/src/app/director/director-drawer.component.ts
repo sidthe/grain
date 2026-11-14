@@ -16,7 +16,6 @@ import { DOCUMENT, NgTemplateOutlet } from "@angular/common";
 import {
   ChangeDetectionStrategy,
   Component,
-  ElementRef,
   NgZone,
   OnDestroy,
   OnInit,
@@ -25,7 +24,7 @@ import {
   effect,
   inject,
   signal,
-  viewChild,
+  untracked,
 } from "@angular/core";
 import { RouterLink } from "@angular/router";
 import type { AttachmentUpload } from "../api/models";
@@ -54,39 +53,38 @@ import { extractGrainDrafts } from "./director-draft";
   styleUrl: "./director-drawer.css",
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    @if (isCompact()) {
+    @if (directorCtx.isOpen() && isCompact()) {
       <div
         class="drawer-scrim"
         aria-hidden="true"
         (click)="directorCtx.close(true)"
       ></div>
-      <aside
-        class="director-drawer is-overlay"
-        role="dialog"
-        aria-label="Director"
-        aria-modal="true"
-        data-testid="director-drawer"
-        gDialogTrap
-        (gDialogClose)="directorCtx.close(true)"
-      >
-        <ng-container *ngTemplateOutlet="drawerInner" />
-      </aside>
-    } @else {
-      <aside
-        class="director-drawer"
-        [class.is-wide]="wide()"
-        role="complementary"
-        aria-label="Director"
-        data-testid="director-drawer"
-      >
-        <ng-container *ngTemplateOutlet="drawerInner" />
-      </aside>
     }
+    <aside
+      id="director-drawer"
+      class="director-drawer"
+      [class.is-overlay]="isCompact()"
+      [class.is-wide]="!isCompact() && wide()"
+      [attr.role]="isCompact() ? 'dialog' : 'complementary'"
+      aria-label="Director"
+      [attr.aria-modal]="isCompact() ? 'true' : null"
+      [attr.aria-expanded]="directorCtx.isOpen()"
+      [attr.aria-hidden]="!directorCtx.isOpen()"
+      [attr.inert]="directorCtx.isOpen() ? null : ''"
+      [hidden]="!directorCtx.isOpen()"
+      data-testid="director-drawer"
+      gDialogTrap
+      [gDialogTrapActive]="directorCtx.isOpen()"
+      [gDialogTrapRestoreFocus]="false"
+      (gDialogClose)="directorCtx.close(true)"
+    >
+      <ng-container *ngTemplateOutlet="drawerInner" />
+    </aside>
 
     <ng-template #drawerInner>
       <header class="drawer-head">
         <div class="drawer-title-group">
-          <h2 class="drawer-title" tabindex="-1" #titleEl>Director</h2>
+          <h2 class="drawer-title">Director</h2>
           @let st = sessions.directorLiveStatus();
           <span [class]="'status-pill ' + st.tone" [gTip]="st.tip">
             <g-status-icon [tone]="st.tone" [kind]="st.label" />{{ st.label }}
@@ -228,7 +226,6 @@ export class DirectorDrawerComponent implements OnInit, OnDestroy {
   protected readonly draft = signal("");
   protected readonly staged = signal<AttachmentUpload[]>([]);
 
-  private readonly titleEl = viewChild<ElementRef<HTMLElement>>("titleEl");
   private mql: MediaQueryList | null = null;
   private readonly onMqlChange = (ev: MediaQueryListEvent): void => {
     this.zone.run(() => this.isCompact.set(ev.matches));
@@ -263,14 +260,12 @@ export class DirectorDrawerComponent implements OnInit, OnDestroy {
 
   constructor() {
     effect(() => {
-      if (this.directorCtx.isOpen()) {
-        queueMicrotask(() => this.titleEl()?.nativeElement.focus());
-      }
+      const open = this.directorCtx.isOpen();
+      untracked(() => this.sessions.setDirectorWatch("drawer", open));
     });
   }
 
   ngOnInit(): void {
-    this.sessions.setDirectorWatch("drawer", true);
     const win = this.doc.defaultView;
     if (win && typeof win.matchMedia === "function") {
       this.mql = win.matchMedia("(max-width: 1079px)");
