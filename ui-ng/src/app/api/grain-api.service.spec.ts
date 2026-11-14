@@ -149,4 +149,31 @@ describe("GrainApi.getIfChanged", () => {
     delReq.flush({ ok: true });
     await delP;
   });
+
+  it("exposes response headers via getTextResponse for namespace grep truncation flags", async () => {
+    const resP = api.getTextResponse(
+      "GET /api/fs/memory/{path...}",
+      { path: "repos/acme/api" },
+      "grep=token&i=1&n=1",
+    );
+    const req = http.expectOne(
+      "/api/fs/memory/repos/acme/api?grep=token&i=1&n=1",
+    );
+    expect(req.request.responseType).toBe("text");
+    req.flush(
+      "notes.md:4:token\n[truncated: walked 2000 entries and stopped at z.md]\n",
+      {
+        headers: {
+          "X-Grain-Truncated": "true",
+          "X-Grain-Walk-Truncated": "true",
+          "X-Grain-Matches": "1",
+        },
+      },
+    );
+    const res = await resP;
+    expect(res.body).toContain("notes.md:4:token");
+    expect(res.headers.get("X-Grain-Truncated")).toBe("true");
+    expect(res.headers.get("X-Grain-Walk-Truncated")).toBe("true");
+    expect(res.headers.get("X-Grain-Matches")).toBe("1");
+  });
 });
