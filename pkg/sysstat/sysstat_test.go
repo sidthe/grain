@@ -36,6 +36,7 @@ package sysstat_test
 // honestly has no reading to give.
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -178,5 +179,61 @@ func TestFilesystemIDReportsAMissingPathAsAnError(t *testing.T) {
 
 	if _, err := sysstat.FilesystemID(filepath.Join(t.TempDir(), "no-such-dir")); err == nil {
 		t.Error("FilesystemID of a missing path returned no error")
+	}
+}
+
+func TestIsOverloaded(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		cpuUsage float64
+		memUsage float64
+		want     bool
+		wantErr  bool
+	}{
+		{name: "negative cpu", cpuUsage: -0.01, memUsage: 50, wantErr: true},
+		{name: "negative mem", cpuUsage: 50, memUsage: -0.01, wantErr: true},
+		{name: "both negative", cpuUsage: -1, memUsage: -1, wantErr: true},
+		{name: "negative inf cpu", cpuUsage: math.Inf(-1), memUsage: 50, wantErr: true},
+		{name: "negative inf mem", cpuUsage: 50, memUsage: math.Inf(-1), wantErr: true},
+		{name: "negative max float cpu", cpuUsage: -math.MaxFloat64, memUsage: 50, wantErr: true},
+		{name: "negative cpu and over 100 mem", cpuUsage: -1, memUsage: 101, wantErr: true},
+		{name: "cpu above 100", cpuUsage: 100.01, memUsage: 50, wantErr: true},
+		{name: "mem above 100", cpuUsage: 50, memUsage: 100.01, wantErr: true},
+		{name: "both above 100", cpuUsage: 101, memUsage: 101, wantErr: true},
+		{name: "positive inf cpu", cpuUsage: math.Inf(1), memUsage: 50, wantErr: true},
+		{name: "positive inf mem", cpuUsage: 50, memUsage: math.Inf(1), wantErr: true},
+		{name: "max float cpu", cpuUsage: math.MaxFloat64, memUsage: 50, wantErr: true},
+		{name: "nan cpu", cpuUsage: math.NaN(), memUsage: 95, wantErr: true},
+		{name: "nan mem", cpuUsage: 95, memUsage: math.NaN(), wantErr: true},
+		{name: "zero values", cpuUsage: 0, memUsage: 0, want: false},
+		{name: "negative zero cpu", cpuUsage: math.Copysign(0, -1), memUsage: 0, want: false},
+		{name: "mid range", cpuUsage: 50, memUsage: 50, want: false},
+		{name: "at exact cpu and mem thresholds", cpuUsage: 90.0, memUsage: 80.0, want: false},
+		{name: "at exact cpu threshold high mem", cpuUsage: 90.0, memUsage: 95.0, want: false},
+		{name: "at exact cpu threshold max mem", cpuUsage: 90.0, memUsage: 100.0, want: false},
+		{name: "high cpu at exact mem threshold", cpuUsage: 95.0, memUsage: 80.0, want: false},
+		{name: "max cpu at exact mem threshold", cpuUsage: 100.0, memUsage: 80.0, want: false},
+		{name: "high cpu low mem", cpuUsage: 95.0, memUsage: 50.0, want: false},
+		{name: "low cpu high mem", cpuUsage: 50.0, memUsage: 95.0, want: false},
+		{name: "just above both thresholds", cpuUsage: 90.0001, memUsage: 80.0001, want: true},
+		{name: "overloaded", cpuUsage: 95.0, memUsage: 85.0, want: true},
+		{name: "max cpu just above mem", cpuUsage: 100.0, memUsage: 80.1, want: true},
+		{name: "just above cpu max mem", cpuUsage: 90.1, memUsage: 100.0, want: true},
+		{name: "max values", cpuUsage: 100.0, memUsage: 100.0, want: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := sysstat.IsOverloaded(tc.cpuUsage, tc.memUsage)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("IsOverloaded(%v, %v) err = %v, wantErr %v", tc.cpuUsage, tc.memUsage, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("IsOverloaded(%v, %v) = %v, want %v", tc.cpuUsage, tc.memUsage, got, tc.want)
+			}
+		})
 	}
 }
