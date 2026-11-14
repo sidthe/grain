@@ -15,7 +15,7 @@
 import { TestBed, type ComponentFixture } from "@angular/core/testing";
 import { provideRouter } from "@angular/router";
 import { NEVER } from "rxjs";
-import { GrainApi } from "../api/grain-api.service";
+import { GrainApi, routeScope } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import type { GrainConfig } from "../api/models";
 import { AccessService } from "../services/access.service";
@@ -23,17 +23,20 @@ import { FleetPageComponent } from "./fleet-page.component";
 import {
   type ActionsCacheState,
   type AgentPauseResponse,
+  type HostEnrollmentCodeView,
   type HostTopResponse,
   type HostdView,
   type LogLinesResponse,
   type LogSourcesResponse,
   type PackageCacheState,
+  type PendingHostJoinView,
   type PersistentSandboxStatus,
   type PipelinePauseStatus,
   type SandboxHealthResponse,
   effectivePersistentState,
   extractTaskIdFromSandbox,
   isPersistentActionAllowed,
+  parseHostdLabels,
 } from "./fleet.models";
 
 interface RecordedCall {
@@ -170,6 +173,9 @@ class FakeFleetApi {
     },
   ];
 
+  enrollmentCodesBody: HostEnrollmentCodeView[] = [];
+  pendingHostdsBody: PendingHostJoinView[] = [];
+
   pipelinePauseState: PipelinePauseStatus = { paused: false };
   agentPauseBody: AgentPauseResponse = {
     enabled: true,
@@ -244,6 +250,10 @@ class FakeFleetApi {
         return Promise.resolve(structuredClone(this.hostTopBody));
       case "GET /api/hostds":
         return Promise.resolve(structuredClone(this.hostdsBody));
+      case "GET /api/hostds/enrollment-codes":
+        return Promise.resolve(structuredClone(this.enrollmentCodesBody));
+      case "GET /api/hostds/pending":
+        return Promise.resolve(structuredClone(this.pendingHostdsBody));
       case "GET /api/pipeline-pause":
         return Promise.resolve({
           pause: structuredClone(this.pipelinePauseState),
@@ -294,6 +304,66 @@ class FakeFleetApi {
         hostd: { name, state: "connected" },
         token: "ghd_secret_rotated_token",
       });
+    }
+    if (route === "POST /api/hostds/enrollment-codes") {
+      const name = (body as { name?: string })?.name ?? "default";
+      const created: HostEnrollmentCodeView = {
+        name,
+        code: `ghe_secret_${name}`,
+        uses: 0,
+        max_uses: 10,
+        install: {
+          command: `curl -fsSL https://grain.example.com/hostd/install | sh -s -- --join ghe_secret_${name}`,
+        },
+      };
+      this.enrollmentCodesBody = [...this.enrollmentCodesBody, created];
+      return Promise.resolve(structuredClone(created));
+    }
+    if (route === "POST /api/hostds/enrollment-codes/{name}/rotate") {
+      const name = params?.["name"] ?? "default";
+      const rotated: HostEnrollmentCodeView = {
+        name,
+        code: `ghe_rotated_${name}`,
+        uses: 1,
+        max_uses: 10,
+        install: {
+          command: `curl -fsSL https://grain.example.com/hostd/install | sh -s -- --join ghe_rotated_${name}`,
+        },
+      };
+      this.enrollmentCodesBody = this.enrollmentCodesBody.map((c) =>
+        c.name === name ? rotated : c,
+      );
+      return Promise.resolve(structuredClone(rotated));
+    }
+    if (route === "POST /api/hostds/enrollment-codes/{name}/revoke") {
+      const name = params?.["name"] ?? "default";
+      this.enrollmentCodesBody = this.enrollmentCodesBody.map((c) =>
+        c.name === name ? { ...c, revoked_at: "2026-11-14T00:00:00Z" } : c,
+      );
+      return Promise.resolve({ name, revoked_at: "2026-11-14T00:00:00Z" });
+    }
+    if (route === "POST /api/hostds/pending/{id}/accept") {
+      const id = params?.["id"] ?? "";
+      this.pendingHostdsBody = this.pendingHostdsBody.filter(
+        (p) => p.id !== id,
+      );
+      const req = body as { name?: string; labels?: Record<string, string> };
+      this.hostdsBody = [
+        ...this.hostdsBody,
+        {
+          name: req?.name || id,
+          state: "connected",
+          labels: req?.labels,
+        },
+      ];
+      return Promise.resolve({ name: req?.name || id, state: "connected" });
+    }
+    if (route === "POST /api/hostds/pending/{id}/reject") {
+      const id = params?.["id"] ?? "";
+      this.pendingHostdsBody = this.pendingHostdsBody.filter(
+        (p) => p.id !== id,
+      );
+      return Promise.resolve({ ok: true });
     }
     if (route === "POST /api/pipeline-pause") {
       const reason = (body as { reason?: string })?.reason || "maintenance";
@@ -1244,5 +1314,572 @@ describe("FleetPageComponent", () => {
 
     expect(access.configLoaded()).toBe(true);
     expect(comp.canReadPersistentLogs(sandbox)).toBe(true);
+  });
+
+  it("requires scope: null operator gating after api.config() for host enrollment codes and pending approvals", async () => {
+    const operatorRoutes = [
+      "GET /api/hostds/enrollment-codes",
+      "POST /api/hostds/enrollment-codes",
+      "POST /api/hostds/enrollment-codes/{name}/rotate",
+      "POST /api/hostds/enrollment-codes/{name}/revoke",
+      "GET /api/hostds/pending",
+      "POST /api/hostds/pending/{id}/accept",
+      "POST /api/hostds/pending/{id}/reject",
+    ] as const;
+    for (const r of operatorRoutes) {
+      expect(routeScope(r), `${r} routeScope`).toBeNull();
+    }
+
+    const api = new FakeFleetApi();
+    api.enrollmentCodesBody = [
+      {
+        name: "team-code",
+        uses: 1,
+        max_uses: 5,
+        created_by: "alice@example.com",
+      },
+      {
+        name: "old-code",
+        uses: 2,
+        max_uses: 2,
+        revoked_at: "2026-11-10T00:00:00Z",
+      },
+    ];
+    api.pendingHostdsBody = [
+      {
+        id: "hjr_1",
+        hostname: "dev-box.example.com",
+        suggested_name: "dev-box",
+        enrolled_by: "carol@example.com",
+        os: "linux",
+        arch: "amd64",
+        key_fingerprint: "SHA256:abcdef1234567890",
+        default_labels: { team: "infra" },
+        default_capacity: 4,
+      },
+      {
+        id: "hjr_2",
+        hostname: "rogue-box.example.com",
+        suggested_name: "rogue-box",
+        enrolled_by: "mallory@example.com",
+        os: "darwin",
+        arch: "arm64",
+        key_fingerprint: "SHA256:999999",
+      },
+    ];
+
+    let resolveCfg!: (cfg: GrainConfig) => void;
+    api.config = () =>
+      new Promise<GrainConfig>((resolve) => {
+        resolveCfg = resolve;
+      });
+
+    TestBed.configureTestingModule({
+      imports: [FleetPageComponent],
+      providers: [
+        provideRouter([
+          { path: "task/:id", children: [] },
+          { path: "settings/hostds", children: [] },
+        ]),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => NEVER } },
+      ],
+    });
+
+    const access = TestBed.inject(AccessService);
+    const fixture = TestBed.createComponent(FleetPageComponent);
+    fixture.detectChanges();
+    const root = fixture.nativeElement as HTMLElement;
+
+    const comp = fixture.componentInstance as unknown as {
+      canReadEnrollmentCodes: () => boolean;
+      canCreateEnrollmentCode: () => boolean;
+      canRotateEnrollmentCode: () => boolean;
+      canRevokeEnrollmentCode: () => boolean;
+      canReadPendingHostds: () => boolean;
+      canAcceptPendingHostd: () => boolean;
+      canRejectPendingHostd: () => boolean;
+      newEnrollmentCodeName: { set: (v: string) => void };
+      loadHostds: () => Promise<void>;
+      loadHostEnrollmentCodes: () => Promise<void>;
+      loadPendingHostds: () => Promise<void>;
+      createEnrollmentCode: () => Promise<void>;
+      confirmRotateEnrollmentCode: (name: string) => void;
+      confirmRevokeEnrollmentCode: (name: string) => void;
+      acceptPendingHostd: (p: PendingHostJoinView) => Promise<void>;
+      confirmRejectPendingHostd: (p: PendingHostJoinView) => void;
+      confirmReq: () => unknown;
+    };
+
+    // Switch to Hosts tab before api.config() resolves: everything must fail closed.
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="fleet-tab-hostds"]')!
+      .click();
+    fixture.detectChanges();
+
+    expect(access.configLoaded()).toBe(false);
+    expect(comp.canReadEnrollmentCodes()).toBe(false);
+    expect(comp.canCreateEnrollmentCode()).toBe(false);
+    expect(comp.canRotateEnrollmentCode()).toBe(false);
+    expect(comp.canRevokeEnrollmentCode()).toBe(false);
+    expect(comp.canReadPendingHostds()).toBe(false);
+    expect(comp.canAcceptPendingHostd()).toBe(false);
+    expect(comp.canRejectPendingHostd()).toBe(false);
+
+    expect(
+      root.querySelector('[data-testid="fleet-enrollment-restricted"]'),
+    ).not.toBeNull();
+    expect(
+      root.querySelector('[data-testid="fleet-pending-restricted"]'),
+    ).not.toBeNull();
+    expect(
+      root.querySelector('[data-testid="fleet-enrollment-name-input"]'),
+    ).toBeNull();
+    expect(root.querySelector('[data-testid="fleet-pending-list"]')).toBeNull();
+
+    // Direct invocation of loaders or mutations before api.config() must send zero API calls.
+    comp.newEnrollmentCodeName.set("early-code");
+    await comp.loadHostEnrollmentCodes();
+    await comp.loadPendingHostds();
+    await comp.createEnrollmentCode();
+    comp.confirmRotateEnrollmentCode("team-code");
+    comp.confirmRevokeEnrollmentCode("team-code");
+    await comp.acceptPendingHostd(api.pendingHostdsBody[0]);
+    comp.confirmRejectPendingHostd(api.pendingHostdsBody[1]);
+    expect(comp.confirmReq()).toBeNull();
+    expect(
+      api.calls.filter(
+        (c) =>
+          c.route.includes("/enrollment-codes") ||
+          c.route.includes("/hostds/pending"),
+      ),
+    ).toEqual([]);
+
+    // Resolve api.config() as a non-operator role that holds capabilities:read/admin and settings:write.
+    resolveCfg({
+      version: "v3.5.0-test",
+      hostSandboxes: false,
+      access: {
+        role: "grain/admin",
+        roles: ["grain/admin"],
+        full: false,
+        scopes: [
+          "capabilities:read",
+          "capabilities:admin",
+          "settings:read",
+          "settings:write",
+          "deployment:read",
+        ],
+      },
+    });
+    await settle(fixture);
+
+    expect(access.configLoaded()).toBe(true);
+    // Registered hosts (capabilities:read/admin) still work for non-operator admin.
+    expect(api.calls.some((c) => c.route === "GET /api/hostds")).toBe(true);
+    expect(
+      root.querySelector('[data-testid="hostd-row-workstation-1"]'),
+    ).not.toBeNull();
+
+    // Enrollment codes & pending approvals (scope: null) remain gated without 403 calls.
+    expect(comp.canReadEnrollmentCodes()).toBe(false);
+    expect(comp.canCreateEnrollmentCode()).toBe(false);
+    expect(comp.canRotateEnrollmentCode()).toBe(false);
+    expect(comp.canRevokeEnrollmentCode()).toBe(false);
+    expect(comp.canReadPendingHostds()).toBe(false);
+    expect(comp.canAcceptPendingHostd()).toBe(false);
+    expect(comp.canRejectPendingHostd()).toBe(false);
+    expect(
+      root.querySelector('[data-testid="fleet-enrollment-restricted"]')
+        ?.textContent,
+    ).toContain("grain/operator");
+    expect(
+      root.querySelector('[data-testid="fleet-pending-restricted"]')
+        ?.textContent,
+    ).toContain("grain/operator");
+
+    await comp.loadHostds();
+    await comp.createEnrollmentCode();
+    comp.confirmRotateEnrollmentCode("team-code");
+    comp.confirmRevokeEnrollmentCode("team-code");
+    await comp.acceptPendingHostd(api.pendingHostdsBody[0]);
+    comp.confirmRejectPendingHostd(api.pendingHostdsBody[1]);
+    expect(comp.confirmReq()).toBeNull();
+    expect(
+      api.calls.filter(
+        (c) =>
+          c.route.includes("/enrollment-codes") ||
+          c.route.includes("/hostds/pending"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("allows operator enrollment codes and pending approval workflows, enforces confirmation, and revokes dynamically", async () => {
+    const api = new FakeFleetApi();
+    api.enrollmentCodesBody = [
+      {
+        name: "team-code",
+        uses: 1,
+        max_uses: 5,
+        created_by: "alice@example.com",
+      },
+      {
+        name: "old-code",
+        uses: 2,
+        max_uses: 2,
+        revoked_at: "2026-11-10T00:00:00Z",
+      },
+    ];
+    api.pendingHostdsBody = [
+      {
+        id: "hjr_1",
+        hostname: "dev-box.example.com",
+        suggested_name: "dev-box",
+        enrolled_by: "carol@example.com",
+        os: "linux",
+        arch: "amd64",
+        key_fingerprint: "SHA256:abcdef1234567890",
+        default_labels: { team: "infra" },
+        default_capacity: 4,
+      },
+      {
+        id: "hjr_2",
+        hostname: "rogue-box.example.com",
+        suggested_name: "rogue-box",
+        enrolled_by: "mallory@example.com",
+        os: "darwin",
+        arch: "arm64",
+        key_fingerprint: "SHA256:999999",
+      },
+    ];
+
+    const { fixture, root } = await setup(api);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="fleet-tab-hostds"]')!
+      .click();
+    await settle(fixture);
+
+    expect(
+      root.querySelector('[data-testid="fleet-enrollment-row-team-code"]')
+        ?.textContent,
+    ).toContain("active");
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="fleet-enrollment-rotate-old-code"]',
+      )!.disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="fleet-enrollment-revoke-old-code"]',
+      )!.disabled,
+    ).toBe(true);
+
+    expect(
+      root.querySelector('[data-testid="fleet-pending-count"]')?.textContent,
+    ).toContain("2 pending");
+    expect(
+      root.querySelector('[data-testid="fleet-pending-fingerprint-hjr_1"]')
+        ?.textContent,
+    ).toContain("SHA256:abcdef1234567890");
+    expect(
+      root.querySelector('[data-testid="fleet-pending-row-hjr_1"]')
+        ?.textContent,
+    ).toContain("carol@example.com");
+
+    // Create enrollment code -> displays one-time issued secret banner.
+    const nameInput = root.querySelector<HTMLInputElement>(
+      '[data-testid="fleet-enrollment-name-input"]',
+    )!;
+    nameInput.value = "ml-hosts";
+    nameInput.dispatchEvent(new Event("input"));
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="fleet-enrollment-create-btn"]',
+      )!
+      .click();
+    await settle(fixture);
+
+    expect(
+      root.querySelector('[data-testid="fleet-enrollment-issued"]')
+        ?.textContent,
+    ).toContain("ghe_secret_ml-hosts");
+    expect(
+      root.querySelector('[data-testid="fleet-enrollment-row-ml-hosts"]'),
+    ).not.toBeNull();
+
+    // Rotate enrollment code requires confirmation outside [inert].
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="fleet-enrollment-rotate-team-code"]',
+      )!
+      .click();
+    await settle(fixture);
+    const rotateDialog = root.querySelector('[data-testid="confirm-dialog"]')!;
+    expect(rotateDialog.textContent).toContain(
+      "Rotate enrollment code team-code?",
+    );
+    expect(rotateDialog.closest("[inert]")).toBeNull();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="fleet-enrollment-issued"]')
+        ?.textContent,
+    ).toContain("ghe_rotated_team-code");
+
+    // Revoke enrollment code requires confirmation.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="fleet-enrollment-revoke-team-code"]',
+      )!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="fleet-enrollment-row-team-code"]')
+        ?.textContent,
+    ).toContain("revoked");
+    // Issued banner for the revoked code is cleared.
+    expect(
+      root.querySelector('[data-testid="fleet-enrollment-issued"]'),
+    ).toBeNull();
+
+    // Invalid pending label draft aborts accept without posting.
+    const labelsInput = root.querySelector<HTMLInputElement>(
+      '[data-testid="fleet-pending-labels-hjr_1"]',
+    )!;
+    labelsInput.value = "badlabel";
+    labelsInput.dispatchEvent(new Event("input"));
+    await settle(fixture);
+    expect(parseHostdLabels("badlabel").error).toContain("key=value");
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="fleet-pending-accept-hjr_1"]',
+      )!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls.some((c) => c.route === "POST /api/hostds/pending/{id}/accept"),
+    ).toBe(false);
+
+    // Valid labels accept pending host and add it to hostds list.
+    labelsInput.value = "gpu=l4,zone=us-central1";
+    labelsInput.dispatchEvent(new Event("input"));
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="fleet-pending-accept-hjr_1"]',
+      )!
+      .click();
+    await settle(fixture);
+    const acceptCall = api.calls.find(
+      (c) => c.route === "POST /api/hostds/pending/{id}/accept",
+    );
+    expect(acceptCall?.body).toEqual({
+      name: "dev-box",
+      labels: { gpu: "l4", zone: "us-central1" },
+      capacity: 4,
+    });
+    expect(
+      root.querySelector('[data-testid="hostd-row-dev-box"]'),
+    ).not.toBeNull();
+
+    // Reject pending host requires confirmation, and guards mid-dialog revocation.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="fleet-pending-reject-hjr_2"]',
+      )!
+      .click();
+    await settle(fixture);
+    const access = TestBed.inject(AccessService);
+    access.setConfig({
+      access: {
+        role: "grain/admin",
+        roles: ["grain/admin"],
+        full: false,
+        scopes: ["capabilities:admin", "capabilities:read"],
+      },
+    });
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls.some((c) => c.route === "POST /api/hostds/pending/{id}/reject"),
+    ).toBe(false);
+    expect(
+      root.querySelector('[data-testid="fleet-enrollment-restricted"]'),
+    ).not.toBeNull();
+    expect(
+      root.querySelector('[data-testid="fleet-pending-restricted"]'),
+    ).not.toBeNull();
+
+    // Legacy non-RBAC operator config (access: null) after configLoaded is allowed.
+    access.setConfig({ access: null });
+    fixture.detectChanges();
+    await settle(fixture);
+    const comp = fixture.componentInstance as unknown as {
+      canReadEnrollmentCodes: () => boolean;
+      canReadPendingHostds: () => boolean;
+      loadHostds: () => Promise<void>;
+    };
+    expect(comp.canReadEnrollmentCodes()).toBe(true);
+    expect(comp.canReadPendingHostds()).toBe(true);
+    await comp.loadHostds();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="fleet-pending-reject-hjr_2"]',
+      )!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls.some(
+        (c) =>
+          c.route === "POST /api/hostds/pending/{id}/reject" &&
+          (c.params as { id: string }).id === "hjr_2",
+      ),
+    ).toBe(true);
+    expect(
+      root.querySelector('[data-testid="fleet-pending-empty"]'),
+    ).not.toBeNull();
+  });
+
+  it("discards in-flight enrollment and pending responses if operator access is revoked mid-request", async () => {
+    const api = new FakeFleetApi();
+    let resolveCodes!: (v: HostEnrollmentCodeView[]) => void;
+    let resolvePending!: (v: PendingHostJoinView[]) => void;
+    const origGet = api.get;
+    api.get = (route, params, query) => {
+      if (route === "GET /api/hostds/enrollment-codes") {
+        api.calls.push({ method: "GET", route, params, query });
+        return new Promise<HostEnrollmentCodeView[]>((resolve) => {
+          resolveCodes = resolve;
+        });
+      }
+      if (route === "GET /api/hostds/pending") {
+        api.calls.push({ method: "GET", route, params, query });
+        return new Promise<PendingHostJoinView[]>((resolve) => {
+          resolvePending = resolve;
+        });
+      }
+      return origGet(route, params, query);
+    };
+
+    const { fixture, root } = await setup(api);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="fleet-tab-hostds"]')!
+      .click();
+    await settle(fixture);
+
+    const access = TestBed.inject(AccessService);
+    access.setConfig({
+      access: {
+        role: "grain/viewer",
+        roles: ["grain/viewer"],
+        full: false,
+        scopes: ["capabilities:read"],
+      },
+    });
+    resolveCodes([{ name: "secret-code", uses: 0 }]);
+    resolvePending([
+      {
+        id: "hjr_secret",
+        hostname: "secret-host",
+        key_fingerprint: "SHA256:secret",
+        enrolled_by: "alice@example.com",
+      },
+    ]);
+    await settle(fixture);
+
+    const comp = fixture.componentInstance as unknown as {
+      enrollmentCodes: () => HostEnrollmentCodeView[];
+      pendingHostds: () => PendingHostJoinView[];
+    };
+    expect(comp.enrollmentCodes()).toEqual([]);
+    expect(comp.pendingHostds()).toEqual([]);
+    expect(
+      root.querySelector('[data-testid="fleet-enrollment-restricted"]'),
+    ).not.toBeNull();
+    expect(
+      root.querySelector('[data-testid="fleet-pending-restricted"]'),
+    ).not.toBeNull();
+  });
+
+  it("keeps enrollment and pending approvals locked when api.config() fails or access.can() denies", async () => {
+    const api = new FakeFleetApi();
+    api.config = () => Promise.reject(new Error("config unavailable"));
+
+    TestBed.configureTestingModule({
+      imports: [FleetPageComponent],
+      providers: [
+        provideRouter([
+          { path: "task/:id", children: [] },
+          { path: "settings/hostds", children: [] },
+        ]),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => NEVER } },
+      ],
+    });
+
+    const access = TestBed.inject(AccessService);
+    const fixture = TestBed.createComponent(FleetPageComponent);
+    fixture.detectChanges();
+    await settle(fixture);
+
+    const comp = fixture.componentInstance as unknown as {
+      canReadEnrollmentCodes: () => boolean;
+      canCreateEnrollmentCode: () => boolean;
+      canReadPendingHostds: () => boolean;
+      canAcceptPendingHostd: () => boolean;
+      loadHostds: () => Promise<void>;
+    };
+    expect(access.configLoaded()).toBe(false);
+    expect(comp.canReadEnrollmentCodes()).toBe(false);
+    expect(comp.canCreateEnrollmentCode()).toBe(false);
+    expect(comp.canReadPendingHostds()).toBe(false);
+    expect(comp.canAcceptPendingHostd()).toBe(false);
+    expect(
+      api.calls.filter(
+        (c) =>
+          c.route.includes("/enrollment-codes") ||
+          c.route.includes("/hostds/pending"),
+      ),
+    ).toEqual([]);
+
+    // Even once configLoaded is true as operator, an explicit access.can() denial blocks calls.
+    access.setConfig(api.configBody);
+    const canSpy = vi.spyOn(access, "can").mockImplementation((route) => {
+      if (
+        route.includes("/enrollment-codes") ||
+        route.includes("/hostds/pending")
+      ) {
+        return false;
+      }
+      return true;
+    });
+    fixture.detectChanges();
+    expect(comp.canReadEnrollmentCodes()).toBe(false);
+    expect(comp.canCreateEnrollmentCode()).toBe(false);
+    expect(comp.canReadPendingHostds()).toBe(false);
+    expect(comp.canAcceptPendingHostd()).toBe(false);
+    await comp.loadHostds();
+    expect(
+      api.calls.filter(
+        (c) =>
+          c.route.includes("/enrollment-codes") ||
+          c.route.includes("/hostds/pending"),
+      ),
+    ).toEqual([]);
+    canSpy.mockRestore();
   });
 });
