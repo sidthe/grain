@@ -171,9 +171,15 @@ func cmdQAFlow(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 		if err != nil {
 			return err
 		}
-		decl, err := qa.ParseFlowDeclarationV2(data)
+		decl, err := qa.ParseFlowDeclaration(data)
 		if err != nil {
 			return err
+		}
+		var key string
+		if d, ok := decl.(qa.FlowDeclarationV3); ok {
+			key = d.Key
+		} else if d, ok := decl.(qa.FlowDeclarationV2); ok {
+			key = d.Key
 		}
 		reqBody := map[string]any{
 			"yaml":        string(data),
@@ -188,7 +194,7 @@ func cmdQAFlow(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 			return nil
 		}
 		fmt.Printf("valid: %s (hash %v, sampled=%v, wouldBlock=%v)\n",
-			decl.Key, resp["hash"], resp["sampledPRs"], resp["wouldBlockPRs"])
+			key, resp["hash"], resp["sampledPRs"], resp["wouldBlockPRs"])
 		return nil
 
 	case "publish":
@@ -204,7 +210,7 @@ func cmdQAFlow(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 		if err != nil {
 			return err
 		}
-		if _, err := qa.ParseFlowDeclarationV2(data); err != nil {
+		if _, err := qa.ParseFlowDeclaration(data); err != nil {
 			return err
 		}
 		var resp map[string]any
@@ -241,7 +247,40 @@ func cmdQAFlow(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 		fmt.Printf("retired %v at %v\n", resp["hash"], resp["retiredAt"])
 		return nil
 
+	case "adopt":
+		fs := flag.NewFlagSet("grain qa flow adopt", flag.ContinueOnError)
+		var f adoptFlags
+		fs.StringVar(&f.Repo, "repo", "", "GitHub repository (owner/name)")
+		fs.StringVar(&f.Path, "path", "", "Path to the flow declaration inside the repository")
+		fs.StringVar(&f.Commit, "commit", "", "40-char commit SHA to read from")
+		fs.BoolVar(&f.DryRun, "dry-run", false, "Validate and simulate adoption without saving")
+		tail, err := parseArgs(fs, rest)
+		if err != nil {
+			return err
+		}
+		if len(tail) > 0 {
+			return usageErrorf("usage: grain qa flow adopt --repo <O/R> --path <PATH> --commit <SHA> [--dry-run]")
+		}
+		return runQAFlowAdopt(ctx, c, out, f)
+
+	case "probe":
+		fs := flag.NewFlagSet("grain qa flow probe", flag.ContinueOnError)
+		var f probeFlags
+		fs.StringVar(&f.Flow, "flow", "", "Flow hash or key@version to probe (default golden-v3@1)")
+		fs.StringVar(&f.Title, "title", "", "Simulated pull request title")
+		fs.StringVar(&f.Body, "body", "", "Simulated pull request body description")
+		fs.StringVar(&f.Files, "files", "", "Comma-separated list of simulated changed file paths")
+		fs.IntVar(&f.NonTestAdded, "non-test-added", 0, "Simulated non-test lines added")
+		tail, err := parseArgs(fs, rest)
+		if err != nil {
+			return err
+		}
+		if len(tail) > 0 {
+			return usageErrorf("usage: grain qa flow probe [--flow <REF>] --title <TITLE> [--body <BODY>] [--files <CSV>] [--non-test-added <N>]")
+		}
+		return runQAFlowProbe(ctx, c, out, f)
+
 	default:
-		return usageErrorf("usage: grain qa flow <list|show|fork|validate|publish|retire> [args...]")
+		return usageErrorf("usage: grain qa flow <list|show|fork|validate|publish|retire|adopt|probe> [args...]")
 	}
 }

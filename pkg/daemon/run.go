@@ -15,6 +15,8 @@
 package daemon
 
 import (
+	qaresolve "github.com/ai-on-gke/grain/pkg/qa/resolve"
+	"github.com/ai-on-gke/grain/pkg/qa/checks"
 	"context"
 	"database/sql"
 	"errors"
@@ -48,7 +50,6 @@ import (
 	"github.com/ai-on-gke/grain/pkg/pkgcache"
 	"github.com/ai-on-gke/grain/pkg/policy"
 	"github.com/ai-on-gke/grain/pkg/qa"
-	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 	"github.com/ai-on-gke/grain/pkg/sandboxaddr"
 	"github.com/ai-on-gke/grain/pkg/sandboximage"
 	"github.com/ai-on-gke/grain/pkg/secrets"
@@ -1489,8 +1490,35 @@ func runDaemon(ctx context.Context, cfg Config, store *model.Store, sandboxes or
 			return res.FinalText, res.Usage.InputTokens, res.Usage.OutputTokens, nil
 		},
 	})
-	resolve.SetRuntimeHooks(&resolve.RuntimeHooks{
+	qaresolve.SetRuntimeHooks(&qaresolve.RuntimeHooks{
 		DataDir: cfg.DataDir,
+		ReadRepoFileAtCommit: func(rCtx context.Context, repoStr, commitSHA, filePath string) ([]byte, error) {
+			parts := strings.Split(repoStr, "/")
+			if len(parts) != 2 {
+				return nil, fmt.Errorf("invalid repoStr: %s", repoStr)
+			}
+			repo := model.RepoRef{Owner: parts[0], Name: parts[1]}
+			host := cfg.GithubHost
+			if host == "" {
+				host = "github.com"
+			}
+			scheme := "https"
+			if cfg.GithubInsecureHTTP {
+				scheme = "http"
+			}
+			remoteURL := fmt.Sprintf("%s://%s/%s/%s.git", scheme, host, repo.Owner, repo.Name)
+			var tok string
+			if githubRESTClient != nil && githubRESTClient.Tokens != nil {
+				if tp := githubRESTClient.Tokens.TokenFor(repo.Owner, repo.Name); tp != nil {
+					tok = *tp
+				}
+			}
+			ws, err := checks.OpenMirrorWorkspace(rCtx, filepath.Join(cfg.DataDir, "qa-repos"), remoteURL, tok, commitSHA, commitSHA)
+			if err != nil {
+				return nil, err
+			}
+			return ws.ReadFileAtHead(rCtx, filePath)
+		},
 		PromoteExperimentStages: func(pCtx context.Context, experimentID, reason string) {
 			orchestrator.PromoteStrandedQAStagesForExperiment(pCtx, store, githubClient, experimentID, reason)
 		},

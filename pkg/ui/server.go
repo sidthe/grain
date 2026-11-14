@@ -562,6 +562,8 @@ func (s *Server) routes() {
 	s.route("GET /api/qa/flow-versions", s.handleGetQAFlowVersions)
 	s.route("GET /api/qa/flow-versions/{hash}", s.handleGetQAFlowVersion)
 	s.route("POST /api/qa/flow-versions", s.handlePostQAFlowVersion)
+	s.route("POST /api/qa/flow-versions/adopt", s.handlePostQAFlowVersionAdopt)
+	s.route("POST /api/qa/probe", s.handlePostQAProbe)
 	s.route("GET /api/qa/experiments", s.handleGetQAExperiments)
 	s.route("POST /api/qa/experiments", s.handlePostQAExperiment)
 	s.route("GET /api/qa/experiments/{id}", s.handleGetQAExperiment)

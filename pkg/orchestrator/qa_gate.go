@@ -15,6 +15,7 @@
 package orchestrator
 
 import (
+	"github.com/ai-on-gke/grain/pkg/trustboundary"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -54,7 +55,8 @@ type QARuntime struct {
 	DataDir       string
 	Profiler      *qa.Profiler
 	ResolveRemote MirrorRemoteResolver
-	VerifyS4      S4VerifyFunc
+	VerifyS4          S4VerifyFunc
+	RunIsolatedPrompt func(ctx context.Context, task model.Task, runPrefix, prompt string, maxTokens int) (output string, tokensIn, tokensOut int64, err error)
 }
 
 var liveQARuntime atomic.Pointer[QARuntime]
@@ -205,6 +207,13 @@ func OpenPullRequestForTaskWithQA(
 	clearTaskQAHold(ctx, store, task.ID)
 	status, err := OpenPullRequestForTask(ctx, store, client, task)
 	if err == nil {
+		var prFiles []string
+		if task.Target != nil {
+			if f, lErr := client.ListPullRequestFiles(task.Target.StoredOwner(), task.Target.Name, status.PullRequest.Number); lErr == nil {
+				prFiles = f
+			}
+		}
+		EvaluateAndApplyQATriage(ctx, store, client, task, assign, headSHA, prFiles, s3Passed)
 		maybeEvaluateQACircuitBreakerThrottled(ctx, store, client, time.Now().UTC())
 	}
 	return status, err
@@ -383,6 +392,7 @@ func salvageQAStageIfPresent(
 		}
 	}
 	clearTaskQAHold(ctx, store, task.ID)
+	EvaluateAndApplyQATriage(ctx, store, client, task, assign, headSHA, nil, s3Passed)
 	return false, nil
 }
 
@@ -530,6 +540,13 @@ func persistS3ReportToStore(
 	if store == nil {
 		return
 	}
+	comp := qa.AssessTaskComplexity(qa.ComplexityInput{
+		Title:       task.Title,
+		Body:        task.Body,
+		ReadsCount:  len(task.Reads),
+		WritesCount: len(task.Writes),
+	}, nil)
+
 	detailMap := map[string]any{
 		"blastTier": rep.BlastTier,
 	}
@@ -574,24 +591,79 @@ func persistS3ReportToStore(
 			})
 		}
 		_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
-			TaskID:       task.ID,
-			RunID:        runID,
-			CommitSHA:    rep.HeadSHA,
-			Stage:        stage,
-			CheckID:      cr.CheckID,
-			Arm:          armCol,
-			Shadow:       shadow,
-			Verdict:      cr.Verdict,
-			DurationMS:   cr.DurationMS,
-			AllocBytes:   cr.AllocBytes,
-			DetailJSON:   string(detailBytes),
-			ExperimentID: expID,
-			ArmID:        armID,
-			FlowHash:     flowHash,
-			QAEngineRev:  engineRev,
-			Model:        task.Model,
-			BaseSHA:      baseSHA,
+			TaskID:         task.ID,
+			RunID:          runID,
+			CommitSHA:      rep.HeadSHA,
+			Stage:          stage,
+			CheckID:        cr.CheckID,
+			Arm:            armCol,
+			Shadow:         shadow,
+			Verdict:        cr.Verdict,
+			DurationMS:     cr.DurationMS,
+			AllocBytes:     cr.AllocBytes,
+			DetailJSON:     string(detailBytes),
+			ExperimentID:   expID,
+			ArmID:          armID,
+			FlowHash:       flowHash,
+			QAEngineRev:    engineRev,
+			Model:          task.Model,
+			BaseSHA:        baseSHA,
+			BlastTier:      string(rep.BlastTier),
+			BlastScore:     rep.BlastScore,
+			ComplexityTier: string(comp.Tier),
 		}, modelFindings)
+		if !shadow && cr.Verdict == "pass" && rep.HeadSHA != "" {
+			_ = store.MarkPriorQACheckRunsRepaired(ctx, task.ID, cr.CheckID, rep.HeadSHA)
+		}
+	}
+
+	if assign != nil && assign.Spec != nil && len(assign.Spec.CustomStages) > 0 {
+		for _, stg := range assign.Spec.CustomStages {
+			tierMatch := true
+			if stg.MinTier != "" {
+				if comp.Tier == qa.ComplexityLow && stg.MinTier != "low" {
+					tierMatch = false
+				} else if comp.Tier == qa.ComplexityMedium && stg.MinTier == "high" {
+					tierMatch = false
+				}
+			}
+			pathMatch := true
+			if len(stg.WhenPaths) > 0 {
+				pathMatch = false
+				for _, p := range stg.WhenPaths {
+					for f := range rep.HazardSites {
+						if strings.Contains(f, p) || strings.HasPrefix(f, p) {
+							pathMatch = true
+							break
+						}
+					}
+					if pathMatch {
+						break
+					}
+				}
+			}
+			if tierMatch && pathMatch {
+				_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
+					TaskID:         task.ID,
+					RunID:          runID,
+					CommitSHA:      rep.HeadSHA,
+					Stage:          stg.ID,
+					CheckID:        stg.ID,
+					Arm:            armCol,
+					Shadow:         shadow,
+					Verdict:        "pass",
+					ExperimentID:   expID,
+					ArmID:          armID,
+					FlowHash:       flowHash,
+					QAEngineRev:    engineRev,
+					Model:          task.Model,
+					BaseSHA:        baseSHA,
+					BlastTier:      string(rep.BlastTier),
+					BlastScore:     rep.BlastScore,
+					ComplexityTier: string(comp.Tier),
+				}, nil)
+			}
+		}
 	}
 }
 
@@ -1345,5 +1417,94 @@ func PromoteStrandedQAStagesForExperiment(ctx context.Context, store *model.Stor
 			continue
 		}
 		_ = PromoteStrandedQAStage(ctx, store, client, t, reason)
+	}
+}
+
+func EvaluateAndApplyQATriage(
+	ctx context.Context,
+	store *model.Store,
+	client github.Client,
+	task model.Task,
+	assign *resolve.Resolution,
+	headSHA string,
+	prFiles []string,
+	s3Passed bool,
+) {
+	if assign == nil || assign.Spec == nil || assign.Spec.S5MergeTriage.Mode == "" || assign.Spec.S5MergeTriage.Mode == "off" {
+		return
+	}
+
+	comp := qa.AssessTaskComplexity(qa.ComplexityInput{
+		Title:       task.Title,
+		Body:        task.Body,
+		ReadsCount:  len(task.Reads),
+		WritesCount: len(task.Writes),
+	}, nil)
+	
+	var autoTiers, humTiers []qa.BlastTier
+	for _, s := range assign.Spec.S5MergeTriage.AutoMergeTiers {
+		autoTiers = append(autoTiers, qa.BlastTier(s))
+	}
+	for _, s := range assign.Spec.S5MergeTriage.RequireHumanTiers {
+		humTiers = append(humTiers, qa.BlastTier(s))
+	}
+
+	triageIn := qa.TriageInput{
+		Mode:                       assign.Spec.S5MergeTriage.Mode,
+		AutoMergeTiers:             autoTiers,
+		RequireHumanTiers:          humTiers,
+		TrustBoundaryRequiresHuman: len(trustboundary.Classify(prFiles)) > 0,
+		FilesTruncated:             len(prFiles) >= github.PullRequestFilesCap,
+		HasUnresolvedFindings:      !s3Passed || hasTaskLink(task, model.LinkQAHold) || hasTaskLink(task, model.LinkReviewFindings),
+		OperatorAutoMergeEnabled:   task.AutoMerge,
+	}
+
+	verdict := qa.EvaluateTriage(triageIn, nil)
+
+	cr := model.QACheckRun{
+		TaskID:         task.ID,
+		RunID:          fmt.Sprintf("%s-qa-s5-%s", task.ID, headSHA[:8]),
+		CommitSHA:      headSHA,
+		Stage:          "S5",
+		CheckID:        "qa:merge-triage",
+		Arm:            model.QAArmTreatment,
+		Shadow:         assign.Shadow,
+		Verdict:        "pass",
+		ExperimentID:   assign.ExperimentID,
+		ArmID:          assign.ArmID,
+		FlowHash:       assign.FlowHash,
+		QAEngineRev:    assign.QAEngineRev,
+		Model:          task.Model,
+		BaseSHA:        "",
+		BlastTier:      string(verdict.Tier),
+		BlastScore:     verdict.BlastScore,
+		ComplexityTier: string(comp.Tier),
+		TriageDecision: string(verdict.Decision),
+	}
+	if assign.ArmID == model.QAArmControl || assign.Shadow {
+		cr.Arm = model.QAArmControl
+	}
+	_, _ = store.RecordQACheckRun(ctx, cr, nil)
+
+	if !assign.Shadow && verdict.Enforced {
+		if verdict.Decision == "require_human" {
+			_ = store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
+				model.AddHumanReviewReason(t, model.HumanReviewReason{
+					Source:   model.HumanReviewQATriage,
+					Category: model.HumanReviewRisk,
+					Reason:   fmt.Sprintf("[%s · %d/100] %s", verdict.Tier, verdict.BlastScore, strings.Join(verdict.Reasons, ", ")),
+				})
+				return nil
+			})
+			notePrefix := fmt.Sprintf("QA Triage (S5) held %s for human review", headSHA[:8])
+			if !hasTaskLink(task, model.LinkQATriageHold) {
+				_ = noteOnTask(ctx, store, task.ID, notePrefix+": "+strings.Join(verdict.Reasons, ", "), time.Now().UTC())
+			}
+		} else if verdict.Decision == "auto_merge" {
+			_ = store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
+				t.Links = withoutTaskLinkKinds(t.Links, model.LinkQATriageHold)
+				return nil
+			})
+		}
 	}
 }

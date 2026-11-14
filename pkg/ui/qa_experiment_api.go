@@ -42,6 +42,7 @@ import (
 type postQAExperimentReq struct {
 	ID              string                        `json:"id,omitempty"`
 	Name            string                        `json:"name"`
+	ReferenceArmID  string                        `json:"referenceArmId,omitempty"`
 	Hypothesis      string                        `json:"hypothesis,omitempty"`
 	Arms            []model.QAExperimentArm       `json:"arms"`
 	Scope           model.QAExperimentScope       `json:"scope,omitempty"`
@@ -74,6 +75,7 @@ type postQAExperimentTransitionReq struct {
 	Guardrails      []string                      `json:"guardrails,omitempty"`
 	Plan            *model.QAExperimentPlan       `json:"plan,omitempty"`
 	Options         *model.QAExperimentOptions    `json:"options,omitempty"`
+	ReferenceArmID  string                        `json:"referenceArmId,omitempty"`
 }
 
 type qaPairEndpointOutcome struct {
@@ -269,12 +271,12 @@ func buildPowerPreviewView(exp model.QAExperiment) qaExperimentPowerPreviewView 
 	}
 }
 
-func (s *Server) validateExperimentArms(ctx context.Context, arms []model.QAExperimentArm, mdeAck bool) ([]model.QAExperimentArm, error) {
+func (s *Server) validateExperimentArms(ctx context.Context, arms []model.QAExperimentArm, referenceArmID string, mdeAck bool) ([]model.QAExperimentArm, string, error) {
 	if len(arms) < 2 || len(arms) > 3 {
-		return nil, errors.New("an experiment must declare control + 1 treatment arm (or 2 treatments with mdeAck)")
+		return nil, "", errors.New("an experiment must declare control + 1 treatment arm (or 2 treatments with mdeAck)")
 	}
 	if len(arms) == 3 && !mdeAck {
-		return nil, errors.New("adding a second treatment arm requires mdeAck: true")
+		return nil, "", errors.New("adding a second treatment arm requires mdeAck: true")
 	}
 	seenIDs := map[string]bool{}
 	hasControl := false
@@ -286,10 +288,10 @@ func (s *Server) validateExperimentArms(ctx context.Context, arms []model.QAExpe
 		a.FlowHash = strings.TrimSpace(a.FlowHash)
 		a.BaseBranch = strings.TrimSpace(a.BaseBranch)
 		if a.ID == "" {
-			return nil, errors.New("each experiment arm must have a non-empty id")
+			return nil, "", errors.New("each experiment arm must have a non-empty id")
 		}
 		if seenIDs[a.ID] {
-			return nil, fmt.Errorf("duplicate arm id %q", a.ID)
+			return nil, "", fmt.Errorf("duplicate arm id %q", a.ID)
 		}
 		seenIDs[a.ID] = true
 		if a.Label == "" {
@@ -306,17 +308,17 @@ func (s *Server) validateExperimentArms(ctx context.Context, arms []model.QAExpe
 		} else {
 			treatmentCount++
 			if a.FlowHash == "" {
-				return nil, fmt.Errorf("treatment arm %q requires a flowHash", a.ID)
+				return nil, "", fmt.Errorf("treatment arm %q requires a flowHash", a.ID)
 			}
 			bundle, _, _, retiredAt, found, err := s.lookupFlowBundle(ctx, a.FlowHash)
 			if err != nil {
-				return nil, err
+				return nil, "", err
 			}
 			if !found {
-				return nil, fmt.Errorf("flow version %q not found", a.FlowHash)
+				return nil, "", fmt.Errorf("flow version %q not found", a.FlowHash)
 			}
 			if retiredAt != nil {
-				return nil, fmt.Errorf("flow version %q is retired and cannot be used in an experiment", a.FlowHash)
+				return nil, "", fmt.Errorf("flow version %q is retired and cannot be used in an experiment", a.FlowHash)
 			}
 			if bundle.Hash != "" && strings.Contains(a.FlowHash, "@") {
 				// Keep canonical key@ver or hash usable; resolve.LookupFlowSpec handles both.
@@ -324,10 +326,19 @@ func (s *Server) validateExperimentArms(ctx context.Context, arms []model.QAExpe
 		}
 		out[i] = a
 	}
-	if !hasControl || treatmentCount == 0 {
-		return nil, errors.New("arms must include one control arm and at least one treatment arm")
+	if !hasControl && len(arms) == 2 {
+		if referenceArmID == "" {
+			referenceArmID = out[0].ID
+		}
+	} else {
+		if !hasControl || treatmentCount == 0 {
+			return nil, "", errors.New("arms must include one control arm and at least one treatment arm")
+		}
+		if referenceArmID == "" {
+			referenceArmID = model.QAArmControl
+		}
 	}
-	return out, nil
+	return out, referenceArmID, nil
 }
 
 func generateAllocationForExperiment(exp *model.QAExperiment) error {
@@ -600,7 +611,7 @@ func (s *Server) handlePostQAExperiment(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, errors.New("experiment name is required"))
 		return
 	}
-	arms, err := s.validateExperimentArms(r.Context(), req.Arms, req.Plan.MDEAck)
+	arms, _, err := s.validateExperimentArms(r.Context(), req.Arms, req.ReferenceArmID, req.Plan.MDEAck)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -812,7 +823,7 @@ func (s *Server) handlePostQAExperimentTransition(w http.ResponseWriter, r *http
 			writeError(w, http.StatusInternalServerError, gErr)
 			return
 		}
-		if _, vErr := s.validateExperimentArms(r.Context(), cur.Arms, cur.Plan.MDEAck); vErr != nil {
+		if _, _, vErr := s.validateExperimentArms(r.Context(), cur.Arms, cur.ReferenceArmID, cur.Plan.MDEAck); vErr != nil {
 			writeError(w, http.StatusBadRequest, vErr)
 			return
 		}
@@ -830,7 +841,7 @@ func (s *Server) handlePostQAExperimentTransition(w http.ResponseWriter, r *http
 		if req.Plan != nil {
 			mdeAck = req.Plan.MDEAck
 		}
-		arms, vErr := s.validateExperimentArms(r.Context(), req.Arms, mdeAck)
+		arms, _, vErr := s.validateExperimentArms(r.Context(), req.Arms, req.ReferenceArmID, mdeAck)
 		if vErr != nil {
 			writeError(w, http.StatusBadRequest, vErr)
 			return
@@ -1209,6 +1220,32 @@ func (s *Server) handleGetQAExperimentResults(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	refArmID := exp.ReferenceArmID
+	if refArmID == "" {
+		refArmID = refArmID
+	}
+	var treatArmID string
+	if len(exp.Arms) >= 2 {
+		foundRef := false
+		for _, a := range exp.Arms {
+			if a.ID == refArmID {
+				foundRef = true
+				break
+			}
+		}
+		if !foundRef {
+			refArmID = exp.Arms[0].ID
+			treatArmID = exp.Arms[1].ID
+		} else {
+			for _, a := range exp.Arms {
+				if a.ID != refArmID {
+					treatArmID = a.ID
+					break
+				}
+			}
+		}
+	}
+
 	enrollments, _ := s.tasks.Store.ListQAEnrollments(ctx, exp.ID)
 	counts := map[string]int{}
 	weightsMap := map[string]float64{}
@@ -1436,7 +1473,7 @@ func (s *Server) handleGetQAExperimentResults(w http.ResponseWriter, r *http.Req
 
 	treatArm := exp.Arms[0]
 	for _, a := range exp.Arms {
-		if a.ID != model.QAArmControl {
+		if a.ID != refArmID {
 			treatArm = a
 			break
 		}
@@ -1449,7 +1486,7 @@ func (s *Server) handleGetQAExperimentResults(w http.ResponseWriter, r *http.Req
 				continue
 			}
 			obs := expstats.ClusterObs{Num: num, Den: den, Segment: strconv.Itoa(ag.segment)}
-			if ag.armID == model.QAArmControl {
+			if ag.armID == refArmID {
 				ctrlObs = append(ctrlObs, obs)
 			} else if ag.armID == treatArm.ID {
 				treatObs = append(treatObs, obs)
@@ -1498,7 +1535,7 @@ func (s *Server) handleGetQAExperimentResults(w http.ResponseWriter, r *http.Req
 		sort.Strings(keys)
 		for _, k := range keys {
 			pair := byKey[k]
-			cOut, okC := pair[model.QAArmControl]
+			cOut, okC := pair[refArmID]
 			tOut, okT := pair[treatArm.ID]
 			if !okC || !okT {
 				continue
@@ -1636,7 +1673,7 @@ func (s *Server) handleGetQAExperimentResults(w http.ResponseWriter, r *http.Req
 
 	// Build plain-language verdict per treatment arm.
 	for _, a := range exp.Arms {
-		if a.ID == model.QAArmControl {
+		if a.ID == refArmID {
 			continue
 		}
 		nArm := counts[a.ID]
@@ -1709,13 +1746,13 @@ func (s *Server) handleGetQAExperimentResults(w http.ResponseWriter, r *http.Req
 			durs := slices.Clone(ag.timesToPR)
 			slices.Sort(durs)
 			med := durs[len(durs)/2]
-			if ag.armID == model.QAArmControl {
+			if ag.armID == refArmID {
 				ctrlTimes = append(ctrlTimes, med)
 			} else if ag.armID == treatArm.ID {
 				treatTimes = append(treatTimes, med)
 			}
 		}
-		if ag.armID == model.QAArmControl {
+		if ag.armID == refArmID {
 			ctrlTokens = append(ctrlTokens, float64(ag.tokens))
 		} else if ag.armID == treatArm.ID {
 			treatTrees++
@@ -1948,9 +1985,34 @@ func (s *Server) handleGetQAExperimentResults(w http.ResponseWriter, r *http.Req
 	// Suppress unused import warning on metrics if only constants/helpers referenced elsewhere.
 	_ = metrics.MinTreatmentSampleForAutoDowngrade
 
+	var declarationDiff any
+	if treatArmID != "" {
+		var refHash, candHash string
+		for _, a := range exp.Arms {
+			if a.ID == refArmID { refHash = a.FlowHash }
+			if a.ID == treatArmID { candHash = a.FlowHash }
+		}
+		if refHash != "" && candHash != "" {
+			rB, _, _, _, _, _ := s.lookupFlowBundle(ctx, refHash)
+			cB, _, _, _, _, _ := s.lookupFlowBundle(ctx, candHash)
+			if rB.SchemaVer == "grain.dev/qa-flow/v3" && cB.SchemaVer == "grain.dev/qa-flow/v3" {
+				diff := qa.ComputeDeclarationDiff(&rB, &cB)
+				declarationDiff = &diff
+			}
+		}
+	}
+
+	stageFunnel := map[string]any{}
+	var triageObs []expstats.TriageObservation
+	triageMetrics := expstats.ComputeTriageSummary(triageObs)
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"experimentId": exp.ID,
-		"state":        exp.State,
+		"experimentId":    exp.ID,
+		"referenceArmId":  refArmID,
+		"declarationDiff": declarationDiff,
+		"stageFunnel":     stageFunnel,
+		"triageMetrics":   triageMetrics,
+		"state":           exp.State,
 		"periodLabel":  periodLabel,
 		"scopeRepos":   exp.Scope.Repos,
 		"verdicts":     verdicts,

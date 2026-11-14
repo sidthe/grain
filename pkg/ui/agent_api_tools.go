@@ -86,6 +86,8 @@ const APIToolPrefix = "api_"
 // that changes something has one; a read with none is described from
 // its handler name, method and path.
 var routeDocs = map[string]string{
+	"POST /api/qa/flow-versions/adopt":                                     "Adopt a flow version manually.",
+	"POST /api/qa/probe":                                                   "Simulate and probe QA rules.",
 	"PUT /api/settings":                                                    "Change deployment settings: only the fields given are changed, the rest keep their values.",
 	"PUT /api/usage/settings":                                              "Replace the token usage settings: the concurrency mode (advisory, auto or off), the automatic cap's floor, per-run usage retention and the connection budgets.",
 	"POST /api/settings":                                                   "Change deployment settings, as PUT /api/settings does: only the fields given are changed.",

@@ -373,9 +373,9 @@ func releaseSecret(t *testing.T, client *ui.Client, _ sender) string {
 	return ""
 }
 
-// adopterClient is testClient's deployment with a fake pull-request
+// adminClient is testClient's deployment with a fake pull-request
 // adopter, and adoptedFor who its newest filing was for.
-func adopterClient(t *testing.T) *ui.Client {
+func adminClient(t *testing.T) *ui.Client {
 	t.Helper()
 	client, _, _ := testClient(t)
 	client.Config.PullRequests = &fakeAdopter{}
@@ -410,14 +410,18 @@ func cancelledBy(t *testing.T, _ context.Context, client *ui.Client, _, _ string
 // inventory for tasks, the conversation, releases and the merge queue,
 // settings, sessions, and through the agent row the agent API.
 var attributedRoutes = map[string]attributedRoute{
+	"POST /api/qa/flow-versions/adopt": {
+		client:      adminClient,
+		body:        `{"repo":"acme/widgets","path":"qa.yaml","commit":"1234567890abcdef1234567890abcdef12345678"}`,
+	},
 	"POST /api/pull-requests/adopt": {
-		client:      adopterClient,
+		client:      adminClient,
 		body:        `{"pr":"acme/widgets#7"}`,
 		agentGrants: []string{"api:merge:write", "api:tasks:write"},
 		recorded:    adoptedFor,
 	},
 	"POST /api/pull-requests/review": {
-		client:      adopterClient,
+		client:      adminClient,
 		body:        `{"pr":"acme/widgets#7","design":true}`,
 		agentGrants: []string{"api:tasks:write", "api:repos:read"},
 		recorded:    adoptedFor,

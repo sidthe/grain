@@ -15,6 +15,7 @@
 package ui
 
 import (
+	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 	"context"
 	"encoding/json"
 	"errors"
@@ -65,26 +66,37 @@ func (s *Server) lookupFlowBundle(ctx context.Context, ref string) (qa.FlowVersi
 	}
 	var sp qa.FlowSpec
 	_ = json.Unmarshal([]byte(fv.SpecJSON), &sp)
-	var decl qa.FlowDeclarationV2
+	var declV2 qa.FlowDeclarationV2
+	var declV3 qa.FlowDeclarationV3
 	if fv.SourceYAML != "" {
-		if parsed, pErr := qa.ParseFlowDeclarationV2([]byte(fv.SourceYAML)); pErr == nil {
-			decl = parsed
+		if fv.SchemaVer == "grain.dev/qa-flow/v3" {
+			if parsed, pErr := qa.ParseFlowDeclaration([]byte(fv.SourceYAML)); pErr == nil {
+				if d, ok := parsed.(qa.FlowDeclarationV3); ok {
+					declV3 = d
+				}
+			}
+		} else {
+			if parsed, pErr := qa.ParseFlowDeclarationV2([]byte(fv.SourceYAML)); pErr == nil {
+				declV2 = parsed
+			}
 		}
 	}
 	created := fv.CreatedAt
 	return qa.FlowVersionBundle{
-		Hash:        fv.Hash,
-		Key:         fv.Key,
-		Version:     fv.Version,
-		ParentHash:  fv.ParentHash,
-		Label:       fv.Label,
-		Summary:     fv.Summary,
-		BuiltIn:     false,
-		QAEngineRev: fv.QAEngineRev,
-		SourceYAML:  fv.SourceYAML,
-		Declaration: decl,
-		SpecJSON:    fv.SpecJSON,
-		Resolved:    sp,
+		Hash:          fv.Hash,
+		Key:           fv.Key,
+		Version:       fv.Version,
+		ParentHash:    fv.ParentHash,
+		Label:         fv.Label,
+		Summary:       fv.Summary,
+		BuiltIn:       false,
+		QAEngineRev:   fv.QAEngineRev,
+		SourceYAML:    fv.SourceYAML,
+		Declaration:   declV2,
+		DeclarationV3: &declV3,
+		SpecJSON:      fv.SpecJSON,
+		Resolved:      sp,
+		SchemaVer:     fv.SchemaVer,
 	}, &created, fv.CreatedBy, fv.RetiredAt, true, nil
 }
 
@@ -378,22 +390,12 @@ func (s *Server) handlePostQAFlowVersion(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var (
-		decl    qa.FlowDeclarationV2
-		yamlSrc string
-	)
+	var yamlSrc string
 	switch {
 	case strings.TrimSpace(req.YAML) != "":
 		yamlSrc = req.YAML
-		parsed, err := qa.ParseFlowDeclarationV2([]byte(req.YAML))
-		if err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
-		decl = parsed
 	case req.Declaration != nil:
-		decl = *req.Declaration
-		if raw, err := json.Marshal(decl); err == nil {
+		if raw, err := json.Marshal(req.Declaration); err == nil {
 			yamlSrc = string(raw)
 		}
 	default:
@@ -401,20 +403,21 @@ func (s *Server) handlePostQAFlowVersion(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	version, err := s.tasks.Store.NextQAFlowVersionNumber(ctx, decl.Key)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-
-	bundle, err := qa.ResolveFlowDeclarationV2(decl, version, yamlSrc, func(parentRef string) (qa.FlowVersionBundle, bool) {
-		pb, _, _, _, ok, lErr := s.lookupFlowBundle(ctx, parentRef)
-		return pb, lErr == nil && ok
+	bundle, err := qa.ResolveAnyFlowDeclaration([]byte(yamlSrc), 0, func(p string) (qa.FlowVersionBundle, bool) {
+		b, _, _, _, ok, _ := s.lookupFlowBundle(ctx, p)
+		return b, ok
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+
+	version, err := s.tasks.Store.NextQAFlowVersionNumber(ctx, bundle.Key)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	bundle.Version = version
 
 	if isDryRun {
 		sim, err := s.simulateDryRun(ctx, bundle.Resolved, bundle.Hash, req.SampleLimit)
@@ -458,6 +461,8 @@ func (s *Server) handlePostQAFlowVersion(w http.ResponseWriter, r *http.Request)
 		QAEngineRev: qa.QAEngineRev,
 		CreatedBy:   actor.Actor.ID,
 		CreatedAt:   now,
+		SchemaVer:   bundle.SchemaVer,
+		SourceKind:  "ui",
 	}
 	if err := s.tasks.Store.InsertQAFlowVersion(ctx, fv); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -470,6 +475,128 @@ func (s *Server) handlePostQAFlowVersion(w http.ResponseWriter, r *http.Request)
 		OnBehalfOf: actor.OnBehalfOf,
 		Surface:    "qa_flow_version",
 		Summary:    fmt.Sprintf("publish %s@%d (%s)", fv.Key, fv.Version, fv.Hash),
+	})
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"version": formatFlowBundleMap(bundle, &now, fv.CreatedBy, nil),
+		"hash":    fv.Hash,
+	})
+}
+
+type postQAFlowVersionAdoptReq struct {
+	Repo   string `json:"repo"`
+	Path   string `json:"path"`
+	Commit string `json:"commit"`
+	DryRun bool   `json:"dryRun"`
+}
+
+func (s *Server) handlePostQAFlowVersionAdopt(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	actor := s.tasks.requestActor(ctx)
+
+	var req postQAFlowVersionAdoptReq
+	if !readJSON(w, r, &req) {
+		return
+	}
+
+	isDryRun := req.DryRun || r.URL.Query().Get("dryRun") == "1"
+
+	if len(req.Commit) != 40 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("commit must be a 40-char hex string"))
+		return
+	}
+	if req.Path == "" || strings.Contains(req.Path, "..") || strings.HasPrefix(req.Path, "/") {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid path"))
+		return
+	}
+
+	hook := resolve.GetRuntimeHooks()
+	if hook == nil || hook.ReadRepoFileAtCommit == nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("ReadRepoFileAtCommit hook not configured"))
+		return
+	}
+
+	bContent, err := hook.ReadRepoFileAtCommit(ctx, req.Repo, req.Commit, req.Path)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("failed to read file: %w", err))
+		return
+	}
+	content := string(bContent)
+
+	bundle, err := qa.ResolveAnyFlowDeclaration([]byte(content), 0, func(p string) (qa.FlowVersionBundle, bool) {
+		b, _, _, _, ok, _ := s.lookupFlowBundle(ctx, p)
+		return b, ok
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	if isDryRun {
+		sim, err := s.simulateDryRun(ctx, bundle.Resolved, bundle.Hash, 0)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, sim)
+		return
+	}
+
+	version, err := s.tasks.Store.NextQAFlowVersionNumber(ctx, bundle.Key)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	bundle.Version = version
+
+	if existing, err := s.tasks.Store.GetQAFlowVersion(ctx, bundle.Hash); err == nil {
+		now := s.tasks.now()
+		_, _ = s.tasks.Store.RecordConfigAudit(ctx, model.ConfigAuditEntry{
+			At:         now,
+			By:         actor.Actor,
+			OnBehalfOf: actor.OnBehalfOf,
+			Surface:    "qa_flow_version",
+			Summary:    fmt.Sprintf("re-adopt %s@%d (%s)", existing.Key, existing.Version, existing.Hash),
+		})
+		created := existing.CreatedAt
+		writeJSON(w, http.StatusOK, map[string]any{
+			"version": formatFlowBundleMap(bundle, &created, existing.CreatedBy, existing.RetiredAt),
+			"hash":    existing.Hash,
+		})
+		return
+	}
+
+	now := s.tasks.now()
+	fv := model.QAFlowVersion{
+		Hash:         bundle.Hash,
+		Key:          bundle.Key,
+		Version:      version,
+		ParentHash:   bundle.ParentHash,
+		Label:        bundle.Label,
+		Summary:      bundle.Summary,
+		SpecJSON:     bundle.SpecJSON,
+		SourceYAML:   content,
+		QAEngineRev:  qa.QAEngineRev,
+		CreatedBy:    actor.Actor.ID,
+		CreatedAt:    now,
+		SchemaVer:    bundle.SchemaVer,
+		SourceKind:   "adopt",
+		SourceRepo:   req.Repo,
+		SourcePath:   req.Path,
+		SourceCommit: req.Commit,
+	}
+
+	if err := s.tasks.Store.InsertQAFlowVersion(ctx, fv); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	_, _ = s.tasks.Store.RecordConfigAudit(ctx, model.ConfigAuditEntry{
+		At:         now,
+		By:         actor.Actor,
+		OnBehalfOf: actor.OnBehalfOf,
+		Surface:    "qa_flow_version",
+		Summary:    fmt.Sprintf("adopt %s@%d (%s)", fv.Key, fv.Version, fv.Hash),
 	})
 
 	writeJSON(w, http.StatusCreated, map[string]any{

@@ -423,6 +423,8 @@ var routeScopes = map[string]APIScope{
 	"GET /api/qa/flow-versions":                                            "qa:read",
 	"GET /api/qa/flow-versions/{hash}":                                     "qa:read",
 	"POST /api/qa/flow-versions":                                           "qa:admin",
+	"POST /api/qa/flow-versions/adopt":                                     "qa:admin",
+	"POST /api/qa/probe":                                                   "qa:read",
 	"GET /api/qa/experiments":                                              "qa:read",
 	"POST /api/qa/experiments":                                             "qa:admin",
 	"GET /api/qa/experiments/{id}":                                         "qa:read",

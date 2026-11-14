@@ -3352,6 +3352,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		if qaAssignment.Spec != nil {
 			qaSkillPrompt = qaAssignment.Spec.SkillPrompt()
 			qaStopNudge = qaAssignment.Spec.StopNudge
+			qaSkillPrompt = ExecutePreDispatchQAPhases(ctx, store, task, qaAssignment.Spec, qaAssignment.ExperimentID, qaAssignment.ArmID, qaAssignment.FlowHash, qaSkillPrompt)
 		}
 	}
 
