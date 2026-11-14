@@ -4,9 +4,13 @@ g-fleet-page {
   display: contents;
 }
 
+g-fleet-page .ops-scroll {
+  box-sizing: border-box;
+}
+
 .fleet-host-strip {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(210px, 100%), 1fr));
   gap: 12px;
 }
 
@@ -137,4 +141,42 @@ g-fleet-page {
 
 .fleet-fingerprint {
   overflow-wrap: anywhere;
+}
+
+g-fleet-page .fleet-item-card,
+g-fleet-page .fleet-inline-bar {
+  min-width: 0;
+}
+
+g-fleet-page .fleet-inline-bar > .ops-input {
+  min-width: 0;
+  max-width: 100%;
+}
+
+g-fleet-page .fleet-token-code,
+g-fleet-page .dark-well {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+/* Clear the fixed 56px phone FAB above the bottom bar; border-box keeps
+   .ops-scroll inside .view-panel without clipping bottom padding. */
+g-fleet-page.is-mobile .ops-scroll,
+g-fleet-page .ops-scroll.is-mobile {
+  padding: 16px 16px calc(var(--grain-bottombar-height, 92px) + 16px);
+}
+
+@media (max-width: 599.95px) {
+  g-fleet-page .ops-scroll {
+    padding: 16px 16px calc(var(--grain-bottombar-height, 92px) + 16px);
+  }
+}
+
+@media (max-height: 480px) and (orientation: landscape) {
+  g-fleet-page .ops-scroll,
+  g-fleet-page.is-mobile .ops-scroll,
+  g-fleet-page .ops-scroll.is-mobile {
+    padding-bottom: calc(var(--grain-bottombar-height, 52px) + 36px);
+  }
 }

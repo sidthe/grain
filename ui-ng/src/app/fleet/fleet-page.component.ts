@@ -39,6 +39,7 @@ import {
 } from "../shared/confirm-dialog.component";
 import { StatusIconComponent } from "../shared/status-icon.component";
 import { TipDirective } from "../shared/tip.directive";
+import { FleetMobileDirective, FleetMobileTracker } from "./fleet-mobile";
 import {
   type ActionsCacheState,
   type AgentPauseEntry,
@@ -90,14 +91,42 @@ const PERSISTENT_ACTIONS: readonly {
   { action: "stop", label: "Stop" },
 ];
 
+type DestructivePersistentAction = Exclude<PersistentAction, "start">;
+
+const PERSISTENT_CONFIRM: Record<
+  DestructivePersistentAction,
+  { title: (name: string) => string; message: string; accept: string }
+> = {
+  restart: {
+    title: (name) => `Restart persistent sandbox ${name}?`,
+    message:
+      "Restarts the running persistent sandbox service, briefly interrupting any active preview or connections to it.",
+    accept: "Restart sandbox",
+  },
+  rebuild: {
+    title: (name) => `Rebuild persistent sandbox ${name}?`,
+    message:
+      "Tears down the current persistent sandbox, discards ephemeral state inside it, and rebuilds it from its repository.",
+    accept: "Rebuild sandbox",
+  },
+  stop: {
+    title: (name) => `Stop persistent sandbox ${name}?`,
+    message:
+      "Stops the running persistent sandbox so any active preview or connections to it are disconnected.",
+    accept: "Stop sandbox",
+  },
+};
+
 @Component({
   selector: "g-fleet-page",
+  providers: [FleetMobileTracker],
   imports: [
     RouterLink,
     TipDirective,
     StatusIconComponent,
     ActorChipComponent,
     ConfirmDialogComponent,
+    FleetMobileDirective,
   ],
   encapsulation: ViewEncapsulation.None,
   styleUrls: [
@@ -112,6 +141,7 @@ const PERSISTENT_ACTIONS: readonly {
   template: `
     <section
       class="view-panel is-active"
+      gFleetMobile
       aria-labelledby="fleet-headline"
       [attr.inert]="confirmReq() ? '' : null"
       data-testid="fleet-page"
@@ -211,7 +241,7 @@ const PERSISTENT_ACTIONS: readonly {
         </p>
       }
 
-      <div class="ops-scroll">
+      <div class="ops-scroll" gFleetMobile data-testid="fleet-scroll">
         <!-- Dispatch Blocked Alert (pkg/ui/dispatch_conditions.go) -->
         @for (blk of sandboxes()?.dispatchBlocked ?? []; track $index) {
           <div
@@ -545,8 +575,13 @@ const PERSISTENT_ACTIONS: readonly {
                               @if (tid && canRecreateTaskSandbox()) {
                                 <button
                                   type="button"
-                                  class="btn-text"
+                                  class="btn-text danger"
                                   [attr.data-testid]="'sandbox-recreate-' + tid"
+                                  [gTip]="
+                                    'Destroy and rebuild sandbox for task #' +
+                                    tid +
+                                    ' (asks confirmation first)'
+                                  "
                                   (click)="recreateTaskSandbox(tid)"
                                 >
                                   Recreate
@@ -2508,17 +2543,24 @@ export class FleetPageComponent implements OnInit {
     }
   }
 
-  protected async recreateTaskSandbox(taskId: string): Promise<void> {
-    if (!this.canRecreateTaskSandbox()) return;
-    try {
-      await this.api.post("POST /api/tasks/{id}/sandbox/recreate", {
-        id: taskId,
-      });
-      this.snackbar.show(`Recreated sandbox for task #${taskId}.`);
-      await this.loadSandboxes();
-    } catch (err) {
-      this.snackbar.show(errorText(err));
-    }
+  protected recreateTaskSandbox(taskId: string): Promise<void> {
+    if (!this.canRecreateTaskSandbox()) return Promise.resolve();
+    this.confirmReq.set({
+      title: `Recreate sandbox for task #${taskId}?`,
+      message:
+        "Destroys the task's current sandbox and builds a fresh one in its place. Any uncommitted work inside it is lost.",
+      accept: "Recreate sandbox",
+      destructive: true,
+      run: async () => {
+        if (!this.canRecreateTaskSandbox()) return;
+        await this.api.post("POST /api/tasks/{id}/sandbox/recreate", {
+          id: taskId,
+        });
+        this.snackbar.show(`Recreated sandbox for task #${taskId}.`);
+        await this.loadSandboxes();
+      },
+    });
+    return Promise.resolve();
   }
 
   protected async runSandboxProbe(): Promise<void> {
@@ -2545,21 +2587,45 @@ export class FleetPageComponent implements OnInit {
     action: PersistentAction,
   ): Promise<void> {
     if (this.isPersistentActionDisabled(ps, action)) return;
-    const key = `${ps.name}:${action}`;
-    this.busyPersistent.set(key);
-    try {
-      await this.api.post(
-        "POST /api/persistent-sandboxes/{name}/{action}",
-        { name: ps.name, action },
-        {},
-      );
-      this.snackbar.show(`Persistent sandbox ${ps.name}: ${action} requested.`);
-      await this.loadPersistentSandboxes();
-    } catch (err) {
-      this.snackbar.show(errorText(err));
-    } finally {
-      this.busyPersistent.set(null);
+    const runControl = async (
+      target: PersistentSandboxStatus,
+    ): Promise<void> => {
+      if (this.isPersistentActionDisabled(target, action)) return;
+      const key = `${target.name}:${action}`;
+      this.busyPersistent.set(key);
+      try {
+        await this.api.post(
+          "POST /api/persistent-sandboxes/{name}/{action}",
+          { name: target.name, action },
+          {},
+        );
+        this.snackbar.show(
+          `Persistent sandbox ${target.name}: ${action} requested.`,
+        );
+        await this.loadPersistentSandboxes();
+      } catch (err) {
+        this.snackbar.show(errorText(err));
+      } finally {
+        this.busyPersistent.set(null);
+      }
+    };
+    if (action === "start") {
+      await runControl(ps);
+      return;
     }
+    const copy = PERSISTENT_CONFIRM[action];
+    this.confirmReq.set({
+      title: copy.title(ps.name),
+      message: copy.message,
+      accept: copy.accept,
+      destructive: true,
+      run: async () => {
+        const latest =
+          this.persistentSandboxes().find((item) => item.name === ps.name) ??
+          ps;
+        await runControl(latest);
+      },
+    });
   }
 
   protected async togglePersistentLogs(
@@ -2598,20 +2664,27 @@ export class FleetPageComponent implements OnInit {
     }
   }
 
-  protected async rotateHostd(name: string): Promise<void> {
-    if (!this.canAdminHostds()) return;
-    try {
-      const issued = await this.api.post<IssuedHostdToken>(
-        "POST /api/hostds/{name}/rotate",
-        { name },
-        {},
-      );
-      this.issuedToken.set(issued);
-      this.snackbar.show(`Rotated token for host ${name}.`);
-      await this.loadHostds();
-    } catch (err) {
-      this.snackbar.show(errorText(err));
-    }
+  protected rotateHostd(name: string): Promise<void> {
+    if (!this.canAdminHostds()) return Promise.resolve();
+    this.confirmReq.set({
+      title: `Rotate host ${name}'s token?`,
+      message:
+        "Its current token stops working at once, so the host is disconnected until the new token is installed on it.",
+      accept: "Rotate token",
+      destructive: true,
+      run: async () => {
+        if (!this.canAdminHostds()) return;
+        const issued = await this.api.post<IssuedHostdToken>(
+          "POST /api/hostds/{name}/rotate",
+          { name },
+          {},
+        );
+        this.issuedToken.set(issued);
+        this.snackbar.show(`Rotated token for host ${name}.`);
+        await this.loadHostds();
+      },
+    });
+    return Promise.resolve();
   }
 
   protected startRenameHostd(name: string): void {
@@ -2647,6 +2720,9 @@ export class FleetPageComponent implements OnInit {
       run: async () => {
         if (!this.canAdminHostds()) return;
         await this.api.post("POST /api/hostds/{name}/revoke", { name }, {});
+        if (this.issuedToken()?.hostd?.name === name) {
+          this.issuedToken.set(null);
+        }
         this.snackbar.show(`Revoked host ${name}.`);
         await this.loadHostds();
       },
@@ -2663,6 +2739,9 @@ export class FleetPageComponent implements OnInit {
       run: async () => {
         if (!this.canAdminHostds()) return;
         await this.api.delete("DELETE /api/hostds/{name}", { name });
+        if (this.issuedToken()?.hostd?.name === name) {
+          this.issuedToken.set(null);
+        }
         this.snackbar.show(`Deleted host ${name}.`);
         await this.loadHostds();
       },
@@ -2845,39 +2924,69 @@ export class FleetPageComponent implements OnInit {
     });
   }
 
-  protected async pausePipeline(): Promise<void> {
-    if (!this.canWriteDispatch() || this.busyDispatch()) return;
-    this.busyDispatch.set(true);
-    try {
-      const res = await this.api.post<PipelinePauseResponse>(
-        "POST /api/pipeline-pause",
-        undefined,
-        { reason: this.pauseReasonDraft().trim() },
-      );
-      this.pipelinePause.set(res?.pause ?? { paused: true });
-      this.pauseReasonDraft.set("");
-      this.snackbar.show("Pipeline paused.");
-    } catch (err) {
-      this.snackbar.show(errorText(err));
-    } finally {
-      this.busyDispatch.set(false);
+  protected pausePipeline(): Promise<void> {
+    if (!this.canWriteDispatch() || this.busyDispatch()) {
+      return Promise.resolve();
     }
+    const reason = this.pauseReasonDraft().trim();
+    this.confirmReq.set({
+      title: "Pause the pipeline?",
+      message: reason
+        ? `Grain will stop starting new agent and CI runs (reason: "${reason}"). Runs already in flight will continue.`
+        : "Grain will stop starting new agent and CI runs. Runs already in flight will continue.",
+      accept: "Pause pipeline",
+      destructive: true,
+      run: async () => {
+        if (!this.canWriteDispatch() || this.busyDispatch()) return;
+        this.busyDispatch.set(true);
+        try {
+          const res = await this.api.post<PipelinePauseResponse>(
+            "POST /api/pipeline-pause",
+            undefined,
+            { reason },
+          );
+          this.pipelinePause.set(res?.pause ?? { paused: true });
+          this.pauseReasonDraft.set("");
+          this.snackbar.show("Pipeline paused.");
+        } finally {
+          this.busyDispatch.set(false);
+        }
+      },
+    });
+    return Promise.resolve();
   }
 
-  protected async resumePipeline(): Promise<void> {
-    if (!this.canWriteDispatch() || this.busyDispatch()) return;
-    this.busyDispatch.set(true);
-    try {
-      const res = await this.api.delete<PipelinePauseResponse>(
-        "DELETE /api/pipeline-pause",
-      );
-      this.pipelinePause.set(res?.pause ?? { paused: false });
-      this.snackbar.show("Pipeline resumed.");
-    } catch (err) {
-      this.snackbar.show(errorText(err));
-    } finally {
-      this.busyDispatch.set(false);
+  protected resumePipeline(): Promise<void> {
+    if (!this.canWriteDispatch() || this.busyDispatch()) {
+      return Promise.resolve();
     }
+    const pause = this.pipelinePause();
+    const upgradeHold =
+      pause?.byKind === "automation" && pause?.byId === "upgrade-schedule";
+    this.confirmReq.set({
+      title: upgradeHold
+        ? "Cancel scheduled upgrade and resume pipeline?"
+        : "Resume the pipeline?",
+      message: upgradeHold
+        ? `This deployment is paused because it is waiting to upgrade${pause?.reason ? ` — ${pause.reason}` : ""}. Resuming cancels that upgrade: tasks start again and the upgrade will not be applied.`
+        : "Grain will start dispatching queued agent and CI runs again.",
+      accept: upgradeHold ? "Cancel upgrade & resume" : "Resume pipeline",
+      destructive: upgradeHold,
+      run: async () => {
+        if (!this.canWriteDispatch() || this.busyDispatch()) return;
+        this.busyDispatch.set(true);
+        try {
+          const res = await this.api.delete<PipelinePauseResponse>(
+            "DELETE /api/pipeline-pause",
+          );
+          this.pipelinePause.set(res?.pause ?? { paused: false });
+          this.snackbar.show("Pipeline resumed.");
+        } finally {
+          this.busyDispatch.set(false);
+        }
+      },
+    });
+    return Promise.resolve();
   }
 
   protected async liftAgentPause(entry?: AgentPauseEntry): Promise<void> {
@@ -2904,6 +3013,7 @@ export class FleetPageComponent implements OnInit {
   }
 
   protected confirmFlushPackageCache(): void {
+    if (!this.canWriteCaches() || !this.packageCache()?.enabled) return;
     this.confirmReq.set({
       title: "Flush package proxy cache?",
       message:
@@ -2911,6 +3021,7 @@ export class FleetPageComponent implements OnInit {
       accept: "Flush cache",
       destructive: true,
       run: async () => {
+        if (!this.canWriteCaches() || !this.packageCache()?.enabled) return;
         const res = await this.api.post<{
           entries: number;
           bytes: number;
@@ -2925,6 +3036,7 @@ export class FleetPageComponent implements OnInit {
   }
 
   protected confirmFlushActionsCache(): void {
+    if (!this.canWriteCaches() || !this.actionsCache()?.enabled) return;
     this.confirmReq.set({
       title: "Flush GitHub Actions cache?",
       message:
@@ -2932,6 +3044,7 @@ export class FleetPageComponent implements OnInit {
       accept: "Flush cache",
       destructive: true,
       run: async () => {
+        if (!this.canWriteCaches() || !this.actionsCache()?.enabled) return;
         const res = await this.api.post<{
           entries: number;
           bytes: number;
@@ -2946,6 +3059,7 @@ export class FleetPageComponent implements OnInit {
   }
 
   protected confirmRestartDaemon(): void {
+    if (!this.canRestartDaemon()) return;
     this.confirmReq.set({
       title: "Restart grain daemon?",
       message:
@@ -2953,6 +3067,7 @@ export class FleetPageComponent implements OnInit {
       accept: "Restart daemon",
       destructive: true,
       run: async () => {
+        if (!this.canRestartDaemon()) return;
         this.watchRestarting.set(true);
         try {
           await this.api.post("POST /api/host/restart", undefined, {});

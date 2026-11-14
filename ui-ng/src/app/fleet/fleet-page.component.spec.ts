@@ -19,6 +19,7 @@ import { GrainApi, routeScope } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import type { GrainConfig } from "../api/models";
 import { AccessService } from "../services/access.service";
+import { PHONE_QUERY } from "../shared/split";
 import { FleetPageComponent } from "./fleet-page.component";
 import {
   type ActionsCacheState,
@@ -493,8 +494,42 @@ describe("FleetPageComponent", () => {
       }),
     ).toBeNull();
 
+    // Recreate task sandbox requires confirmation outside [attr.inert].
     root
       .querySelector<HTMLButtonElement>('[data-testid="sandbox-recreate-42"]')!
+      .click();
+    await settle(fixture);
+    const recreateDialog = root.querySelector(
+      '[data-testid="confirm-dialog"]',
+    )!;
+    expect(recreateDialog).not.toBeNull();
+    expect(recreateDialog.closest("[inert]")).toBeNull();
+    expect(recreateDialog.textContent).toContain(
+      "Recreate sandbox for task #42?",
+    );
+    expect(
+      api.calls.some(
+        (c) => c.route === "POST /api/tasks/{id}/sandbox/recreate",
+      ),
+    ).toBe(false);
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(
+      api.calls.some(
+        (c) => c.route === "POST /api/tasks/{id}/sandbox/recreate",
+      ),
+    ).toBe(false);
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sandbox-recreate-42"]')!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
       .click();
     await settle(fixture);
     expect(
@@ -523,11 +558,27 @@ describe("FleetPageComponent", () => {
       root.querySelector('[data-testid="probe-output"]')?.textContent,
     ).toContain("Linux granule 6.8.0");
 
-    // Persistent sandbox restart + ?format=text logs viewer.
+    // Persistent sandbox restart confirms via g-confirm-dialog + ?format=text logs viewer.
     root
       .querySelector<HTMLButtonElement>(
         '[data-testid="persistent-restart-staging-web"]',
       )!
+      .click();
+    await settle(fixture);
+    const restartPersistentDialog = root.querySelector(
+      '[data-testid="confirm-dialog"]',
+    )!;
+    expect(restartPersistentDialog).not.toBeNull();
+    expect(restartPersistentDialog.textContent).toContain(
+      "Restart persistent sandbox staging-web?",
+    );
+    expect(
+      api.calls.some(
+        (c) => c.route === "POST /api/persistent-sandboxes/{name}/{action}",
+      ),
+    ).toBe(false);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
       .click();
     await settle(fixture);
     expect(
@@ -656,18 +707,47 @@ describe("FleetPageComponent", () => {
         ?.textContent,
     ).toContain("alice@example.com");
 
-    // Rotate token shows one-time token banner.
+    // Rotate token requires confirmation outside [attr.inert] and shows one-time token banner on accept.
     root
       .querySelector<HTMLButtonElement>(
         '[data-testid="hostd-rotate-workstation-1"]',
       )!
       .click();
     await settle(fixture);
+    const rotateDialog = root.querySelector('[data-testid="confirm-dialog"]')!;
+    expect(rotateDialog).not.toBeNull();
+    expect(rotateDialog.closest("[inert]")).toBeNull();
+    expect(rotateDialog.textContent).toContain(
+      "Rotate host workstation-1's token?",
+    );
+    expect(
+      api.calls.some((c) => c.route === "POST /api/hostds/{name}/rotate"),
+    ).toBe(false);
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(
+      api.calls.some((c) => c.route === "POST /api/hostds/{name}/rotate"),
+    ).toBe(false);
+
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="hostd-rotate-workstation-1"]',
+      )!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
     expect(
       root.querySelector('[data-testid="hostd-issued-token"]')?.textContent,
     ).toContain("ghd_secret_rotated_token");
 
-    // Revoke requires ConfirmDialogComponent acceptance OUTSIDE [attr.inert].
+    // Revoke requires ConfirmDialogComponent acceptance OUTSIDE [attr.inert] and clears issued token.
     root
       .querySelector<HTMLButtonElement>(
         '[data-testid="hostd-revoke-workstation-1"]',
@@ -690,6 +770,7 @@ describe("FleetPageComponent", () => {
           (c.params as { name: string }).name === "workstation-1",
       ),
     ).toBe(true);
+    expect(root.querySelector('[data-testid="hostd-issued-token"]')).toBeNull();
   });
 
   it("toggles pipeline pause, flushes caches with confirmation, and confirms daemon restart", async () => {
@@ -700,7 +781,7 @@ describe("FleetPageComponent", () => {
       .click();
     await settle(fixture);
 
-    // Pause pipeline with reason, then resume.
+    // Pause pipeline with reason via confirmation dialog, then resume via confirmation dialog.
     const reasonInput = root.querySelector<HTMLInputElement>(
       '[data-testid="pipeline-pause-reason"]',
     )!;
@@ -708,6 +789,18 @@ describe("FleetPageComponent", () => {
     reasonInput.dispatchEvent(new Event("input"));
     root
       .querySelector<HTMLButtonElement>('[data-testid="pipeline-pause-btn"]')!
+      .click();
+    await settle(fixture);
+    const pauseDialog = root.querySelector('[data-testid="confirm-dialog"]')!;
+    expect(pauseDialog).not.toBeNull();
+    expect(pauseDialog.textContent).toContain("Pause the pipeline?");
+    expect(pauseDialog.textContent).toContain("Deploying M12");
+    expect(api.calls.some((c) => c.route === "POST /api/pipeline-pause")).toBe(
+      false,
+    );
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
       .click();
     await settle(fixture);
 
@@ -725,6 +818,16 @@ describe("FleetPageComponent", () => {
 
     root
       .querySelector<HTMLButtonElement>('[data-testid="pipeline-resume-btn"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="confirm-dialog"]')?.textContent,
+    ).toContain("Resume the pipeline?");
+    expect(
+      api.calls.some((c) => c.route === "DELETE /api/pipeline-pause"),
+    ).toBe(false);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
       .click();
     await settle(fixture);
     expect(
@@ -1881,5 +1984,427 @@ describe("FleetPageComponent", () => {
       ),
     ).toEqual([]);
     canSpy.mockRestore();
+  });
+
+  it("requires g-confirm-dialog confirmation for destructive persistent sandbox actions while running start immediately", async () => {
+    const api = new FakeFleetApi();
+    api.persistentBody = [
+      {
+        name: "sb-live",
+        repo: "acme/web",
+        command: "npm start",
+        enabled: true,
+        state: "running",
+        restarts: 0,
+      },
+      {
+        name: "sb-down",
+        repo: "acme/web",
+        command: "npm start",
+        enabled: false,
+        state: "stopped",
+        restarts: 0,
+      },
+    ];
+    const { fixture, root } = await setup(api);
+
+    // Non-destructive start executes directly with no confirmation dialog.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="persistent-start-sb-down"]',
+      )!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(
+      api.calls.some(
+        (c) =>
+          c.route === "POST /api/persistent-sandboxes/{name}/{action}" &&
+          (c.params as { name: string; action: string }).name === "sb-down" &&
+          (c.params as { name: string; action: string }).action === "start",
+      ),
+    ).toBe(true);
+
+    // stop, restart, rebuild each require confirmation; Escape/Cancel sends zero requests.
+    for (const [action, expectedTitle] of [
+      ["stop", "Stop persistent sandbox sb-live?"],
+      ["restart", "Restart persistent sandbox sb-live?"],
+      ["rebuild", "Rebuild persistent sandbox sb-live?"],
+    ] as const) {
+      const btn = root.querySelector<HTMLButtonElement>(
+        `[data-testid="persistent-${action}-sb-live"]`,
+      )!;
+      btn.click();
+      await settle(fixture);
+      const dialog = root.querySelector('[data-testid="confirm-dialog"]')!;
+      expect(dialog, `${action} dialog`).not.toBeNull();
+      expect(dialog.closest("[inert]")).toBeNull();
+      expect(dialog.textContent).toContain(expectedTitle);
+      expect(root.querySelector("[inert]")).not.toBeNull();
+
+      // Dismissing via Escape cancels without sending POST.
+      dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      await settle(fixture);
+      expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+      expect(root.querySelector("[inert]")).toBeNull();
+      expect(
+        api.calls.some(
+          (c) =>
+            c.route === "POST /api/persistent-sandboxes/{name}/{action}" &&
+            (c.params as { action: string }).action === action,
+        ),
+      ).toBe(false);
+
+      // Re-open and accept.
+      btn.click();
+      await settle(fixture);
+      root
+        .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+        .click();
+      await settle(fixture);
+      expect(
+        api.calls.some(
+          (c) =>
+            c.route === "POST /api/persistent-sandboxes/{name}/{action}" &&
+            (c.params as { name: string; action: string }).name === "sb-live" &&
+            (c.params as { name: string; action: string }).action === action,
+        ),
+      ).toBe(true);
+    }
+
+    // Mid-dialog permission revocation aborts persistent action on accept.
+    const callsBeforeRevoke = api.calls.length;
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="persistent-stop-sb-live"]',
+      )!
+      .click();
+    await settle(fixture);
+    TestBed.inject(AccessService).setConfig({
+      access: {
+        role: "viewer",
+        roles: ["viewer"],
+        full: false,
+        scopes: ["sandboxes:read"],
+      },
+    });
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls
+        .slice(callsBeforeRevoke)
+        .some(
+          (c) => c.route === "POST /api/persistent-sandboxes/{name}/{action}",
+        ),
+    ).toBe(false);
+  });
+
+  it("confirms scheduled upgrade cancellation on pipeline resume and guards mid-dialog RBAC revocation", async () => {
+    const api = new FakeFleetApi();
+    api.pipelinePauseState = {
+      paused: true,
+      byKind: "automation",
+      byId: "upgrade-schedule",
+      reason: "waiting to upgrade to v3.6.0",
+    };
+    const { fixture, root } = await setup(api);
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="fleet-tab-controls"]')!
+      .click();
+    await settle(fixture);
+
+    // Scheduled upgrade hold warns destructively; Cancel leaves paused.
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="pipeline-resume-btn"]')!
+      .click();
+    await settle(fixture);
+    const upgradeDialog = root.querySelector('[data-testid="confirm-dialog"]')!;
+    expect(upgradeDialog).not.toBeNull();
+    expect(upgradeDialog.closest("[inert]")).toBeNull();
+    expect(upgradeDialog.textContent).toContain(
+      "Cancel scheduled upgrade and resume pipeline?",
+    );
+    expect(upgradeDialog.textContent).toContain("waiting to upgrade to v3.6.0");
+    expect(
+      root
+        .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+        .classList.contains("is-destructive"),
+    ).toBe(true);
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls.some((c) => c.route === "DELETE /api/pipeline-pause"),
+    ).toBe(false);
+
+    // Accepting sends DELETE /api/pipeline-pause.
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="pipeline-resume-btn"]')!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls.some((c) => c.route === "DELETE /api/pipeline-pause"),
+    ).toBe(true);
+
+    // Mid-dialog revocation prevents pausePipeline, recreateTaskSandbox, rotateHostd, flush caches, and restartDaemon.
+    const access = TestBed.inject(AccessService);
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="pipeline-pause-btn"]')!
+      .click();
+    await settle(fixture);
+    access.setConfig({
+      access: {
+        role: "reader",
+        roles: ["reader"],
+        full: false,
+        scopes: [
+          "deployment:read",
+          "dispatch:read",
+          "caches:read",
+          "capabilities:read",
+        ],
+      },
+    });
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(api.calls.some((c) => c.route === "POST /api/pipeline-pause")).toBe(
+      false,
+    );
+
+    // Restore full operator access and verify mid-dialog revocation on recreateTaskSandbox and rotateHostd.
+    access.setConfig(api.configBody);
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="fleet-tab-sandboxes"]')!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sandbox-recreate-42"]')!
+      .click();
+    await settle(fixture);
+    access.setConfig({
+      access: {
+        role: "reader",
+        roles: ["reader"],
+        full: false,
+        scopes: ["deployment:read"],
+      },
+    });
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls.some(
+        (c) => c.route === "POST /api/tasks/{id}/sandbox/recreate",
+      ),
+    ).toBe(false);
+
+    access.setConfig(api.configBody);
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="fleet-tab-hostds"]')!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="hostd-rotate-workstation-1"]',
+      )!
+      .click();
+    await settle(fixture);
+    access.setConfig({
+      access: {
+        role: "reader",
+        roles: ["reader"],
+        full: false,
+        scopes: ["capabilities:read"],
+      },
+    });
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls.some((c) => c.route === "POST /api/hostds/{name}/rotate"),
+    ).toBe(false);
+  });
+
+  it("toggles is-mobile across MediaQueryList and resize 600px boundaries for 390px mobile clearance and cleans up on destroy", async () => {
+    const origWidth = Object.getOwnPropertyDescriptor(window, "innerWidth");
+    const origMatchMedia = Object.getOwnPropertyDescriptor(
+      window,
+      "matchMedia",
+    );
+    const setWidth = (w: number) => {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        writable: true,
+        value: w,
+      });
+    };
+    const listeners = new Set<(ev: MediaQueryListEvent) => void>();
+    const removeSpy = vi.fn(
+      (type: string, cb: EventListenerOrEventListenerObject) => {
+        if (type === "change" && typeof cb === "function") {
+          listeners.delete(cb as (ev: MediaQueryListEvent) => void);
+        }
+      },
+    );
+    let mqlMatches = false;
+
+    try {
+      setWidth(1024);
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        writable: true,
+        value: (q: string) => ({
+          matches: q === PHONE_QUERY ? mqlMatches : false,
+          media: q,
+          onchange: null,
+          addListener: () => {},
+          removeListener: () => {},
+          addEventListener: (
+            type: string,
+            cb: EventListenerOrEventListenerObject,
+          ) => {
+            if (type === "change" && typeof cb === "function") {
+              listeners.add(cb as (ev: MediaQueryListEvent) => void);
+            }
+          },
+          removeEventListener: removeSpy,
+          dispatchEvent: () => false,
+        }),
+      });
+
+      const { fixture, root } = await setup();
+      const host = fixture.nativeElement as HTMLElement;
+      const page = () =>
+        root.querySelector<HTMLElement>('[data-testid="fleet-page"]')!;
+      const scroll = () =>
+        root.querySelector<HTMLElement>('[data-testid="fleet-scroll"]')!;
+
+      expect(host.classList.contains("is-mobile")).toBe(false);
+      expect(page().classList.contains("is-mobile")).toBe(false);
+      expect(scroll().classList.contains("is-mobile")).toBe(false);
+
+      // MediaQueryList change -> true applies is-mobile across host, section, and ops-scroll.
+      mqlMatches = true;
+      for (const cb of listeners) {
+        cb({ matches: true, media: PHONE_QUERY } as MediaQueryListEvent);
+      }
+      fixture.detectChanges();
+      expect(host.classList.contains("is-mobile")).toBe(true);
+      expect(page().classList.contains("is-mobile")).toBe(true);
+      expect(scroll().classList.contains("is-mobile")).toBe(true);
+
+      // MediaQueryList change -> false clears is-mobile at desktop width.
+      mqlMatches = false;
+      for (const cb of listeners) {
+        cb({ matches: false, media: PHONE_QUERY } as MediaQueryListEvent);
+      }
+      fixture.detectChanges();
+      expect(host.classList.contains("is-mobile")).toBe(false);
+      expect(page().classList.contains("is-mobile")).toBe(false);
+      expect(scroll().classList.contains("is-mobile")).toBe(false);
+
+      // Window resize transitions across 600px boundary (599 -> 600 -> 390).
+      setWidth(599);
+      window.dispatchEvent(new Event("resize"));
+      fixture.detectChanges();
+      expect(host.classList.contains("is-mobile")).toBe(true);
+      expect(page().classList.contains("is-mobile")).toBe(true);
+      expect(scroll().classList.contains("is-mobile")).toBe(true);
+
+      setWidth(600);
+      window.dispatchEvent(new Event("resize"));
+      fixture.detectChanges();
+      expect(host.classList.contains("is-mobile")).toBe(false);
+      expect(page().classList.contains("is-mobile")).toBe(false);
+      expect(scroll().classList.contains("is-mobile")).toBe(false);
+
+      setWidth(390);
+      window.dispatchEvent(new Event("resize"));
+      fixture.detectChanges();
+      expect(host.classList.contains("is-mobile")).toBe(true);
+      expect(page().classList.contains("is-mobile")).toBe(true);
+      expect(scroll().classList.contains("is-mobile")).toBe(true);
+
+      // Switching tabs keeps is-mobile on the shared scroll container.
+      root
+        .querySelector<HTMLButtonElement>('[data-testid="fleet-tab-controls"]')!
+        .click();
+      await settle(fixture);
+      expect(scroll().classList.contains("is-mobile")).toBe(true);
+
+      fixture.destroy();
+      expect(removeSpy).toHaveBeenCalledWith("change", expect.any(Function));
+      expect(listeners.size).toBe(0);
+    } finally {
+      if (origWidth) {
+        Object.defineProperty(window, "innerWidth", origWidth);
+      } else {
+        setWidth(1024);
+      }
+      if (origMatchMedia) {
+        Object.defineProperty(window, "matchMedia", origMatchMedia);
+      } else {
+        delete (window as { matchMedia?: unknown }).matchMedia;
+      }
+    }
+  });
+
+  it("applies is-mobile on initial mount when viewport starts at 390px without matchMedia", async () => {
+    const origWidth = Object.getOwnPropertyDescriptor(window, "innerWidth");
+    const origMatchMedia = Object.getOwnPropertyDescriptor(
+      window,
+      "matchMedia",
+    );
+    try {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        writable: true,
+        value: 390,
+      });
+      Object.defineProperty(window, "matchMedia", {
+        configurable: true,
+        writable: true,
+        value: undefined,
+      });
+
+      const { fixture, root } = await setup();
+      const host = fixture.nativeElement as HTMLElement;
+      expect(host.classList.contains("is-mobile")).toBe(true);
+      expect(
+        root
+          .querySelector<HTMLElement>('[data-testid="fleet-page"]')!
+          .classList.contains("is-mobile"),
+      ).toBe(true);
+      expect(
+        root
+          .querySelector<HTMLElement>('[data-testid="fleet-scroll"]')!
+          .classList.contains("is-mobile"),
+      ).toBe(true);
+    } finally {
+      if (origWidth) {
+        Object.defineProperty(window, "innerWidth", origWidth);
+      }
+      if (origMatchMedia) {
+        Object.defineProperty(window, "matchMedia", origMatchMedia);
+      } else {
+        delete (window as { matchMedia?: unknown }).matchMedia;
+      }
+    }
   });
 });

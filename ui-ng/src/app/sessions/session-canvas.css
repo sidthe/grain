@@ -118,7 +118,8 @@
 .canvas-btn-group {
   display: inline-flex;
   flex-wrap: wrap;
-  gap: 4px;
+  align-items: center;
+  gap: 6px;
   max-width: 100%;
 }
 

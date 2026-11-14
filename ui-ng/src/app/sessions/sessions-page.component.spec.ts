@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import { TestBed, type ComponentFixture } from "@angular/core/testing";
-import { provideRouter } from "@angular/router";
+import { Router, provideRouter } from "@angular/router";
 import { NEVER } from "rxjs";
 import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
@@ -107,6 +107,13 @@ class FakeApi {
     models: ["gemini-fast", "gemini-pro"],
     defaultModel: "gemini-pro",
   };
+  memoryDocsData: {
+    name: string;
+    repo?: string;
+    summary: string;
+    text?: string;
+    length?: number;
+  }[] = [];
   calls: Call[] = [];
   fail: Record<string, unknown> = {};
 
@@ -125,7 +132,7 @@ class FakeApi {
     return null;
   }
 
-  get = (route: string) => {
+  get = (route: string, params?: { name?: string }) => {
     const e = this.record("GET", route);
     if (e) return e;
     if (route === "GET /api/agent-models") {
@@ -138,7 +145,15 @@ class FakeApi {
       return Promise.resolve({ nodes: [] });
     }
     if (route === "GET /api/memory/documents") {
-      return Promise.resolve({ documents: [] });
+      return Promise.resolve({
+        documents: structuredClone(this.memoryDocsData),
+      });
+    }
+    if (route === "GET /api/memory/documents/{name}") {
+      const doc = this.memoryDocsData.find((d) => d.name === params?.name);
+      return Promise.resolve(
+        doc ?? { name: params?.name ?? "", summary: "", text: "" },
+      );
     }
     if (route === "GET /api/api-scope-sets") {
       return Promise.resolve({
@@ -1185,6 +1200,173 @@ describe("SessionsPageComponent", () => {
       "Default (gemini-pro)",
     );
     expect(q(f, '[data-testid="chat-head-model-badge"]')).toBeNull();
+    f.destroy();
+  });
+
+  it("restores focus to the canvas opener on Escape and guards unsaved canvas state on toggle, session switch, and dialog keyboard events", async () => {
+    const api = new FakeApi();
+    api.memoryDocsData = [
+      {
+        name: "runbook",
+        summary: "Runbook summary",
+        text: "Initial runbook",
+        length: 15,
+      },
+    ];
+    api.details["1"] = {
+      ...api.details["1"],
+      comments: [
+        ...api.details["1"].comments!,
+        {
+          id: 99,
+          author: "grain",
+          authorKind: "automation",
+          body: "```grain-doc\n# Design Alpha\n\nFirst doc body.\n```\n```grain-doc\n# Design Beta\n\nSecond doc body.\n```",
+        },
+      ],
+    };
+
+    const f = await render(api, "director");
+    const navSpy = vi
+      .spyOn(TestBed.inject(Router), "navigate")
+      .mockResolvedValue(true);
+
+    // 1. Open via canvas toggle, focus inside canvas, Escape closes & restores focus to toggle.
+    const toggleBtn = q(
+      f,
+      '[data-testid="session-canvas-toggle"]',
+    ) as HTMLButtonElement;
+    toggleBtn.focus();
+    toggleBtn.click();
+    await f.whenStable();
+    f.detectChanges();
+
+    const htmlTab = q(
+      f,
+      '[data-testid="canvas-tab-html"]',
+    ) as HTMLButtonElement;
+    expect(htmlTab).not.toBeNull();
+    htmlTab.focus();
+    expect(document.activeElement).toBe(htmlTab);
+
+    htmlTab.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await f.whenStable();
+    f.detectChanges();
+    expect(q(f, '[data-testid="session-canvas-shell"]')).toBeNull();
+    expect(document.activeElement).toBe(toggleBtn);
+
+    // 2. Open via chat artifact chip, edit Pin to Memory, and verify artifact switch & toggle confirm.
+    const chipA = q(
+      f,
+      '[data-testid="open-artifact-doc-99-1"]',
+    ) as HTMLButtonElement;
+    chipA.focus();
+    chipA.click();
+    await f.whenStable();
+    f.detectChanges();
+
+    (
+      q(f, '[data-testid="canvas-pin-memory-toggle"]') as HTMLButtonElement
+    ).click();
+    f.detectChanges();
+    const pinInput = q(
+      f,
+      '[data-testid="pin-memory-name"]',
+    ) as HTMLInputElement;
+    pinInput.value = "unsaved-alpha";
+    pinInput.dispatchEvent(new Event("input"));
+    f.detectChanges();
+
+    // Clicking a different doc chip in chat opens discard confirmation instead of losing draft.
+    (
+      q(f, '[data-testid="open-artifact-doc-99-2"]') as HTMLButtonElement
+    ).click();
+    f.detectChanges();
+    expect(q(f, '[data-testid="confirm-dialog"]')).not.toBeNull();
+    (q(f, '[data-testid="confirm-cancel"]') as HTMLButtonElement).click();
+    f.detectChanges();
+    expect(
+      (q(f, '[data-testid="pin-memory-name"]') as HTMLInputElement).value,
+    ).toBe("unsaved-alpha");
+
+    // 3. With settings drawer open and dirty Memory doc, confirm dialog Escape & Tab stay isolated from SessionsPageComponent.
+    (
+      q(f, '[data-testid="session-settings-toggle"]') as HTMLButtonElement
+    ).click();
+    f.detectChanges();
+    expect(q(f, '[data-testid="session-settings-panel"]')).not.toBeNull();
+
+    (q(f, '[data-testid="canvas-tab-memory"]') as HTMLButtonElement).click();
+    await f.whenStable();
+    f.detectChanges();
+    (q(f, ".canvas-selector .canvas-chip") as HTMLButtonElement).click();
+    await vi.waitFor(() => {
+      f.detectChanges();
+      expect(q(f, '[data-testid="canvas-memory-text"]')).not.toBeNull();
+    });
+    const memTa = q(
+      f,
+      '[data-testid="canvas-memory-text"]',
+    ) as HTMLTextAreaElement;
+    memTa.value = "Modified runbook";
+    memTa.dispatchEvent(new Event("input"));
+    f.detectChanges();
+
+    // Clicking session-rel in the list confirms before navigating away.
+    (q(f, '[data-testid="session-rel"]') as HTMLAnchorElement).click();
+    f.detectChanges();
+    expect(q(f, '[data-testid="confirm-dialog"]')).not.toBeNull();
+    expect(navSpy).not.toHaveBeenCalled();
+
+    // Tab inside confirm dialog wraps cleanly between Cancel and Discard without colliding with SessionsPage.onTab.
+    await f.whenStable();
+    const cancelBtn = q(
+      f,
+      '[data-testid="confirm-cancel"]',
+    ) as HTMLButtonElement;
+    const acceptBtn = q(
+      f,
+      '[data-testid="confirm-accept"]',
+    ) as HTMLButtonElement;
+    expect(document.activeElement).toBe(cancelBtn);
+    cancelBtn.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(document.activeElement).toBe(acceptBtn);
+
+    // Document Escape cancels confirm dialog without closing the underlying settings panel.
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    f.detectChanges();
+    expect(q(f, '[data-testid="confirm-dialog"]')).toBeNull();
+    expect(q(f, '[data-testid="session-settings-panel"]')).not.toBeNull();
+
+    // Clicking canvas toggle while dirty confirms; accepting closes canvas and restores focus to chipA.
+    toggleBtn.click();
+    f.detectChanges();
+    expect(q(f, '[data-testid="confirm-dialog"]')).not.toBeNull();
+    (q(f, '[data-testid="confirm-accept"]') as HTMLButtonElement).click();
+    await f.whenStable();
+    f.detectChanges();
+    expect(q(f, '[data-testid="session-canvas-shell"]')).toBeNull();
+    expect(document.activeElement).toBe(chipA);
+
     f.destroy();
   });
 });
