@@ -61,15 +61,24 @@ export class DirectorContextService {
   });
 
   open(opener?: HTMLElement | null): void {
-    if (opener) this.openerEl = opener;
+    const active =
+      typeof document !== "undefined" ? document.activeElement : null;
+    const resolved =
+      opener ??
+      (active instanceof HTMLElement && active !== document.body
+        ? active
+        : null);
+    if (resolved) this.openerEl = resolved;
     this.isOpen.set(true);
   }
 
   close(restoreFocus = true): void {
     if (!this.isOpen()) return;
     this.isOpen.set(false);
-    if (restoreFocus && this.openerEl?.isConnected) {
-      queueMicrotask(() => this.openerEl?.focus());
+    const opener = this.openerEl;
+    this.openerEl = null;
+    if (restoreFocus && opener?.isConnected) {
+      queueMicrotask(() => opener.focus());
     }
   }
 

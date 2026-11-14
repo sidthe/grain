@@ -732,6 +732,254 @@ describe("WorkstreamsPageComponent", () => {
     expect(rowAfterReset.classList.contains("is-selected")).toBe(false);
     expect(rowAfterReset.hasAttribute("aria-current")).toBe(false);
   });
+
+  it("stops propagation on Enter and Space selection so ancestor and document shortcuts do not double-fire", async () => {
+    api.open = [
+      t("10", {
+        title: "First stream",
+        state: "running",
+        updatedAt: "2026-11-11T12:00:00Z",
+      }),
+      t("11", {
+        title: "First sub",
+        state: "queued",
+        origin: "task:10",
+        generatedFrom: "10",
+        updatedAt: "2026-11-11T12:00:00Z",
+      }),
+      t("20", {
+        title: "Second stream",
+        state: "running",
+        updatedAt: "2026-11-11T10:00:00Z",
+      }),
+      t("21", {
+        title: "Second sub",
+        state: "queued",
+        origin: "task:20",
+        generatedFrom: "20",
+        updatedAt: "2026-11-11T10:00:00Z",
+      }),
+    ];
+
+    const { fixture, router } = await mount("/workstreams?selected=task:10");
+    const el = fixture.nativeElement as HTMLElement;
+    const nav = vi.spyOn(router, "navigate").mockResolvedValue(true);
+    const hostKeySpy = vi.fn();
+    const docKeySpy = vi.fn();
+    el.addEventListener("keydown", hostKeySpy);
+    document.addEventListener("keydown", docKeySpy);
+
+    try {
+      const row2 = el.querySelector<HTMLElement>(
+        '[data-testid="ws-row-task:20"]',
+      )!;
+      row2.focus();
+
+      for (const init of [
+        { key: "Enter", bubbles: true, cancelable: true },
+        { key: " ", bubbles: true, cancelable: true },
+        // Even non-cancelable synthetic Enter/Space events must not bubble to document.
+        { key: "Enter", bubbles: true, cancelable: false },
+        { key: " ", bubbles: true, cancelable: false },
+      ]) {
+        nav.mockClear();
+        hostKeySpy.mockClear();
+        docKeySpy.mockClear();
+        const ev = new KeyboardEvent("keydown", init);
+        const stopSpy = vi.spyOn(ev, "stopPropagation");
+        row2.dispatchEvent(ev);
+        expect(stopSpy).toHaveBeenCalledTimes(1);
+        if (init.cancelable) expect(ev.defaultPrevented).toBe(true);
+        expect(hostKeySpy).not.toHaveBeenCalled();
+        expect(docKeySpy).not.toHaveBeenCalled();
+        expect(nav).toHaveBeenCalledTimes(1);
+        expect(nav).toHaveBeenCalledWith(["/workstreams", "task:20"], {
+          queryParams: { node: null },
+          queryParamsHandling: "merge",
+        });
+      }
+
+      // Held-down key repeats stop propagation and prevent default without re-navigating.
+      nav.mockClear();
+      for (const key of ["Enter", " "]) {
+        const rep = new KeyboardEvent("keydown", {
+          key,
+          bubbles: true,
+          cancelable: true,
+          repeat: true,
+        });
+        row2.dispatchEvent(rep);
+        expect(rep.defaultPrevented).toBe(true);
+      }
+      expect(hostKeySpy).not.toHaveBeenCalled();
+      expect(docKeySpy).not.toHaveBeenCalled();
+      expect(nav).not.toHaveBeenCalled();
+
+      // Modified keys do not trigger pickKey.
+      row2.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      row2.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: " ",
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      expect(nav).not.toHaveBeenCalled();
+
+      // Cards view: Enter and Space on a card also stop propagation and fire once.
+      el.querySelector<HTMLButtonElement>(
+        '[data-testid="ws-view-cards"]',
+      )!.click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      nav.mockClear();
+      hostKeySpy.mockClear();
+      docKeySpy.mockClear();
+
+      const card1 = el.querySelector<HTMLElement>(
+        '[data-testid="ws-card-task:10"]',
+      )!;
+      card1.focus();
+      for (const key of ["Enter", " "]) {
+        nav.mockClear();
+        const ev = new KeyboardEvent("keydown", {
+          key,
+          bubbles: true,
+          cancelable: true,
+        });
+        const stopSpy = vi.spyOn(ev, "stopPropagation");
+        card1.dispatchEvent(ev);
+        expect(stopSpy).toHaveBeenCalledTimes(1);
+        expect(ev.defaultPrevented).toBe(true);
+        expect(hostKeySpy).not.toHaveBeenCalled();
+        expect(docKeySpy).not.toHaveBeenCalled();
+        expect(nav).toHaveBeenCalledTimes(1);
+        expect(nav).toHaveBeenCalledWith(["/workstreams", "task:10"], {
+          queryParams: { node: null },
+          queryParamsHandling: "merge",
+        });
+      }
+    } finally {
+      el.removeEventListener("keydown", hostKeySpy);
+      document.removeEventListener("keydown", docKeySpy);
+    }
+  });
+
+  it("handles keyboard stepping, shortcuts, and page-level Enter while stopping window propagation", async () => {
+    api.open = [
+      t("10", {
+        title: "First stream",
+        state: "running",
+        updatedAt: "2026-11-11T12:00:00Z",
+      }),
+      t("11", {
+        title: "First sub",
+        state: "queued",
+        origin: "task:10",
+        generatedFrom: "10",
+        updatedAt: "2026-11-11T12:00:00Z",
+      }),
+    ];
+
+    const { fixture, router } = await mount("/workstreams");
+    const el = fixture.nativeElement as HTMLElement;
+    const nav = vi.spyOn(router, "navigate").mockResolvedValue(true);
+    const winKeySpy = vi.fn();
+    const docKeySpy = vi.fn();
+    window.addEventListener("keydown", winKeySpy);
+    document.addEventListener("keydown", docKeySpy);
+
+    try {
+      // j focuses the first row and stops propagation to window; Enter opens once without reaching document.
+      const stepEv = new KeyboardEvent("keydown", {
+        key: "j",
+        bubbles: true,
+        cancelable: true,
+      });
+      document.body.dispatchEvent(stepEv);
+      fixture.detectChanges();
+      expect(stepEv.defaultPrevented).toBe(true);
+      expect(winKeySpy).not.toHaveBeenCalled();
+
+      const row1 = el.querySelector<HTMLElement>(
+        '[data-testid="ws-row-task:10"]',
+      )!;
+      expect(document.activeElement).toBe(row1);
+
+      docKeySpy.mockClear();
+      winKeySpy.mockClear();
+      nav.mockClear();
+      (document.activeElement as HTMLElement).dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      expect(docKeySpy).not.toHaveBeenCalled();
+      expect(winKeySpy).not.toHaveBeenCalled();
+      expect(nav).toHaveBeenCalledTimes(1);
+      expect(nav).toHaveBeenCalledWith(["/workstreams", "task:10"], {
+        queryParams: { node: null },
+        queryParamsHandling: "merge",
+      });
+
+      // Page shortcuts (v, /, p, s, a) stop propagation to window.
+      nav.mockClear();
+      for (const key of ["v", "p", "s", "a", "/"]) {
+        const ev = new KeyboardEvent("keydown", {
+          key,
+          bubbles: true,
+          cancelable: true,
+        });
+        document.body.dispatchEvent(ev);
+        expect(ev.defaultPrevented).toBe(true);
+      }
+      expect(winKeySpy).not.toHaveBeenCalled();
+      expect(document.activeElement).toBe(
+        el.querySelector('[data-testid="ws-search"]'),
+      );
+
+      // Enter on page body opens selected stream and stops propagation to window,
+      // while Enter on a role="button" widget does not activate openStream.
+      nav.mockClear();
+      const roleBtn = document.createElement("div");
+      roleBtn.setAttribute("role", "button");
+      el.appendChild(roleBtn);
+      roleBtn.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      expect(nav).not.toHaveBeenCalled();
+      expect(winKeySpy).toHaveBeenCalledTimes(1);
+      roleBtn.remove();
+      winKeySpy.mockClear();
+
+      const bodyEnter = new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      });
+      document.body.dispatchEvent(bodyEnter);
+      expect(bodyEnter.defaultPrevented).toBe(true);
+      expect(winKeySpy).not.toHaveBeenCalled();
+      expect(nav).toHaveBeenCalledTimes(1);
+    } finally {
+      window.removeEventListener("keydown", winKeySpy);
+      document.removeEventListener("keydown", docKeySpy);
+    }
+  });
 });
 
 describe("Workstreams detail embedded task pane", () => {

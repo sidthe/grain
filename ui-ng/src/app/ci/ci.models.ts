@@ -291,6 +291,78 @@ export type CIBucket =
 export type CIFilterId = "all" | CIBucket;
 export type CIProviderFilter = "all" | "grain" | "github";
 
+export const CI_PROVIDER_GRAIN = "grain";
+export const CI_PROVIDER_GITHUB_ACTIONS = "github-actions";
+
+export function isGitHubActionsRunId(runId: string | undefined): boolean {
+  return (runId ?? "").trim().toLowerCase().startsWith("gha:");
+}
+
+export function actionsRunRepo(runId: string | undefined): string {
+  const raw = (runId ?? "").trim();
+  if (!raw.toLowerCase().startsWith("gha:")) return "";
+  const rest = raw.slice(4);
+  const at = rest.lastIndexOf(":");
+  if (at <= 0) return "";
+  const repo = rest.slice(0, at).replaceAll(":", "/");
+  return repo.includes("/") ? repo : "";
+}
+
+export function isGitHubActionsRun(
+  runOrId:
+    { id?: string; provider?: string; source?: string } | string | undefined,
+  repoProvider?: string,
+): boolean {
+  if (!runOrId) return false;
+  if (typeof runOrId === "string") {
+    return (
+      isGitHubActionsRunId(runOrId) ||
+      (repoProvider ?? "").trim().toLowerCase() === CI_PROVIDER_GITHUB_ACTIONS
+    );
+  }
+  const p = (runOrId.provider || runOrId.source || "").trim().toLowerCase();
+  if (p) return p.includes("github");
+  if (isGitHubActionsRunId(runOrId.id)) return true;
+  return (
+    (repoProvider ?? "").trim().toLowerCase() === CI_PROVIDER_GITHUB_ACTIONS
+  );
+}
+
+export function providerQueryParam(provider: CIProviderFilter): string | null {
+  switch (provider) {
+    case "github":
+      return CI_PROVIDER_GITHUB_ACTIONS;
+    case "grain":
+      return CI_PROVIDER_GRAIN;
+    default:
+      return null;
+  }
+}
+
+export function parseProviderQueryParam(
+  value: string | null | undefined,
+): CIProviderFilter {
+  const norm = (value ?? "").trim().toLowerCase();
+  if (norm === CI_PROVIDER_GITHUB_ACTIONS || norm === "github") {
+    return "github";
+  }
+  if (norm === CI_PROVIDER_GRAIN) {
+    return "grain";
+  }
+  return "all";
+}
+
+export function ciRunQueryParams(
+  runOrId:
+    { id?: string; provider?: string; source?: string } | string | undefined,
+  repoProvider?: string,
+): { provider: string } | null {
+  if (isGitHubActionsRun(runOrId, repoProvider)) {
+    return { provider: CI_PROVIDER_GITHUB_ACTIONS };
+  }
+  return null;
+}
+
 export function cleanRef(ref: string | undefined): string {
   if (!ref) return "";
   return ref.replace(/^refs\/heads\//, "");
@@ -302,7 +374,7 @@ export function runBranch(run: CIRun): string {
 
 export function providerOfRun(run: CIRun): "grain" | "github" {
   const p = (run.provider || run.source || "").toLowerCase();
-  if (p.includes("github") || run.id.startsWith("gha:")) return "github";
+  if (p.includes("github") || isGitHubActionsRunId(run.id)) return "github";
   return "grain";
 }
 
