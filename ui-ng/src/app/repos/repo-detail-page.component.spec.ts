@@ -32,11 +32,52 @@ interface RepoCall {
 class FakeRepoApi {
   calls: RepoCall[] = [];
   ciMode = "grain";
+  refuseGet: string | null = null;
+  refuseGetMessage = "failed to load";
   refusePut: string | null = null;
   refusePutMessage = 'ciMode: must be "grain", "github", or "none"';
   declarationsBody: Record<string, unknown> = {
     declarations: false,
     declarationsStatus: null,
+  };
+  releaseEnabled = true;
+  workOwnershipBody: {
+    repo: string;
+    default: string;
+    defaultRuns: boolean;
+    items: {
+      item: string;
+      kind: string;
+      title?: string;
+      override: string;
+      runs: boolean;
+      paused?: boolean;
+      declaration?: { repo?: string; path: string };
+    }[];
+  } = {
+    repo: "acme/platform",
+    default: "",
+    defaultRuns: true,
+    items: [
+      {
+        item: "release",
+        kind: "release",
+        title: "Release",
+        override: "",
+        runs: true,
+      },
+      {
+        item: "repo:schedule:acme:platform:nightly",
+        kind: "schedule",
+        title: "Nightly sweep",
+        override: "off",
+        runs: false,
+        declaration: {
+          repo: "acme/platform",
+          path: ".grain/schedules/nightly.yml",
+        },
+      },
+    ],
   };
 
   configBody: GrainConfig = {
@@ -53,6 +94,11 @@ class FakeRepoApi {
 
   get = (key: string, params?: RouteParams) => {
     this.calls.push({ method: "GET", key, params });
+    if (this.refuseGet === key) {
+      return new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(this.refuseGetMessage))),
+      );
+    }
     if (key === "GET /api/deployment/repos/{owner}/{name}/config") {
       return Promise.resolve({
         baseBranch: "main",
@@ -70,6 +116,9 @@ class FakeRepoApi {
     if (key === "GET /api/repos/{owner}/{name}/declarations") {
       return Promise.resolve(structuredClone(this.declarationsBody));
     }
+    if (key === "GET /api/repos/{owner}/{name}/work-ownership") {
+      return Promise.resolve(structuredClone(this.workOwnershipBody));
+    }
     if (key === "GET /api/deployment/git-connections") {
       return Promise.resolve([
         { credential: "github-main" },
@@ -81,6 +130,7 @@ class FakeRepoApi {
     }
     if (key === "GET /api/repos/{owner}/{name}/release") {
       return Promise.resolve({
+        enabled: this.releaseEnabled,
         pendingReleases: [
           { version: "v1.3.0", summary: "Trunk release candidate" },
         ],
@@ -114,6 +164,56 @@ class FakeRepoApi {
         declarations: next,
       };
       return Promise.resolve(structuredClone(this.declarationsBody));
+    }
+    if (key === "PUT /api/repos/{owner}/{name}/work-ownership") {
+      const req = (body ?? {}) as {
+        default?: string;
+        item?: string;
+        state?: string;
+      };
+      if (req.default !== undefined) {
+        this.workOwnershipBody.default = req.default;
+        this.workOwnershipBody.defaultRuns = req.default !== "off";
+      } else if (req.item !== undefined && req.state !== undefined) {
+        const target = this.workOwnershipBody.items.find(
+          (i) => i.item === req.item,
+        );
+        if (target) {
+          target.override = req.state;
+        }
+      }
+      for (const item of this.workOwnershipBody.items) {
+        item.runs =
+          item.override === "on"
+            ? true
+            : item.override === "off"
+              ? false
+              : this.workOwnershipBody.defaultRuns;
+      }
+      const rel = this.workOwnershipBody.items.find(
+        (i) => i.item === "release",
+      );
+      if (rel) this.releaseEnabled = rel.runs;
+      return Promise.resolve(structuredClone(this.workOwnershipBody));
+    }
+    if (key === "PUT /api/repos/{owner}/{name}/release") {
+      const req = (body ?? {}) as { enabled?: boolean };
+      if (req.enabled !== undefined) {
+        this.releaseEnabled = Boolean(req.enabled);
+        const rel = this.workOwnershipBody.items.find(
+          (i) => i.item === "release",
+        );
+        if (rel) {
+          rel.override = this.releaseEnabled ? "on" : "off";
+          rel.runs = this.releaseEnabled;
+        }
+      }
+      return Promise.resolve({
+        enabled: this.releaseEnabled,
+        pendingReleases: [
+          { version: "v1.3.0", summary: "Trunk release candidate" },
+        ],
+      });
     }
     return Promise.resolve({ ok: true });
   };
@@ -892,6 +992,452 @@ describe("RepoDetailPageComponent (/next/repos/:owner/:name)", () => {
     expect(
       el.querySelector<HTMLButtonElement>(
         '[data-testid="switch-repo-declarations"]',
+      )!.disabled,
+    ).toBe(true);
+  });
+
+  it("renders work ownership silence, explicit exceptions, resolved states, and metadata", async () => {
+    const api = new FakeRepoApi();
+    const nightly = "repo:schedule:acme:platform:nightly";
+    api.workOwnershipBody = {
+      repo: "acme/platform",
+      default: "",
+      defaultRuns: true,
+      items: [
+        {
+          item: "release",
+          kind: "release",
+          override: "",
+          runs: true,
+        },
+        {
+          item: nightly,
+          kind: "schedule",
+          title: "Nightly sweep",
+          override: "off",
+          runs: false,
+          declaration: {
+            repo: "acme/platform",
+            path: ".grain/schedules/nightly.yml",
+          },
+        },
+        {
+          item: "local-chore",
+          kind: "schedule",
+          title: "Housekeeping",
+          override: "on",
+          runs: true,
+          paused: true,
+        },
+        {
+          item: "chore",
+          kind: "schedule",
+          title: "chore",
+          override: "",
+          runs: true,
+        },
+        {
+          item: "withdrawn",
+          kind: "unknown",
+          override: "off",
+          runs: false,
+        },
+      ],
+    };
+
+    const { el, harness } = await mountRepo(
+      "/repos/acme/platform/releases",
+      api,
+    );
+    await waitForEl(harness, '[data-testid="wo-items-list"]');
+
+    const card = el.querySelector('[data-testid="card-repo-work-ownership"]')!;
+    expect(card.textContent).toContain("Standing work on this deployment: on");
+    expect(card.textContent).toContain("the base-branch check");
+    expect(card.textContent).toContain(
+      "tasks people file by hand against this repository",
+    );
+    expect(
+      el.querySelector('[data-testid="wo-default-said"]')?.textContent,
+    ).toContain("Nobody has said");
+    expect(
+      el.querySelector('[data-testid="wo-default-resolved"]')?.textContent,
+    ).toContain("Runs this repository's work");
+
+    // Three-state button aria-pressed reflects server state and active button stays clickable
+    const nightlyOff = el.querySelector<HTMLButtonElement>(
+      `button[aria-label="Nightly sweep: off"]`,
+    )!;
+    expect(nightlyOff.getAttribute("aria-pressed")).toBe("true");
+    expect(nightlyOff.disabled).toBe(false);
+    expect(
+      el
+        .querySelector(`button[aria-label="Nightly sweep: on"]`)!
+        .getAttribute("aria-pressed"),
+    ).toBe("false");
+    expect(
+      el
+        .querySelector(`button[aria-label="Nightly sweep: say nothing"]`)!
+        .getAttribute("aria-pressed"),
+    ).toBe("false");
+    expect(
+      el
+        .querySelector(`button[aria-label="release: say nothing"]`)!
+        .getAttribute("aria-pressed"),
+    ).toBe("true");
+
+    // Metadata parity: id shown only when differing from title, declaration path, paused, unknown
+    const nightlyRow = el.querySelector(
+      `[data-testid="wo-item-row-${nightly}"]`,
+    )!;
+    expect(nightlyRow.textContent).toContain("Nightly sweep");
+    expect(nightlyRow.textContent).toContain(nightly);
+    expect(nightlyRow.textContent).toContain(
+      "declared in .grain/schedules/nightly.yml",
+    );
+    expect(nightlyRow.textContent).toContain("Off, set here");
+    expect(nightlyRow.textContent).toContain("Not run");
+
+    const pausedRow = el.querySelector(
+      '[data-testid="wo-item-row-local-chore"]',
+    )!;
+    expect(pausedRow.textContent).toContain("Paused on its own row");
+    expect(pausedRow.textContent).toContain("On, set here");
+    expect(pausedRow.textContent).toContain("Runs");
+
+    const sameTitleRow = el.querySelector('[data-testid="wo-item-row-chore"]')!;
+    expect(sameTitleRow.querySelectorAll("code").length).toBe(0);
+
+    const unknownRow = el.querySelector(
+      '[data-testid="wo-item-row-withdrawn"]',
+    )!;
+    expect(unknownRow.textContent).toContain("nothing here has this id");
+    expect(
+      el.querySelector(`button[aria-label="withdrawn: say nothing"]`),
+    ).not.toBeNull();
+  });
+
+  it("writes repository default, clears item overrides, and syncs two-way with release workflow switch", async () => {
+    const api = new FakeRepoApi();
+    const nightly = "repo:schedule:acme:platform:nightly";
+    const { el, harness } = await mountRepo(
+      "/repos/acme/platform/releases",
+      api,
+    );
+    await waitForEl(harness, '[data-testid="wo-default-row"]');
+
+    // Toggle standing-work switch off -> PUT { default: "off" } -> release switch syncs off
+    const sw = el.querySelector<HTMLButtonElement>(
+      '[data-testid="switch-repo-work-ownership"]',
+    )!;
+    const relSw = el.querySelector<HTMLButtonElement>(
+      '[data-testid="switch-repo-release-enabled"]',
+    )!;
+    expect(sw.getAttribute("aria-checked")).toBe("true");
+    expect(relSw.getAttribute("aria-checked")).toBe("true");
+
+    sw.click();
+    await flushUi(harness);
+    expect(
+      api.calls.some(
+        (c) =>
+          c.method === "PUT" &&
+          c.key === "PUT /api/repos/{owner}/{name}/work-ownership" &&
+          (c.body as { default?: string })?.default === "off",
+      ),
+    ).toBe(true);
+    expect(sw.getAttribute("aria-checked")).toBe("false");
+    expect(relSw.getAttribute("aria-checked")).toBe("false");
+    expect(
+      el.querySelector('[data-testid="wo-default-resolved"]')?.textContent,
+    ).toContain("Does not run this repository's work");
+    // Release item still says "Nobody has said" while resolving to "Not run"
+    const relRow = el.querySelector('[data-testid="wo-item-row-release"]')!;
+    expect(relRow.textContent).toContain("Nobody has said");
+    expect(relRow.textContent).toContain("Not run");
+
+    // Set repository default back to say nothing ("")
+    el.querySelector<HTMLButtonElement>(
+      'button[aria-label="the repository default: say nothing"]',
+    )!.click();
+    await flushUi(harness);
+    expect(
+      api.calls.some(
+        (c) =>
+          c.method === "PUT" &&
+          c.key === "PUT /api/repos/{owner}/{name}/work-ownership" &&
+          (c.body as { default?: string })?.default === "",
+      ),
+    ).toBe(true);
+    expect(sw.getAttribute("aria-checked")).toBe("true");
+    expect(relSw.getAttribute("aria-checked")).toBe("true");
+
+    // Clear Nightly sweep exception without turning it "on" -> sends { item: nightly, state: "" }
+    el.querySelector<HTMLButtonElement>(
+      'button[aria-label="Nightly sweep: say nothing"]',
+    )!.click();
+    await flushUi(harness);
+    expect(
+      api.calls.some(
+        (c) =>
+          c.method === "PUT" &&
+          c.key === "PUT /api/repos/{owner}/{name}/work-ownership" &&
+          (c.body as { item?: string; state?: string })?.item === nightly &&
+          (c.body as { item?: string; state?: string })?.state === "",
+      ),
+    ).toBe(true);
+    expect(
+      el.querySelector(`[data-testid="wo-item-said-${nightly}"]`)?.textContent,
+    ).toContain("Nobody has said");
+
+    // Saving Release settings off refreshes Work Ownership release item
+    relSw.click();
+    harness.detectChanges();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="save-repo-release-btn"]',
+    )!.click();
+    await flushUi(harness);
+    expect(relRow.textContent).toContain("Off, set here");
+    expect(relRow.textContent).toContain("Not run");
+  });
+
+  it("renders empty work items copy when no items exist", async () => {
+    const api = new FakeRepoApi();
+    api.workOwnershipBody = {
+      repo: "acme/platform",
+      default: "",
+      defaultRuns: true,
+      items: [],
+    };
+    const { harness } = await mountRepo("/repos/acme/platform/releases", api);
+    const empty = await waitForEl(harness, '[data-testid="wo-empty-items"]');
+    expect(empty.textContent).toContain(
+      "No work items: this repository declares no schedules here",
+    );
+  });
+
+  it("reports failed GET without drawing empty list and preserves state on refused PUT or invalid input", async () => {
+    const api = new FakeRepoApi();
+    api.refuseGet = "GET /api/repos/{owner}/{name}/work-ownership";
+    api.refuseGetMessage = "work ownership store unavailable";
+
+    const { el, harness } = await mountRepo(
+      "/repos/acme/platform/releases",
+      api,
+    );
+    const errEl = await waitForEl(
+      harness,
+      '[data-testid="repo-work-ownership-error"]',
+    );
+    expect(errEl.textContent).toContain("work ownership store unavailable");
+    expect(
+      el.querySelector('[data-testid="switch-repo-work-ownership"]'),
+    ).toBeNull();
+    expect(el.textContent).not.toContain("Nobody has said");
+
+    // Retry succeeds when error clears
+    api.refuseGet = null;
+    api.refusePut = "PUT /api/repos/{owner}/{name}/work-ownership";
+    api.refusePutMessage = "forbidden: repository settings locked";
+    errEl.querySelector<HTMLButtonElement>("button")!.click();
+    await waitForEl(harness, '[data-testid="switch-repo-work-ownership"]');
+
+    const sw = el.querySelector<HTMLButtonElement>(
+      '[data-testid="switch-repo-work-ownership"]',
+    )!;
+    expect(sw.getAttribute("aria-checked")).toBe("true");
+    sw.click();
+    await new Promise((r) => setTimeout(r, 15));
+    await flushUi(harness);
+
+    // Refused PUT preserves existing switch state and shows inline error
+    expect(sw.getAttribute("aria-checked")).toBe("true");
+    expect(
+      el.querySelector('[data-testid="repo-work-ownership-error"]')
+        ?.textContent,
+    ).toContain("forbidden: repository settings locked");
+
+    // Client-side validation rejects malformed item IDs and invalid states without calling PUT
+    const callsBefore = api.calls.length;
+    const cmp = harness.fixture.debugElement.query(
+      By.directive(RepoDetailPageComponent),
+    ).componentInstance as unknown as {
+      saveWorkDefault: (state: string) => Promise<void>;
+      saveWorkItem: (item: string, state: string) => Promise<void>;
+    };
+
+    await cmp.saveWorkDefault("invalid");
+    harness.detectChanges();
+    expect(
+      el.querySelector('[data-testid="repo-work-ownership-error"]')
+        ?.textContent,
+    ).toContain("Invalid ownership state");
+
+    await cmp.saveWorkItem("bad,item", "off");
+    harness.detectChanges();
+    expect(
+      el.querySelector('[data-testid="repo-work-ownership-error"]')
+        ?.textContent,
+    ).toContain('cannot contain "," or "="');
+
+    await cmp.saveWorkItem(" ", "off");
+    harness.detectChanges();
+    expect(
+      el.querySelector('[data-testid="repo-work-ownership-error"]')
+        ?.textContent,
+    ).toContain("cannot be empty");
+
+    expect(api.calls.length).toBe(callsBefore);
+  });
+
+  it("enforces repos:read, repos:write, configRepoOnly, and host-prefixed repo scoping on work ownership", async () => {
+    // 1. repos:read denied -> no GET, shows denied banner
+    const readDeniedApi = new FakeRepoApi();
+    readDeniedApi.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "grain/scoped-reader",
+        roles: ["grain/scoped-reader"],
+        full: false,
+        scopes: ["repos:read"],
+        repoLimits: { "repos:read": ["acme/allowed"] },
+      },
+    };
+    const m1 = await mountRepo("/repos/acme/platform/releases", readDeniedApi);
+    expect(
+      readDeniedApi.calls.some(
+        (c) => c.key === "GET /api/repos/{owner}/{name}/work-ownership",
+      ),
+    ).toBe(false);
+    expect(
+      m1.el.querySelector('[data-testid="repo-work-ownership-denied"]')
+        ?.textContent,
+    ).toContain("repos:read on this repository");
+
+    // 2. repos:read allowed, repos:write denied -> read-only banner + aria-describedby + no PUT
+    TestBed.resetTestingModule();
+    const writeDeniedApi = new FakeRepoApi();
+    writeDeniedApi.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "grain/viewer",
+        roles: ["grain/viewer"],
+        full: false,
+        scopes: ["repos:read", "releases:read"],
+      },
+    };
+    const m2 = await mountRepo("/repos/acme/platform/releases", writeDeniedApi);
+    await waitForEl(m2.harness, '[data-testid="switch-repo-work-ownership"]');
+    const roBanner = m2.el.querySelector(
+      '[data-testid="repo-work-ownership-readonly"]',
+    );
+    expect(roBanner?.textContent).toContain("repos:write");
+    const roSw = m2.el.querySelector<HTMLButtonElement>(
+      '[data-testid="switch-repo-work-ownership"]',
+    )!;
+    expect(roSw.disabled).toBe(true);
+    expect(roSw.getAttribute("aria-describedby")).toBe(
+      "repo-work-ownership-readonly",
+    );
+    const roDefBtn = m2.el.querySelector<HTMLButtonElement>(
+      '[data-testid="wo-default-btn-off"]',
+    )!;
+    expect(roDefBtn.disabled).toBe(true);
+    expect(roDefBtn.getAttribute("aria-describedby")).toBe(
+      "repo-work-ownership-readonly",
+    );
+    const cmp2 = m2.harness.fixture.debugElement.query(
+      By.directive(RepoDetailPageComponent),
+    ).componentInstance as unknown as {
+      saveWorkDefault: (s: string) => Promise<void>;
+      saveWorkItem: (i: string, s: string) => Promise<void>;
+    };
+    await cmp2.saveWorkDefault("off");
+    await cmp2.saveWorkItem("release", "off");
+    expect(writeDeniedApi.calls.filter((c) => c.method !== "GET")).toEqual([]);
+
+    // 3. configRepoOnly -> disabled + aria-describedby=repo-readonly-banner + no PUT
+    TestBed.resetTestingModule();
+    const lockedApi = new FakeRepoApi();
+    lockedApi.configBody = {
+      version: "v3.6.0",
+      configRepoOnly: true,
+      access: {
+        role: "grain/operator",
+        roles: ["grain/operator"],
+        full: true,
+        scopes: [],
+      },
+    };
+    const m3 = await mountRepo("/repos/acme/platform/releases", lockedApi);
+    await waitForEl(m3.harness, '[data-testid="switch-repo-work-ownership"]');
+    const lockedSw = m3.el.querySelector<HTMLButtonElement>(
+      '[data-testid="switch-repo-work-ownership"]',
+    )!;
+    expect(lockedSw.disabled).toBe(true);
+    expect(lockedSw.getAttribute("aria-describedby")).toBe(
+      "repo-readonly-banner",
+    );
+    const cmp3 = m3.harness.fixture.debugElement.query(
+      By.directive(RepoDetailPageComponent),
+    ).componentInstance as unknown as {
+      saveWorkDefault: (s: string) => Promise<void>;
+      saveWorkItem: (i: string, s: string) => Promise<void>;
+    };
+    await cmp3.saveWorkDefault("off");
+    await cmp3.saveWorkItem("release", "off");
+    expect(lockedApi.calls.filter((c) => c.method !== "GET")).toEqual([]);
+
+    // 4. Host-prefixed repo scoping and in-place navigation reset
+    TestBed.resetTestingModule();
+    const hostApi = new FakeRepoApi();
+    hostApi.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "grain/host-scoped",
+        roles: ["grain/host-scoped"],
+        full: false,
+        scopes: ["repos:read", "repos:write"],
+        repoLimits: { "repos:write": ["ghes.example.com/acme/allowed"] },
+      },
+    };
+    const m4 = await mountRepo(
+      "/repos/ghes.example.com/acme/allowed/releases",
+      hostApi,
+    );
+    await waitForEl(m4.harness, '[data-testid="switch-repo-work-ownership"]');
+    expect(
+      hostApi.calls.some(
+        (c) =>
+          c.key === "GET /api/repos/{owner}/{name}/work-ownership" &&
+          c.params?.["owner"] === "ghes.example.com/acme" &&
+          c.params?.["name"] === "allowed",
+      ),
+    ).toBe(true);
+    expect(
+      m4.el.querySelector<HTMLButtonElement>(
+        '[data-testid="switch-repo-work-ownership"]',
+      )!.disabled,
+    ).toBe(false);
+
+    hostApi.workOwnershipBody = {
+      repo: "ghes.example.com/acme/forbidden",
+      default: "off",
+      defaultRuns: false,
+      items: [],
+    };
+    await m4.harness.navigateByUrl(
+      "/repos/ghes.example.com/acme/forbidden/releases",
+    );
+    await vi.waitFor(() => {
+      m4.harness.detectChanges();
+      expect(
+        m4.el.querySelector('[data-testid="wo-default-resolved"]')?.textContent,
+      ).toContain("Does not run this repository's work");
+    });
+    expect(
+      m4.el.querySelector<HTMLButtonElement>(
+        '[data-testid="switch-repo-work-ownership"]',
       )!.disabled,
     ).toBe(true);
   });
