@@ -34,6 +34,7 @@ import {
 import { Router, RouterLink } from "@angular/router";
 import { type RouteKey } from "../api/generated-routes";
 import { routeScope } from "../api/grain-api.service";
+import { runProviderQueryParams } from "../ci/ci.models";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
 import { TaskFeedStore } from "../services/task-feed.service";
@@ -1015,9 +1016,11 @@ function isValidGitRef(raw: string): boolean {
                       <span>
                         Workflow run
                         @if (lwr.runId) {
-                          <a [routerLink]="['/ci', 'runs', lwr.runId]">{{
-                            lwr.runId
-                          }}</a>
+                          <a
+                            [routerLink]="['/ci', 'runs', lwr.runId]"
+                            [queryParams]="workflowRunQueryParams(lwr.runId)"
+                            >{{ lwr.runId }}</a
+                          >
                         }
                         ({{ lwr.conclusion || "running" }})
                       </span>
@@ -5173,6 +5176,8 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       this.submitting.set(false);
     }
   }
+
+  protected workflowRunQueryParams = runProviderQueryParams;
 
   protected async onConfirmDone(accepted: boolean): Promise<void> {
     const req = this.confirming();

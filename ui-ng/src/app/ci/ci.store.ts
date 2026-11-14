@@ -36,8 +36,12 @@ import {
   type PackageCacheFlush,
   type QuarantineTestRequest,
   type QuarantineTestResponse,
+  GITHUB_ACTIONS_PROVIDER,
+  GRAIN_PROVIDER,
   faultSourceOf,
   isRunActive,
+  providerOfRun,
+  repoFromActionsRunId,
 } from "./ci.models";
 
 const POLL_MS = 5000;
@@ -95,12 +99,16 @@ export class CIStore {
   private eventSub: Subscription | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private activeCount = 0;
+  private sessionGen = 0;
+  private bootstrapping = false;
 
   start(): void {
     this.actionError.set(null);
     this.activeCount++;
     if (this.activeCount > 1) return;
-    void this.bootstrap();
+    const gen = ++this.sessionGen;
+    this.bootstrapping = true;
+    void this.bootstrap(gen);
     this.eventSub = this.events.events().subscribe((ev) => {
       if (ev.type === "task.ci" || ev.type === "task.state") {
         void this.refresh();
@@ -116,6 +124,8 @@ export class CIStore {
   stop(): void {
     this.activeCount = Math.max(0, this.activeCount - 1);
     if (this.activeCount > 0) return;
+    this.sessionGen++;
+    this.bootstrapping = false;
     this.eventSub?.unsubscribe();
     this.eventSub = null;
     if (this.pollTimer) clearInterval(this.pollTimer);
@@ -129,14 +139,20 @@ export class CIStore {
     }
     this.queryRepo.set(cleanRepo);
     this.queryProvider.set(provider);
-    if (this.activeCount > 0) {
+    if (this.activeCount > 0 && !this.bootstrapping) {
       void this.refresh();
     }
   }
 
-  private async bootstrap(): Promise<void> {
-    await this.loadConfig();
-    if (this.activeCount === 0) return;
+  private async bootstrap(gen: number): Promise<void> {
+    try {
+      await this.loadConfig();
+    } finally {
+      if (this.sessionGen === gen) {
+        this.bootstrapping = false;
+      }
+    }
+    if (this.sessionGen !== gen || this.activeCount === 0) return;
     await this.refresh();
   }
 
@@ -160,6 +176,10 @@ export class CIStore {
     extraFaults: readonly CIFault[],
   ): string[] {
     const set = new Set<string>(this.targetRepos());
+    const detRepo = this.detail()?.repo;
+    if (detRepo) set.add(detRepo);
+    const selRepo = repoFromActionsRunId(this.selectedId());
+    if (selRepo) set.add(selRepo);
     for (const r of this.runs()) if (r.repo) set.add(r.repo);
     for (const r of extraRuns) if (r.repo) set.add(r.repo);
     for (const f of this.faults()) if (f.repo) set.add(f.repo);
@@ -167,13 +187,15 @@ export class CIStore {
     return [...set].filter(Boolean).sort();
   }
 
-  private fetchActionsForRepo(repo: string) {
-    const q = new URLSearchParams({
-      repo,
-      provider: "github-actions",
-    }).toString();
+  private fetchActionsRuns(repo?: string) {
+    const params = new URLSearchParams({ provider: GITHUB_ACTIONS_PROVIDER });
+    if (repo) params.set("repo", repo);
     return this.api
-      .getIfChanged<CIRunsResponse>("GET /api/ci/runs", undefined, q)
+      .getIfChanged<CIRunsResponse>(
+        "GET /api/ci/runs",
+        undefined,
+        params.toString(),
+      )
       .catch(() => ({ body: null as CIRunsResponse | null, changed: false }));
   }
 
@@ -187,15 +209,29 @@ export class CIStore {
     try {
       const repo = this.queryRepo();
       const prov = this.queryProvider();
+      const selectedActionsRepo =
+        repoFromActionsRunId(this.selectedId()) ||
+        (this.detail() && providerOfRun(this.detail()!) === "github"
+          ? (this.detail()?.repo ?? "")
+          : "");
       let ghaRepos: string[] = [];
       if (repo && (prov === "all" || prov === "github")) {
         ghaRepos = [repo];
       } else if (!repo && prov === "github") {
         ghaRepos = this.knownActionsRepos([], []);
+      } else if (prov === "all" && selectedActionsRepo) {
+        ghaRepos = [selectedActionsRepo];
       }
 
+      const grainQuery =
+        prov === "grain" ? `provider=${GRAIN_PROVIDER}` : undefined;
+
       const [runsRes, faultsRes, initialGha] = await Promise.all([
-        this.api.getIfChanged<CIRunsResponse>("GET /api/ci/runs"),
+        this.api.getIfChanged<CIRunsResponse>(
+          "GET /api/ci/runs",
+          undefined,
+          grainQuery,
+        ),
         this.access.can("GET /api/ci/faults")
           ? this.api
               .getIfChanged<CIFaultsResponse>("GET /api/ci/faults")
@@ -207,20 +243,24 @@ export class CIStore {
               body: null as CIFaultsResponse | null,
               changed: false,
             }),
-        Promise.all(ghaRepos.map((r) => this.fetchActionsForRepo(r))),
+        Promise.all(ghaRepos.map((r) => this.fetchActionsRuns(r))),
       ]);
       if (this.activeCount === 0) return;
 
       let ghaResults = initialGha;
-      if (!repo && prov === "github" && ghaRepos.length === 0) {
+      if (!repo && prov === "github") {
         const discovered = this.knownActionsRepos(runsRes.body?.runs ?? [], [
           ...(faultsRes.body?.faults ?? []),
           ...(runsRes.body?.faults ?? []),
-        ]);
+        ]).filter((r) => !ghaRepos.includes(r));
         if (discovered.length > 0) {
-          ghaResults = await Promise.all(
-            discovered.map((r) => this.fetchActionsForRepo(r)),
+          const extra = await Promise.all(
+            discovered.map((r) => this.fetchActionsRuns(r)),
           );
+          if (this.activeCount === 0) return;
+          ghaResults = [...ghaResults, ...extra];
+        } else if (ghaRepos.length === 0) {
+          ghaResults = [await this.fetchActionsRuns()];
           if (this.activeCount === 0) return;
         }
       }
@@ -236,6 +276,10 @@ export class CIStore {
             body.enabled !== false ||
               ghaBodies.some((b) => b.enabled !== false),
           );
+        } else if (ghaBodies.some((b) => b.enabled !== false)) {
+          this.enabled.set(true);
+        } else if (!this.loaded()) {
+          this.enabled.set(false);
         }
         const byId = new Map<string, CIRun>();
         for (const r of body?.runs ?? []) {
