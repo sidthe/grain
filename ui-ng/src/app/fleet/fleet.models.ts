@@ -382,3 +382,16 @@ export function parseArgv(cmd: string): string[] {
   }
   return out;
 }
+
+/** Validates a fleet model name and node count against length, spacing, and bounds rules. */
+export function validateFleetModel(modelName: string, nodes: number): boolean {
+  if (typeof modelName !== "string" || typeof nodes !== "number") {
+    return false;
+  }
+  return (
+    nodes > 0 &&
+    nodes <= 1000 &&
+    modelName.length >= 3 &&
+    !modelName.includes(" ")
+  );
+}
