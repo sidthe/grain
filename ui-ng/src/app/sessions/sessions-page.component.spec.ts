@@ -839,4 +839,315 @@ describe("SessionsPageComponent", () => {
     expect(closedIds).toEqual(["t-2", "t-1"]);
     f.destroy();
   });
+
+  it("hides the composer for repo-less sessions when tasks:write has repoLimits", async () => {
+    const api = new FakeApi();
+    const f = await render(api);
+    const access = TestBed.inject(AccessService);
+    access.setConfig({
+      access: {
+        role: "dev",
+        roles: ["dev"],
+        full: false,
+        scopes: ["tasks:read", "tasks:write"],
+        repoLimits: { "tasks:write": ["acme/allowed"] },
+      },
+    });
+    await settle(f);
+    expect(q(f, '[data-testid="composer"]')).toBeNull();
+
+    // Explicit empty repo stays repo-less and still denied.
+    api.details["1"] = { ...api.details["1"], repo: "" };
+    await TestBed.inject(SessionsStore).refresh();
+    await settle(f);
+    expect(q(f, '[data-testid="composer"]')).toBeNull();
+
+    // Removing repoLimits on tasks:write grants global comment writes.
+    access.setConfig({
+      access: {
+        role: "dev",
+        roles: ["dev"],
+        full: false,
+        scopes: ["tasks:read", "tasks:write"],
+        repoLimits: {},
+      },
+    });
+    await settle(f);
+    expect(q(f, '[data-testid="composer"]')).not.toBeNull();
+    f.destroy();
+  });
+
+  it("requires global sessions:write scope for repo-less console-session mutations", async () => {
+    const api = new FakeApi();
+    // Non-director running session with an allowed repo; console-session
+    // endpoints remain repo-less on the server and must reject repoLimits.
+    api.details["9"] = { ...api.details["9"], repo: "acme/allowed" };
+    api.taskList[1] = { ...api.taskList[1], repo: "acme/allowed" };
+    const f = await render(api, "rel");
+    const access = TestBed.inject(AccessService);
+
+    access.setConfig({
+      access: {
+        role: "dev",
+        roles: ["dev"],
+        full: false,
+        scopes: [
+          "sessions:read",
+          "sessions:write",
+          "tasks:read",
+          "tasks:write",
+        ],
+        repoLimits: { "sessions:write": ["acme/allowed"] },
+      },
+    });
+    await settle(f);
+
+    expect(q(f, '[data-testid="new-session"]')).toBeNull();
+    expect(q(f, '[data-testid="stop"]')).toBeNull();
+    expect(q(f, '[data-testid="session-settings-toggle"]')).toBeNull();
+    expect(q(f, '[data-testid="delete-session"]')).toBeNull();
+    expect(q(f, '[data-testid="fresh-chat-open"]')).toBeNull();
+    expect(q(f, '[data-testid="chat-head-model"]')).toBeNull();
+    expect(
+      (q(f, '[data-testid="cap-self-debug"]') as HTMLInputElement).disabled,
+    ).toBe(true);
+    // Composer uses tasks:write (unbounded here), so it stays available.
+    expect(q(f, '[data-testid="composer"]')).not.toBeNull();
+
+    // Global sessions:write (no repoLimits entry for sessions:write) unlocks all.
+    access.setConfig({
+      access: {
+        role: "dev",
+        roles: ["dev"],
+        full: false,
+        scopes: [
+          "sessions:read",
+          "sessions:write",
+          "tasks:read",
+          "tasks:write",
+        ],
+        repoLimits: { "tasks:write": ["acme/allowed"] },
+      },
+    });
+    await settle(f);
+
+    expect(q(f, '[data-testid="new-session"]')).not.toBeNull();
+    expect(q(f, '[data-testid="stop"]')).not.toBeNull();
+    expect(q(f, '[data-testid="session-settings-toggle"]')).not.toBeNull();
+    expect(q(f, '[data-testid="delete-session"]')).not.toBeNull();
+    expect(q(f, '[data-testid="fresh-chat-open"]')).not.toBeNull();
+    expect(
+      (q(f, '[data-testid="cap-self-debug"]') as HTMLInputElement).disabled,
+    ).toBe(false);
+    f.destroy();
+  });
+
+  it("gates session settings checkboxes on repo-scoped tasks:admin and global settings:write", async () => {
+    const api = new FakeApi();
+    const f = await render(api);
+    const access = TestBed.inject(AccessService);
+    const store = TestBed.inject(SessionsStore);
+
+    access.setConfig({
+      access: {
+        role: "dev",
+        roles: ["dev"],
+        full: false,
+        scopes: [
+          "sessions:read",
+          "sessions:write",
+          "tasks:read",
+          "tasks:admin",
+          "settings:write",
+        ],
+        repoLimits: {
+          "tasks:admin": ["acme/allowed"],
+          "settings:write": ["acme/allowed"],
+        },
+      },
+    });
+    await settle(f);
+
+    (
+      q(f, '[data-testid="session-settings-toggle"]') as HTMLButtonElement
+    ).click();
+    await settle(f);
+
+    const tasksApproved = () =>
+      q(f, '[data-testid="session-tasks-approved"]') as HTMLInputElement;
+    const readsAll = () =>
+      q(f, '[data-testid="session-reads-all"]') as HTMLInputElement;
+
+    // Repo-less session: both tasks:admin and settings:write require global scope.
+    expect(tasksApproved().disabled).toBe(true);
+    expect(readsAll().disabled).toBe(true);
+
+    // Session task in disallowed repo: both stay disabled.
+    api.details["1"] = { ...api.details["1"], repo: "acme/other" };
+    await store.refresh();
+    await settle(f);
+    expect(tasksApproved().disabled).toBe(true);
+    expect(readsAll().disabled).toBe(true);
+
+    // Session task in allowed repo: tasks:admin succeeds; POST /api/settings stays global-only.
+    api.details["1"] = { ...api.details["1"], repo: "acme/allowed" };
+    await store.refresh();
+    await settle(f);
+    expect(tasksApproved().disabled).toBe(false);
+    expect(readsAll().disabled).toBe(true);
+
+    // Global settings:write unlocks readsAll.
+    access.setConfig({
+      access: {
+        role: "dev",
+        roles: ["dev"],
+        full: false,
+        scopes: [
+          "sessions:read",
+          "sessions:write",
+          "tasks:read",
+          "tasks:admin",
+          "settings:write",
+        ],
+        repoLimits: { "tasks:admin": ["acme/allowed"] },
+      },
+    });
+    await settle(f);
+    expect(readsAll().disabled).toBe(false);
+    f.destroy();
+  });
+
+  it("renders unadvertised and disabled-only model badges across catalog edge cases", async () => {
+    const api1 = new FakeApi();
+    api1.sessions[0] = { ...api1.sessions[0], model: "retired-model" };
+    const f1 = await render(api1);
+    expect(q(f1, '[data-testid="chat-head-model"]')).not.toBeNull();
+    expect(text(f1, '[data-testid="chat-head-model-unadvertised"]')).toBe(
+      "not advertised by any connection",
+    );
+    (
+      q(f1, '[data-testid="session-settings-toggle"]') as HTMLButtonElement
+    ).click();
+    await settle(f1);
+    expect(text(f1, '[data-testid="session-model-unadvertised"]')).toBe(
+      "not advertised by any connection",
+    );
+    f1.destroy();
+  });
+
+  it("matches advertised models case-insensitively without showing an unadvertised badge", async () => {
+    const apiCase = new FakeApi();
+    apiCase.sessions[0] = { ...apiCase.sessions[0], model: "GEMINI-PRO" };
+    const fCase = await render(apiCase);
+    expect(q(fCase, '[data-testid="chat-head-model"]')).not.toBeNull();
+    expect(q(fCase, '[data-testid="chat-head-model-unadvertised"]')).toBeNull();
+    fCase.destroy();
+  });
+
+  it("renders read-only default and unadvertised badge when models are omitted and hides empty whitespace models", async () => {
+    const apiEmpty = new FakeApi();
+    apiEmpty.config = () =>
+      Promise.resolve({
+        access: null,
+        modelsConfigured: false,
+        defaultModel: "vanished-default",
+      } as never);
+    const fEmpty = await render(apiEmpty);
+    expect(q(fEmpty, '[data-testid="chat-head-model"]')).toBeNull();
+    expect(text(fEmpty, '[data-testid="chat-head-model-readonly"]')).toBe(
+      "Deployment default (vanished-default)",
+    );
+    expect(text(fEmpty, '[data-testid="chat-head-model-unadvertised"]')).toBe(
+      "not advertised by any connection",
+    );
+    fEmpty.destroy();
+    TestBed.inject(SessionsStore).stop();
+    TestBed.resetTestingModule();
+
+    const apiNone = new FakeApi();
+    apiNone.sessions[0] = { ...apiNone.sessions[0], model: "   " };
+    apiNone.config = () =>
+      Promise.resolve({ access: null, models: [], defaultModel: "" } as never);
+    const fNone = await render(apiNone);
+    expect(q(fNone, '[data-testid="chat-head-model"]')).toBeNull();
+    expect(q(fNone, '[data-testid="chat-head-model-readonly"]')).toBeNull();
+    expect(q(fNone, '[data-testid="chat-head-model-unadvertised"]')).toBeNull();
+    fNone.destroy();
+  });
+
+  it("flags models served only by disabled connections in the session header", async () => {
+    const apiDisabled = new FakeApi();
+    apiDisabled.sessions[0] = {
+      ...apiDisabled.sessions[0],
+      model: "claude-disabled",
+    };
+    apiDisabled.config = () =>
+      Promise.resolve({
+        access: null,
+        models: ["claude-disabled"],
+        agentBackends: [
+          {
+            id: "claude-1",
+            framework: "claude",
+            disabled: true,
+            models: ["claude-disabled"],
+          },
+        ],
+        defaultModel: "",
+      } as never);
+    const fDisabled = await render(apiDisabled);
+    expect(
+      text(fDisabled, '[data-testid="chat-head-model-unadvertised"]'),
+    ).toBe("disabled connections only");
+    fDisabled.destroy();
+  });
+
+  it("renders a read-only model fallback and unadvertised badge for viewers", async () => {
+    const apiViewer = new FakeApi();
+    apiViewer.sessions[0] = { ...apiViewer.sessions[0], model: "legacy-view" };
+    apiViewer.config = () =>
+      Promise.resolve({
+        access: {
+          role: "grain/viewer",
+          roles: ["grain/viewer"],
+          full: false,
+          scopes: ["sessions:read", "tasks:read", "settings:read"],
+        },
+        models: [],
+        defaultModel: "",
+      } as never);
+    const fViewer = await render(apiViewer);
+    expect(q(fViewer, '[data-testid="chat-head-model"]')).toBeNull();
+    expect(text(fViewer, '[data-testid="chat-head-model-readonly"]')).toBe(
+      "legacy-view",
+    );
+    expect(text(fViewer, '[data-testid="chat-head-model-unadvertised"]')).toBe(
+      "not advertised by any connection",
+    );
+    fViewer.destroy();
+    TestBed.inject(SessionsStore).stop();
+    TestBed.resetTestingModule();
+
+    const apiViewerAdv = new FakeApi();
+    apiViewerAdv.config = () =>
+      Promise.resolve({
+        access: {
+          role: "grain/viewer",
+          roles: ["grain/viewer"],
+          full: false,
+          scopes: ["sessions:read", "tasks:read", "settings:read"],
+        },
+        models: ["gemini-fast", "gemini-pro"],
+        defaultModel: "gemini-pro",
+      } as never);
+    const fViewerAdv = await render(apiViewerAdv);
+    expect(q(fViewerAdv, '[data-testid="chat-head-model"]')).toBeNull();
+    expect(text(fViewerAdv, '[data-testid="chat-head-model-readonly"]')).toBe(
+      "Deployment default (gemini-pro)",
+    );
+    expect(
+      q(fViewerAdv, '[data-testid="chat-head-model-unadvertised"]'),
+    ).toBeNull();
+    fViewerAdv.destroy();
+  });
 });

@@ -661,19 +661,27 @@ describe("AppComponent shell", () => {
     ) as HTMLButtonElement;
     expect(btn).toBeTruthy();
     expect(ctx.isOpen()).toBe(false);
+    expect(btn.getAttribute("aria-expanded")).toBe("false");
+    expect(btn.getAttribute("aria-controls")).toBe("director-drawer");
 
     btn.click();
     await f.whenStable();
     expect(ctx.isOpen()).toBe(true);
+    expect(btn.getAttribute("aria-expanded")).toBe("true");
+    const drawer = el(f).querySelector('[data-testid="director-drawer"]');
+    expect(drawer?.getAttribute("aria-expanded")).toBe("true");
+    expect(drawer?.getAttribute("aria-hidden")).toBe("false");
     expect(el(f).querySelector("#main")?.hasAttribute("inert")).toBe(false);
 
     press("Escape");
     await f.whenStable();
     expect(ctx.isOpen()).toBe(false);
+    expect(btn.getAttribute("aria-expanded")).toBe("false");
 
     press("d");
     await f.whenStable();
     expect(ctx.isOpen()).toBe(true);
+    expect(btn.getAttribute("aria-expanded")).toBe("true");
 
     // Alt+D works even when focus sits inside an input field.
     const search = el(f).querySelector(
@@ -685,5 +693,6 @@ describe("AppComponent shell", () => {
     );
     await f.whenStable();
     expect(ctx.isOpen()).toBe(false);
+    expect(btn.getAttribute("aria-expanded")).toBe("false");
   });
 });

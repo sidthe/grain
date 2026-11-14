@@ -929,11 +929,18 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
     this.selectAndOpen(key);
   }
 
-  // pickKey activates a focused card or row on Enter or Space and consumes
-  // the key so page-level shortcuts do not also act on it.
+  private consumeKey(ev: Event): void {
+    ev.preventDefault();
+    ev.stopPropagation();
+  }
+
+  // pickKey activates a focused card or row on Enter or Space and stops
+  // propagation so ancestor and page-level shortcuts do not also act on it.
   protected pickKey(ev: Event, key: string): void {
     if (ev.target !== ev.currentTarget) return;
-    ev.preventDefault();
+    if (document.querySelector('[aria-modal="true"], #account-popover')) return;
+    this.consumeKey(ev);
+    if ((ev as KeyboardEvent).repeat) return;
     this.selectAndOpen(key);
   }
 
@@ -1086,40 +1093,46 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
       return;
     }
     if (ev.metaKey || ev.ctrlKey || ev.altKey || ev.repeat) return;
-    if (document.querySelector('[aria-modal="true"]')) return;
+    if (document.querySelector('[aria-modal="true"], #account-popover')) return;
     const letters = this.keyboard.enabled();
     if (letters && ev.key === "v") {
-      ev.preventDefault();
+      this.consumeKey(ev);
       this.setView(this.activeView() === "list" ? "cards" : "list");
     } else if (letters && ev.key === "/") {
-      ev.preventDefault();
+      this.consumeKey(ev);
       this.searchEl()?.nativeElement.focus();
     } else if (letters && ev.key === "p") {
-      ev.preventDefault();
+      this.consumeKey(ev);
       this.setScope("people");
     } else if (letters && ev.key === "s") {
-      ev.preventDefault();
+      this.consumeKey(ev);
       this.setScope("system");
     } else if (letters && ev.key === "a" && !ev.shiftKey) {
-      ev.preventDefault();
+      this.consumeKey(ev);
       this.setScope("all");
     } else if ((letters && ev.key === "j") || ev.key === "ArrowDown") {
-      ev.preventDefault();
+      this.consumeKey(ev);
       this.stepStreamFocus(1);
     } else if ((letters && ev.key === "k") || ev.key === "ArrowUp") {
-      ev.preventDefault();
+      this.consumeKey(ev);
       this.stepStreamFocus(-1);
-    } else if (ev.key === "Enter") {
+    } else if (ev.key === "Enter" && !ev.shiftKey) {
       const target = ev.target as HTMLElement | null;
-      if (target?.closest?.("a, button, [data-ws-row-trigger]")) return;
+      if (
+        target?.closest?.(
+          'a, button, summary, [role="button"], [role="link"], [role="menuitem"], [role="option"], [role="switch"], [role="tab"], [role="checkbox"], [role="separator"], [data-ws-row-trigger]',
+        )
+      ) {
+        return;
+      }
       const sel = this.selectedListKey();
       if (sel) {
-        ev.preventDefault();
+        this.consumeKey(ev);
         this.selectAndOpen(sel);
       }
     } else if (ev.key === "Escape") {
       if (this.selectedListKey()) {
-        ev.preventDefault();
+        this.consumeKey(ev);
         this.store.lastSelectedKey.set(null);
         this.setPickedKey(null);
       }

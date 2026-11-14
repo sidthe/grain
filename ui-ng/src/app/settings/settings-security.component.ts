@@ -60,6 +60,8 @@ interface ExternalTokenRow {
   owner?: string;
   scopeSet?: string;
   scopes?: string[];
+  resolvedScopes?: string[];
+  repos?: string[];
   revokedAt?: string | null;
   revoked?: boolean;
   expiresAt?: string | null;
@@ -82,6 +84,267 @@ interface AuditEventRow {
   kind: "config" | "secret" | "access";
   action: string;
   detail: string;
+}
+
+export interface TokenScopeValidation {
+  scopes: string[];
+  error: string | null;
+}
+
+export interface TokenScopeSummary {
+  label: string;
+  resolvedDetail: string | null;
+  missingScopes: boolean;
+}
+
+/** Validates comma-separated gma_ token scope specifications before submission. */
+export function validateTokenScopes(raw: string): TokenScopeValidation {
+  const parts = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (parts.length === 0) {
+    return {
+      scopes: [],
+      error:
+        "Enter at least one token scope (for example tasks:read,tasks:write).",
+    };
+  }
+  const scopes: string[] = [];
+  const repoRe = /^[^/\s@]+\/[^/\s@]+$/;
+  const nameRe = /^[a-z0-9:*._-]+$/i;
+  for (const part of parts) {
+    if (/\s/.test(part)) {
+      return {
+        scopes: [],
+        error: `Scope "${part}" contains whitespace; separate scopes with commas.`,
+      };
+    }
+    const stripped = part.startsWith("api:") ? part.slice(4) : part;
+    if (!stripped) {
+      return {
+        scopes: [],
+        error: `Scope "${part}" is missing a scope or scope-set name after "api:".`,
+      };
+    }
+    const atIdx = stripped.indexOf("@");
+    const target = atIdx >= 0 ? stripped.slice(0, atIdx) : stripped;
+    if (!target) {
+      return {
+        scopes: [],
+        error: `Scope "${part}" is missing a scope name before "@".`,
+      };
+    }
+    if (atIdx >= 0) {
+      const repo = stripped.slice(atIdx + 1);
+      if (!repoRe.test(repo)) {
+        return {
+          scopes: [],
+          error: `Scope "${part}" must target a repository formatted as owner/name.`,
+        };
+      }
+    }
+    if (target.toLowerCase() === "internal") {
+      return {
+        scopes: [],
+        error: `Scope "${part}" uses "internal", which is reserved for Grain internals and cannot be granted.`,
+      };
+    }
+    if (
+      !nameRe.test(target) ||
+      target.startsWith(":") ||
+      target.endsWith(":")
+    ) {
+      return {
+        scopes: [],
+        error: `Scope "${part}" has invalid syntax; use <area>:<level> (for example tasks:read) or a named preset.`,
+      };
+    }
+    if (!scopes.includes(part)) {
+      scopes.push(part);
+    }
+  }
+  return { scopes, error: null };
+}
+
+/** Validates GCP service account key form fields prior to submission. */
+export function validateGcpKeyForm(form: {
+  name: string;
+  projectId: string;
+  serviceAccountEmail: string;
+  countRaw: string;
+  maxKeyAge: string;
+}): { error: string | null; count: number } {
+  const name = form.name.trim();
+  const projectId = form.projectId.trim();
+  const sa = form.serviceAccountEmail.trim();
+  if (!name || !projectId || !sa) {
+    return {
+      error:
+        "Key alias, project ID, and service account email are all required.",
+      count: 0,
+    };
+  }
+  if (!sa.includes("@") || /\s/.test(sa)) {
+    return {
+      error: `Service account email "${sa}" must be a valid email address.`,
+      count: 0,
+    };
+  }
+  const rawCount = form.countRaw.trim();
+  let count = 0;
+  if (rawCount) {
+    const parsed = Number(rawCount);
+    if (!Number.isFinite(parsed) || !Number.isInteger(parsed) || parsed < 0) {
+      return {
+        error: "Account pool count must be a non-negative integer.",
+        count: 0,
+      };
+    }
+    count = parsed;
+  }
+  const age = form.maxKeyAge.trim();
+  if (age && !/^(\d+(?:\.\d+)?(ns|us|µs|ms|s|m|h))+$/.test(age)) {
+    return {
+      error: `Max key age "${age}" must be a valid Go duration (for example 24h or 30m).`,
+      count: 0,
+    };
+  }
+  return { error: null, count };
+}
+
+/** Summarizes an existing token's configured scopes and detects missing scopes. */
+export function summarizeTokenScopes(tok: ExternalTokenRow): TokenScopeSummary {
+  const scopeSet = tok.scopeSet?.trim() ?? "";
+  const explicit = (tok.scopes ?? []).map((s) => s.trim()).filter(Boolean);
+  const resolved = (tok.resolvedScopes ?? [])
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const repos = (tok.repos ?? []).map((r) => r.trim()).filter(Boolean);
+  if (!scopeSet && explicit.length === 0 && resolved.length === 0) {
+    return {
+      label: "Missing scopes",
+      resolvedDetail: null,
+      missingScopes: true,
+    };
+  }
+  const primaryParts: string[] = [];
+  if (scopeSet) primaryParts.push(scopeSet);
+  if (explicit.length > 0) primaryParts.push(explicit.join(", "));
+  const label =
+    primaryParts.length > 0 ? primaryParts.join(" + ") : resolved.join(", ");
+  const details: string[] = [];
+  if (resolved.length > 0 && primaryParts.length > 0) {
+    const joined = resolved.join(", ");
+    if (joined !== label) {
+      details.push(`resolved: ${joined}`);
+    }
+  }
+  if (repos.length > 0) {
+    details.push(`repos: ${repos.join(", ")}`);
+  }
+  return {
+    label,
+    resolvedDetail: details.length > 0 ? details.join(" · ") : null,
+    missingScopes: false,
+  };
+}
+
+/** Lists missing required metadata fields on a stored GCP key entry. */
+export function missingGcpKeyFields(gk: GcpKeyRow): string[] {
+  const missing: string[] = [];
+  if (!gk.name?.trim()) missing.push("name");
+  if (!gk.projectId?.trim()) missing.push("projectId");
+  if (!gk.serviceAccountEmail?.trim()) missing.push("serviceAccountEmail");
+  return missing;
+}
+
+function unwrapArrayPayload(
+  raw: unknown,
+  keys: readonly string[],
+): Record<string, unknown>[] {
+  let list: unknown = raw;
+  if (!Array.isArray(list) && raw && typeof raw === "object") {
+    const rec = raw as Record<string, unknown>;
+    for (const k of keys) {
+      if (Array.isArray(rec[k])) {
+        list = rec[k];
+        break;
+      }
+    }
+  }
+  if (!Array.isArray(list)) return [];
+  return list.filter(
+    (item): item is Record<string, unknown> =>
+      Boolean(item) && typeof item === "object" && !Array.isArray(item),
+  );
+}
+
+function asStringList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((v): v is string => typeof v === "string")
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+/** Normalizes principal rows defensively when API responses omit expected keys. */
+export function normalizePrincipals(raw: unknown): PrincipalRow[] {
+  return unwrapArrayPayload(raw, ["entries", "principals", "items"]).map(
+    (r) => ({
+      entry: typeof r["entry"] === "string" ? r["entry"].trim() : "",
+      role: typeof r["role"] === "string" ? r["role"].trim() : "",
+      label: typeof r["label"] === "string" ? r["label"].trim() : undefined,
+      addedBy:
+        typeof r["addedBy"] === "string" ? r["addedBy"].trim() : undefined,
+    }),
+  );
+}
+
+/** Normalizes external agent token rows defensively when API responses omit keys. */
+export function normalizeExternalTokens(raw: unknown): ExternalTokenRow[] {
+  return unwrapArrayPayload(raw, ["tokens", "items"]).map((r) => ({
+    id: typeof r["id"] === "string" ? r["id"].trim() : "",
+    name: typeof r["name"] === "string" ? r["name"].trim() : "",
+    tokenPrefix:
+      typeof r["tokenPrefix"] === "string"
+        ? r["tokenPrefix"].trim()
+        : undefined,
+    prefix: typeof r["prefix"] === "string" ? r["prefix"].trim() : undefined,
+    owner: typeof r["owner"] === "string" ? r["owner"].trim() : undefined,
+    scopeSet:
+      typeof r["scopeSet"] === "string" ? r["scopeSet"].trim() : undefined,
+    scopes: asStringList(r["scopes"]),
+    resolvedScopes: asStringList(r["resolvedScopes"]),
+    repos: asStringList(r["repos"]),
+    revokedAt: typeof r["revokedAt"] === "string" ? r["revokedAt"] : null,
+    revoked: Boolean(r["revoked"]),
+    expiresAt: typeof r["expiresAt"] === "string" ? r["expiresAt"] : null,
+    active: typeof r["active"] === "boolean" ? r["active"] : undefined,
+  }));
+}
+
+/** Normalizes GCP key rows defensively when API responses omit keys. */
+export function normalizeGcpKeys(raw: unknown): GcpKeyRow[] {
+  return unwrapArrayPayload(raw, ["keys", "items"]).map((r) => ({
+    name: typeof r["name"] === "string" ? r["name"].trim() : "",
+    projectId:
+      typeof r["projectId"] === "string" ? r["projectId"].trim() : undefined,
+    serviceAccountEmail:
+      typeof r["serviceAccountEmail"] === "string"
+        ? r["serviceAccountEmail"].trim()
+        : undefined,
+    serviceAccountCount:
+      typeof r["serviceAccountCount"] === "number"
+        ? r["serviceAccountCount"]
+        : undefined,
+    maxKeyAge:
+      typeof r["maxKeyAge"] === "string" ? r["maxKeyAge"].trim() : undefined,
+    minterCredential:
+      typeof r["minterCredential"] === "string"
+        ? r["minterCredential"].trim()
+        : undefined,
+  }));
 }
 
 const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
@@ -114,13 +377,66 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
             >
           </div>
 
+          @if (missingRoleSets().length > 0) {
+            <div
+              class="s-banner error"
+              role="alert"
+              data-testid="access-missing-role-sets"
+            >
+              <span
+                >Missing required role scope sets:
+                <strong class="s-mono">{{
+                  missingRoleSets().join(", ")
+                }}</strong
+                >. Tokens or role assignments referencing these sets lack
+                required scope definitions.</span
+              >
+            </div>
+          }
+
           @if (!access.can("GET /api/access/principals")) {
-            <div class="s-banner warn" data-testid="principals-restricted">
+            <div
+              class="s-banner warn"
+              role="status"
+              data-testid="principals-restricted"
+            >
               {{ access.deniedReason("GET /api/access/principals") }}
             </div>
           } @else {
+            @if (principalsError(); as pErr) {
+              <div
+                class="s-banner error"
+                role="alert"
+                data-testid="principals-error"
+              >
+                <span>{{ pErr }}</span>
+                <button
+                  type="button"
+                  class="btn-text s-btn-sm"
+                  (click)="principalsError.set(null)"
+                >
+                  Dismiss
+                </button>
+              </div>
+            }
+
+            @if (!canWritePrincipals()) {
+              <div
+                class="s-banner readonly"
+                role="status"
+                data-testid="principals-write-restricted"
+              >
+                {{ access.deniedReason("POST /api/access/principals") }}
+              </div>
+            }
+
             @if (principals().length > 0) {
-              <div class="s-table-wrap">
+              <div
+                class="s-table-wrap"
+                tabindex="0"
+                role="region"
+                aria-label="Access principals"
+              >
                 <table class="s-table" aria-label="Access principals">
                   <thead>
                     <tr>
@@ -130,40 +446,71 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
                     </tr>
                   </thead>
                   <tbody>
-                    @for (p of principals(); track p.entry) {
-                      <tr [attr.data-testid]="'principal-row-' + p.entry">
+                    @for (p of principals(); track p.entry || $index) {
+                      <tr
+                        [attr.data-testid]="
+                          'principal-row-' + (p.entry || $index)
+                        "
+                      >
                         <td>
                           <div class="s-cell-stack">
                             <span class="s-cell-title">{{
-                              p.label || p.entry
+                              p.label || p.entry || "(missing principal)"
                             }}</span>
-                            @if (p.label) {
+                            @if (p.label && p.entry) {
                               <span class="s-meta-mono">{{ p.entry }}</span>
                             }
                           </div>
                         </td>
                         <td>
-                          <g-pill-select
-                            [testid]="'role-select-' + p.entry"
-                            [ariaLabel]="'Role for ' + p.entry"
-                            align="left"
-                            [options]="roleOptions()"
-                            [value]="p.role"
-                            [disabled]="
-                              !access.can(
-                                'PATCH /api/access/principals/{entry}'
-                              )
-                            "
-                            (valueChange)="updatePrincipalRole(p.entry, $event)"
-                          />
+                          @if (!p.role) {
+                            <span
+                              class="status-pill warn"
+                              [attr.data-testid]="
+                                'principal-missing-role-' + (p.entry || $index)
+                              "
+                              >Missing role</span
+                            >
+                          } @else {
+                            <g-pill-select
+                              [testid]="'role-select-' + p.entry"
+                              [ariaLabel]="'Role for ' + p.entry"
+                              align="left"
+                              [options]="roleOptions()"
+                              [value]="p.role"
+                              [disabled]="
+                                !p.entry ||
+                                !access.can(
+                                  'PATCH /api/access/principals/{entry}'
+                                )
+                              "
+                              (valueChange)="
+                                updatePrincipalRole(p.entry, $event)
+                              "
+                            />
+                          }
                         </td>
                         <td class="s-actions-cell">
                           <div class="s-row-actions">
                             <button
                               type="button"
                               class="btn-text s-btn-sm"
-                              [attr.data-testid]="'remove-principal-' + p.entry"
+                              [attr.data-testid]="
+                                'remove-principal-' + (p.entry || $index)
+                              "
+                              [attr.title]="
+                                !p.entry
+                                  ? 'Principal entry key is missing'
+                                  : !access.can(
+                                        'DELETE /api/access/principals/{entry}'
+                                      )
+                                    ? access.deniedReason(
+                                        'DELETE /api/access/principals/{entry}'
+                                      )
+                                    : null
+                              "
                               [disabled]="
+                                !p.entry ||
                                 !access.can(
                                   'DELETE /api/access/principals/{entry}'
                                 )
@@ -179,6 +526,10 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
                   </tbody>
                 </table>
               </div>
+            } @else if (!principalsError()) {
+              <p class="s-card-desc" data-testid="principals-empty">
+                No explicit RBAC principals configured.
+              </p>
             }
 
             <div class="s-subsection">
@@ -238,6 +589,11 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
                   type="button"
                   class="btn-primary"
                   data-testid="add-principal-btn"
+                  [attr.title]="
+                    !access.can('POST /api/access/principals')
+                      ? access.deniedReason('POST /api/access/principals')
+                      : null
+                  "
                   [disabled]="
                     !newPrincipalEntry().trim() ||
                     !access.can('POST /api/access/principals')
@@ -289,6 +645,11 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
               role="switch"
               data-testid="switch-external-agent-api"
               [attr.aria-checked]="Boolean(state.val('externalAgentApi', true))"
+              [attr.title]="
+                !canWriteSettings()
+                  ? access.deniedReason('POST /api/settings')
+                  : null
+              "
               [disabled]="!canWriteSettings()"
               aria-label="Accept external agent tokens"
               (click)="
@@ -299,6 +660,19 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
               "
             ></button>
           </div>
+
+          @if (tokensError(); as tErr) {
+            <div class="s-banner error" role="alert" data-testid="tokens-error">
+              <span>{{ tErr }}</span>
+              <button
+                type="button"
+                class="btn-text s-btn-sm"
+                (click)="tokensError.set(null)"
+              >
+                Dismiss
+              </button>
+            </div>
+          }
 
           @if (mintedTokenSecret(); as secret) {
             <div class="s-banner ok" data-testid="minted-gma-token">
@@ -316,23 +690,79 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
             </div>
           }
 
-          @if (tokens().length > 0) {
-            <div class="s-table-wrap">
+          @if (!access.can("GET /api/external-agents/tokens")) {
+            <div
+              class="s-banner warn"
+              role="status"
+              data-testid="tokens-restricted"
+            >
+              {{ access.deniedReason("GET /api/external-agents/tokens") }}
+            </div>
+          } @else if (tokens().length > 0) {
+            <div
+              class="s-table-wrap"
+              tabindex="0"
+              role="region"
+              aria-label="External agent tokens"
+            >
               <table class="s-table" aria-label="External agent tokens">
                 <thead>
                   <tr>
                     <th>Name</th>
-                    <th>Scope set</th>
+                    <th>Scopes</th>
                     <th>State</th>
                     <th class="s-actions-cell">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  @for (tok of tokens(); track tok.id) {
+                  @for (tok of tokens(); track tok.id || $index) {
                     @let tokState = tokenStatus(tok);
-                    <tr [attr.data-testid]="'gma-token-row-' + tok.id">
-                      <td class="s-mono">{{ tok.name }}</td>
-                      <td>{{ tok.scopeSet || "custom" }}</td>
+                    @let scopeInfo = tokenScopeSummary(tok);
+                    @let tokKey = tok.id || $index;
+                    <tr [attr.data-testid]="'gma-token-row-' + tokKey">
+                      <td>
+                        <div class="s-cell-stack">
+                          <span class="s-cell-title s-mono">{{
+                            tok.name || "(unnamed token)"
+                          }}</span>
+                          @if (tok.tokenPrefix || tok.prefix) {
+                            <span class="s-meta-mono"
+                              >{{ tok.tokenPrefix || tok.prefix }}…</span
+                            >
+                          }
+                          @if (!tok.id) {
+                            <span
+                              class="status-pill warn"
+                              [attr.data-testid]="
+                                'gma-token-missing-id-' + tokKey
+                              "
+                              >Missing token ID</span
+                            >
+                          }
+                        </div>
+                      </td>
+                      <td>
+                        @if (scopeInfo.missingScopes) {
+                          <span
+                            class="status-pill warn"
+                            [attr.data-testid]="
+                              'gma-token-missing-scopes-' + tokKey
+                            "
+                            >{{ scopeInfo.label }}</span
+                          >
+                        } @else {
+                          <div class="s-cell-stack">
+                            <span
+                              class="s-mono"
+                              [attr.data-testid]="'gma-token-scopes-' + tokKey"
+                              >{{ scopeInfo.label }}</span
+                            >
+                            @if (scopeInfo.resolvedDetail; as detail) {
+                              <span class="s-meta">{{ detail }}</span>
+                            }
+                          </div>
+                        }
+                      </td>
                       <td>
                         <span
                           [class]="
@@ -343,7 +773,7 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
                                 ? 'error'
                                 : 'neutral')
                           "
-                          [attr.data-testid]="'gma-token-status-' + tok.id"
+                          [attr.data-testid]="'gma-token-status-' + tokKey"
                         >
                           {{ tokState }}
                         </span>
@@ -353,8 +783,20 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
                           <button
                             type="button"
                             class="btn-tonal s-btn-sm"
-                            [attr.data-testid]="'rotate-token-' + tok.id"
+                            [attr.data-testid]="'rotate-token-' + tokKey"
+                            [attr.title]="
+                              !tok.id
+                                ? 'Missing token id key'
+                                : !access.can(
+                                      'POST /api/external-agents/tokens/{id}/rotate'
+                                    )
+                                  ? access.deniedReason(
+                                      'POST /api/external-agents/tokens/{id}/rotate'
+                                    )
+                                  : null
+                            "
                             [disabled]="
+                              !tok.id ||
                               !access.can(
                                 'POST /api/external-agents/tokens/{id}/rotate'
                               )
@@ -366,11 +808,24 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
                           <button
                             type="button"
                             class="btn-tonal s-btn-sm"
-                            [attr.data-testid]="'revoke-token-' + tok.id"
+                            [attr.data-testid]="'revoke-token-' + tokKey"
+                            [attr.title]="
+                              !tok.id
+                                ? 'Missing token id key'
+                                : !access.can(
+                                      'POST /api/external-agents/tokens/{id}/revoke'
+                                    )
+                                  ? access.deniedReason(
+                                      'POST /api/external-agents/tokens/{id}/revoke'
+                                    )
+                                  : null
+                            "
                             [disabled]="
+                              !tok.id ||
                               !access.can(
                                 'POST /api/external-agents/tokens/{id}/revoke'
-                              ) || tokState !== 'active'
+                              ) ||
+                              tokState !== 'active'
                             "
                             (click)="revokeToken(tok.id)"
                           >
@@ -379,7 +834,20 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
                           <button
                             type="button"
                             class="btn-text s-btn-sm"
+                            [attr.data-testid]="'delete-token-' + tokKey"
+                            [attr.title]="
+                              !tok.id
+                                ? 'Missing token id key'
+                                : !access.can(
+                                      'DELETE /api/external-agents/tokens/{id}'
+                                    )
+                                  ? access.deniedReason(
+                                      'DELETE /api/external-agents/tokens/{id}'
+                                    )
+                                  : null
+                            "
                             [disabled]="
+                              !tok.id ||
                               !access.can(
                                 'DELETE /api/external-agents/tokens/{id}'
                               )
@@ -395,12 +863,25 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
                 </tbody>
               </table>
             </div>
+          } @else if (!tokensError()) {
+            <p class="s-card-desc" data-testid="tokens-empty">
+              No external agent tokens have been minted yet.
+            </p>
           }
 
           <div class="s-subsection">
             <div class="s-subhead">
               <h4 class="s-subhead-title">Mint external agent token</h4>
             </div>
+            @if (!canMintTokens()) {
+              <div
+                class="s-banner warn"
+                role="status"
+                data-testid="tokens-admin-restricted"
+              >
+                {{ access.deniedReason("POST /api/external-agents/tokens") }}
+              </div>
+            }
             <div class="s-grid">
               <div class="s-field">
                 <label class="s-label" for="tk-name">Token name</label>
@@ -411,7 +892,7 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
                   data-testid="input-gma-token-name"
                   placeholder="ci-bot"
                   [value]="newTokenName()"
-                  [disabled]="!access.can('POST /api/external-agents/tokens')"
+                  [disabled]="!canMintTokens()"
                   (input)="newTokenName.set($any($event.target).value)"
                 />
               </div>
@@ -426,9 +907,26 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
                   data-testid="input-gma-token-scopes"
                   placeholder="tasks:read,tasks:write"
                   [value]="newTokenScopes()"
-                  [disabled]="!access.can('POST /api/external-agents/tokens')"
+                  [disabled]="!canMintTokens()"
+                  [attr.aria-invalid]="
+                    canMintTokens() && tokenScopesError() ? 'true' : null
+                  "
+                  [attr.aria-describedby]="
+                    canMintTokens() && tokenScopesError()
+                      ? 'tk-scopes-error'
+                      : null
+                  "
                   (input)="newTokenScopes.set($any($event.target).value)"
                 />
+                @if (canMintTokens() && tokenScopesError(); as scErr) {
+                  <span
+                    id="tk-scopes-error"
+                    class="s-field-error"
+                    role="alert"
+                    data-testid="gma-token-scopes-error"
+                    >{{ scErr }}</span
+                  >
+                }
               </div>
             </div>
             <div class="s-inline">
@@ -436,10 +934,12 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
                 type="button"
                 class="btn-tonal"
                 data-testid="mint-gma-token-btn"
-                [disabled]="
-                  !newTokenName().trim() ||
-                  !access.can('POST /api/external-agents/tokens')
+                [attr.title]="
+                  !canMintTokens()
+                    ? access.deniedReason('POST /api/external-agents/tokens')
+                    : null
                 "
+                [disabled]="!newTokenName().trim() || !canMintTokens()"
                 (click)="mintToken()"
               >
                 Mint gma_ token
@@ -450,6 +950,22 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
 
         <div class="s-card" data-testid="card-gcp-keys">
           <h3 class="s-card-title">GCP service account keys</h3>
+          @if (gcpKeysError(); as gErr) {
+            <div
+              class="s-banner error"
+              role="alert"
+              data-testid="gcp-keys-error"
+            >
+              <span>{{ gErr }}</span>
+              <button
+                type="button"
+                class="btn-text s-btn-sm"
+                (click)="gcpKeysError.set(null)"
+              >
+                Dismiss
+              </button>
+            </div>
+          }
           <div class="s-grid">
             <div class="s-field">
               <label class="s-label" for="gcp-proj"
@@ -461,6 +977,11 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
                 type="text"
                 data-testid="input-default-gcp-project"
                 [value]="state.val('gcpProject', '')"
+                [attr.title]="
+                  !canWriteSettings()
+                    ? access.deniedReason('POST /api/settings')
+                    : null
+                "
                 [disabled]="!canWriteSettings()"
                 (input)="
                   state.setField('gcpProject', $any($event.target).value)
@@ -477,6 +998,11 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
                 type="text"
                 data-testid="input-default-gcp-sa"
                 [value]="state.val('gcpServiceAccountEmail', '')"
+                [attr.title]="
+                  !canWriteSettings()
+                    ? access.deniedReason('POST /api/settings')
+                    : null
+                "
                 [disabled]="!canWriteSettings()"
                 (input)="
                   state.setField(
@@ -487,27 +1013,77 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
               />
             </div>
           </div>
-          @if (gcpKeys().length > 0) {
+          @if (!access.can("GET /api/gcp-keys")) {
+            <div
+              class="s-banner warn"
+              role="status"
+              data-testid="gcp-keys-restricted"
+            >
+              {{ access.deniedReason("GET /api/gcp-keys") }}
+            </div>
+          } @else if (gcpKeys().length > 0) {
             <div class="s-inline">
-              @for (gk of gcpKeys(); track gk.name) {
+              @for (gk of gcpKeys(); track gk.name || $index) {
+                @let missingFields = missingGcpFields(gk);
+                @let gkKey = gk.name || $index;
                 <span
-                  class="status-pill neutral s-mono"
-                  [attr.data-testid]="'gcp-key-pill-' + gk.name"
+                  [class]="
+                    'status-pill s-mono ' +
+                    (missingFields.length > 0 ? 'warn' : 'neutral')
+                  "
+                  [attr.data-testid]="'gcp-key-pill-' + gkKey"
+                  [attr.title]="
+                    missingFields.length > 0
+                      ? 'Missing required API key metadata: ' +
+                        missingFields.join(', ')
+                      : gk.serviceAccountEmail || null
+                  "
                 >
-                  {{ gk.name }}{{ gk.projectId ? " · " + gk.projectId : "" }}
+                  {{ gk.name || "(unnamed key)"
+                  }}{{ gk.projectId ? " · " + gk.projectId : ""
+                  }}{{
+                    missingFields.length > 0
+                      ? " (missing " + missingFields.join(", ") + ")"
+                      : ""
+                  }}
                   <button
                     type="button"
                     class="btn-text s-btn-sm"
                     style="padding: 0 4px; min-width: 24px; min-height: 24px"
-                    [attr.aria-label]="'Delete GCP key ' + gk.name"
-                    [attr.data-testid]="'delete-gcp-key-' + gk.name"
-                    [disabled]="!access.can('DELETE /api/gcp-keys/{name}')"
+                    [attr.aria-label]="
+                      'Delete GCP key ' + (gk.name || 'unnamed')
+                    "
+                    [attr.data-testid]="'delete-gcp-key-' + gkKey"
+                    [attr.title]="
+                      !gk.name
+                        ? 'GCP key entry is missing its name key'
+                        : !access.can('DELETE /api/gcp-keys/{name}')
+                          ? access.deniedReason('DELETE /api/gcp-keys/{name}')
+                          : null
+                    "
+                    [disabled]="
+                      !gk.name || !access.can('DELETE /api/gcp-keys/{name}')
+                    "
                     (click)="deleteGcpKey(gk.name)"
                   >
                     ×
                   </button>
                 </span>
               }
+            </div>
+          } @else if (!gcpKeysError()) {
+            <p class="s-card-desc" data-testid="gcp-keys-empty">
+              No GCP service account keys configured.
+            </p>
+          }
+
+          @if (!access.can("POST /api/gcp-keys")) {
+            <div
+              class="s-banner warn"
+              role="status"
+              data-testid="gcp-keys-write-restricted"
+            >
+              {{ access.deniedReason("POST /api/gcp-keys") }}
             </div>
           }
           <div class="s-grid">
@@ -601,6 +1177,11 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
               type="button"
               class="btn-tonal s-btn-sm"
               data-testid="save-gcp-key-btn"
+              [attr.title]="
+                !access.can('POST /api/gcp-keys')
+                  ? access.deniedReason('POST /api/gcp-keys')
+                  : null
+              "
               [disabled]="
                 !newGcpKeyName().trim() ||
                 !newGcpKeyProject().trim() ||
@@ -629,82 +1210,141 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
               type="button"
               class="btn-tonal s-btn-sm"
               data-testid="refresh-audit-btn"
+              [disabled]="!canViewAudit()"
+              [attr.title]="
+                !canViewAudit()
+                  ? 'Requires at least one of settings:read, secrets:read, or access:read'
+                  : null
+              "
               (click)="loadAuditLogs()"
             >
               Refresh
             </button>
           </div>
 
-          <form
-            class="s-inline"
-            role="search"
-            autocomplete="off"
-            (submit)="$event.preventDefault()"
-          >
-            <input
-              class="s-input s-input-inline"
-              type="search"
-              name="grain-audit-filter"
-              autocomplete="off"
-              spellcheck="false"
-              data-lpignore="true"
-              data-1p-ignore="true"
-              data-form-type="other"
-              aria-label="Filter by actor or action"
-              data-testid="audit-actor-filter"
-              placeholder="Filter actor or action…"
-              [value]="auditFilterText()"
-              (input)="auditFilterText.set($any($event.target).value)"
-            />
-            <g-pill-select
-              testid="audit-kind-filter"
-              ariaLabel="Audit log category"
-              align="left"
-              [options]="auditKindOptions"
-              [value]="auditKindFilter()"
-              (valueChange)="auditKindFilter.set($event)"
-            />
-            <g-pill-select
-              testid="audit-time-filter"
-              ariaLabel="Audit time window"
-              align="left"
-              [options]="auditTimeOptions"
-              [value]="auditTimeFilter()"
-              (valueChange)="auditTimeFilter.set($event)"
-            />
-          </form>
-
-          @if (filteredAuditEvents().length === 0) {
-            <p class="s-card-desc" data-testid="audit-empty">
-              No matching audit events in this window.
-            </p>
-          } @else {
-            <div class="s-table-wrap">
-              <table class="s-table" aria-label="Audit events">
-                <thead>
-                  <tr>
-                    <th>Timestamp</th>
-                    <th>Category</th>
-                    <th>Actor</th>
-                    <th>Action</th>
-                    <th>Detail</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  @for (ev of filteredAuditEvents(); track ev.id) {
-                    <tr data-testid="audit-row">
-                      <td class="s-num">{{ ev.at }}</td>
-                      <td>
-                        <span class="status-pill neutral">{{ ev.kind }}</span>
-                      </td>
-                      <td class="s-mono">{{ ev.actor }}</td>
-                      <td class="s-mono">{{ ev.action }}</td>
-                      <td>{{ ev.detail }}</td>
-                    </tr>
-                  }
-                </tbody>
-              </table>
+          @if (!canViewAudit()) {
+            <div
+              class="s-banner warn"
+              role="status"
+              data-testid="audit-restricted"
+            >
+              <span>
+                Your current role or token lacks required audit read scopes
+                (<span class="s-mono">settings:read</span>,
+                <span class="s-mono">secrets:read</span>, or
+                <span class="s-mono">access:read</span>).
+              </span>
             </div>
+          } @else {
+            @if (auditError(); as aErr) {
+              <div
+                class="s-banner error"
+                role="alert"
+                data-testid="audit-error"
+              >
+                <span>{{ aErr }}</span>
+                <button
+                  type="button"
+                  class="btn-text s-btn-sm"
+                  (click)="auditError.set(null)"
+                >
+                  Dismiss
+                </button>
+              </div>
+            }
+
+            @if (missingAuditScopes().length > 0) {
+              <div
+                class="s-banner readonly"
+                role="status"
+                data-testid="audit-partial-restricted"
+              >
+                <span>
+                  Partial audit coverage: your token lacks
+                  <span class="s-mono">{{
+                    missingAuditScopes().join(", ")
+                  }}</span>
+                  , so those event streams are hidden.
+                </span>
+              </div>
+            }
+
+            <form
+              class="s-inline"
+              role="search"
+              autocomplete="off"
+              (submit)="$event.preventDefault()"
+            >
+              <input
+                class="s-input s-input-inline"
+                type="search"
+                name="grain-audit-filter"
+                autocomplete="off"
+                spellcheck="false"
+                data-lpignore="true"
+                data-1p-ignore="true"
+                data-form-type="other"
+                aria-label="Filter by actor or action"
+                data-testid="audit-actor-filter"
+                placeholder="Filter actor or action…"
+                [value]="auditFilterText()"
+                (input)="auditFilterText.set($any($event.target).value)"
+              />
+              <g-pill-select
+                testid="audit-kind-filter"
+                ariaLabel="Audit log category"
+                align="left"
+                [options]="auditKindOptions"
+                [value]="auditKindFilter()"
+                (valueChange)="auditKindFilter.set($event)"
+              />
+              <g-pill-select
+                testid="audit-time-filter"
+                ariaLabel="Audit time window"
+                align="left"
+                [options]="auditTimeOptions"
+                [value]="auditTimeFilter()"
+                (valueChange)="auditTimeFilter.set($event)"
+              />
+            </form>
+
+            @if (filteredAuditEvents().length === 0) {
+              <p class="s-card-desc" data-testid="audit-empty">
+                No matching audit events in this window.
+              </p>
+            } @else {
+              <div
+                class="s-table-wrap"
+                tabindex="0"
+                role="region"
+                aria-label="Audit events"
+              >
+                <table class="s-table" aria-label="Audit events">
+                  <thead>
+                    <tr>
+                      <th>Timestamp</th>
+                      <th>Category</th>
+                      <th>Actor</th>
+                      <th>Action</th>
+                      <th>Detail</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (ev of filteredAuditEvents(); track ev.id) {
+                      <tr data-testid="audit-row">
+                        <td class="s-num">{{ ev.at }}</td>
+                        <td>
+                          <span class="status-pill neutral">{{ ev.kind }}</span>
+                        </td>
+                        <td class="s-mono">{{ ev.actor }}</td>
+                        <td class="s-mono">{{ ev.action }}</td>
+                        <td>{{ ev.detail }}</td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+            }
           }
         </div>
       }
@@ -724,6 +1364,8 @@ export class SettingsSecurityComponent implements OnInit, OnChanges {
   readonly section = input.required<SettingsSectionId>();
 
   protected readonly Boolean = Boolean;
+  protected readonly tokenScopeSummary = summarizeTokenScopes;
+  protected readonly missingGcpFields = missingGcpKeyFields;
 
   protected readonly confirmRequest = signal<ConfirmRequest | null>(null);
   protected readonly roleOptions =
@@ -742,16 +1384,19 @@ export class SettingsSecurityComponent implements OnInit, OnChanges {
   ];
 
   protected readonly principals = signal<PrincipalRow[]>([]);
+  protected readonly principalsError = signal<string | null>(null);
   protected readonly newPrincipalEntry = signal("");
   protected readonly newPrincipalRole = signal("grain/developer");
   protected readonly newPrincipalReason = signal("");
 
   protected readonly tokens = signal<ExternalTokenRow[]>([]);
+  protected readonly tokensError = signal<string | null>(null);
   protected readonly newTokenName = signal("");
   protected readonly newTokenScopes = signal("tasks:read,tasks:write");
   protected readonly mintedTokenSecret = signal<string | null>(null);
 
   protected readonly gcpKeys = signal<GcpKeyRow[]>([]);
+  protected readonly gcpKeysError = signal<string | null>(null);
   protected readonly newGcpKeyName = signal("");
   protected readonly newGcpKeyProject = signal("");
   protected readonly newGcpKeySaEmail = signal("");
@@ -760,9 +1405,60 @@ export class SettingsSecurityComponent implements OnInit, OnChanges {
   protected readonly newGcpKeyMinter = signal("");
 
   protected readonly auditEvents = signal<AuditEventRow[]>([]);
+  protected readonly auditError = signal<string | null>(null);
   protected readonly auditFilterText = signal("");
   protected readonly auditKindFilter = signal("all");
   protected readonly auditTimeFilter = signal("all");
+
+  private initialized = false;
+
+  protected readonly missingRoleSets = computed(() =>
+    (this.state.config()?.access?.missing ?? []).filter(Boolean),
+  );
+
+  protected readonly tokenScopeCheck = computed(() =>
+    validateTokenScopes(this.newTokenScopes()),
+  );
+
+  protected readonly tokenScopesError = computed(
+    () => this.tokenScopeCheck().error,
+  );
+
+  protected readonly canWritePrincipals = computed(
+    () =>
+      this.access.can("POST /api/access/principals") ||
+      this.access.can("PATCH /api/access/principals/{entry}") ||
+      this.access.can("DELETE /api/access/principals/{entry}"),
+  );
+
+  protected readonly canMintTokens = computed(() =>
+    this.access.can("POST /api/external-agents/tokens"),
+  );
+
+  protected readonly canViewAudit = computed(
+    () =>
+      this.access.can("GET /api/deployment/config-audit") ||
+      this.access.can("GET /api/deployment/audit-logs") ||
+      this.access.can("GET /api/deployment/secret-audit") ||
+      this.access.can("GET /api/access/history"),
+  );
+
+  protected readonly missingAuditScopes = computed(() => {
+    const missing: string[] = [];
+    if (!this.access.can("GET /api/deployment/config-audit")) {
+      missing.push("settings:read");
+    }
+    if (
+      !this.access.can("GET /api/deployment/audit-logs") &&
+      !this.access.can("GET /api/deployment/secret-audit")
+    ) {
+      missing.push("secrets:read");
+    }
+    if (!this.access.can("GET /api/access/history")) {
+      missing.push("access:read");
+    }
+    return missing;
+  });
 
   protected readonly filteredAuditEvents = computed(() => {
     const q = this.auditFilterText().trim().toLowerCase();
@@ -789,11 +1485,14 @@ export class SettingsSecurityComponent implements OnInit, OnChanges {
   });
 
   ngOnInit(): void {
+    this.initialized = true;
     this.loadForSection();
   }
 
   ngOnChanges(): void {
-    this.loadForSection();
+    if (this.initialized) {
+      this.loadForSection();
+    }
   }
 
   protected canWriteSettings(): boolean {
@@ -828,10 +1527,19 @@ export class SettingsSecurityComponent implements OnInit, OnChanges {
     }
   }
 
+  private capture<T>(
+    p: Promise<T>,
+  ): Promise<{ value: T; error: null } | { value: null; error: unknown }> {
+    return p.then(
+      (value) => ({ value, error: null }),
+      (error: unknown) => ({ value: null, error }),
+    );
+  }
+
   private async loadAccessData(): Promise<void> {
     if (this.access.can("GET /api/access/principals")) {
-      try {
-        const p = await this.api.get<
+      const res = await this.capture(
+        this.api.get<
           | PrincipalRow[]
           | {
               entries?: PrincipalRow[];
@@ -839,64 +1547,95 @@ export class SettingsSecurityComponent implements OnInit, OnChanges {
               items?: PrincipalRow[];
               roles?: AccessRoleChoiceDto[];
             }
-        >("GET /api/access/principals");
-        if (Array.isArray(p)) {
-          this.principals.set(p);
-        } else {
-          this.principals.set(p?.entries ?? p?.principals ?? p?.items ?? []);
-          if (Array.isArray(p?.roles) && p.roles.length > 0) {
-            this.roleOptions.set(
-              p.roles.map((r) => ({
-                value: r.name,
-                label: r.description ? `${r.name} — ${r.description}` : r.name,
-              })),
-            );
-          }
+        >("GET /api/access/principals"),
+      );
+      if (res.error) {
+        this.principalsError.set(errText(res.error));
+      } else {
+        this.principalsError.set(null);
+        const p = res.value;
+        this.principals.set(normalizePrincipals(p));
+        if (
+          p &&
+          !Array.isArray(p) &&
+          Array.isArray(p.roles) &&
+          p.roles.length > 0
+        ) {
+          this.roleOptions.set(
+            p.roles.map((r) => ({
+              value: r.name,
+              label: r.description ? `${r.name} — ${r.description}` : r.name,
+            })),
+          );
         }
-      } catch {
-        // Non-fatal
       }
+    } else {
+      this.principals.set([]);
+      this.principalsError.set(null);
     }
     if (this.access.can("GET /api/external-agents/tokens")) {
-      try {
-        const t = await this.api.get<
+      const res = await this.capture(
+        this.api.get<
           | ExternalTokenRow[]
           | { tokens?: ExternalTokenRow[]; items?: ExternalTokenRow[] }
-        >("GET /api/external-agents/tokens");
-        this.tokens.set(Array.isArray(t) ? t : (t?.tokens ?? t?.items ?? []));
-      } catch {
-        // Non-fatal
+        >("GET /api/external-agents/tokens"),
+      );
+      if (res.error) {
+        this.tokensError.set(errText(res.error));
+      } else {
+        this.tokensError.set(null);
+        this.tokens.set(normalizeExternalTokens(res.value));
       }
+    } else {
+      this.tokens.set([]);
+      this.tokensError.set(null);
     }
     if (this.access.can("GET /api/gcp-keys")) {
-      try {
-        const g = await this.api.get<
-          GcpKeyRow[] | { keys?: GcpKeyRow[]; items?: GcpKeyRow[] }
-        >("GET /api/gcp-keys");
-        this.gcpKeys.set(Array.isArray(g) ? g : (g?.keys ?? g?.items ?? []));
-      } catch {
-        // Non-fatal
+      const res = await this.capture(
+        this.api.get<GcpKeyRow[] | { keys?: GcpKeyRow[]; items?: GcpKeyRow[] }>(
+          "GET /api/gcp-keys",
+        ),
+      );
+      if (res.error) {
+        this.gcpKeysError.set(errText(res.error));
+      } else {
+        this.gcpKeysError.set(null);
+        this.gcpKeys.set(normalizeGcpKeys(res.value));
       }
+    } else {
+      this.gcpKeys.set([]);
+      this.gcpKeysError.set(null);
     }
+  }
+
+  private recordSectionError(
+    target: { set(v: string | null): void },
+    err: unknown,
+  ): void {
+    target.set(errText(err));
+    this.state.recordError(err);
   }
 
   protected async addPrincipal(): Promise<void> {
     const entry = this.newPrincipalEntry().trim();
     if (!entry) return;
+    this.principalsError.set(null);
     const reason = this.newPrincipalReason().trim();
-    try {
-      await this.api.post("POST /api/access/principals", undefined, {
+    const res = await this.capture(
+      this.api.post("POST /api/access/principals", undefined, {
         entry,
         role: this.newPrincipalRole(),
         ...(reason ? { reason } : {}),
-      });
-      this.newPrincipalEntry.set("");
-      this.newPrincipalReason.set("");
-      await this.loadAccessData();
-      this.snackbar.show(`Granted ${this.newPrincipalRole()} to ${entry}`);
-    } catch (err) {
-      this.state.recordError(err);
+      }),
+    );
+    if (res.error) {
+      this.recordSectionError(this.principalsError, res.error);
+      return;
     }
+    this.newPrincipalEntry.set("");
+    this.newPrincipalReason.set("");
+    await this.loadAccessData();
+    this.snackbar.show(`Granted ${this.newPrincipalRole()} to ${entry}`);
   }
 
   private isSelfPrincipal(entry: string): boolean {
@@ -918,26 +1657,30 @@ export class SettingsSecurityComponent implements OnInit, OnChanges {
     entry: string,
     role: string,
   ): Promise<void> {
+    if (!entry) return;
+    this.principalsError.set(null);
     const reason = this.newPrincipalReason().trim();
     if (this.isSelfPrincipal(entry)) {
       this.promptSelfRoleConfirm(entry, role, reason);
       return;
     }
-    try {
-      await this.api.patch(
+    const res = await this.capture(
+      this.api.patch(
         "PATCH /api/access/principals/{entry}",
         { entry },
         { role, ...(reason ? { reason } : {}) },
-      );
+      ),
+    );
+    if (!res.error) {
       await this.loadAccessData();
       this.snackbar.show(`Updated ${entry} to ${role}`);
-    } catch (err) {
-      if (this.isSelfConfirmRefusal(err)) {
-        this.promptSelfRoleConfirm(entry, role, reason);
-      } else {
-        await this.loadAccessData();
-        this.state.recordError(err);
-      }
+      return;
+    }
+    if (this.isSelfConfirmRefusal(res.error)) {
+      this.promptSelfRoleConfirm(entry, role, reason);
+    } else {
+      await this.loadAccessData();
+      this.recordSectionError(this.principalsError, res.error);
     }
   }
 
@@ -952,8 +1695,8 @@ export class SettingsSecurityComponent implements OnInit, OnChanges {
       accept: "Confirm role change",
       destructive: true,
       run: async () => {
-        try {
-          await this.api.patch(
+        const res = await this.capture(
+          this.api.patch(
             "PATCH /api/access/principals/{entry}",
             { entry },
             {
@@ -961,39 +1704,44 @@ export class SettingsSecurityComponent implements OnInit, OnChanges {
               confirmSelf: true,
               ...(reason ? { reason } : {}),
             },
-          );
-          await this.loadAccessData();
-          this.snackbar.show(`Updated ${entry} to ${role}`);
-        } catch (err) {
-          await this.loadAccessData();
-          this.state.recordError(err);
+          ),
+        );
+        await this.loadAccessData();
+        if (res.error) {
+          this.recordSectionError(this.principalsError, res.error);
+          return;
         }
+        this.snackbar.show(`Updated ${entry} to ${role}`);
       },
     });
   }
 
   protected async removePrincipal(entry: string): Promise<void> {
+    if (!entry) return;
+    this.principalsError.set(null);
     const reason = this.newPrincipalReason().trim();
     if (this.isSelfPrincipal(entry)) {
       this.promptSelfRemoveConfirm(entry, reason);
       return;
     }
     const q = reason ? `reason=${encodeURIComponent(reason)}` : undefined;
-    try {
-      await this.api.delete(
+    const res = await this.capture(
+      this.api.delete(
         "DELETE /api/access/principals/{entry}",
         { entry },
         undefined,
         q,
-      );
+      ),
+    );
+    if (!res.error) {
       await this.loadAccessData();
       this.snackbar.show(`Removed ${entry}`);
-    } catch (err) {
-      if (this.isSelfConfirmRefusal(err)) {
-        this.promptSelfRemoveConfirm(entry, reason);
-      } else {
-        this.state.recordError(err);
-      }
+      return;
+    }
+    if (this.isSelfConfirmRefusal(res.error)) {
+      this.promptSelfRemoveConfirm(entry, reason);
+    } else {
+      this.recordSectionError(this.principalsError, res.error);
     }
   }
 
@@ -1006,18 +1754,20 @@ export class SettingsSecurityComponent implements OnInit, OnChanges {
       run: async () => {
         const params = ["confirmSelf=1"];
         if (reason) params.push(`reason=${encodeURIComponent(reason)}`);
-        try {
-          await this.api.delete(
+        const res = await this.capture(
+          this.api.delete(
             "DELETE /api/access/principals/{entry}",
             { entry },
             undefined,
             params.join("&"),
-          );
-          await this.loadAccessData();
-          this.snackbar.show(`Removed ${entry}`);
-        } catch (err) {
-          this.state.recordError(err);
+          ),
+        );
+        if (res.error) {
+          this.recordSectionError(this.principalsError, res.error);
+          return;
         }
+        await this.loadAccessData();
+        this.snackbar.show(`Removed ${entry}`);
       },
     });
   }
@@ -1025,121 +1775,185 @@ export class SettingsSecurityComponent implements OnInit, OnChanges {
   protected async mintToken(): Promise<void> {
     const name = this.newTokenName().trim();
     if (!name) return;
-    const scopes = this.newTokenScopes()
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    try {
-      const res = await this.api.post<{ token?: string }>(
+    const { scopes, error } = validateTokenScopes(this.newTokenScopes());
+    if (error) {
+      this.tokensError.set(error);
+      return;
+    }
+    this.tokensError.set(null);
+    const res = await this.capture(
+      this.api.post<{ token?: string }>(
         "POST /api/external-agents/tokens",
         undefined,
         { name, scopes },
-      );
-      this.newTokenName.set("");
-      if (res?.token) this.mintedTokenSecret.set(res.token);
-      await this.loadAccessData();
-      this.snackbar.show(`Minted token ${name}`);
-    } catch (err) {
-      this.state.recordError(err);
+      ),
+    );
+    if (res.error) {
+      this.recordSectionError(this.tokensError, res.error);
+      return;
     }
+    const secret =
+      typeof res.value?.token === "string" ? res.value.token.trim() : "";
+    if (!secret) {
+      await this.loadAccessData();
+      this.recordSectionError(
+        this.tokensError,
+        new Error(
+          `Token "${name}" response is missing the issued token secret key; verify permissions or rotate before retrying.`,
+        ),
+      );
+      return;
+    }
+    this.newTokenName.set("");
+    this.mintedTokenSecret.set(secret);
+    await this.loadAccessData();
+    this.snackbar.show(`Minted token ${name}`);
   }
 
   protected async rotateToken(id: string): Promise<void> {
-    try {
-      const res = await this.api.post<{ token?: string }>(
+    if (!id) return;
+    this.tokensError.set(null);
+    const res = await this.capture(
+      this.api.post<{ token?: string }>(
         "POST /api/external-agents/tokens/{id}/rotate",
         { id },
         {},
-      );
-      if (res?.token) this.mintedTokenSecret.set(res.token);
-      await this.loadAccessData();
-      this.snackbar.show("Token rotated");
-    } catch (err) {
-      this.state.recordError(err);
+      ),
+    );
+    if (res.error) {
+      this.recordSectionError(this.tokensError, res.error);
+      return;
     }
+    const secret =
+      typeof res.value?.token === "string" ? res.value.token.trim() : "";
+    if (!secret) {
+      await this.loadAccessData();
+      this.recordSectionError(
+        this.tokensError,
+        new Error(
+          "Token rotation response is missing the rotated token secret key.",
+        ),
+      );
+      return;
+    }
+    this.mintedTokenSecret.set(secret);
+    await this.loadAccessData();
+    this.snackbar.show("Token rotated");
   }
 
   protected async revokeToken(id: string): Promise<void> {
-    try {
-      await this.api.post(
-        "POST /api/external-agents/tokens/{id}/revoke",
-        { id },
-        {},
-      );
-      await this.loadAccessData();
-      this.snackbar.show("Token revoked");
-    } catch (err) {
-      this.state.recordError(err);
+    if (!id) return;
+    this.tokensError.set(null);
+    const res = await this.capture(
+      this.api.post("POST /api/external-agents/tokens/{id}/revoke", { id }, {}),
+    );
+    if (res.error) {
+      this.recordSectionError(this.tokensError, res.error);
+      return;
     }
+    await this.loadAccessData();
+    this.snackbar.show("Token revoked");
   }
 
   protected async revokeAllTokens(): Promise<void> {
-    try {
-      await this.api.post(
+    this.tokensError.set(null);
+    const res = await this.capture(
+      this.api.post(
         "POST /api/external-agents/tokens/revoke-all",
         undefined,
         {},
-      );
-      await this.loadAccessData();
-      this.snackbar.show("Revoked all external agent tokens");
-    } catch (err) {
-      this.state.recordError(err);
+      ),
+    );
+    if (res.error) {
+      this.recordSectionError(this.tokensError, res.error);
+      return;
     }
+    await this.loadAccessData();
+    this.snackbar.show("Revoked all external agent tokens");
   }
 
   protected async deleteToken(id: string): Promise<void> {
-    try {
-      await this.api.delete("DELETE /api/external-agents/tokens/{id}", { id });
-      await this.loadAccessData();
-      this.snackbar.show("Deleted token");
-    } catch (err) {
-      this.state.recordError(err);
+    if (!id) return;
+    this.tokensError.set(null);
+    const res = await this.capture(
+      this.api.delete("DELETE /api/external-agents/tokens/{id}", { id }),
+    );
+    if (res.error) {
+      this.recordSectionError(this.tokensError, res.error);
+      return;
     }
+    await this.loadAccessData();
+    this.snackbar.show("Deleted token");
   }
 
   protected async saveGcpKey(): Promise<void> {
     const name = this.newGcpKeyName().trim();
     const projectId = this.newGcpKeyProject().trim();
     const serviceAccountEmail = this.newGcpKeySaEmail().trim();
-    if (!name || !projectId || !serviceAccountEmail) return;
-    const count = Math.floor(Number(this.newGcpKeyCount()) || 0);
+    const validation = validateGcpKeyForm({
+      name,
+      projectId,
+      serviceAccountEmail,
+      countRaw: this.newGcpKeyCount(),
+      maxKeyAge: this.newGcpKeyMaxAge(),
+    });
+    if (validation.error) {
+      this.gcpKeysError.set(validation.error);
+      return;
+    }
+    this.gcpKeysError.set(null);
     const maxKeyAge = this.newGcpKeyMaxAge().trim();
     const minterCredential = this.newGcpKeyMinter().trim();
-    try {
-      await this.api.post("POST /api/gcp-keys", undefined, {
+    const res = await this.capture(
+      this.api.post("POST /api/gcp-keys", undefined, {
         name,
         projectId,
         serviceAccountEmail,
-        ...(count > 0 ? { serviceAccountCount: count } : {}),
+        ...(validation.count > 0
+          ? { serviceAccountCount: validation.count }
+          : {}),
         ...(maxKeyAge ? { maxKeyAge } : {}),
         ...(minterCredential ? { minterCredential } : {}),
-      });
-      this.newGcpKeyName.set("");
-      this.newGcpKeyProject.set("");
-      this.newGcpKeySaEmail.set("");
-      this.newGcpKeyCount.set("");
-      this.newGcpKeyMaxAge.set("");
-      this.newGcpKeyMinter.set("");
-      await this.loadAccessData();
-      this.snackbar.show(`Saved GCP key ${name}`);
-    } catch (err) {
-      this.state.recordError(err);
+      }),
+    );
+    if (res.error) {
+      this.recordSectionError(this.gcpKeysError, res.error);
+      return;
     }
+    this.newGcpKeyName.set("");
+    this.newGcpKeyProject.set("");
+    this.newGcpKeySaEmail.set("");
+    this.newGcpKeyCount.set("");
+    this.newGcpKeyMaxAge.set("");
+    this.newGcpKeyMinter.set("");
+    await this.loadAccessData();
+    this.snackbar.show(`Saved GCP key ${name}`);
   }
 
   protected async deleteGcpKey(name: string): Promise<void> {
-    try {
-      await this.api.delete("DELETE /api/gcp-keys/{name}", { name });
-      await this.loadAccessData();
-      this.snackbar.show(`Deleted GCP key ${name}`);
-    } catch (err) {
-      this.state.recordError(err);
+    if (!name) return;
+    this.gcpKeysError.set(null);
+    const res = await this.capture(
+      this.api.delete("DELETE /api/gcp-keys/{name}", { name }),
+    );
+    if (res.error) {
+      this.recordSectionError(this.gcpKeysError, res.error);
+      return;
     }
+    await this.loadAccessData();
+    this.snackbar.show(`Deleted GCP key ${name}`);
   }
 
   protected async loadAuditLogs(): Promise<void> {
+    if (!this.canViewAudit()) {
+      this.auditEvents.set([]);
+      this.auditError.set(null);
+      return;
+    }
+
     const combined: AuditEventRow[] = [];
     const seenConfigAuditKeys = new Set<string>();
+    const streamErrors: string[] = [];
 
     const unwrapItems = (raw: unknown): unknown[] => {
       if (Array.isArray(raw)) return raw;
@@ -1228,40 +2042,43 @@ export class SettingsSecurityComponent implements OnInit, OnChanges {
       });
     };
 
+    const fetchStream = (
+      route:
+        | "GET /api/deployment/config-audit"
+        | "GET /api/deployment/audit-logs"
+        | "GET /api/deployment/secret-audit"
+        | "GET /api/access/history",
+      source: "config" | "secret" | "access",
+      query?: string,
+    ): Promise<void> =>
+      this.api
+        .get(route, undefined, query)
+        .then((r) => norm(r, source))
+        .catch((err) => {
+          streamErrors.push(`${source}: ${errText(err)}`);
+        });
+
     const jobs: Promise<void>[] = [];
     if (this.access.can("GET /api/deployment/config-audit")) {
       jobs.push(
-        this.api
-          .get("GET /api/deployment/config-audit", undefined, "limit=100")
-          .then((r) => norm(r, "config"))
-          .catch(() => undefined),
+        fetchStream("GET /api/deployment/config-audit", "config", "limit=100"),
       );
     }
     if (this.access.can("GET /api/deployment/audit-logs")) {
       jobs.push(
-        this.api
-          .get("GET /api/deployment/audit-logs", undefined, "limit=100")
-          .then((r) => norm(r, "secret"))
-          .catch(() => undefined),
+        fetchStream("GET /api/deployment/audit-logs", "secret", "limit=100"),
       );
     } else if (this.access.can("GET /api/deployment/secret-audit")) {
-      jobs.push(
-        this.api
-          .get("GET /api/deployment/secret-audit")
-          .then((r) => norm(r, "secret"))
-          .catch(() => undefined),
-      );
+      jobs.push(fetchStream("GET /api/deployment/secret-audit", "secret"));
     }
     if (this.access.can("GET /api/access/history")) {
-      jobs.push(
-        this.api
-          .get("GET /api/access/history")
-          .then((r) => norm(r, "access"))
-          .catch(() => undefined),
-      );
+      jobs.push(fetchStream("GET /api/access/history", "access"));
     }
     await Promise.all(jobs);
     combined.sort((a, b) => (b.at || "").localeCompare(a.at || ""));
     this.auditEvents.set(combined);
+    this.auditError.set(
+      streamErrors.length > 0 ? streamErrors.join(" | ") : null,
+    );
   }
 }

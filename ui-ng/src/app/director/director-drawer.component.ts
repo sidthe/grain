@@ -54,39 +54,40 @@ import { extractGrainDrafts } from "./director-draft";
   styleUrl: "./director-drawer.css",
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    @if (isCompact()) {
+    @if (isCompact() && directorCtx.isOpen()) {
       <div
         class="drawer-scrim"
         aria-hidden="true"
-        (click)="directorCtx.close(true)"
+        (click)="closeDrawer(true)"
       ></div>
-      <aside
-        class="director-drawer is-overlay"
-        role="dialog"
-        aria-label="Director"
-        aria-modal="true"
-        data-testid="director-drawer"
-        gDialogTrap
-        (gDialogClose)="directorCtx.close(true)"
-      >
-        <ng-container *ngTemplateOutlet="drawerInner" />
-      </aside>
-    } @else {
-      <aside
-        class="director-drawer"
-        [class.is-wide]="wide()"
-        role="complementary"
-        aria-label="Director"
-        data-testid="director-drawer"
-      >
-        <ng-container *ngTemplateOutlet="drawerInner" />
-      </aside>
     }
+    <aside
+      #drawerEl
+      id="director-drawer"
+      class="director-drawer"
+      [class.is-overlay]="isCompact()"
+      [class.is-wide]="!isCompact() && wide()"
+      [attr.role]="isCompact() ? 'dialog' : 'complementary'"
+      aria-label="Director"
+      [attr.aria-modal]="isCompact() ? 'true' : null"
+      [attr.aria-expanded]="directorCtx.isOpen()"
+      [attr.aria-hidden]="!directorCtx.isOpen()"
+      [hidden]="!directorCtx.isOpen()"
+      [attr.inert]="!directorCtx.isOpen() ? '' : null"
+      data-testid="director-drawer"
+      gDialogTrap
+      [gDialogTrapActive]="directorCtx.isOpen()"
+      [gDialogTrapOutside]="true"
+      [gDialogTrapRestoreFocus]="false"
+      (gDialogClose)="closeDrawer(true)"
+    >
+      <ng-container *ngTemplateOutlet="drawerInner" />
+    </aside>
 
     <ng-template #drawerInner>
       <header class="drawer-head">
         <div class="drawer-title-group">
-          <h2 class="drawer-title" tabindex="-1" #titleEl>Director</h2>
+          <h2 class="drawer-title">Director</h2>
           @let st = sessions.directorLiveStatus();
           <span [class]="'status-pill ' + st.tone" [gTip]="st.tip">
             <g-status-icon [tone]="st.tone" [kind]="st.label" />{{ st.label }}
@@ -108,6 +109,9 @@ import { extractGrainDrafts } from "./director-draft";
             type="button"
             class="btn-text drawer-wide-btn"
             data-testid="director-drawer-wide"
+            [hidden]="isCompact()"
+            [attr.aria-expanded]="wide()"
+            aria-controls="director-drawer"
             [gTip]="wide() ? 'Narrow drawer' : 'Widen drawer'"
             (click)="wide.set(!wide())"
           >
@@ -118,7 +122,7 @@ import { extractGrainDrafts } from "./director-draft";
             [routerLink]="['/sessions', directorId]"
             data-testid="director-drawer-full"
             gTip="Open Director in Sessions"
-            (click)="directorCtx.close(false)"
+            (click)="closeDrawer(false)"
           >
             Open full
           </a>
@@ -127,8 +131,10 @@ import { extractGrainDrafts } from "./director-draft";
             class="icon-btn"
             aria-label="Close Director drawer"
             data-testid="director-drawer-close"
+            [attr.aria-expanded]="directorCtx.isOpen()"
+            aria-controls="director-drawer"
             gTip="Close Director (Esc)"
-            (click)="directorCtx.close(true)"
+            (click)="closeDrawer(true)"
           >
             ✕
           </button>
@@ -228,7 +234,9 @@ export class DirectorDrawerComponent implements OnInit, OnDestroy {
   protected readonly draft = signal("");
   protected readonly staged = signal<AttachmentUpload[]>([]);
 
-  private readonly titleEl = viewChild<ElementRef<HTMLElement>>("titleEl");
+  private readonly drawerEl = viewChild<ElementRef<HTMLElement>>("drawerEl");
+  private watching = false;
+  private fallbackOpener: HTMLElement | null = null;
   private mql: MediaQueryList | null = null;
   private readonly onMqlChange = (ev: MediaQueryListEvent): void => {
     this.zone.run(() => this.isCompact.set(ev.matches));
@@ -263,14 +271,24 @@ export class DirectorDrawerComponent implements OnInit, OnDestroy {
 
   constructor() {
     effect(() => {
-      if (this.directorCtx.isOpen()) {
-        queueMicrotask(() => this.titleEl()?.nativeElement.focus());
+      const open = this.directorCtx.isOpen();
+      if (open && !this.watching) {
+        this.captureFallbackOpener();
+      }
+      if (!open) {
+        this.fallbackOpener = null;
+      }
+      if (open !== this.watching) {
+        this.watching = open;
+        this.sessions.setDirectorWatch("drawer", open);
       }
     });
   }
 
   ngOnInit(): void {
-    this.sessions.setDirectorWatch("drawer", true);
+    if (this.directorCtx.isOpen()) {
+      this.captureFallbackOpener();
+    }
     const win = this.doc.defaultView;
     if (win && typeof win.matchMedia === "function") {
       this.mql = win.matchMedia("(max-width: 1079px)");
@@ -280,8 +298,44 @@ export class DirectorDrawerComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    this.sessions.setDirectorWatch("drawer", false);
+    if (this.watching) {
+      this.watching = false;
+      this.sessions.setDirectorWatch("drawer", false);
+    }
     this.mql?.removeEventListener?.("change", this.onMqlChange);
+  }
+
+  protected closeDrawer(restoreFocus: boolean): void {
+    const fallback = this.fallbackOpener;
+    this.fallbackOpener = null;
+    this.directorCtx.close(restoreFocus);
+    if (restoreFocus && fallback?.isConnected) {
+      queueMicrotask(() => {
+        const active = this.doc.activeElement;
+        const drawer = this.drawerEl()?.nativeElement;
+        if (
+          fallback.isConnected &&
+          (!active ||
+            active === this.doc.body ||
+            (drawer ? drawer.contains(active) : false))
+        ) {
+          fallback.focus();
+        }
+      });
+    }
+  }
+
+  private captureFallbackOpener(): void {
+    if (this.fallbackOpener) return;
+    const active = this.doc.activeElement;
+    const drawer = this.drawerEl()?.nativeElement;
+    if (
+      active instanceof HTMLElement &&
+      active !== this.doc.body &&
+      (!drawer || !drawer.contains(active))
+    ) {
+      this.fallbackOpener = active;
+    }
   }
 
   protected async onSend(ev: {
