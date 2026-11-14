@@ -36,6 +36,7 @@ package sysstat_test
 // honestly has no reading to give.
 
 import (
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -178,5 +179,67 @@ func TestFilesystemIDReportsAMissingPathAsAnError(t *testing.T) {
 
 	if _, err := sysstat.FilesystemID(filepath.Join(t.TempDir(), "no-such-dir")); err == nil {
 		t.Error("FilesystemID of a missing path returned no error")
+	}
+}
+
+func TestIsOverloaded(t *testing.T) {
+	tests := []struct {
+		name    string
+		cpu     float64
+		mem     float64
+		want    bool
+		wantErr bool
+	}{
+		{name: "zeros", cpu: 0, mem: 0, want: false},
+		{name: "negative zero", cpu: math.Copysign(0, -1), mem: math.Copysign(0, -1), want: false},
+		{name: "moderate load", cpu: 50, mem: 50, want: false},
+		{name: "high cpu low mem", cpu: 95, mem: 50, want: false},
+		{name: "low cpu high mem", cpu: 50, mem: 95, want: false},
+		{name: "exact thresholds", cpu: 90.0, mem: 80.0, want: false},
+		{name: "cpu at threshold mem above", cpu: 90.0, mem: math.Nextafter(80.0, 100.0), want: false},
+		{name: "cpu above mem at threshold", cpu: math.Nextafter(90.0, 100.0), mem: 80.0, want: false},
+		{name: "cpu at threshold mem max", cpu: 90.0, mem: 100.0, want: false},
+		{name: "cpu max mem at threshold", cpu: 100.0, mem: 80.0, want: false},
+		{name: "just above both thresholds", cpu: math.Nextafter(90.0, 100.0), mem: math.Nextafter(80.0, 100.0), want: true},
+		{name: "well above both thresholds", cpu: 95.0, mem: 85.0, want: true},
+		{name: "max bounds", cpu: 100.0, mem: 100.0, want: true},
+		{name: "cpu slightly negative", cpu: math.Nextafter(0, -1), mem: 95.0, wantErr: true},
+		{name: "mem slightly negative", cpu: 95.0, mem: math.Nextafter(0, -1), wantErr: true},
+		{name: "cpu negative", cpu: -1, mem: 50, wantErr: true},
+		{name: "mem negative", cpu: 50, mem: -1, wantErr: true},
+		{name: "both negative", cpu: -5, mem: -5, wantErr: true},
+		{name: "cpu slightly over 100", cpu: math.Nextafter(100, 200), mem: 95.0, wantErr: true},
+		{name: "mem slightly over 100", cpu: 95.0, mem: math.Nextafter(100, 200), wantErr: true},
+		{name: "cpu over 100", cpu: 101, mem: 50, wantErr: true},
+		{name: "mem over 100", cpu: 50, mem: 101, wantErr: true},
+		{name: "both over 100", cpu: 150, mem: 150, wantErr: true},
+		{name: "cpu NaN", cpu: math.NaN(), mem: 95.0, wantErr: true},
+		{name: "mem NaN", cpu: 95.0, mem: math.NaN(), wantErr: true},
+		{name: "both NaN", cpu: math.NaN(), mem: math.NaN(), wantErr: true},
+		{name: "cpu +Inf", cpu: math.Inf(1), mem: 95.0, wantErr: true},
+		{name: "mem +Inf", cpu: 95.0, mem: math.Inf(1), wantErr: true},
+		{name: "cpu -Inf", cpu: math.Inf(-1), mem: 95.0, wantErr: true},
+		{name: "mem -Inf", cpu: 95.0, mem: math.Inf(-1), wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := sysstat.IsOverloaded(tc.cpu, tc.mem)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("IsOverloaded(%v, %v) err = nil, want non-nil error (got=%v)", tc.cpu, tc.mem, got)
+				}
+				if got {
+					t.Fatalf("IsOverloaded(%v, %v) = true on error (%v), want false", tc.cpu, tc.mem, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("IsOverloaded(%v, %v) unexpected error: %v", tc.cpu, tc.mem, err)
+			}
+			if got != tc.want {
+				t.Fatalf("IsOverloaded(%v, %v) = %v, want %v", tc.cpu, tc.mem, got, tc.want)
+			}
+		})
 	}
 }
