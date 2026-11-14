@@ -155,78 +155,89 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
               >
             }
           </div>
-          <div class="headline-actions">
-            @if (access.can("POST /api/ci/runs")) {
-              <button
-                type="button"
-                class="btn-primary"
-                data-testid="ci-open-run-dialog"
-                (click)="openRunWorkflowDialog()"
-              >
-                Run workflow
-              </button>
-            }
-            @if (canFlushAnyCache()) {
-              <div class="pill-dropdown">
+          @if (
+            access.configLoaded() &&
+            (access.can("POST /api/ci/runs") || canFlushAnyCache())
+          ) {
+            <div class="headline-actions">
+              @if (access.can("POST /api/ci/runs")) {
                 <button
                   type="button"
-                  class="btn-tonal"
-                  data-testid="ci-caches-menu-btn"
-                  aria-haspopup="menu"
-                  [attr.aria-expanded]="openMenu() === 'caches'"
-                  (click)="toggleMenu('caches', $event)"
+                  class="btn-primary"
+                  data-testid="ci-open-run-dialog"
+                  (click)="openRunWorkflowDialog()"
                 >
-                  Flush cache ▾
+                  Run workflow
                 </button>
-                @if (openMenu() === "caches") {
-                  <ul
-                    class="pop-menu align-right"
-                    role="menu"
-                    data-testid="ci-caches-menu"
+              }
+              @if (canFlushAnyCache()) {
+                <div class="pill-dropdown">
+                  <button
+                    type="button"
+                    class="btn-tonal"
+                    data-testid="ci-caches-menu-btn"
+                    aria-haspopup="menu"
+                    [attr.aria-expanded]="openMenu() === 'caches'"
+                    (click)="toggleMenu('caches', $event)"
                   >
-                    @if (access.can("DELETE /api/ci/cache")) {
-                      <li role="none">
-                        <button
-                          type="button"
-                          role="menuitem"
-                          data-testid="ci-flush-job-cache"
-                          (click)="confirmFlushCache('ci')"
-                        >
-                          Flush Grain CI job cache
-                        </button>
-                      </li>
-                    }
-                    @if (access.can("POST /api/actions-cache/flush")) {
-                      <li role="none">
-                        <button
-                          type="button"
-                          role="menuitem"
-                          data-testid="ci-flush-actions-cache"
-                          (click)="confirmFlushCache('actions')"
-                        >
-                          Flush Actions cache{{
-                            repoFilter() ? " (" + repoFilter() + ")" : ""
-                          }}
-                        </button>
-                      </li>
-                    }
-                    @if (access.can("POST /api/package-cache/flush")) {
-                      <li role="none">
-                        <button
-                          type="button"
-                          role="menuitem"
-                          data-testid="ci-flush-package-cache"
-                          (click)="confirmFlushCache('package')"
-                        >
-                          Flush proxy package cache
-                        </button>
-                      </li>
-                    }
-                  </ul>
-                }
-              </div>
-            }
-          </div>
+                    Flush cache ▾
+                  </button>
+                  @if (openMenu() === "caches") {
+                    <ul
+                      class="pop-menu"
+                      [class.align-right]="menuAlignRight()"
+                      role="menu"
+                      data-testid="ci-caches-menu"
+                    >
+                      @if (access.can("DELETE /api/ci/cache")) {
+                        <li role="none">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            data-testid="ci-flush-job-cache"
+                            (click)="confirmFlushCache('ci')"
+                          >
+                            Flush Grain CI job cache
+                          </button>
+                        </li>
+                      }
+                      @if (
+                        access.can(
+                          "POST /api/actions-cache/flush",
+                          repoFilter() || undefined
+                        )
+                      ) {
+                        <li role="none">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            data-testid="ci-flush-actions-cache"
+                            (click)="confirmFlushCache('actions')"
+                          >
+                            Flush Actions cache{{
+                              repoFilter() ? " (" + repoFilter() + ")" : ""
+                            }}
+                          </button>
+                        </li>
+                      }
+                      @if (access.can("POST /api/package-cache/flush")) {
+                        <li role="none">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            data-testid="ci-flush-package-cache"
+                            (click)="confirmFlushCache('package')"
+                          >
+                            Flush proxy package cache
+                          </button>
+                        </li>
+                      }
+                    </ul>
+                  }
+                </div>
+              }
+            </div>
+          }
         </div>
         <p class="view-subtitle">
           Grain CI and external checks: shared infrastructure faults (Errored)
@@ -263,6 +274,7 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
               data-testid="ci-repo-pill"
               aria-haspopup="listbox"
               [attr.aria-expanded]="openMenu() === 'repo'"
+              [gTip]="repoFilter() ? 'Repo: ' + repoFilter() : null"
               (click)="toggleMenu('repo', $event)"
             >
               <span>Repo: {{ repoFilter() || "All" }}</span>
@@ -271,6 +283,7 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
             @if (openMenu() === "repo") {
               <ul
                 class="pop-menu"
+                [class.align-right]="menuAlignRight()"
                 role="listbox"
                 aria-label="Repository filter"
                 data-testid="ci-repo-menu"
@@ -309,6 +322,7 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
               data-testid="ci-branch-pill"
               aria-haspopup="listbox"
               [attr.aria-expanded]="openMenu() === 'branch'"
+              [gTip]="branchFilter() ? 'Branch: ' + branchFilter() : null"
               (click)="toggleMenu('branch', $event)"
             >
               <span>Branch: {{ branchFilter() || "All" }}</span>
@@ -317,6 +331,7 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
             @if (openMenu() === "branch") {
               <ul
                 class="pop-menu"
+                [class.align-right]="menuAlignRight()"
                 role="listbox"
                 aria-label="Branch filter"
                 data-testid="ci-branch-menu"
@@ -900,73 +915,66 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
                   </h2>
                 </div>
 
-                <div class="headline-actions">
-                  @if (isActive(run)) {
-                    <button
-                      type="button"
-                      class="btn-tonal danger"
-                      data-testid="ci-cancel-run-btn"
-                      [disabled]="
-                        !access.can('DELETE /api/ci/runs/{id}', run.repo)
-                      "
-                      [gTip]="
-                        access.deniedReason(
-                          'DELETE /api/ci/runs/{id}',
-                          run.repo
-                        ) || 'Stop this running CI check.'
-                      "
-                      (click)="confirmCancelRun(run)"
-                    >
-                      Cancel run
-                    </button>
-                  }
-                  @if (providerOf(run) === "grain") {
-                    <button
-                      type="button"
-                      class="btn-tonal"
-                      data-testid="ci-rerun-btn"
-                      [disabled]="!access.can('POST /api/ci/runs', run.repo)"
-                      [gTip]="
-                        access.deniedReason('POST /api/ci/runs', run.repo) ||
-                        'Re-run checks bypassing cached job verdicts.'
-                      "
-                      (click)="rerunSelected(run, false)"
-                    >
-                      Re-run all
-                    </button>
-                    @if (
-                      badge.bucket === "failed" || badge.bucket === "errored"
-                    ) {
+                @let canCancelRun =
+                  isActive(run) &&
+                  access.configLoaded() &&
+                  access.can("DELETE /api/ci/runs/{id}", run.repo);
+                @let canRerunRun =
+                  providerOf(run) === "grain" &&
+                  access.configLoaded() &&
+                  access.can("POST /api/ci/runs", run.repo);
+                @let canQuarantineTest =
+                  access.configLoaded() &&
+                  access.can("POST /api/tests/quarantine", run.repo);
+                @if (canCancelRun || canRerunRun || canQuarantineTest) {
+                  <div class="headline-actions">
+                    @if (canCancelRun) {
+                      <button
+                        type="button"
+                        class="btn-tonal danger"
+                        data-testid="ci-cancel-run-btn"
+                        gTip="Stop this running CI check."
+                        (click)="confirmCancelRun(run)"
+                      >
+                        Cancel run
+                      </button>
+                    }
+                    @if (canRerunRun) {
                       <button
                         type="button"
                         class="btn-tonal"
-                        data-testid="ci-rerun-failed-btn"
-                        [disabled]="!access.can('POST /api/ci/runs', run.repo)"
-                        (click)="rerunSelected(run, true)"
+                        data-testid="ci-rerun-btn"
+                        gTip="Re-run checks bypassing cached job verdicts."
+                        (click)="rerunSelected(run, false)"
                       >
-                        Re-run failed
+                        Re-run all
+                      </button>
+                      @if (
+                        badge.bucket === "failed" || badge.bucket === "errored"
+                      ) {
+                        <button
+                          type="button"
+                          class="btn-tonal"
+                          data-testid="ci-rerun-failed-btn"
+                          (click)="rerunSelected(run, true)"
+                        >
+                          Re-run failed
+                        </button>
+                      }
+                    }
+                    @if (canQuarantineTest) {
+                      <button
+                        type="button"
+                        class="btn-outlined"
+                        data-testid="ci-open-quarantine-btn"
+                        gTip="Quarantine a flaky test with TTL and optional repair task."
+                        (click)="openQuarantineDialog(run)"
+                      >
+                        Quarantine test
                       </button>
                     }
-                  }
-                  <button
-                    type="button"
-                    class="btn-outlined"
-                    data-testid="ci-open-quarantine-btn"
-                    [disabled]="
-                      !access.can('POST /api/tests/quarantine', run.repo)
-                    "
-                    [gTip]="
-                      access.deniedReason(
-                        'POST /api/tests/quarantine',
-                        run.repo
-                      ) ||
-                      'Quarantine a flaky test with TTL and optional repair task.'
-                    "
-                    (click)="openQuarantineDialog(run)"
-                  >
-                    Quarantine test
-                  </button>
-                </div>
+                  </div>
+                }
               </div>
 
               <div class="ci-insp-meta">
@@ -1892,6 +1900,7 @@ export class CIPageComponent implements OnInit, OnDestroy {
   protected readonly openMenu = signal<"repo" | "branch" | "caches" | null>(
     null,
   );
+  protected readonly menuAlignRight = signal(false);
   protected readonly faultsExpanded = signal(true);
   protected readonly mobileDetailOpen = signal(false);
 
@@ -2011,12 +2020,15 @@ export class CIPageComponent implements OnInit, OnDestroy {
       !!this.filter.query().trim(),
   );
 
-  protected readonly canFlushAnyCache = computed(
-    () =>
+  protected readonly canFlushAnyCache = computed(() => {
+    if (!this.access.configLoaded()) return false;
+    const repo = this.repoFilter() || undefined;
+    return (
       this.access.can("DELETE /api/ci/cache") ||
-      this.access.can("POST /api/actions-cache/flush") ||
-      this.access.can("POST /api/package-cache/flush"),
-  );
+      this.access.can("POST /api/actions-cache/flush", repo) ||
+      this.access.can("POST /api/package-cache/flush")
+    );
+  });
 
   protected readonly hasInFlight = computed(() => {
     if (this.filteredRuns().some((r) => isRunActive(r))) return true;
@@ -2155,7 +2167,21 @@ export class CIPageComponent implements OnInit, OnDestroy {
 
   protected toggleMenu(which: "repo" | "branch" | "caches", ev: Event): void {
     ev.stopPropagation();
-    this.openMenu.set(this.openMenu() === which ? null : which);
+    if (this.openMenu() === which) {
+      this.openMenu.set(null);
+      return;
+    }
+    const btn = ev.currentTarget as HTMLElement | null;
+    const vw = this.doc.defaultView?.innerWidth ?? 1280;
+    const rect = btn?.getBoundingClientRect();
+    if (which === "caches") {
+      this.menuAlignRight.set(!rect || rect.width === 0 || rect.right >= 216);
+    } else {
+      this.menuAlignRight.set(
+        !!rect && rect.left + 200 > vw - 16 && rect.right >= 216,
+      );
+    }
+    this.openMenu.set(which);
   }
 
   protected setBucketFilter(id: CIFilterId): void {
@@ -2487,6 +2513,9 @@ export class CIPageComponent implements OnInit, OnDestroy {
   }
 
   protected openRunWorkflowDialog(): void {
+    if (!this.access.configLoaded() || !this.access.can("POST /api/ci/runs")) {
+      return;
+    }
     const active = this.store.activeRun();
     const repo =
       this.repoFilter() || active?.repo || this.availableRepos()[0] || "";
@@ -2535,6 +2564,7 @@ export class CIPageComponent implements OnInit, OnDestroy {
       !repo ||
       !ref ||
       this.submitting() ||
+      !this.access.configLoaded() ||
       !this.access.can("POST /api/ci/runs", repo)
     ) {
       return;
@@ -2562,6 +2592,12 @@ export class CIPageComponent implements OnInit, OnDestroy {
     run: CIRun,
     failedOnly: boolean,
   ): Promise<void> {
+    if (
+      !this.access.configLoaded() ||
+      !this.access.can("POST /api/ci/runs", run.repo)
+    ) {
+      return;
+    }
     const tid = runTaskId(run);
     try {
       const created = await this.store.triggerRun(
@@ -2595,6 +2631,12 @@ export class CIPageComponent implements OnInit, OnDestroy {
   }
 
   protected confirmCancelRun(run: CIRun): void {
+    if (
+      !this.access.configLoaded() ||
+      !this.access.can("DELETE /api/ci/runs/{id}", run.repo)
+    ) {
+      return;
+    }
     this.cancelError.set(null);
     this.cancelReason.set("");
     this.cancelDialogRun.set(run);
@@ -2612,6 +2654,7 @@ export class CIPageComponent implements OnInit, OnDestroy {
     if (
       !run ||
       this.submitting() ||
+      !this.access.configLoaded() ||
       !this.access.can("DELETE /api/ci/runs/{id}", run.repo)
     ) {
       return;
@@ -2634,6 +2677,20 @@ export class CIPageComponent implements OnInit, OnDestroy {
   protected confirmFlushCache(kind: "ci" | "actions" | "package"): void {
     this.openMenu.set(null);
     const repo = this.repoFilter();
+    const routeByKind = {
+      ci: "DELETE /api/ci/cache",
+      actions: "POST /api/actions-cache/flush",
+      package: "POST /api/package-cache/flush",
+    } as const;
+    if (
+      !this.access.configLoaded() ||
+      !this.access.can(
+        routeByKind[kind],
+        kind === "actions" ? repo || undefined : undefined,
+      )
+    ) {
+      return;
+    }
     const labels = {
       ci: {
         title: "Flush Grain CI job cache?",
@@ -2678,6 +2735,12 @@ export class CIPageComponent implements OnInit, OnDestroy {
   }
 
   protected openQuarantineDialog(run: CIRun): void {
+    if (
+      !this.access.configLoaded() ||
+      !this.access.can("POST /api/tests/quarantine", run.repo)
+    ) {
+      return;
+    }
     const failed = extractFailedTests(run);
     this.qTestName.set(failed[0] ?? "");
     this.qReason.set("");
@@ -2692,6 +2755,7 @@ export class CIPageComponent implements OnInit, OnDestroy {
     if (
       !run ||
       this.submitting() ||
+      !this.access.configLoaded() ||
       !this.access.can("POST /api/tests/quarantine", run.repo)
     ) {
       return;

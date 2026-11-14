@@ -116,7 +116,8 @@
   padding: 0 12px;
 }
 
-.s-input[aria-invalid="true"] {
+.s-input[aria-invalid="true"],
+.s-textarea[aria-invalid="true"] {
   border-color: var(--md-sys-color-error);
 }
 

@@ -24,10 +24,18 @@
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+  min-width: 0;
+}
+
+.ci-insp-top .headline-cluster {
+  flex-wrap: wrap;
+  max-width: 100%;
 }
 
 .ci-insp-title {
   margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-family: var(--grain-font-display);
   font-size: 20px;
   line-height: 26px;
@@ -39,11 +47,15 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 14px;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 13px;
   color: var(--md-sys-color-on-surface-variant);
 }
 
 .ci-sha {
+  max-width: 100%;
+  overflow-wrap: anywhere;
   padding: 2px 6px;
   border-radius: var(--md-sys-shape-corner-xs);
   background: var(--md-sys-color-surface-container-low);
@@ -60,6 +72,8 @@
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .ci-verdict-callout.is-errored {
@@ -93,6 +107,7 @@
 
 .ci-job-head {
   width: 100%;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -112,6 +127,7 @@
 .ci-job-name {
   flex: 1;
   min-width: 0;
+  overflow-wrap: anywhere;
   font-weight: 500;
 }
 
@@ -131,6 +147,7 @@
 
 .ci-step-btn {
   width: 100%;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -184,7 +201,10 @@
   background: var(--grain-well-bg, #13151a);
   color: var(--grain-well-fg, #e4e6eb);
   font-size: 12px;
-  min-width: 160px;
+  flex: 1 1 160px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .ci-log-lines {
@@ -330,9 +350,18 @@
   height: 40px;
 }
 
+.g-dialog .filter-chip {
+  height: auto;
+  min-height: 36px;
+  padding: 6px 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
 @media (max-width: 599.95px) {
   .ci-inspector {
-    padding: 14px 12px 24px;
+    padding: 14px 12px 84px;
   }
 
   .ci-step-btn {
