@@ -156,54 +156,58 @@ test("M16 Director overlay: top-bar toggle, d/Alt+D/Escape, coplanar selection c
   await expect(editPanel.getByTestId("director-shaper-pane")).toBeVisible();
 });
 
-test("compact modal Director drawer @phone", async ({ page, axe }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/next/inbox");
-  await page.waitForSelector(".main-stage > *:not(router-outlet)");
+test(
+  "compact modal Director drawer",
+  { tag: ["@phone"] },
+  async ({ page, axe }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/next/inbox");
+    await page.waitForSelector(".main-stage > *:not(router-outlet)");
 
-  const trigger = page.getByTestId("director-trigger");
-  await expect(trigger).toHaveAttribute("aria-expanded", "false");
-  await trigger.click();
+    const trigger = page.getByTestId("director-trigger");
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await trigger.click();
 
-  const drawer = page.getByTestId("director-drawer");
-  await expect(drawer).toBeVisible();
-  await expect(trigger).toHaveAttribute("aria-expanded", "true");
-  await expect(drawer).toHaveAttribute("role", "dialog");
-  await expect(drawer).toHaveAttribute("aria-modal", "true");
-  await expect(drawer).toHaveAttribute("aria-expanded", "true");
-  await expect(drawer).toHaveAttribute("aria-hidden", "false");
-  await expect(page.locator(".drawer-scrim")).toHaveAttribute(
-    "aria-hidden",
-    "true",
-  );
-  await expect(page.getByTestId("director-drawer-wide")).toBeHidden();
+    const drawer = page.getByTestId("director-drawer");
+    await expect(drawer).toBeVisible();
+    await expect(trigger).toHaveAttribute("aria-expanded", "true");
+    await expect(drawer).toHaveAttribute("role", "dialog");
+    await expect(drawer).toHaveAttribute("aria-modal", "true");
+    await expect(drawer).toHaveAttribute("aria-expanded", "true");
+    await expect(drawer).toHaveAttribute("aria-hidden", "false");
+    await expect(page.locator(".drawer-scrim")).toHaveAttribute(
+      "aria-hidden",
+      "true",
+    );
+    await expect(page.getByTestId("director-drawer-wide")).toBeHidden();
 
-  const rect = await drawer.boundingBox();
-  expect(rect).toBeTruthy();
-  expect(rect.x).toBeGreaterThanOrEqual(0);
-  expect(rect.x + rect.width).toBeLessThanOrEqual(390);
-  expect(rect.height).toBeCloseTo(844, 0);
-  expect(
-    await page.evaluate(
-      () => document.documentElement.scrollWidth <= window.innerWidth,
-    ),
-  ).toBe(true);
-  expect(await axe({ disableRules: ["color-contrast"] })).toEqual([]);
-
-  // Both Shift+Tab and forward Tab stay trapped inside the compact modal drawer.
-  for (const key of ["Shift+Tab", "Shift+Tab", "Tab", "Tab", "Tab", "Tab"]) {
-    await page.keyboard.press(key);
+    const rect = await drawer.boundingBox();
+    expect(rect).toBeTruthy();
+    expect(rect.x).toBeGreaterThanOrEqual(0);
+    expect(rect.x + rect.width).toBeLessThanOrEqual(390);
+    expect(rect.height).toBeCloseTo(844, 0);
     expect(
-      await page.evaluate(() =>
-        Boolean(
-          document.activeElement?.closest('[data-testid="director-drawer"]'),
-        ),
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
       ),
     ).toBe(true);
-  }
+    expect(await axe({ disableRules: ["color-contrast"] })).toEqual([]);
 
-  await page.keyboard.press("Escape");
-  await expect(drawer).toHaveCount(0);
-  await expect(trigger).toHaveAttribute("aria-expanded", "false");
-  await expect(trigger).toBeFocused();
-});
+    // Both Shift+Tab and forward Tab stay trapped inside the compact modal drawer.
+    for (const key of ["Shift+Tab", "Shift+Tab", "Tab", "Tab", "Tab", "Tab"]) {
+      await page.keyboard.press(key);
+      expect(
+        await page.evaluate(() =>
+          Boolean(
+            document.activeElement?.closest('[data-testid="director-drawer"]'),
+          ),
+        ),
+      ).toBe(true);
+    }
+
+    await page.keyboard.press("Escape");
+    await expect(drawer).toHaveCount(0);
+    await expect(trigger).toHaveAttribute("aria-expanded", "false");
+    await expect(trigger).toBeFocused();
+  },
+);
