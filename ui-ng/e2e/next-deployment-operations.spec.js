@@ -341,3 +341,130 @@ test("Fleet persistent sandbox Logs button enforces deployment:read scope contex
     .toBe(true);
   expect(logRequests).toHaveLength(1);
 });
+
+test(
+  "Fleet Hosts gates enrollment codes and pending approvals on scope: null for non-operators",
+  { tag: ["@phone", "@dark"] },
+  async ({ page, axe }) => {
+    const blockedRequests = [];
+    page.on("request", (req) => {
+      const p = new URL(req.url()).pathname;
+      if (
+        p.startsWith("/api/hostds/enrollment-codes") ||
+        p.startsWith("/api/hostds/pending")
+      ) {
+        blockedRequests.push(`${req.method()} ${p}`);
+      }
+    });
+    await page.route("**/api/config", async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      await route.fulfill({
+        response: res,
+        json: {
+          ...body,
+          access: {
+            role: "host-admin",
+            roles: ["host-admin"],
+            full: false,
+            scopes: ["capabilities:read", "capabilities:admin"],
+          },
+        },
+      });
+    });
+
+    await page.goto("fleet?tab=hostds");
+    await expect(page.getByTestId("hostd-row-local")).toBeVisible();
+    await expect(page.getByTestId("fleet-enrollment-denied")).toContainText(
+      "grain/operator",
+    );
+    await expect(page.getByTestId("fleet-pending-denied")).toContainText(
+      "grain/operator",
+    );
+    await expect(
+      page.getByTestId("fleet-enrollment-settings-link"),
+    ).toHaveCount(0);
+    expect(blockedRequests).toEqual([]);
+
+    const sideways = await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+    );
+    expect(sideways).toBeLessThanOrEqual(0);
+    expect(await axe({ disableRules: ["color-contrast"] })).toEqual([]);
+  },
+);
+
+test(
+  "Fleet Hosts manages enrollment codes and renders pending approvals cleanly for operators",
+  { tag: ["@phone", "@dark"] },
+  async ({ page, axe }) => {
+    await page.goto("fleet?tab=hostds");
+    await expect(
+      page.getByTestId("fleet-enrollment-settings-link"),
+    ).toBeVisible();
+    await expect(
+      page.getByTestId("fleet-enrollment-row-default"),
+    ).toBeVisible();
+
+    const pendingCard = page.getByTestId("fleet-hostds-pending");
+    await expect(pendingCard).toContainText("carol@example.com");
+    await expect(pendingCard).toContainText("SHA256:");
+    await expect(pendingCard).not.toContainText(/pairing code/i);
+
+    const viewportWidth = page.viewportSize()?.width ?? 1440;
+    for (const tid of [
+      "fleet-hostds-enrollment",
+      "fleet-hostds-pending",
+      "fleet-enrollment-row-default",
+    ]) {
+      const box = await page.getByTestId(tid).boundingBox();
+      expect(box, tid).not.toBeNull();
+      expect(box.x).toBeGreaterThanOrEqual(0);
+      expect(box.x + box.width).toBeLessThanOrEqual(viewportWidth + 1);
+    }
+
+    const nameInput = page.getByTestId("fleet-enrollment-name-input");
+    const uniqueName = `e2e-fleet-${Date.now()}`;
+    await nameInput.fill(uniqueName);
+    await page.getByTestId("fleet-enrollment-create-btn").click();
+    await expect(page.getByTestId("fleet-enrollment-secret")).toBeVisible();
+    await expect(
+      page.getByTestId(`fleet-enrollment-row-${uniqueName}`),
+    ).toBeVisible();
+
+    await page.getByTestId(`fleet-enrollment-rotate-${uniqueName}`).click();
+    const dialog = page.getByTestId("confirm-dialog");
+    await expect(dialog).toContainText(`Rotate enrollment code ${uniqueName}?`);
+    await page.getByTestId("confirm-accept").click();
+    await expect(page.getByTestId("fleet-enrollment-secret")).toContainText(
+      `Rotated enrollment invite for ${uniqueName}`,
+    );
+
+    await page.getByTestId(`fleet-enrollment-revoke-${uniqueName}`).click();
+    await expect(dialog).toContainText(`Revoke enrollment code ${uniqueName}?`);
+    await page.getByTestId("confirm-accept").click();
+    await expect(
+      page.getByTestId(`fleet-enrollment-row-${uniqueName}`),
+    ).toContainText("revoked");
+
+    // Verify Reject opens confirm dialog and Cancel preserves seeded pending row.
+    const rejectBtn = page
+      .locator('[data-testid^="fleet-pending-reject-"]')
+      .first();
+    await rejectBtn.click();
+    await expect(dialog).toContainText("Reject join request");
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(dialog).toBeHidden();
+    await expect(pendingCard).toContainText("carol@example.com");
+
+    const sideways = await page.evaluate(
+      () =>
+        document.documentElement.scrollWidth -
+        document.documentElement.clientWidth,
+    );
+    expect(sideways).toBeLessThanOrEqual(0);
+    expect(await axe({ disableRules: ["color-contrast"] })).toEqual([]);
+  },
+);
