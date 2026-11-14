@@ -15,6 +15,7 @@
 import type { Notification, Task } from "../api/models";
 import {
   buildEntries,
+  classifyInboxItem,
   classifyNotification,
   classifyTask,
   groupEntries,
@@ -267,5 +268,35 @@ describe("inbox classifier", () => {
     });
     expect(cleared.taskId).toBe("412");
     expect(cleared.taskLink).toBe("/task/412");
+  });
+});
+
+describe("classifyInboxItem", () => {
+  it("returns Empty for empty or whitespace-only titles", () => {
+    expect(classifyInboxItem("")).toBe("Empty");
+    expect(classifyInboxItem("   ")).toBe("Empty");
+    expect(classifyInboxItem("\t\n ")).toBe("Empty");
+  });
+
+  it("returns Urgent when title contains URGENT or !", () => {
+    expect(classifyInboxItem("URGENT")).toBe("Urgent");
+    expect(classifyInboxItem("URGENT: fix production")).toBe("Urgent");
+    expect(classifyInboxItem("Please review URGENT patch")).toBe("Urgent");
+    expect(classifyInboxItem("Deploy failed!")).toBe("Urgent");
+    expect(classifyInboxItem("!Alert on main")).toBe("Urgent");
+    expect(classifyInboxItem("URGENT: Can we merge?")).toBe("Urgent");
+    expect(classifyInboxItem("Why did it fail!?")).toBe("Urgent");
+  });
+
+  it("returns Question when title ends with ?", () => {
+    expect(classifyInboxItem("Should we deploy?")).toBe("Question");
+    expect(classifyInboxItem("?")).toBe("Question");
+  });
+
+  it("returns Normal otherwise", () => {
+    expect(classifyInboxItem("Fix bug in parser")).toBe("Normal");
+    expect(classifyInboxItem("urgent lowercase check")).toBe("Normal");
+    expect(classifyInboxItem("?leading mark only")).toBe("Normal");
+    expect(classifyInboxItem("Trailing space after question? ")).toBe("Normal");
   });
 });
