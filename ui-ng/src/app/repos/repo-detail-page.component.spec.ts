@@ -40,6 +40,16 @@ class FakeRepoApi {
     declarations: false,
     declarationsStatus: null,
   };
+  branchesBody: { name: string; sha?: string; head?: string }[] = [
+    { name: "main", sha: "1234567890abcdef" },
+  ];
+  unfixableBody: {
+    unfixableChecks: string[] | null;
+    grainCICheckName?: string;
+  } = {
+    unfixableChecks: [],
+    grainCICheckName: "grain CI",
+  };
   releaseEnabled = true;
   workOwnershipBody: {
     repo: string;
@@ -126,7 +136,10 @@ class FakeRepoApi {
       ]);
     }
     if (key === "GET /api/repos/{owner}/{name}/branches") {
-      return Promise.resolve([{ name: "main", sha: "1234567890abcdef" }]);
+      return Promise.resolve(structuredClone(this.branchesBody));
+    }
+    if (key === "GET /api/repos/{owner}/{name}/unfixable-checks") {
+      return Promise.resolve(structuredClone(this.unfixableBody));
     }
     if (key === "GET /api/repos/{owner}/{name}/release") {
       return Promise.resolve({
@@ -164,6 +177,17 @@ class FakeRepoApi {
         declarations: next,
       };
       return Promise.resolve(structuredClone(this.declarationsBody));
+    }
+    if (key === "PUT /api/repos/{owner}/{name}/unfixable-checks") {
+      const list = (body as { unfixableChecks?: string[] })?.unfixableChecks;
+      const clean = Array.isArray(list)
+        ? list.map((s) => s.trim()).filter(Boolean)
+        : [];
+      this.unfixableBody = {
+        ...this.unfixableBody,
+        unfixableChecks: clean.length > 0 ? clean : null,
+      };
+      return Promise.resolve(structuredClone(this.unfixableBody));
     }
     if (key === "PUT /api/repos/{owner}/{name}/work-ownership") {
       const req = (body ?? {}) as {
@@ -1438,6 +1462,466 @@ describe("RepoDetailPageComponent (/next/repos/:owner/:name)", () => {
     expect(
       m4.el.querySelector<HTMLButtonElement>(
         '[data-testid="switch-repo-work-ownership"]',
+      )!.disabled,
+    ).toBe(true);
+  });
+
+  it("shows 'No Grain-managed branches yet' when branches are empty, surfaces GET failures and denied scope honestly, and renders the table after branch creation", async () => {
+    // 1. Empty branches list -> honest empty state, no table
+    const api = new FakeRepoApi();
+    api.branchesBody = [];
+    const { el, harness } = await mountRepo(
+      "/repos/acme/platform/branches",
+      api,
+    );
+
+    const emptyBox = await waitForEl(
+      harness,
+      '[data-testid="repo-branches-empty"]',
+    );
+    expect(emptyBox.textContent?.trim()).toBe("No Grain-managed branches yet");
+    expect(
+      el.querySelector('table[aria-label="Repository branches"]'),
+    ).toBeNull();
+
+    // Creating a branch transitions out of the empty state into the table
+    api.branchesBody = [{ name: "release/v2.0", sha: "abcdef1234567890" }];
+    const brInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="input-new-branch-name"]',
+    )!;
+    brInput.value = "release/v2.0";
+    brInput.dispatchEvent(new Event("input", { bubbles: true }));
+    harness.detectChanges();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="create-branch-btn"]',
+    )!.click();
+    await flushUi(harness);
+
+    expect(el.querySelector('[data-testid="repo-branches-empty"]')).toBeNull();
+    expect(
+      el.querySelector('[data-testid="branch-row-release/v2.0"]')?.textContent,
+    ).toContain("abcdef1234");
+
+    // 2. Failed GET -> shows error + Retry, never falsely says "No Grain-managed branches yet"
+    TestBed.resetTestingModule();
+    const failApi = new FakeRepoApi();
+    failApi.branchesBody = [];
+    failApi.refuseGet = "GET /api/repos/{owner}/{name}/branches";
+    failApi.refuseGetMessage = "branches store offline";
+    const m2 = await mountRepo("/repos/acme/platform/branches", failApi);
+    const errEl = await waitForEl(
+      m2.harness,
+      '[data-testid="repo-branches-error"]',
+    );
+    expect(errEl.textContent).toContain("branches store offline");
+    expect(
+      m2.el.querySelector('[data-testid="repo-branches-empty"]'),
+    ).toBeNull();
+
+    failApi.refuseGet = null;
+    errEl.querySelector<HTMLButtonElement>("button")!.click();
+    const recoveredEmpty = await waitForEl(
+      m2.harness,
+      '[data-testid="repo-branches-empty"]',
+    );
+    expect(recoveredEmpty.textContent?.trim()).toBe(
+      "No Grain-managed branches yet",
+    );
+
+    // 3. Denied repos:read -> shows denied banner, skips GET
+    TestBed.resetTestingModule();
+    const deniedApi = new FakeRepoApi();
+    deniedApi.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "grain/scoped-reader",
+        roles: ["grain/scoped-reader"],
+        full: false,
+        scopes: ["repos:read"],
+        repoLimits: { "repos:read": ["acme/allowed"] },
+      },
+    };
+    const m3 = await mountRepo("/repos/acme/platform/branches", deniedApi);
+    expect(
+      deniedApi.calls.some(
+        (c) => c.key === "GET /api/repos/{owner}/{name}/branches",
+      ),
+    ).toBe(false);
+    expect(
+      m3.el.querySelector('[data-testid="repo-branches-denied"]')?.textContent,
+    ).toContain("repos:read on this repository");
+    expect(
+      m3.el.querySelector('[data-testid="repo-branches-empty"]'),
+    ).toBeNull();
+  });
+
+  it("adds, validates, and withdraws repo unfixable checks via GET/PUT /unfixable-checks", async () => {
+    const api = new FakeRepoApi();
+    api.unfixableBody = {
+      unfixableChecks: null,
+      grainCICheckName: "grain CI",
+    };
+
+    const { el, harness } = await mountRepo(
+      "/repos/acme/platform/merge-queue",
+      api,
+    );
+    const card = await waitForEl(
+      harness,
+      '[data-testid="card-repo-unfixable-checks"]',
+    );
+    expect(card.classList).toContain("unfixable-card");
+    expect(card.textContent).toContain("Checks no commit here can clear");
+    expect(card.textContent).toContain("This does not exempt them.");
+    expect(
+      el.querySelector('[data-testid="repo-unfixable-empty"]')?.textContent,
+    ).toContain(
+      "grain treats every check acme/platform reports as one a commit could turn green.",
+    );
+
+    const input = el.querySelector<HTMLInputElement>(
+      '[data-testid="input-unfixable-check"]',
+    )!;
+    const addBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="add-unfixable-check-btn"]',
+    )!;
+    expect(addBtn.disabled).toBe(true);
+
+    // Reject grain CI (case-insensitively) without firing PUT
+    input.value = "grain ci";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    harness.detectChanges();
+    expect(addBtn.disabled).toBe(false);
+    addBtn.click();
+    await flushUi(harness);
+
+    expect(
+      el.querySelector('[data-testid="repo-unfixable-error"]')?.textContent,
+    ).toContain("judges one exact commit on the branch");
+    expect(input.getAttribute("aria-invalid")).toBe("true");
+    expect(
+      api.calls.some(
+        (c) => c.key === "PUT /api/repos/{owner}/{name}/unfixable-checks",
+      ),
+    ).toBe(false);
+
+    // Reject comma-containing check names without firing PUT
+    input.value = "cla/google,license/cla";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    harness.detectChanges();
+    expect(el.querySelector('[data-testid="repo-unfixable-error"]')).toBeNull();
+    addBtn.click();
+    await flushUi(harness);
+    expect(
+      el.querySelector('[data-testid="repo-unfixable-error"]')?.textContent,
+    ).toContain('cannot contain ","');
+    expect(
+      api.calls.some(
+        (c) => c.key === "PUT /api/repos/{owner}/{name}/unfixable-checks",
+      ),
+    ).toBe(false);
+
+    // Add valid check "cla/google" -> PUT { unfixableChecks: ["cla/google"] }, clears draft
+    input.value = "  cla/google  ";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    harness.detectChanges();
+    addBtn.click();
+    await flushUi(harness);
+
+    expect(
+      api.calls.some(
+        (c) =>
+          c.method === "PUT" &&
+          c.key === "PUT /api/repos/{owner}/{name}/unfixable-checks" &&
+          JSON.stringify(c.body) ===
+            JSON.stringify({ unfixableChecks: ["cla/google"] }),
+      ),
+    ).toBe(true);
+    expect(input.value).toBe("");
+    expect(
+      el.querySelector('[data-testid="unfixable-chip-cla/google"]')
+        ?.textContent,
+    ).toContain("cla/google");
+    expect(el.querySelector('[data-testid="repo-unfixable-empty"]')).toBeNull();
+
+    // Reject case-insensitive duplicate "CLA/Google" without firing PUT
+    const putCountBeforeDup = api.calls.filter(
+      (c) => c.key === "PUT /api/repos/{owner}/{name}/unfixable-checks",
+    ).length;
+    input.value = "CLA/Google";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    harness.detectChanges();
+    addBtn.click();
+    await flushUi(harness);
+
+    expect(
+      el.querySelector('[data-testid="repo-unfixable-error"]')?.textContent,
+    ).toContain("acme/platform already declares CLA/Google unfixable");
+    expect(
+      api.calls.filter(
+        (c) => c.key === "PUT /api/repos/{owner}/{name}/unfixable-checks",
+      ).length,
+    ).toBe(putCountBeforeDup);
+
+    // Also reject invalid direct saveUnfixableChecks(["grain CI"]) and comma payloads
+    const cmp = harness.fixture.debugElement.query(
+      By.directive(RepoDetailPageComponent),
+    ).componentInstance as unknown as {
+      saveUnfixableChecks: (c: string[]) => Promise<boolean>;
+    };
+    const putCountBeforeDirect = api.calls.filter(
+      (c) => c.key === "PUT /api/repos/{owner}/{name}/unfixable-checks",
+    ).length;
+    expect(await cmp.saveUnfixableChecks(["grain CI"])).toBe(false);
+    expect(await cmp.saveUnfixableChecks(["a,b"])).toBe(false);
+    expect(
+      api.calls.filter(
+        (c) => c.key === "PUT /api/repos/{owner}/{name}/unfixable-checks",
+      ).length,
+    ).toBe(putCountBeforeDirect);
+
+    // Withdraw "cla/google" -> PUT { unfixableChecks: [] }, server null normalizes back to empty state
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="remove-unfixable-cla/google"]',
+    )!.click();
+    await flushUi(harness);
+
+    expect(
+      api.calls.some(
+        (c) =>
+          c.method === "PUT" &&
+          c.key === "PUT /api/repos/{owner}/{name}/unfixable-checks" &&
+          JSON.stringify(c.body) === JSON.stringify({ unfixableChecks: [] }),
+      ),
+    ).toBe(true);
+    expect(
+      el.querySelector('[data-testid="unfixable-chip-cla/google"]'),
+    ).toBeNull();
+    expect(
+      el.querySelector('[data-testid="repo-unfixable-empty"]')?.textContent,
+    ).toContain("grain treats every check acme/platform reports");
+  });
+
+  it("handles failed unfixable-checks GET/PUT without corrupting state and enforces RBAC, configRepoOnly, and repo switches", async () => {
+    // 1. Failed GET -> shows load error + Retry, never renders empty-list copy
+    const api = new FakeRepoApi();
+    api.refuseGet = "GET /api/repos/{owner}/{name}/unfixable-checks";
+    api.refuseGetMessage = "unfixable checks store unavailable";
+    const { el, harness } = await mountRepo(
+      "/repos/acme/platform/merge-queue",
+      api,
+    );
+
+    const loadErr = await waitForEl(
+      harness,
+      '[data-testid="repo-unfixable-load-error"]',
+    );
+    expect(loadErr.textContent).toContain("unfixable checks store unavailable");
+    expect(el.querySelector('[data-testid="repo-unfixable-empty"]')).toBeNull();
+    expect(
+      el.querySelector('[data-testid="input-unfixable-check"]'),
+    ).toBeNull();
+
+    // Retry succeeds and failed PUT preserves existing chips & typed draft
+    api.refuseGet = null;
+    api.unfixableBody = {
+      unfixableChecks: ["cla/google"],
+      grainCICheckName: "grain CI",
+    };
+    api.refusePut = "PUT /api/repos/{owner}/{name}/unfixable-checks";
+    api.refusePutMessage = "unfixableChecks write rejected";
+    loadErr.querySelector<HTMLButtonElement>("button")!.click();
+    await waitForEl(harness, '[data-testid="unfixable-chip-cla/google"]');
+
+    const input = el.querySelector<HTMLInputElement>(
+      '[data-testid="input-unfixable-check"]',
+    )!;
+    input.value = "license/cla";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    harness.detectChanges();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="add-unfixable-check-btn"]',
+    )!.click();
+    await new Promise((r) => setTimeout(r, 15));
+    await flushUi(harness);
+
+    expect(
+      el.querySelector('[data-testid="repo-unfixable-error"]')?.textContent,
+    ).toContain("unfixableChecks write rejected");
+    expect(input.value).toBe("license/cla");
+    expect(
+      el.querySelector('[data-testid="unfixable-chip-cla/google"]'),
+    ).not.toBeNull();
+    expect(
+      el.querySelector('[data-testid="unfixable-chip-license/cla"]'),
+    ).toBeNull();
+
+    // 2. repos:read denied -> no GET, shows denied banner
+    TestBed.resetTestingModule();
+    const readDeniedApi = new FakeRepoApi();
+    readDeniedApi.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "grain/scoped-reader",
+        roles: ["grain/scoped-reader"],
+        full: false,
+        scopes: ["repos:read"],
+        repoLimits: { "repos:read": ["acme/allowed"] },
+      },
+    };
+    const m2 = await mountRepo(
+      "/repos/acme/platform/merge-queue",
+      readDeniedApi,
+    );
+    expect(
+      readDeniedApi.calls.some(
+        (c) => c.key === "GET /api/repos/{owner}/{name}/unfixable-checks",
+      ),
+    ).toBe(false);
+    expect(
+      m2.el.querySelector('[data-testid="repo-unfixable-denied"]')?.textContent,
+    ).toContain("repos:read on this repository");
+
+    // 3. repos:read without repos:write -> readonly banner, disabled input/Add, no chip remove buttons, zero writes
+    TestBed.resetTestingModule();
+    const writeDeniedApi = new FakeRepoApi();
+    writeDeniedApi.unfixableBody = {
+      unfixableChecks: ["cla/google"],
+      grainCICheckName: "grain CI",
+    };
+    writeDeniedApi.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "grain/viewer",
+        roles: ["grain/viewer"],
+        full: false,
+        scopes: ["repos:read"],
+      },
+    };
+    const m3 = await mountRepo(
+      "/repos/acme/platform/merge-queue",
+      writeDeniedApi,
+    );
+    await waitForEl(m3.harness, '[data-testid="repo-unfixable-readonly"]');
+    const roInput = m3.el.querySelector<HTMLInputElement>(
+      '[data-testid="input-unfixable-check"]',
+    )!;
+    const roAdd = m3.el.querySelector<HTMLButtonElement>(
+      '[data-testid="add-unfixable-check-btn"]',
+    )!;
+    expect(roInput.disabled).toBe(true);
+    expect(roAdd.disabled).toBe(true);
+    expect(roAdd.getAttribute("aria-describedby")).toBe(
+      "repo-unfixable-readonly",
+    );
+    expect(
+      m3.el.querySelector('[data-testid="remove-unfixable-cla/google"]'),
+    ).toBeNull();
+    const cmp3 = m3.harness.fixture.debugElement.query(
+      By.directive(RepoDetailPageComponent),
+    ).componentInstance as unknown as {
+      addUnfixableCheck: () => Promise<void>;
+      removeUnfixableCheck: (c: string) => Promise<void>;
+      saveUnfixableChecks: (c: string[]) => Promise<boolean>;
+    };
+    await cmp3.addUnfixableCheck();
+    await cmp3.removeUnfixableCheck("cla/google");
+    await cmp3.saveUnfixableChecks(["license/cla"]);
+    expect(writeDeniedApi.calls.filter((c) => c.method !== "GET")).toEqual([]);
+
+    // 4. configRepoOnly -> disabled + aria-describedby=repo-readonly-banner + zero writes
+    TestBed.resetTestingModule();
+    const lockedApi = new FakeRepoApi();
+    lockedApi.unfixableBody = {
+      unfixableChecks: ["cla/google"],
+      grainCICheckName: "grain CI",
+    };
+    lockedApi.configBody = {
+      version: "v3.6.0",
+      configRepoOnly: true,
+      access: {
+        role: "grain/operator",
+        roles: ["grain/operator"],
+        full: true,
+        scopes: [],
+      },
+    };
+    const m4 = await mountRepo("/repos/acme/platform/merge-queue", lockedApi);
+    await waitForEl(m4.harness, '[data-testid="unfixable-chip-cla/google"]');
+    const lockedAdd = m4.el.querySelector<HTMLButtonElement>(
+      '[data-testid="add-unfixable-check-btn"]',
+    )!;
+    expect(lockedAdd.disabled).toBe(true);
+    expect(lockedAdd.getAttribute("aria-describedby")).toBe(
+      "repo-readonly-banner",
+    );
+    expect(
+      m4.el.querySelector('[data-testid="remove-unfixable-cla/google"]'),
+    ).toBeNull();
+    const cmp4 = m4.harness.fixture.debugElement.query(
+      By.directive(RepoDetailPageComponent),
+    ).componentInstance as unknown as {
+      saveUnfixableChecks: (c: string[]) => Promise<boolean>;
+    };
+    await cmp4.saveUnfixableChecks([]);
+    expect(lockedApi.calls.filter((c) => c.method !== "GET")).toEqual([]);
+
+    // 5. Host-prefixed repo scoping and in-place navigation reset
+    TestBed.resetTestingModule();
+    const hostApi = new FakeRepoApi();
+    hostApi.unfixableBody = {
+      unfixableChecks: ["cla/allowed"],
+      grainCICheckName: "grain CI",
+    };
+    hostApi.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "grain/host-scoped",
+        roles: ["grain/host-scoped"],
+        full: false,
+        scopes: ["repos:read", "repos:write"],
+        repoLimits: { "repos:write": ["ghes.example.com/acme/allowed"] },
+      },
+    };
+    const m5 = await mountRepo(
+      "/repos/ghes.example.com/acme/allowed/merge-queue",
+      hostApi,
+    );
+    await waitForEl(m5.harness, '[data-testid="unfixable-chip-cla/allowed"]');
+    expect(
+      hostApi.calls.some(
+        (c) =>
+          c.key === "GET /api/repos/{owner}/{name}/unfixable-checks" &&
+          c.params?.["owner"] === "ghes.example.com/acme" &&
+          c.params?.["name"] === "allowed",
+      ),
+    ).toBe(true);
+    expect(
+      m5.el.querySelector<HTMLInputElement>(
+        '[data-testid="input-unfixable-check"]',
+      )!.disabled,
+    ).toBe(false);
+
+    hostApi.unfixableBody = {
+      unfixableChecks: [],
+      grainCICheckName: "grain CI",
+    };
+    await m5.harness.navigateByUrl(
+      "/repos/ghes.example.com/acme/forbidden/merge-queue",
+    );
+    await vi.waitFor(() => {
+      m5.harness.detectChanges();
+      expect(
+        m5.el.querySelector('[data-testid="repo-unfixable-empty"]')
+          ?.textContent,
+      ).toContain("ghes.example.com/acme/forbidden");
+    });
+    expect(
+      m5.el.querySelector('[data-testid="unfixable-chip-cla/allowed"]'),
+    ).toBeNull();
+    expect(
+      m5.el.querySelector<HTMLInputElement>(
+        '[data-testid="input-unfixable-check"]',
       )!.disabled,
     ).toBe(true);
   });

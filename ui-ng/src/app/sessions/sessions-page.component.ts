@@ -58,6 +58,7 @@ import {
 import {
   buildAgentModelOptions,
   extractSessionArtifacts,
+  resolveSessionModelNote,
 } from "./session-artifacts";
 import {
   type CanvasTab,
@@ -218,16 +219,37 @@ export function clock(iso: string | undefined, now = new Date()): string {
                   st.label
                 }}<span class="sr-only">: {{ st.tip }}</span></span
               >
-              @if (canEditCaps() && modelOptions().length > 1) {
-                <g-pill-select
-                  [options]="modelOptions()"
-                  [value]="row.session.model || ''"
-                  ariaLabel="Session model"
-                  align="left"
-                  testid="chat-head-model"
-                  [disabled]="store.isBusy('settings')"
-                  (valueChange)="saveModel($event)"
-                />
+              @if (showModelControl()) {
+                @if (canEditCaps() && modelOptions().length > 1) {
+                  <g-pill-select
+                    [options]="modelOptions()"
+                    [value]="selectedModel()"
+                    ariaLabel="Session model"
+                    align="left"
+                    testid="chat-head-model"
+                    [disabled]="store.isBusy('settings')"
+                    (valueChange)="saveModel($event)"
+                  />
+                } @else {
+                  <span
+                    class="status-pill neutral"
+                    data-testid="chat-head-model-readonly"
+                    [attr.title]="activeModelLabel()"
+                    style="max-width: 100%; overflow: hidden; text-overflow: ellipsis"
+                  >
+                    {{ activeModelLabel() }}
+                  </span>
+                }
+                @if (sessionModelNote(); as note) {
+                  <span
+                    class="status-pill blast"
+                    data-testid="chat-head-model-badge"
+                    [attr.title]="note"
+                    style="max-width: 100%; overflow: hidden; text-overflow: ellipsis"
+                  >
+                    {{ note }}
+                  </span>
+                }
               }
               <button
                 type="button"
@@ -383,13 +405,23 @@ export function clock(iso: string | undefined, now = new Date()): string {
                     <span>Model</span>
                     <g-pill-select
                       [options]="modelOptions()"
-                      [value]="row.session.model || ''"
+                      [value]="selectedModel()"
                       ariaLabel="Session model"
                       align="left"
                       testid="session-model"
                       [disabled]="store.isBusy('settings')"
                       (valueChange)="saveModel($event)"
                     />
+                    @if (sessionModelNote(); as note) {
+                      <span
+                        class="status-pill blast"
+                        data-testid="session-model-badge"
+                        [attr.title]="note"
+                        style="align-self: flex-start; max-width: 100%; overflow: hidden; text-overflow: ellipsis"
+                      >
+                        {{ note }}
+                      </span>
+                    }
                   </div>
                   <div class="session-setting-field">
                     <span>Network access</span>
@@ -751,7 +783,7 @@ export function clock(iso: string | undefined, now = new Date()): string {
           <div class="field">
             <span>Model</span>
             <g-pill-select
-              [options]="modelOptions()"
+              [options]="newModelOptions()"
               [value]="newModel()"
               ariaLabel="New session model"
               align="left"
@@ -925,13 +957,60 @@ export class SessionsPageComponent implements OnInit, OnDestroy {
   protected readonly apiGrants = computed(() =>
     apiGrantCount(this.store.selected()?.session),
   );
+  protected readonly sessionModel = computed(() =>
+    (this.store.selected()?.session.model ?? "").trim(),
+  );
+  protected readonly newModelOptions = computed<PillOption[]>(() =>
+    buildAgentModelOptions(
+      this.store.agentModels(),
+      this.store.models(),
+      this.store.defaultModel(),
+    ),
+  );
   protected readonly modelOptions = computed<PillOption[]>(() =>
     buildAgentModelOptions(
       this.store.agentModels(),
       this.store.models(),
       this.store.defaultModel(),
-      this.store.selected()?.session.model,
+      this.sessionModel(),
     ),
+  );
+  protected readonly selectedModel = computed(() => {
+    const raw = this.sessionModel();
+    if (!raw) return "";
+    const lower = raw.toLowerCase();
+    return (
+      this.modelOptions().find((o) => o.value.toLowerCase() === lower)?.value ??
+      raw
+    );
+  });
+  protected readonly sessionModelNote = computed(() =>
+    resolveSessionModelNote({
+      sessionModel: this.sessionModel(),
+      defaultModel: this.store.defaultModel(),
+      configModels: this.store.models(),
+      agentBackends: this.store.agentBackends(),
+      catalogLoaded: this.store.modelCatalogLoaded(),
+    }),
+  );
+  protected readonly activeModelLabel = computed(() => {
+    const val = this.selectedModel();
+    const opts = this.modelOptions();
+    if (val) {
+      return opts.find((o) => o.value === val)?.label ?? val;
+    }
+    const def = this.store.defaultModel().trim();
+    if (def) {
+      return `Default (${def})`;
+    }
+    return opts[0]?.label ?? "";
+  });
+  protected readonly showModelControl = computed(
+    () =>
+      this.modelOptions().length > 1 ||
+      !!this.sessionModel() ||
+      !!this.sessionModelNote() ||
+      !!this.store.defaultModel().trim(),
   );
   protected readonly extractedArtifacts = computed(() =>
     extractSessionArtifacts(this.comments()),

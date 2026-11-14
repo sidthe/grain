@@ -12,11 +12,19 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import type { AgentModel, Comment } from "../api/models";
+import type { AgentBackendOption, AgentModel, Comment } from "../api/models";
 import {
   extractGrainPlans,
   type GrainPlanBlock,
 } from "../director/director-draft";
+import {
+  type ModelAvailability,
+  availabilityNote,
+  containsModel,
+  modelAvailability,
+  modelGroups,
+  parseDefaultModels,
+} from "../shared/model-catalog";
 import type { PillOption } from "../shared/pill-select.component";
 
 export interface DocArtifact {
@@ -188,13 +196,16 @@ export function buildAgentModelOptions(
   ];
   const byId = new Map<string, AgentModel>();
   for (const m of agentModels) {
-    if (m.id && !byId.has(m.id)) byId.set(m.id, m);
+    const id = m.id?.trim().toLowerCase();
+    if (id && !byId.has(id)) byId.set(id, m);
   }
   const seen = new Set<string>([""]);
-  for (const id of configModels) {
-    if (!id || seen.has(id)) continue;
-    seen.add(id);
-    const meta = byId.get(id);
+  for (const rawId of configModels) {
+    const id = rawId.trim();
+    const key = id.toLowerCase();
+    if (!id || seen.has(key)) continue;
+    seen.add(key);
+    const meta = byId.get(key);
     if (meta) {
       const base = meta.label || meta.family || meta.id;
       const label =
@@ -206,10 +217,54 @@ export function buildAgentModelOptions(
       opts.push({ value: id, label: id });
     }
   }
-  if (currentModel && !seen.has(currentModel)) {
-    opts.push({ value: currentModel, label: currentModel });
+  const cur = (currentModel ?? "").trim();
+  if (cur && !seen.has(cur.toLowerCase())) {
+    opts.push({ value: cur, label: cur });
   }
   return opts;
+}
+
+/**
+ * Returns the connection-availability warning for the active session model
+ * (or the default fallback chain when no model is pinned), or "" when available
+ * or before the catalog has loaded.
+ */
+export function resolveSessionModelNote(opts: {
+  sessionModel?: string;
+  defaultModel?: string;
+  configModels: readonly string[];
+  agentBackends?: readonly AgentBackendOption[] | null;
+  catalogLoaded: boolean;
+}): string {
+  const ready =
+    opts.catalogLoaded ||
+    opts.configModels.length > 0 ||
+    (opts.agentBackends !== undefined && opts.agentBackends !== null);
+  if (!ready) return "";
+
+  const backends = opts.agentBackends ?? [];
+  const hasBackendCatalog = backends.some((b) => (b.models?.length ?? 0) > 0);
+  const groups = hasBackendCatalog ? modelGroups(backends) : [];
+  const check = (m: string): ModelAvailability =>
+    hasBackendCatalog
+      ? modelAvailability(m, groups)
+      : containsModel(opts.configModels, m)
+        ? "enabled"
+        : "unadvertised";
+
+  const pinned = (opts.sessionModel ?? "").trim();
+  if (pinned) {
+    return availabilityNote(check(pinned));
+  }
+
+  const chain = parseDefaultModels(opts.defaultModel);
+  if (chain.length === 0) return "";
+  const statuses = chain.map(check);
+  if (statuses.includes("enabled")) return "";
+  if (statuses.includes("disabled-only")) {
+    return availabilityNote("disabled-only");
+  }
+  return availabilityNote("unadvertised");
 }
 
 export function topologicalPlanOrder<

@@ -16,6 +16,7 @@ import type { Comment } from "../api/models";
 import {
   buildAgentModelOptions,
   extractSessionArtifacts,
+  resolveSessionModelNote,
   topologicalPlanOrder,
   wrapSandboxedHtml,
 } from "./session-artifacts";
@@ -111,5 +112,87 @@ describe("session-artifacts helpers", () => {
       "custom-pinned-model",
     ]);
     expect(opts[1].label).toBe("Gemini 3.1 Pro · high");
+  });
+
+  it("trims and case-deduplicates currentModel in buildAgentModelOptions", () => {
+    const opts = buildAgentModelOptions(
+      [{ id: "Gemini-Pro", label: "Gemini Pro" }],
+      ["Gemini-Pro"],
+      "Gemini-Pro",
+      "  gemini-pro  ",
+    );
+    expect(opts.map((o) => o.value)).toEqual(["", "Gemini-Pro"]);
+    expect(opts[1].label).toBe("Gemini Pro");
+
+    const blankOpts = buildAgentModelOptions([], ["gemini-pro"], "", "   ");
+    expect(blankOpts.map((o) => o.value)).toEqual(["", "gemini-pro"]);
+  });
+
+  it("resolves unadvertised and disabled-only model notes across edge cases", () => {
+    // Catalog not loaded yet: suppress false unadvertised warnings.
+    expect(
+      resolveSessionModelNote({
+        sessionModel: "custom-model",
+        defaultModel: "legacy-default",
+        configModels: [],
+        agentBackends: null,
+        catalogLoaded: false,
+      }),
+    ).toBe("");
+
+    // Pinned model not advertised by any connection (case-insensitive check).
+    expect(
+      resolveSessionModelNote({
+        sessionModel: "custom-model",
+        defaultModel: "gemini-pro",
+        configModels: ["gemini-pro"],
+        agentBackends: [
+          { id: "conn-1", kind: "gemini", models: ["gemini-pro"] },
+        ],
+        catalogLoaded: true,
+      }),
+    ).toBe("not advertised by any connection");
+
+    // Case-insensitive match against advertised configModels clears the note.
+    expect(
+      resolveSessionModelNote({
+        sessionModel: "GEMINI-PRO",
+        defaultModel: "gemini-pro",
+        configModels: ["gemini-pro"],
+        agentBackends: [
+          { id: "conn-1", kind: "gemini", models: ["gemini-pro"] },
+        ],
+        catalogLoaded: true,
+      }),
+    ).toBe("");
+
+    // Empty sessionModel falls back to defaultModel; warns when defaultModel is unadvertised.
+    expect(
+      resolveSessionModelNote({
+        sessionModel: "   ",
+        defaultModel: "legacy-default",
+        configModels: [],
+        agentBackends: [],
+        catalogLoaded: true,
+      }),
+    ).toBe("not advertised by any connection");
+
+    // Disabled-only connection (config.models empty, backend present and disabled).
+    expect(
+      resolveSessionModelNote({
+        sessionModel: "",
+        defaultModel: "legacy-default",
+        configModels: [],
+        agentBackends: [
+          {
+            id: "conn-1",
+            kind: "gemini",
+            models: ["legacy-default"],
+            disabled: true,
+          },
+        ],
+        catalogLoaded: true,
+      }),
+    ).toBe("disabled connections only");
   });
 });
