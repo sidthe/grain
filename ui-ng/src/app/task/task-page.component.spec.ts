@@ -1184,6 +1184,132 @@ describe("duration", () => {
     });
   });
 
+  it("follows up with provider=github-actions when GET /api/ci/runs reports repoProvider github-actions and links runs with query param", async () => {
+    const api = new FakeApi();
+    const ghaRun = {
+      id: "gha:acme:web:901",
+      provider: "github-actions",
+      workflow: "CI Workflow",
+      repo: "acme/web",
+      ref: "refs/heads/grain/task-7",
+      commit: "abcdef12",
+      status: "completed",
+      conclusion: "failure",
+      jobs: [],
+    };
+    const origGet = api.get;
+    let firstList = true;
+    api.get = (
+      route: string,
+      params?: Record<string, string>,
+      query?: string,
+    ) => {
+      if (route === "GET /api/ci/runs") {
+        api.calls.push({ method: "GET", route, params, query });
+        if (firstList && !(query ?? "").includes("provider=github-actions")) {
+          firstList = false;
+          return Promise.resolve({
+            enabled: true,
+            repoProvider: "github-actions",
+            runs: [],
+          });
+        }
+        return Promise.resolve({
+          enabled: true,
+          repoProvider: "github-actions",
+          runs: [ghaRun],
+        });
+      }
+      if (route === "GET /api/ci/runs/{id}") {
+        api.calls.push({ method: "GET", route, params, query });
+        return Promise.resolve(ghaRun);
+      }
+      return origGet(route, params, query);
+    };
+    api.detail = {
+      ...api.detail,
+      ci: { status: "failure", runId: "gha:acme:web:901", commit: "abcdef12" },
+    };
+    // First test repoProvider discovery when ci.runId isn't pre-populated on task:
+    const api2 = new FakeApi();
+    let seenFirst = false;
+    const origGet2 = api2.get;
+    api2.get = (
+      route: string,
+      params?: Record<string, string>,
+      query?: string,
+    ) => {
+      if (route === "GET /api/ci/runs") {
+        api2.calls.push({ method: "GET", route, params, query });
+        if (!seenFirst && !(query ?? "").includes("provider=github-actions")) {
+          seenFirst = true;
+          return Promise.resolve({
+            enabled: true,
+            repoProvider: "github-actions",
+            runs: [],
+          });
+        }
+        return Promise.resolve({
+          enabled: true,
+          repoProvider: "github-actions",
+          runs: [ghaRun],
+        });
+      }
+      if (route === "GET /api/ci/runs/{id}") {
+        api2.calls.push({ method: "GET", route, params, query });
+        return Promise.resolve(ghaRun);
+      }
+      return origGet2(route, params, query);
+    };
+    api2.detail = { ...api2.detail, ci: undefined };
+    const f2 = await render(api2, "changes");
+    const list2 = api2.calls.filter((c) => c.route === "GET /api/ci/runs");
+    expect(list2.map((c) => c.query)).toEqual([
+      "repo=acme%2Fweb&ref=grain%2Ftask-7&limit=10",
+      "repo=acme%2Fweb&ref=grain%2Ftask-7&limit=10&provider=github-actions",
+    ]);
+    expect(
+      q<HTMLAnchorElement>(
+        f2,
+        '[data-testid="ci-run-link-gha:acme:web:901"]',
+      )?.getAttribute("href"),
+    ).toBe("/ci/runs/gha:acme:web:901?provider=github-actions");
+
+    // When task.ci.runId already uses gha: (even when run list is empty), provider=github-actions is sent
+    // directly and the fallback obsCi link includes ?provider=github-actions.
+    TestBed.resetTestingModule();
+    const origGet1 = api.get;
+    api.get = (
+      route: string,
+      params?: Record<string, string>,
+      query?: string,
+    ) => {
+      if (route === "GET /api/ci/runs") {
+        api.calls.push({ method: "GET", route, params, query });
+        return Promise.resolve({
+          enabled: true,
+          repoProvider: "github-actions",
+          runs: [],
+        });
+      }
+      if (route === "GET /api/ci/runs/{id}") {
+        api.calls.push({ method: "GET", route, params, query });
+        return Promise.resolve(undefined);
+      }
+      return origGet1(route, params, query);
+    };
+    const f1 = await render(api, "changes");
+    const list1 = api.calls.filter((c) => c.route === "GET /api/ci/runs");
+    expect(list1.map((c) => c.query)).toEqual([
+      "repo=acme%2Fweb&ref=grain%2Ftask-7&limit=10&provider=github-actions",
+    ]);
+    expect(
+      q<HTMLAnchorElement>(f1, '[data-testid="ci-run-link"]')?.getAttribute(
+        "href",
+      ),
+    ).toBe("/ci/runs/gha:acme:web:901?provider=github-actions");
+  });
+
   it("opens force-merge dialog outside inert section, traps focus, and closes on Escape", async () => {
     const api = new FakeApi();
     api.detail = {
