@@ -1268,6 +1268,7 @@ const (
 	LinkMergeWith  LinkKind = "merge-with"  // blocks the merge, not the run
 	LinkAddresses  LinkKind = "addresses"   // -> a review thread
 	LinkProposedBy LinkKind = "proposed-by" // provenance only
+	LinkQATriageHold LinkKind = "qa-triage-hold"
 	// LinkFixTask recorded the separate task the merge queue used to file
 	// to repair this task's own PR (-> that task's ID). Nothing writes it
 	// any more: a repair now runs as another attempt of the task itself,

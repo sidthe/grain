@@ -89,20 +89,71 @@ type FlowDeclarationV2 struct {
 	Verifier         VerifierDecl         `json:"verifier" yaml:"verifier"`
 }
 
+type FlowDeclarationV3 struct {
+	Schema           string               `json:"schema" yaml:"schema"`
+	Key              string               `json:"key" yaml:"key"`
+	Extends          string               `json:"extends,omitempty" yaml:"extends,omitempty"`
+	Label            string               `json:"label,omitempty" yaml:"label,omitempty"`
+	Summary          string               `json:"summary,omitempty" yaml:"summary,omitempty"`
+	Skills           V3SkillsDecl         `json:"skills,omitempty" yaml:"skills,omitempty"`
+	Stages           V3StagesDecl         `json:"stages,omitempty" yaml:"stages,omitempty"`
+	Checks           map[string]CheckDecl `json:"checks,omitempty" yaml:"checks,omitempty"`
+	CustomChecks     []CustomCheckDecl    `json:"custom-checks,omitempty" yaml:"custom-checks,omitempty"`
+	Verifier         VerifierDecl         `json:"verifier,omitempty" yaml:"verifier,omitempty"`
+}
+
+type V3SkillsDecl struct {
+	Coding     SkillDecl `json:"coding,omitempty" yaml:"coding,omitempty"`
+	Intent     SkillDecl `json:"intent,omitempty" yaml:"intent,omitempty"`
+	PlanCritic SkillDecl `json:"plan-critic,omitempty" yaml:"plan-critic,omitempty"`
+	Verifier   SkillDecl `json:"verifier,omitempty" yaml:"verifier,omitempty"`
+	Security   SkillDecl `json:"security,omitempty" yaml:"security,omitempty"`
+}
+
+type V3StagesDecl struct {
+	S0Intent      S0IntentDecl      `json:"s0-intent,omitempty" yaml:"s0-intent,omitempty"`
+	S1Risk        S1RiskDecl        `json:"s1-risk,omitempty" yaml:"s1-risk,omitempty"`
+	S2PlanCritic  S2PlanCriticDecl  `json:"s2-plan-critic,omitempty" yaml:"s2-plan-critic,omitempty"`
+	Custom        []CustomStageDecl `json:"custom,omitempty" yaml:"custom,omitempty"`
+	S5MergeTriage TriageConfig      `json:"s5-merge-triage,omitempty" yaml:"s5-merge-triage,omitempty"`
+}
+
+type S0IntentDecl struct {
+	Enabled      bool     `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Complexities []string `json:"complexities,omitempty" yaml:"complexities,omitempty"`
+	MaxSeconds   int      `json:"max-seconds,omitempty" yaml:"max-seconds,omitempty"`
+	MaxTokens    int      `json:"max-tokens,omitempty" yaml:"max-tokens,omitempty"`
+}
+
+type S1RiskDecl struct {
+	Overrides []RiskOverride `json:"overrides,omitempty" yaml:"overrides,omitempty"`
+}
+
+type S2PlanCriticDecl struct {
+	Enabled      bool     `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Complexities []string `json:"complexities,omitempty" yaml:"complexities,omitempty"`
+	Tiers        []string `json:"tiers,omitempty" yaml:"tiers,omitempty"`
+	MaxSeconds   int      `json:"max-seconds,omitempty" yaml:"max-seconds,omitempty"`
+	MaxTokens    int      `json:"max-tokens,omitempty" yaml:"max-tokens,omitempty"`
+	MaxBounces   int      `json:"max-bounces,omitempty" yaml:"max-bounces,omitempty"`
+}
+
 // FlowVersionBundle pairs a materialized FlowDeclarationV2 with its canonical hash, version metadata, and executable FlowSpec.
 type FlowVersionBundle struct {
-	Hash        string            `json:"hash"`
-	Key         string            `json:"key"`
-	Version     int               `json:"version"`
-	ParentHash  string            `json:"parentHash,omitempty"`
-	Label       string            `json:"label"`
-	Summary     string            `json:"summary"`
-	BuiltIn     bool              `json:"builtIn"`
-	QAEngineRev int               `json:"qaEngineRev"`
-	SourceYAML  string            `json:"sourceYaml,omitempty"`
-	Declaration FlowDeclarationV2 `json:"declaration"`
-	SpecJSON    string            `json:"specJson"`
-	Resolved    FlowSpec          `json:"resolved"`
+	Hash          string              `json:"hash"`
+	Key           string              `json:"key"`
+	Version       int                 `json:"version"`
+	ParentHash    string              `json:"parentHash,omitempty"`
+	Label         string              `json:"label"`
+	Summary       string              `json:"summary"`
+	BuiltIn       bool                `json:"builtIn"`
+	QAEngineRev   int                 `json:"qaEngineRev"`
+	SchemaVer     string              `json:"schemaVer,omitempty"`
+	SourceYAML    string              `json:"sourceYaml,omitempty"`
+	Declaration   FlowDeclarationV2   `json:"declaration"`
+	DeclarationV3 *FlowDeclarationV3  `json:"declarationV3,omitempty"`
+	SpecJSON      string              `json:"specJson"`
+	Resolved      FlowSpec            `json:"resolved"`
 }
 
 const goldenV2YAML = `schema: grain.dev/qa-flow/v2
@@ -342,19 +393,33 @@ func BuiltInFlowVersions() []FlowVersionBundle {
 	}
 
 	out := []FlowVersionBundle{v1Bundle}
-	for _, rawYAML := range []string{goldenV2YAML, goldenV2SkillOnlyYAML, goldenV2ChecksOnlyYAML} {
-		decl, pErr := ParseFlowDeclarationV2([]byte(rawYAML))
+	for _, rawYAML := range []string{goldenV2YAML, goldenV2SkillOnlyYAML, goldenV2ChecksOnlyYAML, goldenV3YAML} {
+		anyDecl, pErr := ParseFlowDeclaration([]byte(rawYAML))
 		if pErr != nil {
-			panic(fmt.Sprintf("qa: invalid built-in v2 yaml: %v", pErr))
+			panic(fmt.Sprintf("qa: invalid built-in yaml: %v", pErr))
 		}
-		b, cErr := compileBundle(decl, 1, rawYAML, "", true, func(ref string) (FlowVersionBundle, bool) {
+		
+		var b FlowVersionBundle
+		var cErr error
+		var key string
+		
+		lfunc := func(ref string) (FlowVersionBundle, bool) {
 			v, ok := lookup[ref]
 			return v, ok
-		})
-		if cErr != nil {
-			panic(fmt.Sprintf("qa: compiling built-in %s: %v", decl.Key, cErr))
 		}
-		b.Hash = fmt.Sprintf("builtin:%s@1#%d", decl.Key, QAEngineRev)
+		
+		switch d := anyDecl.(type) {
+		case *FlowDeclarationV3:
+			key = d.Key
+			b, cErr = ResolveFlowDeclarationV3(*d, 1, rawYAML, "", true, lfunc)
+		case *FlowDeclarationV2:
+			key = d.Key
+			b, cErr = compileBundle(*d, 1, rawYAML, "", true, lfunc)
+		}
+		if cErr != nil {
+			panic(fmt.Sprintf("qa: compiling built-in %s: %v", key, cErr))
+		}
+		b.Hash = fmt.Sprintf("builtin:%s@1#%d", key, QAEngineRev)
 		lookup[b.Hash] = b
 		lookup[b.Key] = b
 		lookup[fmt.Sprintf("%s@1", b.Key)] = b

@@ -58,22 +58,54 @@ type RuleSpec struct {
 
 // FlowSpec describes a quality control flow package executable by the Grain QA engine.
 type FlowSpec struct {
-	ID                 string     `json:"id" yaml:"id"`
-	Label              string     `json:"label" yaml:"label"`
-	Summary            string     `json:"summary" yaml:"summary"`
-	InjectSkill        bool       `json:"injectSkill" yaml:"inject-skill"`
-	SkillText          string     `json:"skillText,omitempty" yaml:"-"`
-	SkillBytes         int        `json:"skillBytes" yaml:"-"`
-	StopNudge          bool       `json:"stopNudge" yaml:"stop-nudge"`
-	StagingIsolation   bool       `json:"stagingIsolation" yaml:"staging-isolation"`
-	EnableS4           bool       `json:"enableS4" yaml:"enable-s4"`
-	VerifierTiers      []string   `json:"verifierTiers,omitempty" yaml:"verifier-tiers,omitempty"`
-	MaxS4RepairRounds  int        `json:"maxS4RepairRounds" yaml:"max-s4-repair-rounds"`
-	MaxS4Seconds       int        `json:"maxS4Seconds,omitempty" yaml:"max-s4-seconds,omitempty"`
-	MaxS4Tokens        int        `json:"maxS4Tokens,omitempty" yaml:"max-s4-tokens,omitempty"`
-	VerifierChecklist  string     `json:"verifierChecklist,omitempty" yaml:"verifier-checklist,omitempty"`
-	StrictDecoderPaths []string   `json:"strictDecoderPaths,omitempty" yaml:"strict-decoder-paths,omitempty"`
-	Rules              []RuleSpec `json:"rules" yaml:"rules"`
+	ID                  string            `json:"id" yaml:"id"`
+	SchemaVer           string            `json:"schemaVer,omitempty" yaml:"-"`
+	Label               string            `json:"label" yaml:"label"`
+	Summary             string            `json:"summary" yaml:"summary"`
+	InjectSkill         bool              `json:"injectSkill" yaml:"inject-skill"`
+	SkillText           string            `json:"skillText,omitempty" yaml:"-"`
+	IntentSkillText     string            `json:"intentSkillText,omitempty" yaml:"-"`
+	PlanCriticSkillText string            `json:"planCriticSkillText,omitempty" yaml:"-"`
+	VerifierSkillText   string            `json:"verifierSkillText,omitempty" yaml:"-"`
+	SecuritySkillText   string            `json:"securitySkillText,omitempty" yaml:"-"`
+	SkillBytes          int               `json:"skillBytes" yaml:"-"`
+	StopNudge           bool              `json:"stopNudge" yaml:"stop-nudge"`
+	StagingIsolation    bool              `json:"stagingIsolation" yaml:"staging-isolation"`
+	EnableS4            bool              `json:"enableS4" yaml:"enable-s4"`
+	VerifierTiers       []string          `json:"verifierTiers,omitempty" yaml:"verifier-tiers,omitempty"`
+	MaxS4RepairRounds   int               `json:"maxS4RepairRounds" yaml:"max-s4-repair-rounds"`
+	MaxS4Seconds        int               `json:"maxS4Seconds,omitempty" yaml:"max-s4-seconds,omitempty"`
+	MaxS4Tokens         int               `json:"maxS4Tokens,omitempty" yaml:"max-s4-tokens,omitempty"`
+	VerifierChecklist   string            `json:"verifierChecklist,omitempty" yaml:"verifier-checklist,omitempty"`
+	StrictDecoderPaths  []string          `json:"strictDecoderPaths,omitempty" yaml:"strict-decoder-paths,omitempty"`
+	Rules               []RuleSpec        `json:"rules" yaml:"rules"`
+	S0Intent            bool              `json:"s0Intent,omitempty" yaml:"s0-intent,omitempty"`
+	S0IntentConfig      S0IntentDecl      `json:"s0IntentConfig,omitempty" yaml:"-"`
+	S2PlanCritic        bool              `json:"s2PlanCritic,omitempty" yaml:"s2-plan-critic,omitempty"`
+	S2PlanCriticConfig  S2PlanCriticDecl  `json:"s2PlanCriticConfig,omitempty" yaml:"-"`
+	RiskOverrides       []RiskOverride    `json:"riskOverrides,omitempty" yaml:"risk-overrides,omitempty"`
+	CustomStages        []CustomStageDecl `json:"customStages,omitempty" yaml:"custom-stages,omitempty"`
+	S5MergeTriage       TriageConfig      `json:"s5MergeTriage,omitempty" yaml:"s5-merge-triage,omitempty"`
+	CustomChecks        []CustomCheckDecl `json:"customChecks,omitempty" yaml:"custom-checks,omitempty"`
+}
+
+type CustomStageDecl struct {
+	ID             string   `json:"id" yaml:"id"`
+	Label          string   `json:"label,omitempty" yaml:"label,omitempty"`
+	InsertAfter    string   `json:"insertAfter" yaml:"insert-after"`
+	Kind           string   `json:"kind,omitempty" yaml:"kind,omitempty"`
+	WhenPaths      []string `json:"whenPaths,omitempty" yaml:"when-paths,omitempty"`
+	MinTier        string   `json:"minTier,omitempty" yaml:"min-tier,omitempty"`
+	Timeout        int      `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	TimeoutSeconds int      `json:"timeoutSeconds,omitempty" yaml:"timeout-seconds,omitempty"`
+	CheckIDs       []string `json:"checkIds,omitempty" yaml:"check-ids,omitempty"`
+	SkillRef       string   `json:"skillRef,omitempty" yaml:"skill-ref,omitempty"`
+}
+
+type TriageConfig struct {
+	Mode              string   `json:"mode" yaml:"mode"`
+	AutoMergeTiers    []string `json:"auto-merge-tiers,omitempty" yaml:"auto-merge-tiers,omitempty"`
+	RequireHumanTiers []string `json:"require-human-tiers,omitempty" yaml:"require-human-tiers,omitempty"`
 }
 
 // SkillPrompt returns the coding-time skill text when InjectSkill is true.

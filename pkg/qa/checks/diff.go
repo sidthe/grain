@@ -55,6 +55,26 @@ type ParsedDiff struct {
 	Files          []DiffFile
 	NonTestAdded   int
 	NonTestDeleted int
+	TestAdded      int
+}
+
+// AddedLinesMap returns a map from file path to the lines added in the diff.
+func (d ParsedDiff) AddedLinesMap() map[string][]string {
+	out := make(map[string][]string, len(d.Files))
+	for _, f := range d.Files {
+		p := f.EffectivePath()
+		if p == "" {
+			continue
+		}
+		var lines []string
+		for _, al := range f.AddedLines {
+			lines = append(lines, al.Text)
+		}
+		if len(lines) > 0 {
+			out[p] = lines
+		}
+	}
+	return out
 }
 
 // AllPaths returns normalized unique file paths touched by the diff.

@@ -128,6 +128,7 @@ type QAExperiment struct {
 	EnrollmentHeld  string                      `json:"enrollmentHeld"`
 	Decision        *QAExperimentDecision       `json:"decision,omitempty"`
 	Readout         json.RawMessage             `json:"readout,omitempty"`
+	ReferenceArmID  string                      `json:"referenceArmId,omitempty"`
 	CreatedBy       string                      `json:"createdBy"`
 	CreatedAt       time.Time                   `json:"createdAt"`
 	StartedAt       *time.Time                  `json:"startedAt,omitempty"`
@@ -157,6 +158,7 @@ type qaExperimentMetricsBlob struct {
 	PrimaryContrast string   `json:"primaryContrast"`
 	Secondaries     []string `json:"secondaries,omitempty"`
 	Guardrails      []string `json:"guardrails,omitempty"`
+	ReferenceArmID  string   `json:"referenceArmId,omitempty"`
 }
 
 const qaExperimentColumns = "`id`, `revision`, `name`, `hypothesis`, `state`, `arms_json`, `scope_json`, " +
@@ -198,6 +200,7 @@ func encodeQAExperimentBlobs(exp QAExperiment) (armsJ, scopeJ, allocJ, listJ, me
 		PrimaryContrast: exp.PrimaryContrast,
 		Secondaries:     exp.Secondaries,
 		Guardrails:      exp.Guardrails,
+		ReferenceArmID:  exp.ReferenceArmID,
 	}
 	if metricsJ, err = marshal(mb); err != nil {
 		return
@@ -259,6 +262,7 @@ func scanQAExperiment(sc rowScanner) (QAExperiment, error) {
 		exp.PrimaryContrast = mb.PrimaryContrast
 		exp.Secondaries = mb.Secondaries
 		exp.Guardrails = mb.Guardrails
+		exp.ReferenceArmID = mb.ReferenceArmID
 	}
 	_ = json.Unmarshal([]byte(planJ), &exp.Plan)
 	_ = json.Unmarshal([]byte(optsJ), &exp.Options)

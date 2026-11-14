@@ -17,6 +17,7 @@ package resolve
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,7 +70,7 @@ func (r *Resolution) IsEnforcedTreatment() bool {
 	}
 }
 
-// LookupFlowSpec resolves ref against built-in/registered v2 flows, stored qa_flow_version rows, or v1 flows.
+// LookupFlowSpec resolves ref against built-in/registered v2/v3 flows, stored qa_flow_version rows, or v1 flows.
 func LookupFlowSpec(ctx context.Context, store *model.Store, ref string) (*qa.FlowSpec, string, error) {
 	trimmed := strings.TrimSpace(ref)
 	if trimmed == "" || trimmed == "control" || trimmed == "baseline" {
@@ -80,7 +81,52 @@ func LookupFlowSpec(ctx context.Context, store *model.Store, ref string) (*qa.Fl
 		return &sp, b.Hash, nil
 	}
 	if store != nil {
-		if fv, err := store.GetQAFlowVersion(ctx, trimmed); err == nil {
+		findFV := func(q string) (model.QAFlowVersion, bool) {
+			if before, after, hasAt := strings.Cut(q, "@"); hasAt {
+				if vNum, aErr := strconv.Atoi(after); aErr == nil && vNum > 0 {
+					if fv, gErr := store.GetQAFlowVersionByKeyVersion(ctx, before, vNum); gErr == nil {
+						return fv, true
+					}
+				}
+			}
+			if fv, gErr := store.GetQAFlowVersion(ctx, q); gErr == nil {
+				return fv, true
+			}
+			if list, lErr := store.ListQAFlowVersions(ctx, q, 1); lErr == nil && len(list) > 0 {
+				return list[0], true
+			}
+			return model.QAFlowVersion{}, false
+		}
+
+		var resolveParent qa.ParentLookupFunc
+		seen := map[string]bool{}
+		resolveParent = func(pRef string) (qa.FlowVersionBundle, bool) {
+			if b, ok := qa.LookupBuiltInOrRegisteredVersion(pRef); ok {
+				return b, true
+			}
+			if seen[pRef] {
+				return qa.FlowVersionBundle{}, false
+			}
+			seen[pRef] = true
+			pfv, ok := findFV(pRef)
+			if !ok || strings.TrimSpace(pfv.SourceYAML) == "" {
+				return qa.FlowVersionBundle{}, false
+			}
+			b, rErr := qa.ResolveAnyFlowDeclaration([]byte(pfv.SourceYAML), pfv.Version, resolveParent)
+			if rErr != nil {
+				return qa.FlowVersionBundle{}, false
+			}
+			b.Hash = pfv.Hash
+			return b, true
+		}
+
+		if fv, ok := findFV(trimmed); ok {
+			if strings.TrimSpace(fv.SourceYAML) != "" {
+				if b, rErr := qa.ResolveAnyFlowDeclaration([]byte(fv.SourceYAML), fv.Version, resolveParent); rErr == nil {
+					sp := b.Resolved
+					return &sp, fv.Hash, nil
+				}
+			}
 			var sp qa.FlowSpec
 			if jErr := json.Unmarshal([]byte(fv.SpecJSON), &sp); jErr == nil {
 				return &sp, fv.Hash, nil

@@ -683,7 +683,7 @@ import "strconv"
 // and indexes `task(origin_ref)` to quickly find prior runs of an origin.
 // 148 adds `qa_experiment` and `qa_enrollment` for pre-registered quality
 // experiments and extends `task_qa_check_run` with experiment/engine provenance.
-const SchemaVersion = 148
+const SchemaVersion = 149
 
 const qaExperimentTable = `CREATE TABLE IF NOT EXISTS ` + "`qa_experiment`" + ` (
   ` + "`id`" + `                   TEXT     NOT NULL PRIMARY KEY,
@@ -743,6 +743,11 @@ const qaFlowVersionTable = `CREATE TABLE IF NOT EXISTS ` + "`qa_flow_version`" +
   ` + "`created_by`" + `    TEXT     NOT NULL,
   ` + "`created_at`" + `    DATETIME NOT NULL,
   ` + "`retired_at`" + `    DATETIME NULL,
+  ` + "`schema_ver`" + `    TEXT     NOT NULL DEFAULT 'grain.dev/qa-flow/v2',
+  ` + "`source_kind`" + `   TEXT     NOT NULL DEFAULT 'ui',
+  ` + "`source_repo`" + `   TEXT     NOT NULL DEFAULT '',
+  ` + "`source_path`" + `   TEXT     NOT NULL DEFAULT '',
+  ` + "`source_commit`" + ` TEXT     NOT NULL DEFAULT '',
   UNIQUE (` + "`key`" + `, ` + "`version`" + `)
 )`
 
@@ -779,6 +784,11 @@ const taskQACheckRunTable = `CREATE TABLE IF NOT EXISTS ` + "`task_qa_check_run`
   ` + "`qa_engine_rev`" + ` INTEGER  NOT NULL DEFAULT 0,
   ` + "`model`" + `         TEXT     NOT NULL DEFAULT '',
   ` + "`base_sha`" + `      TEXT     NOT NULL DEFAULT '',
+  ` + "`blast_tier`" + `    TEXT     NOT NULL DEFAULT '',
+  ` + "`blast_score`" + `   INTEGER  NOT NULL DEFAULT 0,
+  ` + "`complexity_tier`" + ` TEXT     NOT NULL DEFAULT '',
+  ` + "`triage_decision`" + ` TEXT     NOT NULL DEFAULT '',
+  ` + "`repaired_in_next_sha`" + ` INTEGER NOT NULL DEFAULT 0,
   ` + "`created_at`" + `    DATETIME NOT NULL
 )`
 

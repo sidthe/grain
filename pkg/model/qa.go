@@ -328,27 +328,32 @@ type QAAssignment struct {
 
 // QACheckRun records one deterministic or semantic QA check execution for a task run.
 type QACheckRun struct {
-	ID           int64     `json:"id"`
-	TaskID       string    `json:"taskId"`
-	RunID        string    `json:"runId"`
-	CommitSHA    string    `json:"commitSha"`
-	Stage        string    `json:"stage"`
-	CheckID      string    `json:"checkId"`
-	Arm          string    `json:"arm"`
-	Shadow       bool      `json:"shadow"`
-	Verdict      string    `json:"verdict"`
-	DurationMS   int64     `json:"durationMs"`
-	TokensIn     int64     `json:"tokensIn"`
-	TokensOut    int64     `json:"tokensOut"`
-	AllocBytes   int64     `json:"allocBytes"`
-	DetailJSON   string    `json:"detailJson,omitempty"`
-	ExperimentID string    `json:"experimentId,omitempty"`
-	ArmID        string    `json:"armId,omitempty"`
-	FlowHash     string    `json:"flowHash,omitempty"`
-	QAEngineRev  int       `json:"qaEngineRev,omitempty"`
-	Model        string    `json:"model,omitempty"`
-	BaseSHA      string    `json:"baseSha,omitempty"`
-	CreatedAt    time.Time `json:"createdAt"`
+	ID                int64     `json:"id"`
+	TaskID            string    `json:"taskId"`
+	RunID             string    `json:"runId"`
+	CommitSHA         string    `json:"commitSha"`
+	Stage             string    `json:"stage"`
+	CheckID           string    `json:"checkId"`
+	Arm               string    `json:"arm"`
+	Shadow            bool      `json:"shadow"`
+	Verdict           string    `json:"verdict"`
+	DurationMS        int64     `json:"durationMs"`
+	TokensIn          int64     `json:"tokensIn"`
+	TokensOut         int64     `json:"tokensOut"`
+	AllocBytes        int64     `json:"allocBytes"`
+	DetailJSON        string    `json:"detailJson,omitempty"`
+	ExperimentID      string    `json:"experimentId,omitempty"`
+	ArmID             string    `json:"armId,omitempty"`
+	FlowHash          string    `json:"flowHash,omitempty"`
+	QAEngineRev       int       `json:"qaEngineRev,omitempty"`
+	Model             string    `json:"model,omitempty"`
+	BaseSHA           string    `json:"baseSha,omitempty"`
+	BlastTier         string    `json:"blastTier,omitempty"`
+	BlastScore        int       `json:"blastScore,omitempty"`
+	ComplexityTier    string    `json:"complexityTier,omitempty"`
+	TriageDecision    string    `json:"triageDecision,omitempty"`
+	RepairedInNextSha int       `json:"repairedInNextSha,omitempty"`
+	CreatedAt         time.Time `json:"createdAt"`
 }
 
 // QAFinding records an individual actionable or advisory QA finding attached to a QACheckRun.
@@ -459,11 +464,12 @@ func (s *Store) RecordQACheckRun(ctx context.Context, run QACheckRun, findings [
 			"INSERT INTO `task_qa_check_run` "+
 				"(`task_id`, `run_id`, `commit_sha`, `stage`, `check_id`, `arm`, `shadow`, `verdict`, "+
 				"`duration_ms`, `tokens_in`, `tokens_out`, `alloc_bytes`, `detail_json`, "+
-				"`experiment_id`, `arm_id`, `flow_hash`, `qa_engine_rev`, `model`, `base_sha`, `created_at`) "+
-				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+				"`experiment_id`, `arm_id`, `flow_hash`, `qa_engine_rev`, `model`, `base_sha`, `blast_tier`, `blast_score`, `complexity_tier`, `triage_decision`, `repaired_in_next_sha`, `created_at`) "+
+				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			run.TaskID, run.RunID, run.CommitSHA, run.Stage, run.CheckID, run.Arm, shadowInt, run.Verdict,
 			run.DurationMS, run.TokensIn, run.TokensOut, run.AllocBytes, run.DetailJSON,
-			run.ExperimentID, run.ArmID, run.FlowHash, run.QAEngineRev, run.Model, run.BaseSHA, run.CreatedAt,
+			run.ExperimentID, run.ArmID, run.FlowHash, run.QAEngineRev, run.Model, run.BaseSHA,
+			run.BlastTier, run.BlastScore, run.ComplexityTier, run.TriageDecision, run.RepairedInNextSha, run.CreatedAt,
 		)
 		if err != nil {
 			return err
@@ -498,12 +504,24 @@ func (s *Store) RecordQACheckRun(ctx context.Context, run QACheckRun, findings [
 	return runRowID, nil
 }
 
+// MarkPriorQACheckRunsRepaired sets repaired_in_next_sha = 1 on prior non-shadow failed runs of this check on the same task.
+func (s *Store) MarkPriorQACheckRunsRepaired(ctx context.Context, taskID, checkID, commitSHA string) error {
+	return s.write(ctx, "mark prior qa check runs repaired", func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx,
+			"UPDATE `task_qa_check_run` SET `repaired_in_next_sha` = 1 "+
+				"WHERE `task_id` = ? AND `check_id` = ? AND `verdict` = 'fail' AND `shadow` = 0 AND `commit_sha` != '' AND `commit_sha` != ?",
+			taskID, checkID, commitSHA,
+		)
+		return err
+	})
+}
+
 // ListQACheckRunsForTask returns all QA check runs for taskID ordered oldest to newest.
 func (s *Store) ListQACheckRunsForTask(ctx context.Context, taskID string) ([]QACheckRun, error) {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT `id`, `task_id`, `run_id`, `commit_sha`, `stage`, `check_id`, `arm`, `shadow`, `verdict`, "+
 			"`duration_ms`, `tokens_in`, `tokens_out`, `alloc_bytes`, `detail_json`, "+
-			"`experiment_id`, `arm_id`, `flow_hash`, `qa_engine_rev`, `model`, `base_sha`, `created_at` "+
+			"`experiment_id`, `arm_id`, `flow_hash`, `qa_engine_rev`, `model`, `base_sha`, `blast_tier`, `blast_score`, `complexity_tier`, `triage_decision`, `repaired_in_next_sha`, `created_at` "+
 			"FROM `task_qa_check_run` WHERE `task_id` = ? ORDER BY `id` ASC",
 		taskID,
 	)
@@ -518,7 +536,8 @@ func (s *Store) ListQACheckRunsForTask(ctx context.Context, taskID string) ([]QA
 		if err := rows.Scan(
 			&r.ID, &r.TaskID, &r.RunID, &r.CommitSHA, &r.Stage, &r.CheckID, &r.Arm, &shadowInt, &r.Verdict,
 			&r.DurationMS, &r.TokensIn, &r.TokensOut, &r.AllocBytes, &r.DetailJSON,
-			&r.ExperimentID, &r.ArmID, &r.FlowHash, &r.QAEngineRev, &r.Model, &r.BaseSHA, &r.CreatedAt,
+			&r.ExperimentID, &r.ArmID, &r.FlowHash, &r.QAEngineRev, &r.Model, &r.BaseSHA,
+			&r.BlastTier, &r.BlastScore, &r.ComplexityTier, &r.TriageDecision, &r.RepairedInNextSha, &r.CreatedAt,
 		); err != nil {
 			return nil, err
 		}

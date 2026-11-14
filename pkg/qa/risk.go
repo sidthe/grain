@@ -1,8 +1,23 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package qa
 
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"strings"
 
 	"github.com/ai-on-gke/grain/pkg/trustboundary"
@@ -52,9 +67,9 @@ type DiffStats struct {
 }
 
 type RiskOverride struct {
-	Paths   []string
-	MinTier BlastTier
-	Reason  string
+	Paths   []string  `json:"paths" yaml:"paths"`
+	MinTier BlastTier `json:"minTier" yaml:"min-tier"`
+	Reason  string    `json:"reason" yaml:"reason"`
 }
 
 type RiskAssessment struct {
@@ -274,18 +289,41 @@ func assessDiffBlastInternal(stats DiffStats, overrides []RiskOverride) RiskAsse
 }
 
 func matchedGlob(pattern, name string) bool {
-	matched, err := path.Match(pattern, name)
-	if err != nil {
-		return false
+	pattern = strings.TrimPrefix(strings.TrimSpace(pattern), "./")
+	name = strings.TrimPrefix(strings.TrimSpace(name), "./")
+	if !strings.Contains(pattern, "**") {
+		matched, err := path.Match(pattern, name)
+		return err == nil && matched
 	}
-	if matched {
-		return true
+	var b strings.Builder
+	b.WriteString("^")
+	for i := 0; i < len(pattern); {
+		if strings.HasPrefix(pattern[i:], "**/") {
+			b.WriteString("(?:.+/)?")
+			i += 3
+			continue
+		}
+		if strings.HasPrefix(pattern[i:], "**") {
+			b.WriteString(".*")
+			i += 2
+			continue
+		}
+		switch pattern[i] {
+		case '*':
+			b.WriteString("[^/]*")
+		case '?':
+			b.WriteString("[^/]")
+		case '.', '+', '(', ')', '|', '^', '$', '[', ']', '{', '}', '\\':
+			b.WriteByte('\\')
+			b.WriteByte(pattern[i])
+		default:
+			b.WriteByte(pattern[i])
+		}
+		i++
 	}
-	if strings.Contains(pattern, "**") {
-		prefix := strings.Split(pattern, "**")[0]
-		return strings.HasPrefix(name, prefix)
-	}
-	return false
+	b.WriteString("$")
+	re, err := regexp.Compile(b.String())
+	return err == nil && re.MatchString(name)
 }
 
 func isTestFile(p string) bool {

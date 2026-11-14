@@ -35,6 +35,7 @@ type RuntimeHooks struct {
 	DataDir                 string
 	PromoteExperimentStages func(ctx context.Context, experimentID, reason string)
 	RunJudgeModel           func(ctx context.Context, modelID, prompt string) (output string, tokensIn, tokensOut int64, err error)
+	ReadRepoFileAtCommit    func(ctx context.Context, repo, commit, filePath string) ([]byte, error)
 }
 
 var liveRuntimeHooks atomic.Pointer[RuntimeHooks]

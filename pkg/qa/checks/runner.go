@@ -60,6 +60,7 @@ type RunOptions struct {
 type Report struct {
 	HeadSHA      string           `json:"headSha"`
 	BlastTier    qa.BlastTier     `json:"blastTier"`
+	BlastScore   int              `json:"blastScore"`
 	BlastReasons []string         `json:"blastReasons,omitempty"`
 	Passed       bool             `json:"passed"`
 	Results      []CheckResult    `json:"results"`
@@ -67,6 +68,7 @@ type Report struct {
 	HazardSites  map[string][]int `json:"hazardSites,omitempty"`
 	DurationMS   int64            `json:"durationMs"`
 	AllocBytes   int64            `json:"allocBytes"`
+	TestTampered bool             `json:"testTampered,omitempty"`
 }
 
 func (r Report) FormatAgentWarnings() string {
@@ -267,14 +269,60 @@ func RunS3(ctx context.Context, ws WorkspaceReader, flow qa.FlowSpec, opts RunOp
 			return "error", err
 		}
 
-		tier, reasons := qa.ClassifyDiffBlast(qa.DiffStats{
+		testTampered := false
+		for _, res := range report.Results {
+			if res.CheckID == qa.RuleTestIntegrityGuard && len(res.Findings) > 0 {
+				testTampered = true
+			}
+		}
+		
+		for _, c := range flow.CustomChecks {
+			findings, err := qa.EvaluateCustomCheck(c, qa.CustomCheckContext{
+				ChangedFiles:    pd.AllPaths(),
+				AddedLines:      pd.AddedLinesMap(),
+				TotalLinesAdded: pd.NonTestAdded + pd.TestAdded,
+				CallerNotes:     opts.CallerNotes,
+				ReadFile: func(p string) ([]byte, error) {
+					return ws.ReadFileAtHead(ctx, p)
+				},
+			})
+			if err != nil {
+				return "error", err
+			}
+			if len(findings) > 0 {
+				var ruleFindings []Finding
+				for _, f := range findings {
+					ruleFindings = append(ruleFindings, Finding{
+						RuleID:   f.RuleID,
+						Severity: f.Severity,
+						FilePath: f.FilePath,
+						Line:     f.Line,
+						Summary:  f.Summary,
+						Evidence: f.Evidence,
+					})
+				}
+				report.Results = append(report.Results, CheckResult{
+					CheckID:    c.ID,
+					Stage:      "S3",
+					Verdict:    "fail", // assuming fail for findings, you could differentiate based on severity
+					DurationMS: 0,
+					Findings:   ruleFindings,
+				})
+				report.Findings = append(report.Findings, ruleFindings...)
+			}
+		}
+
+		riskAssessment := qa.AssessDiffBlast(qa.DiffStats{
 			Files:                 pd.AllPaths(),
 			NonTestAdded:          pd.NonTestAdded,
 			NonTestDeleted:        pd.NonTestDeleted,
 			SiblingCallerPackages: siblingPkgCount,
-		})
-		report.BlastTier = tier
-		report.BlastReasons = reasons
+			TestTampered:          testTampered,
+		}, flow.RiskOverrides, profiler)
+		
+		report.BlastTier = riskAssessment.Tier
+		report.BlastScore = riskAssessment.Score
+		report.BlastReasons = riskAssessment.Reasons
 		report.HazardSites = hazardSites
 		report.Passed = !hasBlocking(report.Findings)
 		if report.Passed {

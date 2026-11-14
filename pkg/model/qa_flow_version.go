@@ -25,26 +25,37 @@ import (
 var ErrNotFound = errors.New("qa flow version not found")
 
 type QAFlowVersion struct {
-	Hash        string
-	Key         string
-	Version     int
-	ParentHash  string
-	Label       string
-	Summary     string
-	SpecJSON    string
-	SourceYAML  string
-	QAEngineRev int
-	CreatedBy   string
-	CreatedAt   time.Time
-	RetiredAt   *time.Time
+	Hash         string
+	Key          string
+	Version      int
+	ParentHash   string
+	Label        string
+	Summary      string
+	SpecJSON     string
+	SourceYAML   string
+	QAEngineRev  int
+	CreatedBy    string
+	CreatedAt    time.Time
+	RetiredAt    *time.Time
+	SchemaVer    string
+	SourceKind   string
+	SourceRepo   string
+	SourcePath   string
+	SourceCommit string
 }
 
 func (s *Store) InsertQAFlowVersion(ctx context.Context, fv QAFlowVersion) error {
+	if fv.SchemaVer == "" {
+		fv.SchemaVer = "grain.dev/qa-flow/v2"
+	}
+	if fv.SourceKind == "" {
+		fv.SourceKind = "ui"
+	}
 	return s.write(ctx, "insert qa flow version", func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx,
-			"INSERT INTO `qa_flow_version` (`hash`, `key`, `version`, `parent_hash`, `label`, `summary`, `spec_json`, `source_yaml`, `qa_engine_rev`, `created_by`, `created_at`, `retired_at`) "+
-				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-			fv.Hash, fv.Key, fv.Version, fv.ParentHash, fv.Label, fv.Summary, fv.SpecJSON, fv.SourceYAML, fv.QAEngineRev, fv.CreatedBy, fv.CreatedAt, fv.RetiredAt,
+			"INSERT INTO `qa_flow_version` (`hash`, `key`, `version`, `parent_hash`, `label`, `summary`, `spec_json`, `source_yaml`, `qa_engine_rev`, `created_by`, `created_at`, `retired_at`, `schema_ver`, `source_kind`, `source_repo`, `source_path`, `source_commit`) "+
+				"VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			fv.Hash, fv.Key, fv.Version, fv.ParentHash, fv.Label, fv.Summary, fv.SpecJSON, fv.SourceYAML, fv.QAEngineRev, fv.CreatedBy, fv.CreatedAt, fv.RetiredAt, fv.SchemaVer, fv.SourceKind, fv.SourceRepo, fv.SourcePath, fv.SourceCommit,
 		)
 		return err
 	})
@@ -54,8 +65,8 @@ func (s *Store) GetQAFlowVersion(ctx context.Context, hash string) (QAFlowVersio
 	var fv QAFlowVersion
 	var retired sql.NullTime
 	err := s.db.QueryRowContext(ctx,
-		"SELECT `hash`, `key`, `version`, `parent_hash`, `label`, `summary`, `spec_json`, `source_yaml`, `qa_engine_rev`, `created_by`, `created_at`, `retired_at` FROM `qa_flow_version` WHERE `hash` = ?", hash,
-	).Scan(&fv.Hash, &fv.Key, &fv.Version, &fv.ParentHash, &fv.Label, &fv.Summary, &fv.SpecJSON, &fv.SourceYAML, &fv.QAEngineRev, &fv.CreatedBy, &fv.CreatedAt, &retired)
+		"SELECT `hash`, `key`, `version`, `parent_hash`, `label`, `summary`, `spec_json`, `source_yaml`, `qa_engine_rev`, `created_by`, `created_at`, `retired_at`, `schema_ver`, `source_kind`, `source_repo`, `source_path`, `source_commit` FROM `qa_flow_version` WHERE `hash` = ?", hash,
+	).Scan(&fv.Hash, &fv.Key, &fv.Version, &fv.ParentHash, &fv.Label, &fv.Summary, &fv.SpecJSON, &fv.SourceYAML, &fv.QAEngineRev, &fv.CreatedBy, &fv.CreatedAt, &retired, &fv.SchemaVer, &fv.SourceKind, &fv.SourceRepo, &fv.SourcePath, &fv.SourceCommit)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return QAFlowVersion{}, ErrNotFound
@@ -74,8 +85,8 @@ func (s *Store) GetQAFlowVersionByKeyVersion(ctx context.Context, key string, ve
 	var fv QAFlowVersion
 	var retired sql.NullTime
 	err := s.db.QueryRowContext(ctx,
-		"SELECT `hash`, `key`, `version`, `parent_hash`, `label`, `summary`, `spec_json`, `source_yaml`, `qa_engine_rev`, `created_by`, `created_at`, `retired_at` FROM `qa_flow_version` WHERE `key` = ? AND `version` = ?", key, version,
-	).Scan(&fv.Hash, &fv.Key, &fv.Version, &fv.ParentHash, &fv.Label, &fv.Summary, &fv.SpecJSON, &fv.SourceYAML, &fv.QAEngineRev, &fv.CreatedBy, &fv.CreatedAt, &retired)
+		"SELECT `hash`, `key`, `version`, `parent_hash`, `label`, `summary`, `spec_json`, `source_yaml`, `qa_engine_rev`, `created_by`, `created_at`, `retired_at`, `schema_ver`, `source_kind`, `source_repo`, `source_path`, `source_commit` FROM `qa_flow_version` WHERE `key` = ? AND `version` = ?", key, version,
+	).Scan(&fv.Hash, &fv.Key, &fv.Version, &fv.ParentHash, &fv.Label, &fv.Summary, &fv.SpecJSON, &fv.SourceYAML, &fv.QAEngineRev, &fv.CreatedBy, &fv.CreatedAt, &retired, &fv.SchemaVer, &fv.SourceKind, &fv.SourceRepo, &fv.SourcePath, &fv.SourceCommit)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return QAFlowVersion{}, ErrNotFound
@@ -103,7 +114,7 @@ func (s *Store) NextQAFlowVersionNumber(ctx context.Context, key string) (int, e
 }
 
 func (s *Store) ListQAFlowVersions(ctx context.Context, key string, limit int) ([]QAFlowVersion, error) {
-	query := "SELECT `hash`, `key`, `version`, `parent_hash`, `label`, `summary`, `spec_json`, `source_yaml`, `qa_engine_rev`, `created_by`, `created_at`, `retired_at` FROM `qa_flow_version`"
+	query := "SELECT `hash`, `key`, `version`, `parent_hash`, `label`, `summary`, `spec_json`, `source_yaml`, `qa_engine_rev`, `created_by`, `created_at`, `retired_at`, `schema_ver`, `source_kind`, `source_repo`, `source_path`, `source_commit` FROM `qa_flow_version`"
 	args := []any{}
 	if key != "" {
 		query += " WHERE `key` = ?"
@@ -122,7 +133,7 @@ func (s *Store) ListQAFlowVersions(ctx context.Context, key string, limit int) (
 	for rows.Next() {
 		var fv QAFlowVersion
 		var retired sql.NullTime
-		if err := rows.Scan(&fv.Hash, &fv.Key, &fv.Version, &fv.ParentHash, &fv.Label, &fv.Summary, &fv.SpecJSON, &fv.SourceYAML, &fv.QAEngineRev, &fv.CreatedBy, &fv.CreatedAt, &retired); err != nil {
+		if err := rows.Scan(&fv.Hash, &fv.Key, &fv.Version, &fv.ParentHash, &fv.Label, &fv.Summary, &fv.SpecJSON, &fv.SourceYAML, &fv.QAEngineRev, &fv.CreatedBy, &fv.CreatedAt, &retired, &fv.SchemaVer, &fv.SourceKind, &fv.SourceRepo, &fv.SourcePath, &fv.SourceCommit); err != nil {
 			return nil, err
 		}
 		fv.CreatedAt = fv.CreatedAt.UTC()
