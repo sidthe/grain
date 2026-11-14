@@ -899,6 +899,12 @@ describe("ProcessesPageComponent (D-9)", () => {
       '[data-testid="decl-accept-btn-repo:template:acme/widgets:release-notes"]',
     )!;
     expect(acceptBtn.disabled).toBe(true);
+    const repoWarn = root.querySelector(
+      '[data-testid="decl-accept-warning-repo:template:acme/widgets:release-notes"]',
+    );
+    expect(repoWarn).not.toBeNull();
+    expect(repoWarn!.textContent).toContain("repos:write");
+    expect(repoWarn!.textContent).toContain("specific repositories");
 
     // 2. Grant global repos:write and reload -> Accept declaration succeeds, plus edit & delete workflow override
     api.configBody = {
@@ -2211,5 +2217,284 @@ describe("ProcessesPageComponent RBAC (G-06)", () => {
     expect(btn("sched-toggle-enabled-btn")!.disabled).toBe(false);
     expect(btn("sched-edit-btn")!.disabled).toBe(false);
     expect(btn("sched-delete-btn")!.disabled).toBe(false);
+  });
+
+  it("shows inline insufficient global-scopes warnings, gates submission per declaration, and clears warnings when global scopes are granted", async () => {
+    api.acceptances = [
+      {
+        id: "repo:suite:acme:widgets:deploy-sweep",
+        kind: "suite",
+        repo: "acme/widgets",
+        requested: [
+          'https://grain.dev/capabilities/gcp#gcp-key={"permission_set":"artifact-publisher"}',
+          "https://grain.dev/capabilities/api#secrets:write",
+        ],
+        requestedAt: "2026-11-12T00:00:00Z",
+        accepted: ["https://grain.dev/capabilities/api#secrets:write"],
+        acceptedBy: "alice@example.com",
+        acceptedCommit: "abcdef1234567890",
+        acceptedAt: "2026-11-11T00:00:00Z",
+        awaiting: true,
+        unaccepted: [
+          'https://grain.dev/capabilities/gcp#gcp-key={"permission_set":"artifact-publisher"}',
+        ],
+        needsScopes: ["capabilities:admin", "secrets:write"],
+      },
+      {
+        id: "repo:template:acme:widgets:release-notes",
+        kind: "template",
+        repo: "acme/widgets",
+        requested: ["push:refs/tags/v*"],
+        requestedAt: "2026-11-12T01:00:00Z",
+        awaiting: true,
+        unaccepted: ["push:refs/tags/v*"],
+        needsScopes: ["repos:write"],
+      },
+      {
+        id: "ci:acme/widgets:publish-images",
+        kind: "ci-job",
+        repo: "acme/widgets",
+        requested: [
+          'https://grain.dev/capabilities/gcp#gcp-key={"permission_set":"artifact-publisher"}',
+        ],
+        requestedAt: "2026-11-10T00:00:00Z",
+        accepted: [
+          'https://grain.dev/capabilities/gcp#gcp-key={"permission_set":"artifact-publisher"}',
+        ],
+        acceptedBy: "alice@example.com",
+        acceptedCommit: "0123456789ab",
+        acceptedAt: "2026-11-10T01:00:00Z",
+        awaiting: false,
+        needsScopes: ["capabilities:admin"],
+      },
+    ];
+
+    // User holds global repos:write + repo-limited secrets:write, and lacks capabilities:admin
+    const { harness, root, access, btn } = await mount(
+      "/processes/declarations",
+      {
+        role: "release-manager",
+        roles: ["release-manager"],
+        full: false,
+        scopes: [
+          "capabilities:read",
+          "repos:read",
+          "repos:write",
+          "secrets:write",
+        ],
+        repoLimits: {
+          "secrets:write": ["acme/widgets"],
+        },
+      },
+      ["acme/widgets"],
+    );
+
+    // 1. Widened suite declaration lacks capabilities:admin and holds secrets:write only per-repo
+    const suiteBtn = btn(
+      "decl-accept-btn-repo:suite:acme:widgets:deploy-sweep",
+    )!;
+    const suiteWarn = root.querySelector<HTMLElement>(
+      '[data-testid="decl-accept-warning-repo:suite:acme:widgets:deploy-sweep"]',
+    )!;
+    expect(suiteBtn.disabled).toBe(true);
+    expect(suiteWarn).not.toBeNull();
+    expect(suiteWarn.getAttribute("role")).toBe("status");
+    expect(suiteBtn.getAttribute("aria-describedby")).toBe(suiteWarn.id);
+    expect(suiteWarn.textContent).toContain("Insufficient scopes");
+    expect(suiteWarn.textContent).toContain("release-manager");
+    expect(suiteWarn.textContent).toContain("capabilities:admin");
+    expect(suiteWarn.textContent).toContain("secrets:write");
+    expect(suiteWarn.textContent).toContain("global scope(s)");
+    // Widened item marker also appears
+    const suiteItem = root.querySelector(
+      '[data-testid="decl-acceptance-item-repo:suite:acme:widgets:deploy-sweep"]',
+    )!;
+    expect(suiteItem.textContent).toContain("New since accepted:");
+
+    // Clicking disabled button never submits POST /api/declarations/accept
+    suiteBtn.click();
+    await flush(harness);
+    expect(
+      api.calls.some((c) => c.route === "POST /api/declarations/accept"),
+    ).toBe(false);
+
+    // 2. Template declaration needs only global repos:write (which IS held globally) -> NO warning, submission works
+    const tmplBtn = btn(
+      "decl-accept-btn-repo:template:acme:widgets:release-notes",
+    )!;
+    expect(tmplBtn.disabled).toBe(false);
+    expect(
+      root.querySelector(
+        '[data-testid="decl-accept-warning-repo:template:acme:widgets:release-notes"]',
+      ),
+    ).toBeNull();
+    expect(tmplBtn.hasAttribute("aria-describedby")).toBe(false);
+
+    // 3. Already accepted CI declaration shows no warning even though user lacks capabilities:admin
+    expect(
+      root.querySelector(
+        '[data-testid="decl-accept-warning-ci:acme/widgets:publish-images"]',
+      ),
+    ).toBeNull();
+    expect(btn("decl-accept-btn-ci:acme/widgets:publish-images")).toBeNull();
+    expect(
+      root.querySelector(
+        '[data-testid="decl-status-ci:acme/widgets:publish-images"]',
+      )?.textContent,
+    ).toContain("Accepted");
+
+    // 4. Granting global scopes removes the warning and enables submission
+    access.setConfig({
+      access: {
+        role: "grain/operator",
+        roles: ["grain/operator"],
+        full: true,
+        scopes: [],
+      },
+    });
+    await flush(harness);
+    expect(
+      btn("decl-accept-btn-repo:suite:acme:widgets:deploy-sweep")!.disabled,
+    ).toBe(false);
+    expect(
+      root.querySelector(
+        '[data-testid="decl-accept-warning-repo:suite:acme:widgets:deploy-sweep"]',
+      ),
+    ).toBeNull();
+  });
+
+  it("gates declaration acceptance while config is loading and while a submit request is in flight, and renders cleanly on 390px mobile", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 390,
+      configurable: true,
+      writable: true,
+    });
+
+    api.acceptances = [
+      {
+        id: "ci:acme/widgets:very-long-deployment-preview-declaration-name",
+        kind: "ci-job",
+        repo: "acme/widgets",
+        requested: [
+          'https://grain.dev/capabilities/gcp#gcp-key={"permission_set":"artifact-publisher-with-long-name"}',
+          'https://grain.dev/capabilities/host-script#run={"script":"deploy-preview"}',
+        ],
+        requestedAt: "2026-11-12T00:00:00Z",
+        awaiting: true,
+        unaccepted: [
+          'https://grain.dev/capabilities/gcp#gcp-key={"permission_set":"artifact-publisher-with-long-name"}',
+        ],
+        needsScopes: ["capabilities:admin"],
+      },
+    ];
+
+    let resolveConfig!: (cfg: GrainConfig) => void;
+    api.config = () =>
+      new Promise<GrainConfig>((res) => {
+        resolveConfig = res;
+      });
+
+    const harness = await RouterTestingHarness.create(
+      "/processes/declarations",
+    );
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    // On 390px phone, select repo to enter mobile detail view
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="decl-repo-row-acme/widgets"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(
+      root
+        .querySelector(".proc-split")
+        ?.classList.contains("has-mobile-detail"),
+    ).toBe(true);
+
+    const declId =
+      "ci:acme/widgets:very-long-deployment-preview-declaration-name";
+    const acceptBtn = root.querySelector<HTMLButtonElement>(
+      `[data-testid="decl-accept-btn-${declId}"]`,
+    )!;
+    // Before config finishes loading: button is gated without flashing an erroneous missing-scopes warning
+    expect(acceptBtn.disabled).toBe(true);
+    expect(
+      root.querySelector(`[data-testid="decl-accept-warning-${declId}"]`),
+    ).toBeNull();
+
+    // Resolve config as grain/viewer -> inline warning appears inside mobile detail card
+    resolveConfig({
+      access: {
+        role: "grain/viewer",
+        roles: ["grain/viewer"],
+        full: false,
+        scopes: ["capabilities:read", "repos:read"],
+      },
+      targetRepos: ["acme/widgets"],
+      approvedByDefault: true,
+    });
+    await flush(harness);
+
+    expect(acceptBtn.disabled).toBe(true);
+    const warnEl = root.querySelector<HTMLElement>(
+      `[data-testid="decl-accept-warning-${declId}"]`,
+    )!;
+    expect(warnEl).not.toBeNull();
+    expect(warnEl.classList.contains("proc-decl-warning")).toBe(true);
+    expect(warnEl.textContent).toContain("grain/viewer");
+    expect(warnEl.textContent).toContain("capabilities:admin");
+    expect(warnEl.closest(".proc-decl-item")).not.toBeNull();
+
+    // Grant full access and verify single-flight protection during POST
+    const access = TestBed.inject(AccessService);
+    access.setConfig({
+      access: {
+        role: "grain/operator",
+        roles: ["grain/operator"],
+        full: true,
+        scopes: [],
+      },
+    });
+    await flush(harness);
+    expect(acceptBtn.disabled).toBe(false);
+    expect(
+      root.querySelector(`[data-testid="decl-accept-warning-${declId}"]`),
+    ).toBeNull();
+
+    let resolvePost!: (v: DeclarationAcceptanceView) => void;
+    const origPost = api.post;
+    api.post = (
+      route: string,
+      params?: unknown,
+      body?: Record<string, unknown>,
+    ) => {
+      if (route === "POST /api/declarations/accept") {
+        api.calls.push({ method: "POST", route, params, body });
+        return new Promise<DeclarationAcceptanceView>((res) => {
+          resolvePost = res;
+        });
+      }
+      return origPost(route, params, body);
+    };
+
+    acceptBtn.click();
+    harness.detectChanges();
+    expect(acceptBtn.disabled).toBe(true);
+    expect(acceptBtn.textContent?.trim()).toBe("Accepting…");
+    // Second click while in flight does not send duplicate POST
+    acceptBtn.click();
+    expect(
+      api.calls.filter((c) => c.route === "POST /api/declarations/accept"),
+    ).toHaveLength(1);
+
+    api.acceptances[0].awaiting = false;
+    api.acceptances[0].acceptedBy = "alice@example.com";
+    resolvePost(structuredClone(api.acceptances[0]));
+    await flush(harness);
+    expect(
+      root.querySelector(`[data-testid="decl-status-${declId}"]`)?.textContent,
+    ).toContain("Accepted");
   });
 });

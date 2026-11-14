@@ -1437,45 +1437,118 @@ type SuitesPaneView = "suites" | "runs";
                     <h3 class="section-title">
                       Declaration capability acceptances
                     </h3>
-                    @for (acc of acceptancesForRepo(repo); track acc.id) {
-                      <div class="proc-kv-item" style="flex-wrap: wrap">
-                        <div>
-                          <strong>{{ acc.id }}</strong>
-                          <span class="muted"> ({{ acc.kind }})</span>
-                          <div class="muted" style="font-size: 12px">
-                            Requested:
-                            <code>{{ acc.requested.join(", ") }}</code>
-                            @if (acc.needsScopes.length > 0) {
-                              · Requires scopes:
-                              {{ acc.needsScopes.join(", ") }}
+                    @for (
+                      acc of acceptancesForRepo(repo);
+                      track acc.id;
+                      let idx = $index
+                    ) {
+                      @let reqScopes = requiredAcceptScopes(acc);
+                      @let acceptWarn = acceptWarningMessage(acc);
+                      @let warnId = acceptWarningId(acc, idx);
+                      <div
+                        class="proc-decl-item"
+                        [attr.data-testid]="'decl-acceptance-item-' + acc.id"
+                      >
+                        <div class="proc-decl-head">
+                          <div class="proc-decl-meta">
+                            <div class="proc-decl-title">
+                              <strong class="proc-decl-id tabular">{{
+                                acc.id
+                              }}</strong>
+                              <span class="muted">({{ acc.kind }})</span>
+                              @if (acc.awaiting) {
+                                <span
+                                  class="status-pill blast"
+                                  [attr.data-testid]="'decl-status-' + acc.id"
+                                >
+                                  <g-status-icon tone="blast" kind="warning" />
+                                  Awaiting acceptance
+                                </span>
+                              } @else {
+                                <span
+                                  class="status-pill healthy"
+                                  [attr.data-testid]="'decl-status-' + acc.id"
+                                >
+                                  <g-status-icon
+                                    tone="healthy"
+                                    kind="healthy"
+                                  />
+                                  Accepted
+                                </span>
+                              }
+                            </div>
+                            <div class="proc-decl-details muted">
+                              <span>
+                                Requested:
+                                <code>{{ acc.requested.join(", ") }}</code>
+                              </span>
+                              @if (
+                                acc.acceptedAt &&
+                                (acc.unaccepted ?? []).length > 0
+                              ) {
+                                <span>
+                                  · New since accepted:
+                                  <code>{{
+                                    (acc.unaccepted ?? []).join(", ")
+                                  }}</code>
+                                </span>
+                              }
+                              @if (reqScopes.length > 0) {
+                                <span>
+                                  · Requires global scope(s):
+                                  <code class="tabular">{{
+                                    reqScopes.join(", ")
+                                  }}</code>
+                                </span>
+                              }
+                            </div>
+                            @if (acc.acceptedBy) {
+                              <div class="proc-decl-accepted">
+                                Accepted by
+                                <g-actor-chip
+                                  [label]="acc.acceptedBy"
+                                  kind="human"
+                                />
+                              </div>
                             }
                           </div>
-                          @if (acc.acceptedBy) {
-                            <div style="margin-top: 4px">
-                              Accepted by
-                              <g-actor-chip
-                                [label]="acc.acceptedBy"
-                                kind="human"
-                              />
+                          @if (acc.awaiting) {
+                            <div class="proc-decl-actions">
+                              <button
+                                type="button"
+                                class="btn-primary"
+                                [attr.data-testid]="'decl-accept-btn-' + acc.id"
+                                [disabled]="
+                                  !canAcceptDeclaration(acc) ||
+                                  acceptingDeclId() === acc.id
+                                "
+                                [attr.aria-describedby]="
+                                  acceptWarn ? warnId : null
+                                "
+                                [gTip]="acceptDeniedReason(acc)"
+                                (click)="acceptRepoDeclaration(acc)"
+                              >
+                                {{
+                                  acceptingDeclId() === acc.id
+                                    ? "Accepting…"
+                                    : "Accept declaration"
+                                }}
+                              </button>
                             </div>
                           }
                         </div>
-                        @if (acc.awaiting) {
-                          <button
-                            type="button"
-                            class="btn-primary"
-                            [attr.data-testid]="'decl-accept-btn-' + acc.id"
-                            [disabled]="!canAcceptDeclaration(acc)"
-                            [gTip]="acceptDeniedReason(acc)"
-                            (click)="acceptRepoDeclaration(acc)"
+                        @if (acceptWarn) {
+                          <div
+                            class="proc-decl-warning"
+                            role="status"
+                            [attr.id]="warnId"
+                            [attr.data-testid]="'decl-accept-warning-' + acc.id"
                           >
-                            Accept declaration
-                          </button>
-                        } @else {
-                          <span class="status-pill healthy">
-                            <g-status-icon tone="healthy" kind="healthy" />
-                            Accepted
-                          </span>
+                            <g-status-icon tone="blast" kind="warning" />
+                            <span class="proc-decl-warning-text">{{
+                              acceptWarn
+                            }}</span>
+                          </div>
                         }
                       </div>
                     }
@@ -3057,6 +3130,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
 
   protected readonly openPicker = signal<string | null>(null);
   protected readonly submitting = signal(false);
+  protected readonly acceptingDeclId = signal<string | null>(null);
   protected readonly confirming = signal<ConfirmRequest | null>(null);
 
   // Schedule dialog state
@@ -3549,30 +3623,76 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   protected repoPendingAcceptances(repo: string): number {
-    return this.store.acceptances().filter((a) => a.awaiting && a.repo === repo)
-      .length;
+    const norm = repo.trim().toLowerCase();
+    return this.store
+      .acceptances()
+      .filter(
+        (a) => a.awaiting && (!a.repo || a.repo.trim().toLowerCase() === norm),
+      ).length;
   }
 
   protected acceptancesForRepo(repo: string): DeclarationAcceptanceView[] {
-    return this.store.acceptances().filter((a) => !a.repo || a.repo === repo);
+    const norm = repo.trim().toLowerCase();
+    return this.store
+      .acceptances()
+      .filter((a) => !a.repo || a.repo.trim().toLowerCase() === norm);
+  }
+
+  protected requiredAcceptScopes(acc: DeclarationAcceptanceView): string[] {
+    return (acc.needsScopes ?? []).map((sc) => sc.trim()).filter(Boolean);
+  }
+
+  protected missingAcceptScopes(acc: DeclarationAcceptanceView): string[] {
+    if (!this.access.configLoaded()) return [];
+    return this.requiredAcceptScopes(acc).filter(
+      (sc) => !this.access.canGlobalScope(sc),
+    );
   }
 
   protected canAcceptDeclaration(acc: DeclarationAcceptanceView): boolean {
+    if (!acc.awaiting || !this.access.configLoaded()) return false;
     if (!this.access.can("POST /api/declarations/accept")) return false;
-    return (acc.needsScopes ?? []).every((sc) =>
-      this.access.canGlobalScope(sc),
-    );
+    return this.missingAcceptScopes(acc).length === 0;
   }
 
   protected acceptDeniedReason(acc: DeclarationAcceptanceView): string {
+    if (!this.access.configLoaded()) {
+      return "Checking role permissions before accepting this declaration.";
+    }
     if (!this.access.can("POST /api/declarations/accept")) {
       return this.access.deniedReason("POST /api/declarations/accept");
     }
-    const missing = (acc.needsScopes ?? []).filter(
-      (sc) => !this.access.canGlobalScope(sc),
-    );
+    const missing = this.missingAcceptScopes(acc);
     if (missing.length === 0) return "";
-    return `Accepting this declaration requires global scope(s): ${missing.join(", ")}.`;
+    const heldScopes = this.access.scopes();
+    const repoLimited = missing.filter((sc) => heldScopes.includes(sc));
+    const unheld = missing.filter((sc) => !heldScopes.includes(sc));
+    const roleLabel = this.access.roleLabel();
+    const roleNoun =
+      this.access.roles().length > 1
+        ? `Your roles (${roleLabel || "current"})`
+        : roleLabel
+          ? `Your role (${roleLabel})`
+          : "Your current role";
+    if (repoLimited.length > 0 && unheld.length === 0) {
+      return `Insufficient scopes: ${roleNoun} holds ${repoLimited.join(", ")} only for specific repositories, not globally. Accepting requires global scope(s): ${missing.join(", ")}.`;
+    }
+    if (repoLimited.length > 0 && unheld.length > 0) {
+      return `Insufficient scopes: ${roleNoun} lacks ${unheld.join(", ")} and holds ${repoLimited.join(", ")} only for specific repositories. Accepting requires global scope(s): ${missing.join(", ")}.`;
+    }
+    return `Insufficient scopes: ${roleNoun} does not grant ${missing.join(", ")}. Accepting requires global scope(s): ${missing.join(", ")}.`;
+  }
+
+  protected acceptWarningMessage(acc: DeclarationAcceptanceView): string {
+    if (!acc.awaiting || !this.access.configLoaded()) return "";
+    return this.acceptDeniedReason(acc);
+  }
+
+  protected acceptWarningId(
+    acc: DeclarationAcceptanceView,
+    idx: number,
+  ): string {
+    return `decl-accept-warn-${idx}-${acc.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
   }
 
   protected globalScopeDeniedReason(
@@ -4697,12 +4817,17 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected async acceptRepoDeclaration(
     acc: DeclarationAcceptanceView,
   ): Promise<void> {
-    if (!this.canAcceptDeclaration(acc)) return;
+    if (this.acceptingDeclId() || !this.canAcceptDeclaration(acc)) return;
+    this.acceptingDeclId.set(acc.id);
     try {
       await this.store.acceptDeclaration(acc.id, acc.requested ?? []);
       this.snackbar.show(`Accepted declaration ${acc.id}.`);
     } catch (err) {
       this.store.actionError.set(errorText(err));
+    } finally {
+      if (this.acceptingDeclId() === acc.id) {
+        this.acceptingDeclId.set(null);
+      }
     }
   }
 
