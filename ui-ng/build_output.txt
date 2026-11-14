@@ -1,8 +1,0 @@
-
-> grain-ui-ng@0.0.0 build
-> ng build --configuration production
-
-❯ Building...
-✔ Building...
-Application bundle generation failed. [12.280 seconds]
-

@@ -16,22 +16,26 @@ import {
   ChangeDetectionStrategy,
   Component,
   ViewEncapsulation,
+  effect,
+  inject,
   input,
   signal,
-  inject,
 } from "@angular/core";
 import { GrainApi } from "../api/grain-api.service";
 import { SnackbarService } from "../services/snackbar.service";
-import { AccessService } from "../services/access.service";
+import { errorText } from "../sessions/session-helpers";
+import { DialogTrapDirective } from "../shared/dialog-trap.directive";
+import { PillSelectComponent } from "../shared/pill-select.component";
 import type {
+  CustomCheckDeclarationV3,
   FlowDeclarationV3,
+  QAAdoptResponse,
   QADryRunResponse,
   QAProbeResponse,
-  QAAdoptResponse,
 } from "./qa-flows.models";
-import { PillSelectComponent } from "../shared/pill-select.component";
-import { DialogTrapDirective } from "../shared/dialog-trap.directive";
-import { errorText } from "../sessions/session-helpers";
+
+type CustomCheckEngine = "pattern" | "diff-budget" | "companion" | "jsonschema";
+type InsertAfterStage = "s2" | "s3" | "s4";
 
 @Component({
   selector: "g-qa-v3-studio",
@@ -40,28 +44,33 @@ import { errorText } from "../sessions/session-helpers";
   styleUrl: "./qa-v3-studio.css",
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div class="qa-v3-studio editor-scroll-area">
+    <div class="qa-v3-studio editor-scroll-area" data-testid="qa-v3-studio">
       <div class="editor-section">
         <h3>V3 Pipeline stages</h3>
-        <label for="s0Intent"
-          ><input
+        <label for="s0Intent">
+          <input
             id="s0Intent"
             type="checkbox"
             [checked]="s0Intent()"
-            (change)="s0Intent.set($any($event.target).checked)"
+            (change)="s0Intent.set(checkedValue($event))"
           />
-          S0 Intent</label
-        >
-        <label for="s2PlanCritic"
-          ><input
+          S0 Intent
+        </label>
+        <label for="s2PlanCritic">
+          <input
             id="s2PlanCritic"
             type="checkbox"
             [checked]="s2PlanCritic()"
-            (change)="s2PlanCritic.set($any($event.target).checked)"
+            (change)="s2PlanCritic.set(checkedValue($event))"
           />
-          S2 Plan Critic</label
+          S2 Plan Critic
+        </label>
+        <button
+          type="button"
+          class="btn-text"
+          data-testid="qa-v3-add-stage"
+          (click)="addCustomStage()"
         >
-        <button class="btn-text" (click)="addCustomStage()">
           + Custom stage
         </button>
         @for (s of customStages(); track $index) {
@@ -69,6 +78,7 @@ import { errorText } from "../sessions/session-helpers";
             <div class="check-name">
               <strong>Custom Stage</strong>
               <button
+                type="button"
                 class="btn-text danger"
                 (click)="removeCustomStage($index)"
               >
@@ -81,7 +91,7 @@ import { errorText } from "../sessions/session-helpers";
                 [id]="'stg-id-' + $index"
                 type="text"
                 [value]="s.id"
-                (input)="s.id = $any($event.target).value"
+                (input)="updateStageId($index, textValue($event))"
               />
 
               <label [attr.for]="'stg-lbl-' + $index">Label</label>
@@ -89,19 +99,15 @@ import { errorText } from "../sessions/session-helpers";
                 [id]="'stg-lbl-' + $index"
                 type="text"
                 [value]="s.label"
-                (input)="s.label = $any($event.target).value"
+                (input)="updateStageLabel($index, textValue($event))"
               />
 
               <label [attr.for]="'stg-after-' + $index">Insert After</label>
               <g-pill-select
                 ariaLabel="Insert after"
                 [value]="s.insertAfter"
-                (valueChange)="s.insertAfter = $any($event)"
-                [options]="[
-                  { value: 's2', label: 's2' },
-                  { value: 's3', label: 's3' },
-                  { value: 's4', label: 's4' },
-                ]"
+                (valueChange)="updateStageInsertAfter($index, $event)"
+                [options]="insertAfterOptions"
               />
 
               <label [attr.for]="'stg-to-' + $index">Timeout (s)</label>
@@ -109,9 +115,7 @@ import { errorText } from "../sessions/session-helpers";
                 [id]="'stg-to-' + $index"
                 type="number"
                 [value]="s.timeoutSeconds"
-                (input)="
-                  s.timeoutSeconds = $any($event.target).valueAsNumber || 0
-                "
+                (input)="updateStageTimeout($index, numValue($event))"
               />
             </div>
           </div>
@@ -121,6 +125,7 @@ import { errorText } from "../sessions/session-helpers";
           <label for="s5Triage">S5 Merge Triage</label>
           <g-pill-select
             id="s5Triage"
+            ariaLabel="S5 Merge Triage"
             [(value)]="s5Triage"
             [options]="s5Options"
           />
@@ -129,17 +134,34 @@ import { errorText } from "../sessions/session-helpers";
 
       <div class="editor-section">
         <h3>Custom checks</h3>
-        <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-          <button class="btn-outlined" (click)="addCheck('pattern')">
+        <div class="check-engine-bar">
+          <button
+            type="button"
+            class="btn-outlined"
+            data-testid="qa-v3-add-pattern"
+            (click)="addCheck('pattern')"
+          >
             pattern
           </button>
-          <button class="btn-outlined" (click)="addCheck('diff-budget')">
+          <button
+            type="button"
+            class="btn-outlined"
+            (click)="addCheck('diff-budget')"
+          >
             diff-budget
           </button>
-          <button class="btn-outlined" (click)="addCheck('companion')">
+          <button
+            type="button"
+            class="btn-outlined"
+            (click)="addCheck('companion')"
+          >
             companion
           </button>
-          <button class="btn-outlined" (click)="addCheck('jsonschema')">
+          <button
+            type="button"
+            class="btn-outlined"
+            (click)="addCheck('jsonschema')"
+          >
             jsonschema
           </button>
         </div>
@@ -148,38 +170,41 @@ import { errorText } from "../sessions/session-helpers";
           <div class="check-row" style="margin-top: 16px;">
             <div class="check-name">
               <strong>Engine:</strong> {{ c.engine }}
-              <button class="btn-text danger" (click)="removeCheck($index)">
+              <button
+                type="button"
+                class="btn-text danger"
+                (click)="removeCheck($index)"
+              >
                 Remove
               </button>
             </div>
-            <div
-              class="check-params"
-              style="flex-direction: column; align-items: stretch; width: 100%;"
-            >
-              <label [attr.for]="'pass-' + $index"
-                >Pass fixture (JSON array)</label
-              >
+            <div class="check-params fixture-stack">
+              <label [attr.for]="'pass-' + $index">
+                Pass fixture (JSON array)
+              </label>
               <textarea
                 [id]="'pass-' + $index"
                 [value]="c.passJson"
-                (input)="updateFixture($index, 'pass', $any($event.target).value)"
+                (input)="updateFixture($index, 'pass', textValue($event))"
                 rows="2"
               ></textarea>
-              <label [attr.for]="'fail-' + $index"
-                >Fail fixture (JSON array)</label
-              >
+              <label [attr.for]="'fail-' + $index">
+                Fail fixture (JSON array)
+              </label>
               <textarea
                 [id]="'fail-' + $index"
                 [value]="c.failJson"
-                (input)="updateFixture($index, 'fail', $any($event.target).value)"
+                (input)="updateFixture($index, 'fail', textValue($event))"
                 rows="2"
               ></textarea>
             </div>
           </div>
         }
         <button
+          type="button"
           class="btn-tonal"
           style="margin-top: 16px;"
+          data-testid="qa-v3-verify-dry-run"
           (click)="verifyDryRun()"
           [disabled]="verifying()"
         >
@@ -199,22 +224,26 @@ import { errorText } from "../sessions/session-helpers";
         }
       </div>
 
-      <div
-        class="editor-section"
-        style="margin-top: 32px; border-top: 1px solid var(--grain-border); padding-top: 24px;"
-      >
+      <div class="editor-section section-divider">
         <h3>Adopt from repo commit</h3>
-        <button class="btn-outlined" (click)="showAdopt.set(true)">
+        <button
+          type="button"
+          class="btn-outlined"
+          data-testid="qa-v3-open-adopt"
+          (click)="showAdopt.set(true)"
+        >
           Adopt Flow
         </button>
       </div>
 
-      <div
-        class="editor-section"
-        style="margin-top: 32px; border-top: 1px solid var(--grain-border); padding-top: 24px;"
-      >
+      <div class="editor-section section-divider">
         <h3>What-if probe</h3>
-        <button class="btn-outlined" (click)="showProbe.set(true)">
+        <button
+          type="button"
+          class="btn-outlined"
+          data-testid="qa-v3-open-probe"
+          (click)="showProbe.set(true)"
+        >
           Test Probe
         </button>
       </div>
@@ -222,44 +251,44 @@ import { errorText } from "../sessions/session-helpers";
 
     @if (showAdopt()) {
       <!-- eslint-disable @angular-eslint/template/click-events-have-key-events,@angular-eslint/template/interactive-supports-focus -->
-      <div
-        gDialogTrap
-        class="modal-backdrop"
-        (click)="showAdopt.set(false)"
-        class="modal-backdrop-full"
-      >
+      <div class="modal-backdrop-full" (click)="showAdopt.set(false)">
         <div
-          class="modal-content"
+          gDialogTrap
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="qa-v3-adopt-title"
+          class="modal-content-full"
           (click)="$event.stopPropagation()"
-          style="background:var(--grain-surface);margin:10% auto;padding:24px;border-radius:12px;max-width:500px;"
           (keydown.escape)="showAdopt.set(false)"
         >
-          <h3>Adopt Flow from Commit</h3>
+          <h3 id="qa-v3-adopt-title">Adopt Flow from Commit</h3>
           <label for="adoptRepo">Repo</label>
           <input
             id="adoptRepo"
             type="text"
             [value]="adoptRepo()"
-            (input)="adoptRepo.set($any($event.target).value)"
+            (input)="adoptRepo.set(textValue($event))"
           />
           <label for="adoptPath">Path</label>
           <input
             id="adoptPath"
             type="text"
             [value]="adoptPath()"
-            (input)="adoptPath.set($any($event.target).value)"
+            (input)="adoptPath.set(textValue($event))"
           />
           <label for="adoptCommit">Commit (40-char SHA)</label>
           <input
             id="adoptCommit"
             type="text"
             [value]="adoptCommit()"
-            (input)="adoptCommit.set($any($event.target).value)"
+            (input)="adoptCommit.set(textValue($event))"
           />
 
-          <div style="margin-top:24px;display:flex;gap:12px;">
+          <div class="dialog-actions">
             <button
+              type="button"
               class="btn-primary"
+              data-testid="qa-v3-submit-adopt"
               (click)="doAdopt()"
               [disabled]="
                 !adoptRepo() || !adoptPath() || !adoptCommit() || adopting()
@@ -267,7 +296,11 @@ import { errorText } from "../sessions/session-helpers";
             >
               Adopt
             </button>
-            <button class="btn-outlined" (click)="showAdopt.set(false)">
+            <button
+              type="button"
+              class="btn-outlined"
+              (click)="showAdopt.set(false)"
+            >
               Cancel
             </button>
           </div>
@@ -277,38 +310,36 @@ import { errorText } from "../sessions/session-helpers";
 
     @if (showProbe()) {
       <!-- eslint-disable @angular-eslint/template/click-events-have-key-events,@angular-eslint/template/interactive-supports-focus -->
-      <div
-        gDialogTrap
-        class="modal-backdrop"
-        (click)="showProbe.set(false)"
-        class="modal-backdrop-right"
-      >
+      <div class="modal-backdrop-right" (click)="showProbe.set(false)">
         <div
-          class="probe-drawer"
+          gDialogTrap
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="qa-v3-probe-title"
+          class="probe-drawer-full"
           (click)="$event.stopPropagation()"
-          style="background:var(--grain-surface);height:100%;width:400px;padding:24px;overflow-y:auto;"
           (keydown.escape)="showProbe.set(false)"
         >
-          <h3>What-if Probe</h3>
+          <h3 id="qa-v3-probe-title">What-if Probe</h3>
           <label for="probeTitle">Title</label>
           <input
             id="probeTitle"
             type="text"
             [value]="probeTitle()"
-            (input)="probeTitle.set($any($event.target).value)"
+            (input)="probeTitle.set(textValue($event))"
           />
           <label for="probeBody">Body</label>
           <textarea
             id="probeBody"
             [value]="probeBody()"
-            (input)="probeBody.set($any($event.target).value)"
+            (input)="probeBody.set(textValue($event))"
             rows="3"
           ></textarea>
           <label for="probeFiles">Files (comma or newline separated)</label>
           <textarea
             id="probeFiles"
             [value]="probeFiles()"
-            (input)="probeFiles.set($any($event.target).value)"
+            (input)="probeFiles.set(textValue($event))"
             rows="3"
           ></textarea>
           <label for="probeNonTest">Non Test Added</label>
@@ -316,22 +347,30 @@ import { errorText } from "../sessions/session-helpers";
             id="probeNonTest"
             type="number"
             [value]="probeNonTest()"
-            (input)="probeNonTest.set($any($event.target).valueAsNumber || 0)"
+            (input)="probeNonTest.set(numValue($event))"
           />
 
-          <button
-            class="btn-primary"
-            style="margin-top:16px;width:100%;"
-            (click)="doProbe()"
-            [disabled]="probing()"
-          >
-            Run Probe
-          </button>
+          <div class="dialog-actions">
+            <button
+              type="button"
+              class="btn-primary"
+              data-testid="qa-v3-submit-probe"
+              (click)="doProbe()"
+              [disabled]="probing()"
+            >
+              Run Probe
+            </button>
+            <button
+              type="button"
+              class="btn-outlined"
+              (click)="showProbe.set(false)"
+            >
+              Close
+            </button>
+          </div>
 
           @if (probeResult(); as pr) {
-            <div
-              style="margin-top: 24px; border-top: 1px solid var(--grain-border); padding-top: 16px;"
-            >
+            <div class="section-divider" data-testid="qa-v3-probe-result">
               <span class="status-pill info"
                 >Complexity: {{ pr.complexity.tier }}</span
               >
@@ -347,99 +386,177 @@ import { errorText } from "../sessions/session-helpers";
   `,
 })
 export class QaV3StudioComponent {
-  private api = inject(GrainApi);
-  private snackbar = inject(SnackbarService);
-  private access = inject(AccessService);
+  private readonly api = inject(GrainApi);
+  private readonly snackbar = inject(SnackbarService);
 
-  decl = input<FlowDeclarationV3>();
+  readonly decl = input<FlowDeclarationV3>();
 
-  s0Intent = signal(false);
-  s2PlanCritic = signal(false);
-  s5Triage = signal<"off" | "shadow" | "enforced">("off");
-  customStages = signal<
+  readonly s0Intent = signal(false);
+  readonly s2PlanCritic = signal(false);
+  readonly s5Triage = signal<"off" | "shadow" | "enforced">("off");
+  readonly customStages = signal<
     Array<{
       id: string;
       label: string;
-      insertAfter: "s2" | "s3" | "s4";
+      insertAfter: InsertAfterStage;
       timeoutSeconds: number;
     }>
   >([]);
 
-  s5Options = [
+  readonly insertAfterOptions = [
+    { value: "s2", label: "s2" },
+    { value: "s3", label: "s3" },
+    { value: "s4", label: "s4" },
+  ];
+
+  readonly s5Options = [
     { value: "off", label: "off" },
     { value: "shadow", label: "shadow" },
     { value: "enforced", label: "enforced" },
   ];
 
-  customChecks = signal<
+  readonly customChecks = signal<
     Array<{
-      engine: "pattern" | "diff-budget" | "companion" | "jsonschema";
+      engine: CustomCheckEngine;
       passJson: string;
       failJson: string;
     }>
   >([]);
 
-  verifying = signal(false);
-  dryRunResult = signal<QADryRunResponse | null>(null);
+  readonly verifying = signal(false);
+  readonly dryRunResult = signal<QADryRunResponse | null>(null);
 
-  showAdopt = signal(false);
-  adoptRepo = signal("");
-  adoptPath = signal(".grain/qa/flow.yml");
-  adoptCommit = signal("");
-  adopting = signal(false);
+  readonly showAdopt = signal(false);
+  readonly adoptRepo = signal("");
+  readonly adoptPath = signal(".grain/qa/flow.yml");
+  readonly adoptCommit = signal("");
+  readonly adopting = signal(false);
 
-  showProbe = signal(false);
-  probeTitle = signal("");
-  probeBody = signal("");
-  probeFiles = signal("");
-  probeNonTest = signal(0);
-  probing = signal(false);
-  probeResult = signal<QAProbeResponse | null>(null);
+  readonly showProbe = signal(false);
+  readonly probeTitle = signal("");
+  readonly probeBody = signal("");
+  readonly probeFiles = signal("");
+  readonly probeNonTest = signal(0);
+  readonly probing = signal(false);
+  readonly probeResult = signal<QAProbeResponse | null>(null);
 
-  addCustomStage() {
+  constructor() {
+    effect(() => {
+      const d = this.decl();
+      if (!d) return;
+      const s0 = d.stages?.["s0-intent"];
+      this.s0Intent.set(typeof s0 === "boolean" ? s0 : Boolean(s0?.enabled));
+      const s2 = d.stages?.["s2-plan-critic"];
+      this.s2PlanCritic.set(
+        typeof s2 === "boolean" ? s2 : Boolean(s2?.enabled),
+      );
+      const s5 = d.stages?.["s5-merge-triage"];
+      const mode = typeof s5 === "string" ? s5 : s5?.mode;
+      this.s5Triage.set(
+        mode === "shadow" || mode === "enforced" ? mode : "off",
+      );
+      const stages = (d.stages?.custom ?? []).map((cs) => ({
+        id: cs.id,
+        label: cs.label ?? cs.id,
+        insertAfter: cs["insert-after"] ?? cs.insertAfter ?? "s3",
+        timeoutSeconds: cs["timeout-seconds"] ?? cs.timeoutSeconds ?? 30,
+      }));
+      this.customStages.set(stages);
+
+      const rawChecks = d["custom-checks"] ?? d.customChecks;
+      const list: CustomCheckDeclarationV3[] = Array.isArray(rawChecks)
+        ? rawChecks
+        : rawChecks
+          ? Object.values(rawChecks)
+          : [];
+      this.customChecks.set(
+        list.map((cc) => ({
+          engine: cc.kind ?? cc.engine ?? "pattern",
+          passJson: JSON.stringify(cc.fixtures?.pass ?? []),
+          failJson: JSON.stringify(cc.fixtures?.fail ?? []),
+        })),
+      );
+    });
+  }
+
+  protected textValue(ev: Event): string {
+    return (ev.target as HTMLInputElement | HTMLTextAreaElement).value;
+  }
+
+  protected numValue(ev: Event): number {
+    return (ev.target as HTMLInputElement).valueAsNumber || 0;
+  }
+
+  protected checkedValue(ev: Event): boolean {
+    return (ev.target as HTMLInputElement).checked;
+  }
+
+  protected updateStageId(idx: number, id: string): void {
+    this.customStages.update((list) =>
+      list.map((s, i) => (i === idx ? { ...s, id } : s)),
+    );
+  }
+
+  protected updateStageLabel(idx: number, label: string): void {
+    this.customStages.update((list) =>
+      list.map((s, i) => (i === idx ? { ...s, label } : s)),
+    );
+  }
+
+  protected updateStageInsertAfter(idx: number, val: string): void {
+    const insertAfter: InsertAfterStage =
+      val === "s3" || val === "s4" ? val : "s2";
+    this.customStages.update((list) =>
+      list.map((s, i) => (i === idx ? { ...s, insertAfter } : s)),
+    );
+  }
+
+  protected updateStageTimeout(idx: number, timeoutSeconds: number): void {
+    this.customStages.update((list) =>
+      list.map((s, i) => (i === idx ? { ...s, timeoutSeconds } : s)),
+    );
+  }
+
+  addCustomStage(): void {
     this.customStages.update((s) => [
       ...s,
-      { id: "custom-" + s.length,
-        label: "Custom " + s.length,
-        insertAfter: "s2",
-        timeoutSeconds: 300,
+      {
+        id: `custom:stage-${s.length}`,
+        label: `Custom ${s.length}`,
+        insertAfter: "s3",
+        timeoutSeconds: 30,
       },
     ]);
   }
 
-  removeCustomStage(idx: number) {
-    this.customStages.update((s) => {
-      const ns = [...s];
-      ns.splice(idx, 1);
-      return ns;
-    });
+  removeCustomStage(idx: number): void {
+    this.customStages.update((s) => s.filter((_, i) => i !== idx));
   }
 
-  addCheck(engine: "pattern" | "diff-budget" | "companion" | "jsonschema") {
+  addCheck(engine: CustomCheckEngine): void {
     this.customChecks.update((c) => [
       ...c,
       { engine, passJson: "[]", failJson: "[]" },
     ]);
   }
 
-  removeCheck(idx: number) {
-    this.customChecks.update((c) => {
-      const nc = [...c];
-      nc.splice(idx, 1);
-      return nc;
-    });
+  removeCheck(idx: number): void {
+    this.customChecks.update((c) => c.filter((_, i) => i !== idx));
   }
 
-  updateFixture(idx: number, type: "pass" | "fail", val: string) {
-    this.customChecks.update((c) => {
-      const nc = [...c];
-      if (type === "pass") nc[idx].passJson = val;
-      else nc[idx].failJson = val;
-      return nc;
-    });
+  updateFixture(idx: number, kind: "pass" | "fail", val: string): void {
+    this.customChecks.update((c) =>
+      c.map((item, i) =>
+        i === idx
+          ? kind === "pass"
+            ? { ...item, passJson: val }
+            : { ...item, failJson: val }
+          : item,
+      ),
+    );
   }
 
-  async verifyDryRun() {
+  async verifyDryRun(): Promise<void> {
     this.verifying.set(true);
     try {
       let customChecksYaml = "";
@@ -452,14 +569,20 @@ export class QaV3StudioComponent {
           this.snackbar.show(`JSON parse error in check-${i}: ${errorText(e)}`);
           return;
         }
-        customChecksYaml += `  - id: check-${i}\n    kind: ${c.engine}\n    severity: blocking\n    message: "Failed"\n    fixtures:\n      pass: ${c.passJson.replace(/\n/g, "")}\n      fail: ${c.failJson.replace(/\n/g, "")}\n`;
+        customChecksYaml += `  - id: custom:check-${i}\n    kind: ${c.engine}\n    severity: blocking\n    message: "Failed"\n    fixtures:\n      pass: ${c.passJson.replace(/\n/g, "")}\n      fail: ${c.failJson.replace(/\n/g, "")}\n`;
       }
       let customStagesYaml = "";
       for (const s of this.customStages()) {
-        customStagesYaml += `    - id: ${s.id}\n      label: ${s.label}\n      insertAfter: ${s.insertAfter}\n      timeoutSeconds: ${s.timeoutSeconds}\n`;
+        customStagesYaml += `    - id: ${s.id}\n      label: ${s.label}\n      insert-after: ${s.insertAfter}\n      timeout-seconds: ${s.timeoutSeconds}\n`;
       }
 
-      const yml = `schema: "grain.dev/qa-flow/v3"\nkey: draft-v3-preview\nextends: golden-v2@1\nstages:\n  s0-intent:\n    enabled: ${this.s0Intent()}\n  s2-plan-critic:\n    enabled: ${this.s2PlanCritic()}\n  s5-merge-triage:\n    mode: ${this.s5Triage()}\n  custom:\n${customStagesYaml}\ncustom-checks:\n${customChecksYaml}`;
+      const stagesSection = customStagesYaml
+        ? `  custom:\n${customStagesYaml}`
+        : "";
+      const checksSection = customChecksYaml
+        ? `custom-checks:\n${customChecksYaml}`
+        : "";
+      const yml = `schema: "grain.dev/qa-flow/v3"\nkey: draft-v3-preview\nextends: golden-v2@1\nlabel: Draft V3 preview\nstages:\n  s0-intent:\n    enabled: ${this.s0Intent()}\n  s2-plan-critic:\n    enabled: ${this.s2PlanCritic()}\n  s5-merge-triage:\n    mode: ${this.s5Triage()}\n${stagesSection}${checksSection}`;
       const res = await this.api.post<QADryRunResponse>(
         "POST /api/qa/flow-versions",
         undefined,
@@ -474,7 +597,7 @@ export class QaV3StudioComponent {
     }
   }
 
-  async doAdopt() {
+  async doAdopt(): Promise<void> {
     this.adopting.set(true);
     try {
       const res = await this.api.post<QAAdoptResponse>(
@@ -497,7 +620,7 @@ export class QaV3StudioComponent {
     }
   }
 
-  async doProbe() {
+  async doProbe(): Promise<void> {
     this.probing.set(true);
     try {
       const files = this.probeFiles()

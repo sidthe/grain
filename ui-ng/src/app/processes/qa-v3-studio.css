@@ -193,20 +193,51 @@
   margin-top: 0;
 }
 
+.qa-v3-studio .section-divider {
+  margin-top: 24px;
+  border-top: 1px solid var(--md-sys-color-outline-variant);
+  padding-top: 20px;
+}
+
+.qa-v3-studio .check-engine-bar,
+.qa-v3-studio .dialog-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.qa-v3-studio .dialog-actions {
+  margin-top: 20px;
+  gap: 12px;
+}
+
+.qa-v3-studio .fixture-stack {
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+}
+
 .modal-backdrop-full {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.5);
   z-index: 100;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 16px;
 }
 
 .modal-content-full {
-  background: var(--grain-surface);
-  margin: 10% auto;
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  margin-top: 8vh;
   padding: 24px;
   border-radius: 12px;
-  max-width: 500px;
-  width: 100vw;
+  max-width: min(500px, calc(100vw - 32px));
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .modal-backdrop-right {
@@ -219,10 +250,12 @@
 }
 
 .probe-drawer-full {
-  background: var(--grain-surface);
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface);
+  border-left: 1px solid var(--md-sys-color-outline-variant);
   height: 100%;
-  width: 400px;
-  max-width: 100vw;
+  width: min(400px, 100vw);
+  box-sizing: border-box;
   padding: 24px;
   overflow-y: auto;
 }

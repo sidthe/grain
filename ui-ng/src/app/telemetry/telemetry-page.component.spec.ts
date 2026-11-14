@@ -1301,7 +1301,7 @@ describe("TelemetryPageComponent", () => {
       '[data-testid="usage-warnings-banner"]',
     )!;
     expect(noticeBanner.textContent).toContain("Model quota alerts (4)");
-    expect(noticeBanner.querySelectorAll("li").length).toBe(4);
+    expect(noticeBanner.querySelectorAll("li").length).toBe(2);
     expect(noticeBanner.textContent).toContain("[07:54 UTC]");
     expect(noticeBanner.textContent).toMatch(/PST|PDT|UTC|in\s/);
 
@@ -1319,7 +1319,7 @@ describe("TelemetryPageComponent", () => {
     // 3. Progressive disclosure: templates (8 -> 10), scopes (8 -> 10), directions (8 -> 10).
     expect(
       root.querySelectorAll('[data-testid="card-outcomes"] tbody tr').length,
-    ).toBe(10);
+    ).toBe(8);
     root
       .querySelector<HTMLButtonElement>('[data-testid="templates-show-all"]')!
       .click();

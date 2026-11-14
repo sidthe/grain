@@ -15,11 +15,12 @@
 import type { QAFlowSpec } from "../api/models";
 
 export interface FlowDeclarationV2 {
-  schema: "grain.dev/qa-flow/v2";
+  schema: "grain.dev/qa-flow/v2" | "grain.dev/qa-flow/v3";
   key: string;
   extends?: string;
   label: string;
   summary?: string;
+  declarationV3?: FlowDeclarationV3;
   skill: {
     mode: "inherit" | "append" | "replace";
     text: string;
@@ -45,30 +46,38 @@ export interface FlowDeclarationV2 {
   };
 }
 
+export interface CustomCheckDeclarationV3 {
+  id?: string;
+  label?: string;
+  kind?: "pattern" | "diff-budget" | "companion" | "jsonschema";
+  engine?: "pattern" | "diff-budget" | "companion" | "jsonschema";
+  fixtures?: { fail?: unknown[]; pass?: unknown[] };
+}
+
+export interface CustomStageDeclarationV3 {
+  id: string;
+  label?: string;
+  "insert-after"?: "s2" | "s3" | "s4";
+  insertAfter?: "s2" | "s3" | "s4";
+  "timeout-seconds"?: number;
+  timeoutSeconds?: number;
+}
+
 export interface FlowDeclarationV3 {
   schema: "grain.dev/qa-flow/v3";
   skills?: Record<string, unknown>;
   stages?: {
-    "s0-intent"?: boolean;
-    "s1-risk"?: boolean;
-    "s2-plan-critic"?: boolean;
-    "s5-merge-triage"?: "off" | "shadow" | "enforced";
-    custom?: unknown[];
+    "s0-intent"?: boolean | { enabled?: boolean };
+    "s1-risk"?: boolean | Record<string, unknown>;
+    "s2-plan-critic"?: boolean | { enabled?: boolean };
+    "s5-merge-triage"?:
+      "off" | "shadow" | "enforced" | { mode?: "off" | "shadow" | "enforced" };
+    custom?: CustomStageDeclarationV3[];
   };
-  customChecks?: Record<
-    string,
-    {
-      engine: "pattern" | "diff-budget" | "companion" | "jsonschema";
-      fixtures: { fail: unknown[]; pass: unknown[] };
-    }
-  >;
-  "custom-checks"?: Record<
-    string,
-    {
-      engine: "pattern" | "diff-budget" | "companion" | "jsonschema";
-      fixtures: { fail: unknown[]; pass: unknown[] };
-    }
-  >;
+  customChecks?:
+    CustomCheckDeclarationV3[] | Record<string, CustomCheckDeclarationV3>;
+  "custom-checks"?:
+    CustomCheckDeclarationV3[] | Record<string, CustomCheckDeclarationV3>;
 }
 
 export interface QAFlowVersionItem {

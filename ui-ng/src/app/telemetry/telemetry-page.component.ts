@@ -36,7 +36,10 @@ import { SnackbarService } from "../services/snackbar.service";
 import { TaskFeedStore } from "../services/task-feed.service";
 import { ViewFilter } from "../services/view-filter.service";
 import { errorText } from "../sessions/session-helpers";
-import { ActorChipComponent, normalizeActorKind } from "../shared/actor-chip.component";
+import {
+  ActorChipComponent,
+  normalizeActorKind,
+} from "../shared/actor-chip.component";
 import { StatusIconComponent } from "../shared/status-icon.component";
 import { TipDirective } from "../shared/tip.directive";
 import { TelemetryQualityComponent } from "./quality-checks.component";
@@ -50,7 +53,6 @@ import {
   type MetricsReport,
   type MetricsWindow,
   type QASummary,
-  type ReleaseNote,
   type TokenBudget,
   type UsageResponse,
   buildAlphabeticalContributors,
@@ -87,7 +89,11 @@ export type TelemetryTab = "overview" | "quality";
     TelemetryQualityComponent,
   ],
   encapsulation: ViewEncapsulation.None,
-  styleUrls: ["../shared/ops-surface.css", "./telemetry-page.component.css"],
+  styleUrls: [
+    "../shared/surface-controls.css",
+    "../shared/ops-surface.css",
+    "./telemetry-page.component.css",
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     "(document:click)": "onDocClick($event)",
@@ -884,10 +890,7 @@ export type TelemetryTab = "overview" | "quality";
                         </tr>
                       </thead>
                       <tbody>
-                        @for (
-                          tpl of report()?.agents?.templates ?? [];
-                          track tpl.templateId
-                        ) {
+                        @for (tpl of visibleTemplates(); track tpl.templateId) {
                           <tr>
                             <td class="tabular">{{ tpl.templateId }}</td>
                             <td class="tabular">{{ tpl.wakes }}</td>
@@ -902,6 +905,23 @@ export type TelemetryTab = "overview" | "quality";
                       </tbody>
                     </table>
                   </div>
+                  @if ((report()?.agents?.templates?.length ?? 0) > 8) {
+                    <div class="tel-more-row">
+                      <button
+                        type="button"
+                        class="tel-more-btn"
+                        data-testid="templates-show-all"
+                        (click)="showAllTemplates.set(!showAllTemplates())"
+                      >
+                        {{
+                          showAllTemplates()
+                            ? "Show top 8"
+                            : "Show all " +
+                              (report()?.agents?.templates?.length ?? 0)
+                        }}
+                      </button>
+                    </div>
+                  }
                 }
               </article>
 
@@ -1543,114 +1563,42 @@ export type TelemetryTab = "overview" | "quality";
                   </div>
                 }
               }
-            </article>
-
-            <!-- Team Engagement & Shipped Summary (SPACE Guardrail: Alphabetical, NEVER Ranked) -->
-            <article class="ops-card" data-testid="telemetry-team-space">
-              <div class="ops-card-head">
-                <div>
-                  <h2 class="ops-card-title">
-                    Team Collaboration &amp; Shipped Summary
-                  </h2>
-                  <p class="ops-card-sub">
-                    SPACE guardrail: team-level delivery and contributor
-                    context, listed strictly alphabetically (A–Z) and never
-                    leaderboard-ranked.
-                  </p>
-                </div>
-                <div class="headline-actions">
-                  <span
-                    class="status-pill healthy"
-                    data-testid="space-guardrail-pill"
-                  >
-                    <g-status-icon tone="healthy" kind="healthy" />
-                    Alphabetical · Non-ranked
-                  </span>
-                  @if (canReadReleaseNotes()) {
-                    <div
-                      class="segmented"
-                      role="group"
-                      aria-label="Rollup period"
-                    >
-                      @for (p of spacePeriods; track p.id) {
-                        <button
-                          type="button"
-                          [attr.aria-pressed]="spacePeriod() === p.id"
-                          [attr.data-testid]="'space-period-' + p.id"
-                          (click)="pickSpacePeriod(p.id)"
-                        >
-                          {{ p.label }}
-                        </button>
-                      }
-                    </div>
-                  }
-                </div>
-              </div>
-
-              @if (clusterStats(); as cs) {
-                <div class="tel-legend tabular">
-                  <span
-                    >Period: <strong>{{ cs.period }}</strong></span
-                  >
-                  <span
-                    >PRs merged:
-                    <strong>{{ cs.pullRequestsMerged }}</strong></span
-                  >
-                  <span
-                    >Lines:
-                    <strong
-                      >+{{ fmtNum(cs.linesAdded) }} / −{{
-                        fmtNum(cs.linesDeleted)
-                      }}</strong
-                    ></span
-                  >
-                  <span
-                    >Agent time:
-                    <strong>{{ cs.agentHours.toFixed(1) }}h</strong></span
-                  >
-                </div>
-
-                @if ((cs.directions?.length ?? 0) > 0) {
-                  <div>
-                    <h3 class="section-title">Active Work tree Directions</h3>
-                    <ul class="tel-dir-list">
-                      @for (dir of cs.directions ?? []; track dir.taskId) {
-                        <li class="tel-dir-item">
-                          <span>
-                            <a
-                              class="row-title"
-                              [routerLink]="['/task', dir.taskId]"
-                              >#{{ dir.taskId }}
-                              {{ dir.title || "Work tree root" }}</a
-                            >
-                            @if (dir.repo) {
-                              <span class="muted tabular">
-                                · {{ dir.repo }}</span
-                              >
-                            }
-                          </span>
-                          <span class="tabular muted">
-                            {{ dir.pullRequestsMerged }} merged ·
-                            {{ dir.tasksCompleted }} completed
-                          </span>
-                        </li>
-                      }
-                    </ul>
-                  </div>
-                }
-              }
 
               <div>
-                <h3 class="section-title">
-                  Contributors &amp; Actors (Alphabetical A–Z)
-                </h3>
+                <div class="tel-section-head">
+                  <h3 class="section-title">
+                    Contributors &amp; Actors (Alphabetical A–Z)
+                  </h3>
+                  <div
+                    class="segmented"
+                    role="group"
+                    aria-label="Filter contributors"
+                  >
+                    <button
+                      type="button"
+                      data-testid="actors-filter-all"
+                      [attr.aria-pressed]="actorsFilter() === 'all'"
+                      (click)="actorsFilter.set('all')"
+                    >
+                      All ({{ unfilteredActors().length }})
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="actors-filter-people"
+                      [attr.aria-pressed]="actorsFilter() === 'people'"
+                      (click)="actorsFilter.set('people')"
+                    >
+                      People ({{ peopleActorCount() }})
+                    </button>
+                  </div>
+                </div>
                 @if (alphabeticalActors().length === 0) {
                   <p class="muted" style="margin: 0">
                     No contributor records in the current view.
                   </p>
                 } @else {
                   <div class="tel-space-grid" data-testid="space-actors-grid">
-                    @for (actor of alphabeticalActors(); track actor.id) {
+                    @for (actor of visibleActors(); track actor.id) {
                       <div class="tel-space-card" data-testid="space-actor-row">
                         <g-actor-chip
                           [label]="actor.label"
@@ -1662,21 +1610,44 @@ export type TelemetryTab = "overview" | "quality";
                               >{{ actor.workstreams }}
                               {{
                                 actor.workstreams === 1
-                                  ? "work tree"
-                                  : "work trees"
+                                  ? "workstream"
+                                  : "workstreams"
                               }}</span
                             >
                           }
                           @if (actor.activeTasks > 0) {
-                            <span>{{ actor.activeTasks }} open tasks</span>
+                            <span
+                              >{{ actor.activeTasks }} open
+                              {{
+                                actor.activeTasks === 1 ? "task" : "tasks"
+                              }}</span
+                            >
                           }
                           @if (actor.repos.length > 0) {
-                            <span>{{ actor.repos.join(", ") }}</span>
+                            <span [title]="actor.repos.join(', ')">{{
+                              formatActorRepos(actor.repos)
+                            }}</span>
                           }
                         </div>
                       </div>
                     }
                   </div>
+                  @if (alphabeticalActors().length > 12) {
+                    <div class="tel-more-row">
+                      <button
+                        type="button"
+                        class="tel-more-btn"
+                        data-testid="actors-show-all"
+                        (click)="showAllActors.set(!showAllActors())"
+                      >
+                        {{
+                          showAllActors()
+                            ? "Show top 12"
+                            : "Show all " + alphabeticalActors().length
+                        }}
+                      </button>
+                    </div>
+                  }
                 }
               </div>
             </article>
@@ -1732,7 +1703,6 @@ export class TelemetryPageComponent implements OnInit {
   protected readonly qaError = signal<string | null>(null);
   protected readonly usage = signal<UsageResponse | null>(null);
   protected readonly clusterStats = signal<ClusterStats | null>(null);
-  protected readonly releaseNotes = signal<ReleaseNote[]>([]);
   protected readonly configRepos = signal<string[]>([]);
   protected readonly knownConnections = signal<string[]>([]);
 
@@ -1842,8 +1812,17 @@ export class TelemetryPageComponent implements OnInit {
       items.push({ text, level: "warn" });
     }
     const hasError = items.some((i) => i.level === "error");
-    return { total: items.length, hasError, items };
+    return {
+      total: items.length,
+      hasError,
+      items: this.showAllUsageNotices() ? items : items.slice(0, 2),
+    };
   });
+
+  protected formatActorRepos(repos: readonly string[]): string {
+    if (repos.length <= 2) return repos.join(", ");
+    return `${repos.slice(0, 2).join(", ")} +${repos.length - 2}`;
+  }
 
   protected readonly qaDigest = computed(() => {
     const qa = this.qaSummary();
@@ -2207,18 +2186,12 @@ export class TelemetryPageComponent implements OnInit {
     const params = new URLSearchParams();
     if (this.spacePeriod()) params.set("period", this.spacePeriod());
     try {
-      const [stats, notes] = await Promise.all([
-        this.api.get<ClusterStats>(
-          "GET /api/release-notes/stats",
-          undefined,
-          params.toString(),
-        ),
-        this.api
-          .get<ReleaseNote[]>("GET /api/release-notes/stats")
-          .catch(() => [] as ReleaseNote[]),
-      ]);
+      const stats = await this.api.get<ClusterStats>(
+        "GET /api/release-notes/stats",
+        undefined,
+        params.toString(),
+      );
       this.clusterStats.set(stats);
-      this.releaseNotes.set(Array.isArray(notes) ? notes : []);
     } catch {
       // Optional section when release-notes scope is restricted.
     }
@@ -2462,6 +2435,7 @@ export class TelemetryPageComponent implements OnInit {
         },
       );
       this.usage.set(updated);
+      this.access.setUsage(updated);
       this.editingUsage.set(false);
       this.snackbar.show("Saved token budget and concurrency settings.");
     } catch (err) {

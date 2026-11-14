@@ -26,9 +26,9 @@ import type { QAExperimentResults } from "./qa-experiments.models";
   styleUrl: "./quality-v3-cards.css",
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
-    <div class="quality-v3-cards">
+    <div class="quality-v3-cards" data-testid="quality-v3-cards">
       @if (results()?.declarationDiff; as diff) {
-        <div class="diff-strip">
+        <div class="diff-strip" data-testid="v3-declaration-diff">
           <strong
             >Changed vs. {{ results()?.referenceArmId || "control" }}:</strong
           >
@@ -63,78 +63,94 @@ import type { QAExperimentResults } from "./qa-experiments.models";
         </div>
       }
 
-      @if ((results()?.stageFunnel || [])?.length) {
-        <div class="ops-card">
+      @if ((results()?.stageFunnel || []).length) {
+        <div class="ops-card" data-testid="v3-stage-funnel">
           <h3>Stage Funnel &amp; Cost Attribution</h3>
-          <table>
-            <thead>
-              <tr>
-                <th>Stage</th>
-                <th>Arm</th>
-                <th>Runs / Applies</th>
-                <th>Findings</th>
-                <th>Repaired next SHA</th>
-                <th>p95 latency</th>
-                <th>Median tokens</th>
-              </tr>
-            </thead>
-            <tbody>
-              @for (
-                row of results()?.stageFunnel || [];
-                track row.armId + "-" + row.stage
-              ) {
+          <div
+            class="ops-table-wrap"
+            tabindex="0"
+            role="region"
+            aria-label="Stage funnel and cost attribution"
+          >
+            <table class="ops-table">
+              <thead>
                 <tr>
-                  <td>{{ row.stage }}</td>
-                  <td class="mono">{{ row.armId }}</td>
-                  <td>
-                    {{ row.runs }}
-                    <span class="muted">({{ row.applicablePct }}%)</span>
-                  </td>
-                  <td>{{ row.findingsCount }}</td>
-                  <td>{{ row.repairedInNextShaPct }}%</td>
-                  <td>{{ row.durationP95Ms }} ms</td>
-                  <td>{{ row.tokensMedian }}</td>
+                  <th scope="col">Stage</th>
+                  <th scope="col">Arm</th>
+                  <th scope="col">Runs / Applies</th>
+                  <th scope="col">Findings</th>
+                  <th scope="col">Repaired next SHA</th>
+                  <th scope="col">p95 latency</th>
+                  <th scope="col">Median tokens</th>
                 </tr>
-              }
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                @for (
+                  row of results()?.stageFunnel || [];
+                  track row.armId + "-" + row.stage
+                ) {
+                  <tr>
+                    <td>{{ row.stage }}</td>
+                    <td class="mono">{{ row.armId }}</td>
+                    <td class="tabular">
+                      {{ row.runs }}
+                      <span class="muted">({{ row.applicablePct }}%)</span>
+                    </td>
+                    <td class="tabular">{{ row.findingsCount }}</td>
+                    <td class="tabular">{{ row.repairedInNextShaPct }}%</td>
+                    <td class="tabular">{{ row.durationP95Ms }} ms</td>
+                    <td class="tabular">{{ row.tokensMedian }}</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
         </div>
       }
 
-      @if ((results()?.triageMetrics || [])?.length) {
-        <div class="ops-card">
+      @if ((results()?.triageMetrics || []).length) {
+        <div class="ops-card" data-testid="v3-triage-metrics">
           <h3>Human-Review Triage (S5)</h3>
-          <table>
-            <thead>
-              <tr>
-                <th>Arm</th>
-                <th>Mode</th>
-                <th>Reviews saved</th>
-                <th>Human-routed</th>
-                <th>Auto-merged escape rate</th>
-                <th>Human-routed precision</th>
-              </tr>
-            </thead>
-            <tbody>
-              @for (row of results()?.triageMetrics || []; track row.armId) {
+          <div
+            class="ops-table-wrap"
+            tabindex="0"
+            role="region"
+            aria-label="Human-review triage metrics"
+          >
+            <table class="ops-table">
+              <thead>
                 <tr>
-                  <td class="mono">{{ row.armId }}</td>
-                  <td>
-                    <span class="status-pill">{{ row.mode }}</span>
-                  </td>
-                  <td>{{ row.autoMergeEligiblePct }}%</td>
-                  <td>{{ row.humanRoutedPct }}%</td>
-                  <td>{{ row.autoMergedEscapeRate }}%</td>
-                  <td>{{ row.humanRoutedTruePositiveRate }}%</td>
+                  <th scope="col">Arm</th>
+                  <th scope="col">Mode</th>
+                  <th scope="col">Reviews saved</th>
+                  <th scope="col">Human-routed</th>
+                  <th scope="col">Auto-merged escape rate</th>
+                  <th scope="col">Human-routed precision</th>
                 </tr>
-              }
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                @for (row of results()?.triageMetrics || []; track row.armId) {
+                  <tr>
+                    <td class="mono">{{ row.armId }}</td>
+                    <td>
+                      <span class="status-pill">{{ row.mode }}</span>
+                    </td>
+                    <td class="tabular">{{ row.autoMergeEligiblePct }}%</td>
+                    <td class="tabular">{{ row.humanRoutedPct }}%</td>
+                    <td class="tabular">{{ row.autoMergedEscapeRate }}%</td>
+                    <td class="tabular">
+                      {{ row.humanRoutedTruePositiveRate }}%
+                    </td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
         </div>
       }
     </div>
   `,
 })
 export class QualityV3CardsComponent {
-  results = input<QAExperimentResults>();
+  readonly results = input<QAExperimentResults>();
 }

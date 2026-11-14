@@ -549,6 +549,15 @@ export class QaExperimentSheetComponent implements OnInit {
     if (!this.canSubmit()) return;
     this.saving.set(true);
     try {
+      const refVal = this.referenceArmId().trim();
+      const isControlRef = !refVal || refVal === "control";
+      const refOpt = this.referenceArmOptions().find((o) => o.value === refVal);
+      const refKey = isControlRef
+        ? "control"
+        : (refOpt?.label || refVal)
+            .split("@")[0]
+            .replace(/^builtin:/, "")
+            .trim() || "reference";
       const arms: Array<{
         id: string;
         label: string;
@@ -557,9 +566,11 @@ export class QaExperimentSheetComponent implements OnInit {
         baseBranch?: string;
       }> = [
         {
-          id: "control",
-          label: "Control",
-          flowHash: this.controlHash().trim() || "control",
+          id: refKey,
+          label: isControlRef ? "Control" : refOpt?.label || refKey,
+          flowHash: isControlRef
+            ? this.controlHash().trim() || "control"
+            : refVal,
           weight: 50,
           baseBranch: this.controlBaseBranch().trim() || undefined,
         },
@@ -584,9 +595,10 @@ export class QaExperimentSheetComponent implements OnInit {
       const res = (await this.api.post("POST /api/qa/experiments", undefined, {
         name: this.name().trim(),
         hypothesis: this.hypothesis().trim(),
+        referenceArmId: isControlRef ? undefined : refKey,
         arms,
         primaryMetric: this.primaryMetric(),
-        primaryContrast: this.primaryContrast().trim() || "treatment:control",
+        primaryContrast: this.primaryContrast().trim() || `treatment:${refKey}`,
         plan: {
           plannedOriginsPerArm: this.plannedOrigins(),
           maxDays: this.maxDays(),
