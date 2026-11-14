@@ -16,6 +16,8 @@ import type { Comment } from "../api/models";
 import {
   buildAgentModelOptions,
   extractSessionArtifacts,
+  sessionModelAvailability,
+  sessionModelNote,
   topologicalPlanOrder,
   wrapSandboxedHtml,
 } from "./session-artifacts";
@@ -111,5 +113,43 @@ describe("session-artifacts helpers", () => {
       "custom-pinned-model",
     ]);
     expect(opts[1].label).toBe("Gemini 3.1 Pro · high");
+
+    // Whitespace-only currentModel or defaultModel is normalized out.
+    const blankOpts = buildAgentModelOptions([], ["gemini-pro"], "   ", "   ");
+    expect(blankOpts).toEqual([
+      { value: "", label: "Deployment default" },
+      { value: "gemini-pro", label: "gemini-pro" },
+    ]);
+  });
+
+  it("classifies advertised, disabled-only, unadvertised, and pre-load session models", () => {
+    expect(
+      sessionModelAvailability("gemini-pro", ["gemini-pro"], [], false),
+    ).toBe("");
+    expect(
+      sessionModelAvailability("GEMINI-PRO", ["gemini-pro"], [], true),
+    ).toBe("enabled");
+    expect(sessionModelNote("legacy-model", [], [], true)).toBe(
+      "not advertised by any connection",
+    );
+    expect(
+      sessionModelNote(
+        "claude-opus",
+        ["claude-opus"],
+        [{ id: "c1", disabled: true, models: ["claude-opus"] }],
+        true,
+      ),
+    ).toBe("disabled connections only");
+    expect(
+      sessionModelNote(
+        "claude-opus",
+        ["claude-opus"],
+        [
+          { id: "c1", disabled: true, models: ["claude-opus"] },
+          { id: "c2", disabled: false, models: ["claude-opus"] },
+        ],
+        true,
+      ),
+    ).toBe("");
   });
 });
