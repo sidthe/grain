@@ -22,6 +22,9 @@ jobs:
       - name: Vet and test leaf Go packages (1-5)
         run: |
           set -euo pipefail
+          mkdir -p "$PWD/.ci-tmp"
+          trap 'rm -rf "$PWD/.ci-tmp"' EXIT
+          export TMPDIR="$PWD/.ci-tmp" GOTMPDIR="$PWD/.ci-tmp"
           export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all GIT_CONFIG_KEY_1=init.defaultRefFormat GIT_CONFIG_VALUE_1=files
           go vet ./pkg/sandboxaddr ./pkg/gitrefs ./pkg/portpick ./pkg/schedulefilter ./pkg/treeid
           go test -count=1 ./pkg/sandboxaddr ./pkg/gitrefs ./pkg/portpick ./pkg/schedulefilter ./pkg/treeid
@@ -42,6 +45,9 @@ jobs:
       - name: Vet and test leaf Go packages (6-10)
         run: |
           set -euo pipefail
+          mkdir -p "$PWD/.ci-tmp"
+          trap 'rm -rf "$PWD/.ci-tmp"' EXIT
+          export TMPDIR="$PWD/.ci-tmp" GOTMPDIR="$PWD/.ci-tmp"
           export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all GIT_CONFIG_KEY_1=init.defaultRefFormat GIT_CONFIG_VALUE_1=files
           go vet ./pkg/sysstat ./pkg/hostscriptcli ./pkg/namespace ./pkg/releasenotes ./pkg/designdoc
           go test -count=1 ./pkg/sysstat ./pkg/hostscriptcli ./pkg/namespace ./pkg/releasenotes ./pkg/designdoc
@@ -64,6 +70,9 @@ jobs:
       - name: Vet and test multi-package Go targets (11-15)
         run: |
           set -euo pipefail
+          mkdir -p "$PWD/.ci-tmp"
+          trap 'rm -rf "$PWD/.ci-tmp"' EXIT
+          export TMPDIR="$PWD/.ci-tmp" GOTMPDIR="$PWD/.ci-tmp"
           export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all GIT_CONFIG_KEY_1=init.defaultRefFormat GIT_CONFIG_VALUE_1=files
           go vet ./pkg/declschema ./pkg/repodecl ./pkg/staterepo ./pkg/orchestrator ./pkg/metrics ./pkg/ci ./pkg/workflows
           go test -count=1 ./pkg/declschema ./pkg/repodecl ./pkg/metrics ./pkg/workflows
@@ -83,6 +92,9 @@ jobs:
         working-directory: ui-ng
         run: |
           set -euo pipefail
+          mkdir -p "$PWD/.ci-tmp"
+          trap 'rm -rf "$PWD/.ci-tmp"' EXIT
+          export TMPDIR="$PWD/.ci-tmp"
           npm ci --prefer-offline --no-audit --no-fund
           npm run format:check
           npm run lint
