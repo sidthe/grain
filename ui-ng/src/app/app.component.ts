@@ -224,7 +224,10 @@ export class DeferErrorDirective implements OnInit {
           </svg>
         </button>
 
-        <div class="rail-create" (focusout)="onCreateFocusOut($event)">
+        <div
+          class="rail-create"
+          (focusout)="onMenuFocusOut($event, '.rail-create', createOpen)"
+        >
           <button
             #createBtn
             type="button"
@@ -281,7 +284,10 @@ export class DeferErrorDirective implements OnInit {
           />
         }
 
-        <div class="rail-more-wrap" (focusout)="onRailMoreFocusOut($event)">
+        <div
+          class="rail-more-wrap"
+          (focusout)="onMenuFocusOut($event, '.rail-more-wrap', railMoreOpen)"
+        >
           <button
             #railMoreBtn
             type="button"
@@ -749,7 +755,7 @@ export class DeferErrorDirective implements OnInit {
           id="more-sheet"
           aria-label="More destinations"
           data-testid="more-sheet"
-          (focusout)="onMoreFocusOut($event)"
+          (focusout)="onMenuFocusOut($event, '.more-sheet', moreOpen, moreBtn)"
         >
           <ul class="more-sheet-list">
             @for (d of navConfig.phoneMoreDestinations(); track d.id) {
@@ -1456,24 +1462,15 @@ export class AppComponent implements OnInit, OnDestroy {
     btn?.focus();
   }
 
-  protected onCreateFocusOut(ev: FocusEvent): void {
+  protected onMenuFocusOut(
+    ev: FocusEvent,
+    selector: string,
+    open: { set(v: boolean): void },
+    skip?: HTMLElement,
+  ): void {
     const next = ev.relatedTarget as HTMLElement | null;
-    if (next && !next.closest(".rail-create")) this.createOpen.set(false);
-  }
-
-  protected onRailMoreFocusOut(ev: FocusEvent): void {
-    const next = ev.relatedTarget as HTMLElement | null;
-    if (next && !next.closest(".rail-more-wrap")) this.railMoreOpen.set(false);
-  }
-
-  protected onMoreFocusOut(ev: FocusEvent): void {
-    const next = ev.relatedTarget as HTMLElement | null;
-    if (
-      next &&
-      !next.closest(".more-sheet") &&
-      next !== this.moreBtn()?.nativeElement
-    ) {
-      this.moreOpen.set(false);
+    if (next && !next.closest(selector) && next !== skip) {
+      open.set(false);
     }
   }
 
