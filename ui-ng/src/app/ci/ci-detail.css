@@ -5,9 +5,27 @@
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 20px 24px 32px;
   background: var(--md-sys-color-surface);
+}
+
+.ci-insp-head,
+.ci-insp-top,
+.ci-insp-title,
+.ci-insp-meta,
+.ci-meta-runid,
+.ci-verdict-callout,
+.ci-jobs-section,
+.ci-job-card,
+.ci-log-well,
+.ci-yaml-preview {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .ci-insp-head {
@@ -32,6 +50,7 @@
   font-size: 20px;
   line-height: 26px;
   font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 .ci-insp-meta {
@@ -137,9 +156,10 @@
 }
 
 .ci-job-name {
-  flex: 1;
+  flex: 1 1 120px;
   min-width: 0;
   font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
 .ci-steps-list {
@@ -234,7 +254,9 @@
   background: var(--grain-well-bg, #13151a);
   color: var(--grain-well-fg, #e4e6eb);
   font-size: 12px;
-  min-width: 160px;
+  min-width: 0;
+  flex: 1 1 140px;
+  max-width: 100%;
 }
 
 .ci-log-lines {
@@ -374,7 +396,17 @@
 
 @media (max-width: 599.95px) {
   .ci-inspector {
-    padding: 14px 12px 24px;
+    --ci-clear: calc(
+      var(--grain-bottombar-height, 92px) + 16px +
+        env(safe-area-inset-bottom, 0px)
+    );
+    padding: 14px 12px var(--ci-clear);
+    scroll-padding-bottom: var(--ci-clear);
+  }
+
+  .ci-job-head,
+  .ci-step-btn {
+    flex-wrap: wrap;
   }
 
   .ci-step-btn {
@@ -383,5 +415,41 @@
 
   .ci-log-well {
     margin: 0 8px 10px 8px;
+  }
+
+  g-ci-page .g-dialog {
+    padding: 18px 16px;
+    max-height: calc(100dvh - 32px - env(safe-area-inset-bottom, 0px));
+  }
+
+  g-ci-page .g-dialog .filter-chip {
+    max-width: 100%;
+    white-space: normal;
+    height: auto;
+    min-height: 40px;
+    padding: 6px 12px;
+    overflow-wrap: anywhere;
+  }
+
+  g-ci-page .g-dialog .segmented {
+    display: flex;
+    flex-wrap: wrap;
+    max-width: 100%;
+    border-radius: var(--md-sys-shape-corner-medium);
+  }
+}
+
+@media (max-height: 480px) and (orientation: landscape) {
+  .ci-inspector {
+    --ci-clear: calc(
+      var(--grain-bottombar-height, 52px) + 36px +
+        env(safe-area-inset-bottom, 0px)
+    );
+    padding-bottom: var(--ci-clear);
+    scroll-padding-bottom: var(--ci-clear);
+  }
+
+  g-ci-page .g-dialog {
+    max-height: calc(100dvh - 24px - env(safe-area-inset-bottom, 0px));
   }
 }
