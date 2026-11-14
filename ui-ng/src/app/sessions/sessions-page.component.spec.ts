@@ -13,7 +13,7 @@
 // limitations under the License.
 
 import { TestBed, type ComponentFixture } from "@angular/core/testing";
-import { provideRouter } from "@angular/router";
+import { Router, provideRouter } from "@angular/router";
 import { NEVER } from "rxjs";
 import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
@@ -1149,5 +1149,141 @@ describe("SessionsPageComponent", () => {
       q(fViewerAdv, '[data-testid="chat-head-model-unadvertised"]'),
     ).toBeNull();
     fViewerAdv.destroy();
+  });
+
+  it("guards canvas toggle, session switch, and artifact switch against unsaved canvas drafts and restores focus on Escape", async () => {
+    const api = new FakeApi();
+    api.details["1"] = {
+      ...api.details["1"],
+      comments: [
+        ...api.details["1"].comments!,
+        {
+          id: 99,
+          author: "grain",
+          authorKind: "automation",
+          body: [
+            "```grain-doc",
+            "# Alpha Spec",
+            "",
+            "Alpha body.",
+            "```",
+            "```grain-doc",
+            "# Beta Spec",
+            "",
+            "Beta body.",
+            "```",
+          ].join("\n"),
+        },
+      ],
+    };
+    const f = await render(api);
+    const navSpy = vi
+      .spyOn(TestBed.inject(Router), "navigate")
+      .mockResolvedValue(true);
+
+    const toggleBtn = q(
+      f,
+      '[data-testid="session-canvas-toggle"]',
+    ) as HTMLButtonElement;
+    toggleBtn.focus();
+    toggleBtn.click();
+    await f.whenStable();
+    f.detectChanges();
+    expect(q(f, '[data-testid="session-canvas"]')).not.toBeNull();
+
+    // Clean Escape closes canvas and returns focus to the canvas toggle trigger.
+    (q(f, '[data-testid="canvas-tab-docs"]') as HTMLButtonElement).focus();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await f.whenStable();
+    f.detectChanges();
+    expect(q(f, '[data-testid="session-canvas"]')).toBeNull();
+    expect(document.activeElement).toBe(toggleBtn);
+
+    // Open canvas via an artifact chip, start Pin to Memory, and edit the name.
+    const alphaOpenBtn = q(
+      f,
+      '[data-testid="open-artifact-doc-99-1"]',
+    ) as HTMLButtonElement;
+    alphaOpenBtn.focus();
+    alphaOpenBtn.click();
+    await f.whenStable();
+    f.detectChanges();
+    expect(q(f, '[data-testid="session-canvas"]')).not.toBeNull();
+
+    (
+      q(f, '[data-testid="canvas-pin-memory-toggle"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    const nameInput = q(
+      f,
+      '[data-testid="pin-memory-name"]',
+    ) as HTMLInputElement;
+    nameInput.value = "custom-pin";
+    nameInput.dispatchEvent(new Event("input"));
+    await f.whenStable();
+
+    // Opening another artifact in chat while Pin draft is dirty confirms before switching.
+    (
+      q(f, '[data-testid="open-artifact-doc-99-2"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    expect(q(f, '[data-testid="confirm-dialog"]')).not.toBeNull();
+    (q(f, '[data-testid="confirm-cancel"]') as HTMLButtonElement).click();
+    await f.whenStable();
+    expect(
+      (q(f, '[data-testid="pin-memory-name"]') as HTMLInputElement).value,
+    ).toBe("custom-pin");
+
+    // Clicking another session while canvas is dirty asks confirmation before navigating.
+    (q(f, '[data-testid="session-rel"]') as HTMLAnchorElement).click();
+    await f.whenStable();
+    expect(q(f, '[data-testid="confirm-dialog"]')).not.toBeNull();
+    expect(navSpy).not.toHaveBeenCalled();
+    (q(f, '[data-testid="confirm-cancel"]') as HTMLButtonElement).click();
+    await f.whenStable();
+    expect(
+      (q(f, '[data-testid="pin-memory-name"]') as HTMLInputElement).value,
+    ).toBe("custom-pin");
+
+    // Settings open + Escape inside canvas confirm dialog cancels only the dialog, not settings.
+    (
+      q(f, '[data-testid="session-settings-toggle"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    expect(q(f, '[data-testid="session-settings-panel"]')).not.toBeNull();
+
+    toggleBtn.focus();
+    toggleBtn.click();
+    await f.whenStable();
+    expect(q(f, '[data-testid="confirm-dialog"]')).not.toBeNull();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await f.whenStable();
+    expect(q(f, '[data-testid="confirm-dialog"]')).toBeNull();
+    expect(q(f, '[data-testid="session-settings-panel"]')).not.toBeNull();
+    expect(q(f, '[data-testid="session-canvas"]')).not.toBeNull();
+    expect(document.activeElement).toBe(toggleBtn);
+
+    // Accepting discard on toggle closes canvas and restores focus to toggleBtn.
+    toggleBtn.click();
+    await f.whenStable();
+    (q(f, '[data-testid="confirm-accept"]') as HTMLButtonElement).click();
+    await f.whenStable();
+    f.detectChanges();
+    expect(q(f, '[data-testid="session-canvas"]')).toBeNull();
+    expect(document.activeElement).toBe(toggleBtn);
+
+    f.destroy();
   });
 });

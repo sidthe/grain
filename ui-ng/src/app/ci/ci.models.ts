@@ -391,6 +391,99 @@ export function faultSourceOf(source: string | undefined): "grain" | "github" {
   return "grain";
 }
 
+export function faultSourceLabel(source: string | undefined): string {
+  return faultSourceOf(source) === "github" ? "GitHub CI" : "Grain CI";
+}
+
+export function faultRunCommit(
+  run: Pick<CIFaultRun, "commit" | "sha">,
+): string {
+  return run.commit || run.sha || "";
+}
+
+export function faultFixWhere(fix: Pick<CIFaultFix, "files">): string {
+  const files = fix?.files ?? [];
+  if (files.length === 0) return "touches a file this failure names";
+  if (files.length === 1) return `touches ${files[0]}`;
+  return `touches ${files.length} of the files this failure names`;
+}
+
+export function pullRequestExternalUrl(
+  pr: string | undefined | null,
+): string | null {
+  const trimmed = (pr ?? "").trim();
+  const hash = trimmed.indexOf("#");
+  if (hash <= 0) return null;
+  const repo = trimmed.slice(0, hash).trim();
+  const num = trimmed.slice(hash + 1).trim();
+  if (!/^\d+$/.test(num)) return null;
+  const parts = repo.split("/").filter(Boolean);
+  if (parts.length === 2) {
+    return safeExternalUrl(
+      `https://github.com/${parts[0]}/${parts[1]}/pull/${num}`,
+    );
+  }
+  if (parts.length >= 3) {
+    return safeExternalUrl(
+      `https://${parts[0]}/${parts[1]}/${parts[2]}/pull/${num}`,
+    );
+  }
+  return null;
+}
+
+export function artifactDownloadable(
+  runId: string,
+  art: Pick<CIRunArtifact, "run" | "job" | "name" | "stored">,
+): boolean {
+  return (
+    art.stored === true &&
+    !isActionsRunId(art.run || runId) &&
+    !!art.job &&
+    !!art.name
+  );
+}
+
+export function mergeRunArtifacts(
+  apiArtifacts: readonly CIRunArtifact[],
+  jobs: readonly CIJobRun[] | undefined,
+  runId: string,
+): CIRunArtifact[] {
+  const byKey = new Map<string, CIRunArtifact>();
+  const add = (art: CIRunArtifact, fallbackJob = "") => {
+    const job = art.job || fallbackJob;
+    const key = `${job}\0${art.name}`;
+    const norm: CIRunArtifact = {
+      ...art,
+      run: art.run || runId,
+      job,
+      stored: art.stored === true,
+    };
+    const prev = byKey.get(key);
+    if (!prev) {
+      byKey.set(key, norm);
+      return;
+    }
+    if (!prev.stored && norm.stored) {
+      byKey.set(key, {
+        ...norm,
+        note: norm.note || prev.note,
+      });
+    } else if (!prev.note && norm.note) {
+      byKey.set(key, { ...prev, note: norm.note });
+    }
+  };
+  for (const a of apiArtifacts) {
+    if (a?.name) add(a);
+  }
+  for (const job of jobs ?? []) {
+    const jId = job.jobId || job.name || "";
+    for (const a of job.artifacts ?? []) {
+      if (a?.name) add(a, jId);
+    }
+  }
+  return [...byKey.values()];
+}
+
 export function faultsForRun(
   run: CIRun,
   faults: readonly CIFault[],
@@ -433,7 +526,12 @@ export function runBucket(run: CIRun, faults: readonly CIFault[]): CIBucket {
   if (isRunActive(run)) return "running";
   const c = (run.conclusion || "").toLowerCase();
   const hasFault = faultsForRun(run, faults).length > 0;
-  if (c === "errored" || (c === "failure" && hasFault)) return "errored";
+  if (
+    c === "errored" ||
+    ((c === "failure" || c === "failed" || c === "timed_out") && hasFault)
+  ) {
+    return "errored";
+  }
   if (c === "failure" || c === "failed" || c === "timed_out") return "failed";
   if (c === "success" || c === "passed" || c === "skipped" || c === "neutral") {
     return "passed";

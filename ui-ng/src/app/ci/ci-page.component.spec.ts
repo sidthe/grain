@@ -28,13 +28,21 @@ import {
   type CIFault,
   type CIRun,
   type CIRunArtifact,
+  type CIRunArtifactsResponse,
   type CIRunLogResponse,
   type CIWorkflowOption,
+  artifactDownloadable,
+  faultFixWhere,
+  faultRunCommit,
+  faultSourceLabel,
   faultsForRun,
   isActionsRunId,
+  mergeRunArtifacts,
   parseProviderQueryParam,
   providerQueryParam,
+  pullRequestExternalUrl,
   repoFromActionsRunId,
+  runBucket,
   runProviderQueryParams,
   safeExternalUrl,
 } from "./ci.models";
@@ -221,6 +229,12 @@ class FakeCIApi {
   deleteCalls: { route: string; params?: unknown; body?: unknown }[] = [];
   deleteError: Error | null = null;
   logCalls: { id: string; query?: string }[] = [];
+  artifactCalls: { id: string; query?: string }[] = [];
+  artifactResponsesByRun: Record<string, CIRunArtifactsResponse> = {};
+  artifactResponder:
+    ((id: string, query?: string) => Promise<CIRunArtifactsResponse>) | null =
+    null;
+  artifactErrorByRun: Record<string, Error | string> = {};
 
   config = () => Promise.resolve(this.configBody);
   clearConditionalCache = () => undefined;
@@ -279,33 +293,48 @@ class FakeCIApi {
     return Promise.resolve({ body: null, changed: false });
   };
 
-  get = (route: string, params?: Record<string, unknown>, query?: string) => {
+  get = async (
+    route: string,
+    params?: Record<string, unknown>,
+    query?: string,
+  ) => {
     if (route === "GET /api/ci/runs/{id}") {
       const id = String(params?.["id"] ?? "");
       const found = this.runs.find((r) => r.id === id);
-      return Promise.resolve(structuredClone(found ?? this.runs[0]));
+      return structuredClone(found ?? this.runs[0]);
     }
     if (route === "GET /api/ci/runs/{id}/artifacts") {
       const id = String(params?.["id"] ?? "");
+      this.artifactCalls.push({ id, query });
+      if (this.artifactErrorByRun[id]) {
+        const err = this.artifactErrorByRun[id];
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+      if (this.artifactResponder) {
+        return await this.artifactResponder(id, query);
+      }
+      if (this.artifactResponsesByRun[id]) {
+        return structuredClone(this.artifactResponsesByRun[id]);
+      }
       const list = this.artifactsByRun[id] ?? [];
-      return Promise.resolve({
+      return {
         enabled: true,
         available: true,
         artifacts: structuredClone(list),
         total: list.length,
-      });
+      };
     }
     if (route === "GET /api/ci/runs/{id}/log") {
       this.logCalls.push({ id: String(params?.["id"] ?? ""), query });
-      return Promise.resolve(structuredClone(this.ghaLog));
+      return structuredClone(this.ghaLog);
     }
     if (route === "GET /api/ci/workflows") {
-      return Promise.resolve({
+      return {
         workflows: structuredClone(this.workflows),
         total: this.workflows.length,
-      });
+      };
     }
-    return Promise.resolve({});
+    return {};
   };
 
   post = (
@@ -941,5 +970,532 @@ describe("CIPageComponent (D-26)", () => {
           q.includes("repo=acme%2Fwidgets"),
       ),
     ).toBe(true);
+  });
+
+  it("evaluates shared-fault and artifact helper contracts cleanly", () => {
+    expect(faultSourceLabel("github")).toBe("GitHub CI");
+    expect(faultSourceLabel("grain")).toBe("Grain CI");
+    expect(faultSourceLabel(undefined)).toBe("Grain CI");
+
+    expect(faultRunCommit({ commit: "11223344", sha: "deadbeef" })).toBe(
+      "11223344",
+    );
+    expect(faultRunCommit({ sha: "deadbeef" })).toBe("deadbeef");
+    expect(faultRunCommit({})).toBe("");
+
+    expect(faultFixWhere({ files: [] })).toBe(
+      "touches a file this failure names",
+    );
+    expect(faultFixWhere({ files: ["pkg/ci/boot.go"] })).toBe(
+      "touches pkg/ci/boot.go",
+    );
+    expect(faultFixWhere({ files: ["a.go", "b.go"] })).toBe(
+      "touches 2 of the files this failure names",
+    );
+
+    expect(pullRequestExternalUrl("acme/widgets#42")).toBe(
+      "https://github.com/acme/widgets/pull/42",
+    );
+    expect(pullRequestExternalUrl("#42")).toBeNull();
+    expect(pullRequestExternalUrl("javascript:alert(1)#42")).toBeNull();
+
+    expect(
+      artifactDownloadable("run-1", {
+        run: "run-1",
+        job: "unit",
+        name: "coverage.xml",
+        stored: true,
+      }),
+    ).toBe(true);
+    expect(
+      artifactDownloadable("gha:acme:widgets:9001", {
+        run: "gha:acme:widgets:9001",
+        job: "e2e",
+        name: "playwright-report",
+        stored: true,
+      }),
+    ).toBe(false);
+    expect(
+      artifactDownloadable("run-1", {
+        run: "run-1",
+        job: "",
+        name: "missing-job",
+        stored: true,
+      }),
+    ).toBe(false);
+
+    const merged = mergeRunArtifacts(
+      [
+        {
+          run: "run-1",
+          job: "unit",
+          name: "coverage-report",
+          stored: true,
+          bytes: 2048,
+        },
+      ],
+      [
+        {
+          jobId: "unit",
+          name: "Unit",
+          artifacts: [
+            {
+              run: "run-1",
+              job: "unit",
+              name: "coverage-report",
+              stored: false,
+              note: "kept until next run",
+            },
+            {
+              run: "run-1",
+              job: "",
+              name: "expired-trace",
+              stored: false,
+              note: "evicted after 7d",
+            },
+          ],
+        },
+      ],
+      "run-1",
+    );
+    expect(merged.length).toBe(2);
+    expect(merged[0]).toMatchObject({
+      job: "unit",
+      name: "coverage-report",
+      stored: true,
+      note: "kept until next run",
+    });
+    expect(merged[1]).toMatchObject({
+      job: "unit",
+      name: "expired-trace",
+      stored: false,
+      note: "evicted after 7d",
+    });
+
+    const faultBackedFailure: CIRun = {
+      id: "run-shared-fail",
+      provider: "grain",
+      repo: "acme/widgets",
+      conclusion: "failure",
+      finishedAt: "2026-11-12T00:05:00Z",
+    };
+    expect(
+      runBucket(faultBackedFailure, [
+        {
+          source: "grain",
+          digest: "d1",
+          repo: "acme/widgets",
+          jobName: "Unit",
+          runs: [{ runId: "run-shared-fail" }],
+        },
+      ]),
+    ).toBe("errored");
+  });
+
+  it("displays shared-fault runIds, metadata, PR links, and navigates between affected runs", async () => {
+    api.runs.push({
+      id: "run-errored-2",
+      provider: "grain",
+      repo: "acme/widgets",
+      ref: "refs/heads/grain/task-109",
+      commit: "eee555566667777",
+      event: "push",
+      requestedBy: "109",
+      conclusion: "errored",
+      error: "sandbox boot failed: granule image pull timeout",
+      startedAt: "2026-11-12T00:06:00Z",
+      finishedAt: "2026-11-12T00:07:15Z",
+      jobs: [
+        {
+          jobId: "test",
+          name: "Unit tests",
+          workflow: "CI",
+          conclusion: "errored",
+          steps: [],
+        },
+      ],
+    });
+    api.faults = [
+      {
+        ...api.faults[0],
+        paths: ["deploy/helm/values.yaml", "pkg/sandbox/boot.go"],
+        ownerRef: "grain/fix-88",
+        fixes: [
+          {
+            pullRequest: "acme/widgets#42",
+            task: "88",
+            title: "Retry granule registry pulls",
+            files: ["pkg/sandbox/boot.go"],
+          },
+        ],
+        runs: [
+          {
+            runId: "run-errored-1",
+            ref: "grain/task-101",
+            taskId: "101",
+            commit: "aaa111122223333",
+          },
+          {
+            runId: "run-errored-2",
+            ref: "grain/task-109",
+            taskId: "109",
+            commit: "eee555566667777",
+          },
+        ],
+      },
+    ];
+
+    const harness = await RouterTestingHarness.create("/ci");
+    await flush(harness);
+    const router = TestBed.inject(Router);
+    const root = harness.routeNativeElement!;
+
+    expect(
+      root.querySelector('[data-testid="ci-fault-source-grain"]')?.textContent,
+    ).toContain("Grain CI");
+    expect(
+      root.querySelector('[data-testid="ci-fault-paths"]')?.textContent,
+    ).toContain("pkg/sandbox/boot.go");
+    expect(
+      root.querySelector('[data-testid="ci-fault-owner"]')?.textContent,
+    ).toContain("grain/fix-88");
+
+    const prLink = root.querySelector<HTMLAnchorElement>(
+      '[data-testid="ci-fault-card"] a[target="_blank"]',
+    )!;
+    expect(prLink.getAttribute("href")).toBe(
+      "https://github.com/acme/widgets/pull/42",
+    );
+    expect(prLink.getAttribute("rel")).toBe("noopener noreferrer");
+
+    const run1Link = root.querySelector<HTMLAnchorElement>(
+      '[data-testid="ci-fault-run-link-run-errored-1"]',
+    )!;
+    const run2Link = root.querySelector<HTMLAnchorElement>(
+      '[data-testid="ci-fault-run-link-run-errored-2"]',
+    )!;
+    expect(run1Link.textContent?.trim()).toBe("run-errored-1");
+    expect(run2Link.textContent?.trim()).toBe("run-errored-2");
+    expect(
+      root
+        .querySelector('[data-testid="ci-fault-run-task-run-errored-2"]')
+        ?.getAttribute("href"),
+    ).toBe("/task/109");
+
+    run2Link.click();
+    await flush(harness);
+    expect(router.url).toBe("/ci/runs/run-errored-2");
+    const detailRoot = harness.routeNativeElement!;
+    expect(
+      detailRoot.querySelector('[data-testid="ci-detail-run-id"]')?.textContent,
+    ).toContain("run-errored-2");
+
+    const calloutRuns = detailRoot.querySelector(
+      '[data-testid="ci-errored-callout-runs"]',
+    )!;
+    expect(calloutRuns.textContent).toContain("run-errored-1");
+    detailRoot
+      .querySelector<HTMLAnchorElement>(
+        '[data-testid="ci-callout-run-link-run-errored-1"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(router.url).toBe("/ci/runs/run-errored-1");
+    expect(
+      harness.routeNativeElement!.querySelector(
+        '[data-testid="ci-detail-run-id"]',
+      )?.textContent,
+    ).toContain("run-errored-1");
+  });
+
+  it("toggles inline fault artifact inspection with stored downloads, unstored notes, pagination, errors, and GitHub fault runId resolution", async () => {
+    api.faults = [
+      {
+        ...api.faults[0],
+        runs: [
+          { runId: "run-errored-1", ref: "grain/task-101", taskId: "101" },
+          { runId: "run-errored-err", ref: "grain/task-108", taskId: "108" },
+        ],
+      },
+      {
+        source: "github",
+        digest: "gha-fault-1",
+        repo: "acme/widgets",
+        jobName: "Playwright E2E",
+        step: "npx playwright test",
+        kind: "errored",
+        runs: [
+          {
+            runId: "9001",
+            ref: "main",
+            commit: "ddd444455556666",
+          },
+        ],
+      },
+    ];
+    api.artifactResponder = async (id, query) => {
+      if (query?.includes("cursor=c-2")) {
+        return {
+          enabled: true,
+          available: true,
+          total: 2,
+          artifacts: [
+            {
+              run: id,
+              job: "test",
+              name: "old-core.dmp",
+              stored: false,
+              bytes: 512,
+              note: "expired under retention policy",
+            },
+          ],
+        };
+      }
+      return {
+        enabled: true,
+        available: true,
+        total: 2,
+        truncated: true,
+        nextCursor: "c-2",
+        artifacts: [
+          {
+            run: id,
+            job: "test",
+            name: "boot-log.txt",
+            stored: true,
+            bytes: 4096,
+          },
+        ],
+      };
+    };
+    api.artifactErrorByRun["run-errored-err"] = "artifact index unavailable";
+
+    const harness = await RouterTestingHarness.create("/ci");
+    await flush(harness);
+    const router = TestBed.inject(Router);
+    const root = harness.routeNativeElement!;
+
+    const artBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="ci-fault-run-artifacts-btn-run-errored-1"]',
+    )!;
+    expect(artBtn.getAttribute("aria-expanded")).toBe("false");
+    artBtn.click();
+    await flush(harness);
+
+    expect(artBtn.getAttribute("aria-expanded")).toBe("true");
+    expect(
+      api.artifactCalls.some((c) => c.id === "run-errored-1" && !c.query),
+    ).toBe(true);
+    const panel = root.querySelector(
+      '[data-testid="ci-fault-run-artifacts-run-errored-1"]',
+    )!;
+    const dl = panel.querySelector<HTMLAnchorElement>(
+      '[data-testid="ci-fault-artifact-download-run-errored-1-boot-log.txt"]',
+    )!;
+    expect(dl.getAttribute("href")).toBe(
+      "/api/ci/runs/run-errored-1/artifacts/test/boot-log.txt",
+    );
+
+    const loadMoreBtn = panel.querySelector<HTMLButtonElement>("button")!;
+    loadMoreBtn.click();
+    await flush(harness);
+    expect(
+      api.artifactCalls.some(
+        (c) => c.id === "run-errored-1" && c.query?.includes("cursor=c-2"),
+      ),
+    ).toBe(true);
+    expect(panel.textContent).toContain("old-core.dmp");
+    expect(panel.textContent).toContain("expired under retention policy");
+
+    // Collapsing toggles aria-expanded back to false.
+    artBtn.click();
+    await flush(harness);
+    expect(artBtn.getAttribute("aria-expanded")).toBe("false");
+    expect(
+      root.querySelector(
+        '[data-testid="ci-fault-run-artifacts-run-errored-1"]',
+      ),
+    ).toBeNull();
+
+    // Error state inside fault artifact inspection renders alert cleanly.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="ci-fault-run-artifacts-btn-run-errored-err"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector(
+        '[data-testid="ci-fault-run-artifacts-run-errored-err"]',
+      )?.textContent,
+    ).toContain("artifact index unavailable");
+
+    // Switch to GitHub provider so GitHub Actions runs are loaded, then verify runId 9001 resolves to gha:.
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-provider-github"]')!
+      .click();
+    await flush(harness);
+
+    const ghLink = root.querySelector<HTMLAnchorElement>(
+      '[data-testid="ci-fault-run-link-9001"]',
+    )!;
+    expect(ghLink.textContent?.trim()).toBe("9001");
+    ghLink.click();
+    await flush(harness);
+    expect(router.url).toBe(
+      "/ci/runs/gha:acme:widgets:9001?provider=github-actions",
+    );
+  });
+
+  it("renders merged job-level artifacts inline above steps and handles disabled, unavailable, and GitHub Actions artifact contracts", async () => {
+    const failedRun = api.runs.find((r) => r.id === "run-failed-2")!;
+    failedRun.jobs[0].artifacts = [
+      {
+        run: "run-failed-2",
+        job: "unit",
+        name: "coverage-report",
+        stored: false,
+        note: "mirrored from runner",
+      },
+      {
+        run: "run-failed-2",
+        job: "",
+        name: "evicted-heap.prof",
+        stored: false,
+        bytes: 8192,
+        note: "evicted after 7d",
+      },
+    ];
+
+    const harness = await RouterTestingHarness.create("/ci/runs/run-failed-2");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    // Job-level artifacts render inline inside expanded unit job without duplicating stored artifacts.
+    const jobArts = root.querySelector('[data-testid="ci-job-artifacts"]')!;
+    expect(jobArts).not.toBeNull();
+    expect(jobArts.textContent).toContain("coverage-report");
+    expect(jobArts.textContent).toContain("mirrored from runner");
+    expect(jobArts.textContent).toContain("evicted-heap.prof");
+    expect(jobArts.textContent).toContain("evicted after 7d");
+    const jobDl = jobArts.querySelector<HTMLAnchorElement>(
+      '[data-testid="ci-job-artifact-download"]',
+    )!;
+    expect(jobDl.getAttribute("href")).toBe(
+      "/api/ci/runs/run-failed-2/artifacts/unit/coverage-report",
+    );
+    // Detail artifacts section retains 1 download link and deduplicated list.
+    expect(
+      root.querySelectorAll('[data-testid="ci-artifact-row"]').length,
+    ).toBe(3);
+
+    // GitHub Actions run renders external link and omits empty "job " label.
+    api.artifactResponsesByRun["gha:acme:widgets:9001"] = {
+      enabled: true,
+      available: true,
+      total: 1,
+      artifacts: [
+        {
+          run: "gha:acme:widgets:9001",
+          job: "",
+          name: "playwright-report",
+          stored: false,
+          bytes: 65536,
+          note: "hosted on GitHub Actions",
+        },
+      ],
+    };
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-provider-github"]')!
+      .click();
+    await flush(harness);
+    root
+      .querySelector<HTMLElement>(
+        '[data-testid="ci-run-row-gha:acme:widgets:9001"]',
+      )!
+      .click();
+    await flush(harness);
+    const ghaSec = root.querySelector('[data-testid="ci-artifacts-section"]')!;
+    expect(ghaSec.textContent).toContain("playwright-report");
+    expect(ghaSec.textContent).not.toContain("job ");
+    const ghaExt = ghaSec.querySelector<HTMLAnchorElement>(
+      '[data-testid="ci-artifact-external"]',
+    )!;
+    expect(ghaExt.getAttribute("href")).toBe(
+      "https://github.com/acme/widgets/actions/runs/9001",
+    );
+
+    // Switch back to All providers to verify Grain CI disabled / unavailable artifact states.
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-provider-all"]')!
+      .click();
+    await flush(harness);
+
+    api.artifactResponsesByRun["run-errored-1"] = {
+      enabled: false,
+      available: false,
+      artifacts: [],
+      total: 0,
+    };
+    root
+      .querySelector<HTMLElement>('[data-testid="ci-run-row-run-errored-1"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="ci-artifacts-disabled"]'),
+    ).not.toBeNull();
+
+    api.artifactResponsesByRun["run-running-3"] = {
+      enabled: true,
+      available: false,
+      artifacts: [],
+      total: 0,
+    };
+    root
+      .querySelector<HTMLElement>('[data-testid="ci-run-row-run-running-3"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="ci-artifacts-unavailable"]'),
+    ).not.toBeNull();
+  });
+
+  it("gates fault and detail artifact fetches behind repo-scoped ci:read RBAC", async () => {
+    api.configBody = {
+      ...api.configBody,
+      access: {
+        role: "grain/viewer",
+        roles: ["grain/viewer"],
+        full: false,
+        scopes: ["ci:read"],
+        repoLimits: { "ci:read": ["acme/infra"] },
+      },
+    };
+
+    const harness = await RouterTestingHarness.create("/ci");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    // Inline fault artifact toggle for acme/widgets must not hit GET /artifacts.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="ci-fault-run-artifacts-btn-run-errored-1"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(api.artifactCalls.length).toBe(0);
+    expect(
+      root.querySelector('[data-testid="ci-fault-art-denied-run-errored-1"]'),
+    ).not.toBeNull();
+
+    // Selecting seeded run-errored-1 (acme/widgets) renders ci-artifacts-denied without calling API.
+    root
+      .querySelector<HTMLElement>('[data-testid="ci-run-row-run-errored-1"]')!
+      .click();
+    await flush(harness);
+    expect(api.artifactCalls.length).toBe(0);
+    expect(
+      root.querySelector('[data-testid="ci-artifacts-denied"]'),
+    ).not.toBeNull();
   });
 });
