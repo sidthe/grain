@@ -49,6 +49,7 @@ import { StatusIconComponent } from "../shared/status-icon.component";
 import { TipDirective } from "../shared/tip.directive";
 import {
   type CIFault,
+  type CIFaultRun,
   type CIFilterId,
   type CIJobRun,
   type CIProviderFilter,
@@ -57,10 +58,14 @@ import {
   type CIWorkflowOption,
   type QuarantineTestResponse,
   GITHUB_ACTIONS_PROVIDER,
+  artifactDownloadable,
   cleanRef,
   extractFailedTests,
+  faultFixWhere,
   faultRefCount,
+  faultRunCommit,
   faultRunCount,
+  faultSourceLabel,
   faultSourceOf,
   faultTitle,
   faultsForRun,
@@ -71,6 +76,7 @@ import {
   parseProviderQueryParam,
   providerOfRun,
   providerQueryParam,
+  pullRequestExternalUrl,
   runBadge,
   runBranch,
   runBucket,
@@ -79,7 +85,7 @@ import {
   safeExternalUrl,
   stepBadge,
 } from "./ci.models";
-import { CIStore } from "./ci.store";
+import { CIStore, type RunArtifactsState } from "./ci.store";
 
 const FILTERS: readonly { id: CIFilterId; label: string; tip: string }[] = [
   { id: "all", label: "All", tip: "Every recorded CI run." },
@@ -454,7 +460,14 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
               @for (f of sharedFaults(); track $index) {
                 <article class="ci-fault-card" data-testid="ci-fault-card">
                   <div class="ci-fault-card-top">
-                    <span class="ci-fault-summary">{{ faultLabel(f) }}</span>
+                    <div class="ci-fault-card-head-left">
+                      <span
+                        class="ci-provider-tag"
+                        [attr.data-testid]="'ci-fault-source-' + faultSource(f)"
+                        >{{ faultSourceText(f) }}</span
+                      >
+                      <span class="ci-fault-summary">{{ faultLabel(f) }}</span>
+                    </div>
                     <span class="status-pill blast tabular">
                       <g-status-icon tone="blast" kind="blast" />
                       {{ faultRuns(f) }}
@@ -465,26 +478,272 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
                     @if (f.repo) {
                       <span class="tabular">{{ f.repo }}</span>
                     }
-                    @if (faultRefs(f) > 0) {
-                      <span class="tabular">{{ faultRefs(f) }} branches</span>
+                    @if (f.summary && f.step) {
+                      <span>step {{ f.step }}</span>
                     }
-                    @if (f.ownerTaskId) {
-                      <a [routerLink]="['/task', f.ownerTaskId]"
-                        >Assigned fix #{{ f.ownerTaskId }}</a
+                    @if (faultRefs(f) > 0) {
+                      <span class="tabular"
+                        >{{ faultRefs(f) }}
+                        {{ faultRefs(f) === 1 ? "branch" : "branches" }}</span
                       >
                     }
+                    @if (f.paths?.length) {
+                      <span class="tabular" data-testid="ci-fault-paths"
+                        >Files: {{ f.paths!.join(", ") }}</span
+                      >
+                    }
+                    @if (f.ownerTaskId) {
+                      <a
+                        [routerLink]="['/task', f.ownerTaskId]"
+                        data-testid="ci-fault-owner"
+                        >Assigned fix #{{ f.ownerTaskId }}
+                        @if (f.ownerRef) {
+                          ({{ cleanRefOf(f.ownerRef) }})
+                        }
+                      </a>
+                    }
                     @for (fix of f.fixes ?? []; track fix.pullRequest) {
-                      @if (fix.task) {
+                      @let prHref = prUrlOf(fix.pullRequest);
+                      @if (fix.task && prHref) {
+                        <a
+                          [href]="prHref"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          [attr.title]="fix.title || null"
+                          >Fix PR {{ fix.pullRequest }}</a
+                        >
                         <a [routerLink]="['/task', fix.task]"
+                          >(#{{ fix.task }})</a
+                        >
+                        <span>{{ fixWhereOf(fix) }}</span>
+                      } @else if (fix.task) {
+                        <a
+                          [routerLink]="['/task', fix.task]"
+                          [attr.title]="fix.title || null"
                           >Fix PR {{ fix.pullRequest }} (#{{ fix.task }})</a
                         >
+                        <span>{{ fixWhereOf(fix) }}</span>
+                      } @else if (prHref) {
+                        <a
+                          [href]="prHref"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          [attr.title]="fix.title || null"
+                          >Fix PR {{ fix.pullRequest }}</a
+                        >
+                        <span>{{ fixWhereOf(fix) }}</span>
                       } @else {
                         <span class="tabular"
-                          >Fix PR {{ fix.pullRequest }}</span
+                          >Fix PR {{ fix.pullRequest }}
+                          {{ fixWhereOf(fix) }}</span
                         >
                       }
                     }
                   </div>
+                  @if (f.runs?.length) {
+                    <ul
+                      class="ci-fault-runs"
+                      aria-label="Affected runs"
+                      data-testid="ci-fault-runs"
+                    >
+                      @for (fr of f.runs!; track fr.runId + ":" + $index) {
+                        @let targetId = resolveFaultRunId(f, fr);
+                        @let artOpen = isFaultRunArtifactsOpen(f, fr);
+                        @let artState = faultRunArtifacts(targetId);
+                        <li
+                          class="ci-fault-run-item"
+                          [attr.data-testid]="'ci-fault-run-' + fr.runId"
+                        >
+                          <div class="ci-fault-run-row">
+                            <a
+                              class="ci-fault-run-link"
+                              [routerLink]="['/ci', 'runs', targetId]"
+                              [queryParams]="faultRunQueryParams(f, targetId)"
+                              queryParamsHandling="merge"
+                              [attr.data-testid]="
+                                'ci-fault-run-link-' + fr.runId
+                              "
+                              (click)="onFaultRunOpen(targetId)"
+                              ><code class="ci-sha">{{ fr.runId }}</code></a
+                            >
+                            @if (fr.ref) {
+                              <span class="muted">{{
+                                cleanRefOf(fr.ref)
+                              }}</span>
+                            }
+                            @if (faultCommitOf(fr); as c) {
+                              <code class="ci-sha">{{ c.slice(0, 7) }}</code>
+                            }
+                            @if (fr.taskId) {
+                              <a
+                                [routerLink]="['/task', fr.taskId]"
+                                [attr.data-testid]="
+                                  'ci-fault-run-task-' + fr.runId
+                                "
+                                >#{{ fr.taskId }}</a
+                              >
+                            }
+                            <button
+                              type="button"
+                              class="btn-text ci-fault-art-btn"
+                              [attr.aria-expanded]="artOpen"
+                              [attr.data-testid]="
+                                'ci-fault-run-artifacts-btn-' + fr.runId
+                              "
+                              (click)="toggleFaultRunArtifacts(f, fr)"
+                            >
+                              {{ artOpen ? "Hide artifacts" : "Artifacts" }}
+                            </button>
+                          </div>
+                          @if (artOpen) {
+                            <div
+                              class="ci-fault-run-artifacts"
+                              [attr.data-testid]="
+                                'ci-fault-run-artifacts-' + fr.runId
+                              "
+                            >
+                              @if (artState?.loading) {
+                                <span class="muted"
+                                  >Loading artifacts for {{ targetId }}…</span
+                                >
+                              } @else if (
+                                !access.can(
+                                  "GET /api/ci/runs/{id}/artifacts",
+                                  f.repo
+                                )
+                              ) {
+                                <span
+                                  class="muted"
+                                  [attr.data-testid]="
+                                    'ci-fault-art-denied-' + fr.runId
+                                  "
+                                >
+                                  {{
+                                    access.deniedReason(
+                                      "GET /api/ci/runs/{id}/artifacts",
+                                      f.repo
+                                    )
+                                  }}
+                                </span>
+                              } @else if (artState?.error) {
+                                <span class="ci-fault-art-err" role="alert">{{
+                                  artState!.error
+                                }}</span>
+                              } @else if (
+                                artState &&
+                                !artState.enabled &&
+                                faultSource(f) !== "github"
+                              ) {
+                                <span class="muted"
+                                  >Grain CI is not enabled on this
+                                  deployment.</span
+                                >
+                              } @else if (
+                                artState &&
+                                !artState.available &&
+                                !artState.artifacts.length &&
+                                faultSource(f) !== "github"
+                              ) {
+                                <span class="muted"
+                                  >This deployment keeps no CI artifacts.</span
+                                >
+                              } @else if (
+                                !artState || artState.artifacts.length === 0
+                              ) {
+                                <span class="muted"
+                                  >No stored artifacts for run
+                                  <code>{{ targetId }}</code
+                                  >.</span
+                                >
+                              } @else {
+                                <ul class="ci-fault-art-list">
+                                  @for (
+                                    art of artState.artifacts;
+                                    track (art.job || "") +
+                                      ":" +
+                                      art.name +
+                                      ":" +
+                                      $index
+                                  ) {
+                                    <li class="ci-fault-art-row">
+                                      <span>
+                                        <strong>{{ art.name }}</strong>
+                                        @if (art.job) {
+                                          <span class="muted">
+                                            · job {{ art.job }}</span
+                                          >
+                                        }
+                                        @if (art.bytes || art.size; as sz) {
+                                          <span class="tabular muted">
+                                            · {{ bytesOf(sz) }}</span
+                                          >
+                                        }
+                                        @if (art.note) {
+                                          <span class="muted">
+                                            — {{ art.note }}</span
+                                          >
+                                        }
+                                      </span>
+                                      @if (
+                                        canDownloadArtifactFor(
+                                          targetId,
+                                          f.repo,
+                                          art
+                                        )
+                                      ) {
+                                        <a
+                                          [href]="
+                                            artifactHref(
+                                              art.run || targetId,
+                                              art
+                                            )
+                                          "
+                                          download
+                                          [attr.data-testid]="
+                                            'ci-fault-artifact-download-' +
+                                            fr.runId +
+                                            '-' +
+                                            art.name
+                                          "
+                                          >Download .tar.gz</a
+                                        >
+                                      }
+                                    </li>
+                                  }
+                                </ul>
+                                @if (
+                                  artState.truncated && artState.nextCursor
+                                ) {
+                                  <button
+                                    type="button"
+                                    class="btn-text ci-fault-art-btn"
+                                    (click)="
+                                      loadMoreFaultArtifacts(
+                                        targetId,
+                                        f.repo,
+                                        artState.nextCursor
+                                      )
+                                    "
+                                  >
+                                    Load more ({{
+                                      artState.artifacts.length
+                                    }}
+                                    of {{ artState.total }})
+                                  </button>
+                                }
+                              }
+                            </div>
+                          }
+                        </li>
+                      }
+                    </ul>
+                    @if (faultRuns(f) > f.runs!.length) {
+                      <span class="muted" style="font-size: 12px"
+                        >Showing {{ f.runs!.length }} of
+                        {{ faultRuns(f) }} affected runs</span
+                      >
+                    }
+                  }
                   <div>
                     <button
                       type="button"
@@ -715,6 +974,9 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
                   [label]="actorLabel(run)"
                   [kind]="actorKind(run)"
                 />
+                <code class="ci-sha" data-testid="ci-detail-run-id">{{
+                  run.id
+                }}</code>
                 <span class="tabular">{{ run.repo }}</span>
                 @if (branchOf(run); as br) {
                   <span class="tabular"
@@ -753,7 +1015,7 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
                 }
               </div>
 
-              @if (badge.bucket === "errored") {
+              @if (badge.bucket === "errored" || runFaults.length > 0) {
                 <div
                   class="ci-verdict-callout is-errored"
                   data-testid="ci-errored-callout"
@@ -776,6 +1038,48 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
                         >
                       }
                     </span>
+                    @if (f.paths?.length) {
+                      <span>Common files: {{ f.paths!.join(", ") }}</span>
+                    }
+                    @if (f.runs?.length) {
+                      <span
+                        class="ci-fault-callout-runs"
+                        data-testid="ci-errored-callout-runs"
+                      >
+                        Affected runs:
+                        @for (
+                          fr of f.runs!;
+                          track fr.runId + ":" + $index;
+                          let last = $last
+                        ) {
+                          @let targetId = resolveFaultRunId(f, fr);
+                          @if (targetId === run.id || fr.runId === run.id) {
+                            <code
+                              class="ci-sha"
+                              [attr.data-testid]="'ci-callout-run-' + fr.runId"
+                              >{{ fr.runId }}</code
+                            >
+                          } @else {
+                            <a
+                              [routerLink]="['/ci', 'runs', targetId]"
+                              [queryParams]="faultRunQueryParams(f, targetId)"
+                              queryParamsHandling="merge"
+                              [attr.data-testid]="
+                                'ci-callout-run-link-' + fr.runId
+                              "
+                              (click)="onFaultRunOpen(targetId)"
+                              ><code class="ci-sha">{{ fr.runId }}</code></a
+                            >
+                          }
+                          @if (fr.ref) {
+                            <span>({{ cleanRefOf(fr.ref) }})</span>
+                          }
+                          @if (!last) {
+                            <span>·</span>
+                          }
+                        }
+                      </span>
+                    }
                   }
                 </div>
               } @else if (badge.bucket === "failed") {
@@ -857,6 +1161,51 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
 
                   @if (jOpen) {
                     <div class="ci-steps-list">
+                      @let jArts = jobArtifacts(job);
+                      @if (jArts.length > 0) {
+                        <ul
+                          class="ci-job-artifacts"
+                          aria-label="Job artifacts"
+                          data-testid="ci-job-artifacts"
+                        >
+                          @for (
+                            art of jArts;
+                            track (art.job || "") +
+                              ":" +
+                              art.name +
+                              ":" +
+                              $index
+                          ) {
+                            <li
+                              class="ci-job-artifact-row"
+                              data-testid="ci-job-artifact-row"
+                            >
+                              <span class="muted">Artifact</span>
+                              @if (
+                                canDownloadArtifactFor(run.id, run.repo, art)
+                              ) {
+                                <a
+                                  [href]="artifactHref(art.run || run.id, art)"
+                                  download
+                                  data-testid="ci-job-artifact-download"
+                                  ><strong>{{ art.name }}</strong></a
+                                >
+                              } @else {
+                                <strong>{{ art.name }}</strong>
+                              }
+                              @if (art.bytes || art.size; as sz) {
+                                <span class="tabular muted"
+                                  >({{ bytesOf(sz)
+                                  }}{{ art.stored ? ", .tar.gz" : "" }})</span
+                                >
+                              }
+                              @if (art.note) {
+                                <span class="muted">— {{ art.note }}</span>
+                              }
+                            </li>
+                          }
+                        </ul>
+                      }
                       @if (job.error) {
                         <p class="banner banner-error">{{ job.error }}</p>
                       }
@@ -1070,21 +1419,70 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
               <h3 class="section-title">
                 Artifacts
                 <span class="muted tabular"
-                  >({{ store.artifacts().length }})</span
+                  >({{
+                    store.artifactsTotal() || store.artifacts().length
+                  }})</span
                 >
               </h3>
-              @if (store.artifacts().length === 0) {
-                <p class="muted">No stored artifacts for this run.</p>
+              @if (store.artifactsLoading() && store.artifacts().length === 0) {
+                <p class="muted">Loading artifacts…</p>
+              } @else if (
+                !access.can("GET /api/ci/runs/{id}/artifacts", run.repo)
+              ) {
+                <p class="muted" data-testid="ci-artifacts-denied">
+                  {{
+                    access.deniedReason(
+                      "GET /api/ci/runs/{id}/artifacts",
+                      run.repo
+                    )
+                  }}
+                </p>
+              } @else if (store.artifactsError()) {
+                <p
+                  class="banner banner-error"
+                  role="alert"
+                  data-testid="ci-artifacts-error"
+                >
+                  {{ store.artifactsError() }}
+                </p>
+              } @else if (store.artifacts().length === 0) {
+                @if (providerOf(run) === "github") {
+                  <p class="muted" data-testid="ci-artifacts-empty">
+                    No artifacts listed for this GitHub Actions run.
+                  </p>
+                } @else if (
+                  store.artifactsLoaded() && !store.artifactsEnabled()
+                ) {
+                  <p class="muted" data-testid="ci-artifacts-disabled">
+                    Grain CI is not enabled on this deployment.
+                  </p>
+                } @else if (
+                  store.artifactsLoaded() && !store.artifactsAvailable()
+                ) {
+                  <p class="muted" data-testid="ci-artifacts-unavailable">
+                    This deployment keeps no CI artifacts.
+                  </p>
+                } @else {
+                  <p class="muted" data-testid="ci-artifacts-empty">
+                    No stored artifacts for this run.
+                  </p>
+                }
               } @else {
                 <ul class="ci-artifacts-list">
                   @for (
                     art of store.artifacts();
-                    track art.job + ":" + art.name
+                    track (art.job || "") + ":" + art.name + ":" + $index
                   ) {
-                    <li class="ci-artifact-row" data-testid="ci-artifact-row">
+                    <li
+                      class="ci-artifact-row"
+                      data-testid="ci-artifact-row"
+                      [attr.title]="art.collectedAt || null"
+                    >
                       <div>
                         <strong>{{ art.name }}</strong>
-                        <span class="muted"> · job {{ art.job }}</span>
+                        @if (art.job) {
+                          <span class="muted"> · job {{ art.job }}</span>
+                        }
                         @if (art.bytes || art.size; as sz) {
                           <span class="tabular muted">
                             · {{ bytesOf(sz) }}</span
@@ -1094,25 +1492,49 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
                           <span class="muted"> — {{ art.note }}</span>
                         }
                       </div>
-                      @if (
-                        art.stored === true &&
-                        providerOf(run) !== "github" &&
-                        access.can(
-                          "GET /api/ci/runs/{id}/artifacts/{job}/{name}",
-                          run.repo
-                        )
-                      ) {
+                      @let extArtUrl = safeUrl(run.actions?.url || run.url);
+                      @if (canDownloadArtifactFor(run.id, run.repo, art)) {
                         <a
                           class="btn-tonal"
-                          [href]="artifactHref(run.id, art)"
+                          [href]="artifactHref(art.run || run.id, art)"
                           download
                           data-testid="ci-artifact-download"
                           >Download .tar.gz</a
+                        >
+                      } @else if (providerOf(run) === "github" && extArtUrl) {
+                        <a
+                          class="btn-text"
+                          [href]="extArtUrl"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          data-testid="ci-artifact-external"
+                          >Open on GitHub ↗</a
                         >
                       }
                     </li>
                   }
                 </ul>
+                @if (
+                  store.artifactsTruncated() && store.artifactsNextCursor()
+                ) {
+                  <div>
+                    <button
+                      type="button"
+                      class="btn-text"
+                      data-testid="ci-artifacts-load-more"
+                      (click)="
+                        loadMoreFaultArtifacts(
+                          run.id,
+                          run.repo,
+                          store.artifactsNextCursor()
+                        )
+                      "
+                    >
+                      Load more artifacts ({{ store.artifacts().length }} of
+                      {{ store.artifactsTotal() }})
+                    </button>
+                  </div>
+                }
               }
             </div>
           } @else {
@@ -1475,6 +1897,9 @@ export class CIPageComponent implements OnInit, OnDestroy {
 
   protected readonly expandedJobs = signal<Record<string, boolean>>({});
   protected readonly expandedSteps = signal<Record<string, boolean>>({});
+  protected readonly expandedFaultRunArtifacts = signal<
+    Record<string, boolean>
+  >({});
   protected readonly logSearch = signal("");
   protected readonly tailFollow = signal(true);
 
@@ -1772,11 +2197,84 @@ export class CIPageComponent implements OnInit, OnDestroy {
       this.providerFilter.set("all");
     }
     this.faultDigestFilter.set(f.digest || faultTitle(f));
-    const firstRunId = f.runs?.[0]?.runId;
+    const firstRun = f.runs?.[0];
+    const firstRunId = firstRun ? this.resolveFaultRunId(f, firstRun) : "";
     const navigated = firstRunId ? this.openRun(firstRunId, true) : false;
     if (!navigated) {
       this.syncQueryParams();
     }
+  }
+
+  protected resolveFaultRunId(f: CIFault, fr: CIFaultRun): string {
+    const rawId = fr.runId;
+    if (faultSourceOf(f.source) !== "github" || isActionsRunId(rawId)) {
+      return rawId;
+    }
+    const wantRepo = (f.repo ?? "").toLowerCase();
+    const wantRef = cleanRef(fr.ref);
+    const wantCommit = faultRunCommit(fr);
+    const matched = this.store.runs().find((r) => {
+      if (r.id === rawId) return true;
+      if (providerOfRun(r) !== "github") return false;
+      if (String(r.actions?.runId ?? "") === rawId) return true;
+      if (wantRepo && r.repo.toLowerCase() !== wantRepo) return false;
+      if (wantRef && runBranch(r) !== wantRef) return false;
+      if (wantCommit && r.commit && r.commit !== wantCommit) return false;
+      return !!(wantRef || wantCommit);
+    });
+    return matched?.id ?? rawId;
+  }
+
+  protected faultRunQueryParams(f: CIFault, targetId: string) {
+    if (faultSourceOf(f.source) === "github" || this.isGitHubRun(targetId)) {
+      return { provider: GITHUB_ACTIONS_PROVIDER };
+    }
+    return {
+      provider:
+        this.providerFilter() === "github"
+          ? null
+          : providerQueryParam(this.providerFilter()),
+    };
+  }
+
+  protected onFaultRunOpen(runId: string): void {
+    this.mobileDetailOpen.set(true);
+    if (this.id() === runId) {
+      void this.store.selectRun(runId);
+    }
+  }
+
+  private faultArtKey(f: CIFault, fr: CIFaultRun): string {
+    return `${faultSourceOf(f.source)}:${f.digest || faultTitle(f)}:${fr.runId}`;
+  }
+
+  protected isFaultRunArtifactsOpen(f: CIFault, fr: CIFaultRun): boolean {
+    return !!this.expandedFaultRunArtifacts()[this.faultArtKey(f, fr)];
+  }
+
+  protected toggleFaultRunArtifacts(f: CIFault, fr: CIFaultRun): void {
+    const key = this.faultArtKey(f, fr);
+    const next = !this.expandedFaultRunArtifacts()[key];
+    this.expandedFaultRunArtifacts.update((m) => ({ ...m, [key]: next }));
+    if (next) {
+      const targetId = this.resolveFaultRunId(f, fr);
+      const state = this.store.runArtifactsById()[targetId];
+      if (!state || (!state.loaded && !state.loading)) {
+        void this.store.loadRunArtifacts(targetId, f.repo);
+      }
+    }
+  }
+
+  protected faultRunArtifacts(runId: string): RunArtifactsState | null {
+    return this.store.runArtifactsById()[runId] ?? null;
+  }
+
+  protected loadMoreFaultArtifacts(
+    runId: string,
+    repo: string | undefined,
+    cursor: string,
+  ): void {
+    void this.store.loadRunArtifacts(runId, repo, cursor);
   }
 
   protected openRun(runId: string, fromUserClick = false): boolean {
@@ -1870,6 +2368,37 @@ export class CIPageComponent implements OnInit, OnDestroy {
   protected faultLabel = faultTitle;
   protected faultRuns = faultRunCount;
   protected faultRefs = faultRefCount;
+  protected cleanRefOf = cleanRef;
+  protected faultCommitOf = faultRunCommit;
+  protected fixWhereOf = faultFixWhere;
+  protected prUrlOf = pullRequestExternalUrl;
+
+  protected faultSource(f: CIFault): "grain" | "github" {
+    return faultSourceOf(f.source);
+  }
+
+  protected faultSourceText(f: CIFault): string {
+    return faultSourceLabel(f.source);
+  }
+
+  protected jobArtifacts(job: CIJobRun): CIRunArtifact[] {
+    const id = job.jobId || "";
+    const name = job.name || "";
+    return this.store
+      .artifacts()
+      .filter((a) => !!a.job && (a.job === id || (!!name && a.job === name)));
+  }
+
+  protected canDownloadArtifactFor(
+    runId: string,
+    repo: string | undefined,
+    art: CIRunArtifact,
+  ): boolean {
+    return (
+      artifactDownloadable(runId, art) &&
+      this.access.can("GET /api/ci/runs/{id}/artifacts/{job}/{name}", repo)
+    );
+  }
 
   protected actorLabel(run: CIRun): string {
     const tid = runTaskId(run);
