@@ -1270,3 +1270,20 @@ export function lastActivityLabel(s: Workstream, now = Date.now()): string {
   if (!s.lastActivityMs) return "";
   return ago(new Date(s.lastActivityMs).toISOString(), now);
 }
+
+/**
+ * Computes a human-readable status label from a workstream's progress percentage
+ * and error state.
+ */
+export function computeWorkstreamStatus(
+  progress: number,
+  hasError: boolean,
+): string {
+  if (hasError) return "Error";
+  if (!Number.isFinite(progress) || progress < 0 || progress > 100) {
+    return "Unknown";
+  }
+  if (progress === 100) return "Complete";
+  if (progress === 0) return "Not Started";
+  return "In Progress";
+}

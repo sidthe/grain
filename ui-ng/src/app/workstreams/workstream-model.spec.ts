@@ -22,6 +22,7 @@ import {
   thumbLayout,
 } from "./workstream-layout";
 import {
+  computeWorkstreamStatus,
   deriveWorkstreams,
   filterWorkstreams,
   progressSummaryText,
@@ -632,5 +633,46 @@ describe("workstream-layout", () => {
     const s = d.byKey.get("task:1600")!;
     const chain = blockingChain(s, "1650");
     expect(chain.some((r) => r.taskId === "1699")).toBe(true);
+  });
+});
+
+describe("computeWorkstreamStatus", () => {
+  it("returns Error when hasError is true regardless of progress", () => {
+    for (const progress of [0, 50, 100, -1, 101, NaN, Infinity, -Infinity]) {
+      expect(computeWorkstreamStatus(progress, true)).toBe("Error");
+    }
+  });
+
+  it("returns Unknown when progress is out of range or non-finite", () => {
+    for (const progress of [
+      -1,
+      -0.001,
+      -100,
+      100.001,
+      101,
+      1000,
+      Number.MAX_SAFE_INTEGER,
+      -Number.MAX_SAFE_INTEGER,
+      NaN,
+      Infinity,
+      -Infinity,
+    ]) {
+      expect(computeWorkstreamStatus(progress, false)).toBe("Unknown");
+    }
+  });
+
+  it("returns Complete when progress is 100 and hasError is false", () => {
+    expect(computeWorkstreamStatus(100, false)).toBe("Complete");
+  });
+
+  it("returns Not Started when progress is 0 and hasError is false", () => {
+    expect(computeWorkstreamStatus(0, false)).toBe("Not Started");
+    expect(computeWorkstreamStatus(-0, false)).toBe("Not Started");
+  });
+
+  it("returns In Progress for values strictly between 0 and 100", () => {
+    for (const progress of [Number.MIN_VALUE, 0.001, 1, 50, 99, 99.999]) {
+      expect(computeWorkstreamStatus(progress, false)).toBe("In Progress");
+    }
   });
 });
