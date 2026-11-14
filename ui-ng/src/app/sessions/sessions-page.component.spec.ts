@@ -84,6 +84,29 @@ class FakeApi {
       comments: [],
     },
   };
+  agentModelsData = [
+    {
+      id: "gemini-3.1-pro-high",
+      label: "Gemini 3.1 Pro",
+      effort: "high",
+      family: "gemini-3.1-pro",
+    },
+  ];
+  configData: {
+    access: null;
+    models: string[];
+    defaultModel: string;
+    agentBackends?: {
+      id: string;
+      kind: string;
+      models?: string[];
+      disabled?: boolean;
+    }[];
+  } = {
+    access: null,
+    models: ["gemini-fast", "gemini-pro"],
+    defaultModel: "gemini-pro",
+  };
   calls: Call[] = [];
   fail: Record<string, unknown> = {};
 
@@ -108,14 +131,7 @@ class FakeApi {
     if (route === "GET /api/agent-models") {
       return Promise.resolve({
         available: true,
-        models: [
-          {
-            id: "gemini-3.1-pro-high",
-            label: "Gemini 3.1 Pro",
-            effort: "high",
-            family: "gemini-3.1-pro",
-          },
-        ],
+        models: this.agentModelsData,
       });
     }
     if (route === "GET /api/tasks/{id}/tree") {
@@ -220,12 +236,7 @@ class FakeApi {
     this.sessions = this.sessions.filter((s) => s.id !== id);
     return Promise.resolve({});
   };
-  config = () =>
-    Promise.resolve({
-      access: null,
-      models: ["gemini-fast", "gemini-pro"],
-      defaultModel: "gemini-pro",
-    });
+  config = () => Promise.resolve(this.configData);
 }
 
 async function render(
@@ -1032,6 +1043,148 @@ describe("SessionsPageComponent", () => {
     await f.whenStable();
     expect(q(f, '[data-testid="composer"]')).not.toBeNull();
     expect(q(f, '[data-testid="attachment-77"]')?.tagName).toBe("A");
+    f.destroy();
+  });
+
+  it("renders unadvertised model badge in header and settings and omits pinned model from new-session picker", async () => {
+    const api = new FakeApi();
+    api.sessions = api.sessions.map((s) =>
+      s.id === "director" ? { ...s, model: "unadvertised-legacy" } : s,
+    );
+    const f = await render(api, "director");
+
+    expect(q(f, '[data-testid="chat-head-model"]')).not.toBeNull();
+    expect(text(f, '[data-testid="chat-head-model"]')).toBe(
+      "unadvertised-legacy",
+    );
+    expect(text(f, '[data-testid="chat-head-model-badge"]')).toBe(
+      "not advertised by any connection",
+    );
+    expect(q(f, '[data-testid="chat-head-model-readonly"]')).toBeNull();
+
+    // Settings drawer shows the same unadvertised badge next to session-model.
+    (
+      q(f, '[data-testid="session-settings-toggle"]') as HTMLButtonElement
+    ).click();
+    f.detectChanges();
+    await f.whenStable();
+    expect(text(f, '[data-testid="session-model-badge"]')).toBe(
+      "not advertised by any connection",
+    );
+
+    // New session modal must not inherit another session's pinned unadvertised model.
+    (q(f, '[data-testid="new-session"]') as HTMLButtonElement).click();
+    f.detectChanges();
+    (q(f, '[data-testid="new-session-model"]') as HTMLButtonElement).click();
+    f.detectChanges();
+    const newMenuText = text(f, '[data-testid="new-session-model-menu"]');
+    expect(newMenuText).not.toContain("unadvertised-legacy");
+    expect(newMenuText).toContain("gemini-pro");
+    (
+      q(f, '[data-testid="new-session-dialog"] .btn-text') as HTMLButtonElement
+    ).click();
+    f.detectChanges();
+
+    // Switching the session to an advertised model clears both badges.
+    (q(f, '[data-testid="chat-head-model"]') as HTMLButtonElement).click();
+    f.detectChanges();
+    const items = Array.from(
+      (f.nativeElement as HTMLElement).querySelectorAll(
+        '[data-testid="chat-head-model-menu"] [role="option"], [data-testid="chat-head-model-menu"] button',
+      ),
+    ) as HTMLButtonElement[];
+    const geminiProItem = items.find((el) =>
+      el.textContent?.includes("gemini-pro"),
+    );
+    expect(geminiProItem).toBeDefined();
+    geminiProItem!.click();
+    await settle(f);
+
+    expect(q(f, '[data-testid="chat-head-model-badge"]')).toBeNull();
+    expect(q(f, '[data-testid="session-model-badge"]')).toBeNull();
+    f.destroy();
+  });
+
+  it("renders unadvertised default model and disabled-only badges even with a single model option", async () => {
+    const api = new FakeApi();
+    api.agentModelsData = [];
+    api.configData = {
+      access: null,
+      models: [],
+      defaultModel: "legacy-default",
+      agentBackends: [],
+    };
+    const f = await render(api, "director");
+
+    // Only one PillOption exists ("Default (legacy-default)"), yet header still
+    // shows a read-only pill and the unadvertised connection badge.
+    expect(q(f, '[data-testid="chat-head-model"]')).toBeNull();
+    expect(text(f, '[data-testid="chat-head-model-readonly"]')).toBe(
+      "Default (legacy-default)",
+    );
+    expect(text(f, '[data-testid="chat-head-model-badge"]')).toBe(
+      "not advertised by any connection",
+    );
+
+    // Disabled-only backend matching defaultModel switches badge copy.
+    api.configData = {
+      access: null,
+      models: [],
+      defaultModel: "legacy-default",
+      agentBackends: [
+        {
+          id: "conn-1",
+          kind: "gemini",
+          models: ["legacy-default"],
+          disabled: true,
+        },
+      ],
+    };
+    await TestBed.inject(SessionsStore).loadConfigModels();
+    f.detectChanges();
+    await f.whenStable();
+    expect(text(f, '[data-testid="chat-head-model-badge"]')).toBe(
+      "disabled connections only",
+    );
+    f.destroy();
+  });
+
+  it("renders viewer read-only model fallback and unadvertised badge without write scopes", async () => {
+    const api = new FakeApi();
+    api.sessions = api.sessions.map((s) =>
+      s.id === "director" ? { ...s, model: "custom-viewer-model" } : s,
+    );
+    const f = await render(api, "director");
+    const access = TestBed.inject(AccessService);
+    access.setConfig({
+      access: {
+        role: "viewer",
+        roles: ["viewer"],
+        full: false,
+        scopes: ["sessions:read", "tasks:read"],
+      },
+    });
+    f.detectChanges();
+    await f.whenStable();
+
+    expect(q(f, '[data-testid="chat-head-model"]')).toBeNull();
+    expect(text(f, '[data-testid="chat-head-model-readonly"]')).toBe(
+      "custom-viewer-model",
+    );
+    expect(text(f, '[data-testid="chat-head-model-badge"]')).toBe(
+      "not advertised by any connection",
+    );
+
+    // Clearing the pinned model on the session falls back to showing the default label.
+    TestBed.inject(SessionsStore).sessions.set(
+      api.sessions.map((s) => (s.id === "director" ? { ...s, model: "" } : s)),
+    );
+    f.detectChanges();
+    await f.whenStable();
+    expect(text(f, '[data-testid="chat-head-model-readonly"]')).toBe(
+      "Default (gemini-pro)",
+    );
+    expect(q(f, '[data-testid="chat-head-model-badge"]')).toBeNull();
     f.destroy();
   });
 });
