@@ -32,6 +32,8 @@ import {
   viewChild,
 } from "@angular/core";
 import { Router, RouterLink } from "@angular/router";
+import { type RouteKey } from "../api/generated-routes";
+import { routeScope } from "../api/grain-api.service";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
 import { TaskFeedStore } from "../services/task-feed.service";
@@ -364,10 +366,7 @@ function isValidGitRef(raw: string): boolean {
                 }
               }
               @case ("suites") {
-                @if (
-                  store.suites().length > 0 &&
-                  access.can("POST /api/suite-runs")
-                ) {
+                @if (store.suites().length > 0 && canOpenRunSuiteDialog()) {
                   <button
                     type="button"
                     class="btn-tonal"
@@ -377,7 +376,7 @@ function isValidGitRef(raw: string): boolean {
                     Run suite
                   </button>
                 }
-                @if (access.can("POST /api/suites")) {
+                @if (canGlobalRoute("POST /api/suites")) {
                   <button
                     type="button"
                     class="btn-primary"
@@ -842,6 +841,7 @@ function isValidGitRef(raw: string): boolean {
           class="proc-inspector"
           aria-label="Process detail inspector"
           data-testid="proc-inspector"
+          tabindex="0"
         >
           @switch (activeTab()) {
             @case ("schedules") {
@@ -878,12 +878,12 @@ function isValidGitRef(raw: string): boolean {
                         class="btn-primary"
                         data-testid="sched-run-now-btn"
                         [disabled]="
-                          !access.can('POST /api/schedules/{id}/run', s.repo)
+                          !canGlobalRoute('POST /api/schedules/{id}/run')
                         "
                         [gTip]="
-                          access.deniedReason(
+                          globalDeniedReason(
                             'POST /api/schedules/{id}/run',
-                            s.repo
+                            'Running a schedule'
                           ) || 'Fire this schedule immediately.'
                         "
                         (click)="runScheduleNow(s)"
@@ -896,14 +896,19 @@ function isValidGitRef(raw: string): boolean {
                         data-testid="sched-toggle-enabled-btn"
                         [disabled]="
                           !!s.declaredIn ||
-                          !access.can('PATCH /api/schedules/{id}', s.repo)
+                          !canGlobalRoute('PATCH /api/schedules/{id}')
                         "
                         [gTip]="
                           s.declaredIn
                             ? 'Declared in ' +
                               s.declaredIn.path +
                               ' — edit in repository.'
-                            : ''
+                            : globalDeniedReason(
+                                'PATCH /api/schedules/{id}',
+                                s.enabled
+                                  ? 'Pausing a schedule'
+                                  : 'Resuming a schedule'
+                              )
                         "
                         (click)="toggleScheduleEnabled(s)"
                       >
@@ -915,7 +920,13 @@ function isValidGitRef(raw: string): boolean {
                           class="btn-tonal"
                           data-testid="sched-edit-btn"
                           [disabled]="
-                            !access.can('PATCH /api/schedules/{id}', s.repo)
+                            !canGlobalRoute('PATCH /api/schedules/{id}')
+                          "
+                          [gTip]="
+                            globalDeniedReason(
+                              'PATCH /api/schedules/{id}',
+                              'Editing a schedule'
+                            )
                           "
                           (click)="openScheduleDialog(s)"
                         >
@@ -928,7 +939,13 @@ function isValidGitRef(raw: string): boolean {
                           class="btn-text danger"
                           data-testid="sched-delete-btn"
                           [disabled]="
-                            !access.can('DELETE /api/schedules/{id}', s.repo)
+                            !canGlobalRoute('DELETE /api/schedules/{id}')
+                          "
+                          [gTip]="
+                            globalDeniedReason(
+                              'DELETE /api/schedules/{id}',
+                              'Deleting a schedule'
+                            )
                           "
                           (click)="confirmDeleteSchedule(s)"
                         >
@@ -1084,6 +1101,7 @@ function isValidGitRef(raw: string): boolean {
                         class="btn-primary"
                         data-testid="tmpl-launch-btn"
                         [disabled]="!store.canLaunchTemplate(t)"
+                        [gTip]="launchTemplateDeniedReason(t)"
                         (click)="openLaunchTemplateDialog(t)"
                       >
                         Launch task
@@ -1093,7 +1111,15 @@ function isValidGitRef(raw: string): boolean {
                           type="button"
                           class="btn-tonal"
                           data-testid="tmpl-edit-btn"
-                          [disabled]="!access.can('PATCH /api/templates/{id}')"
+                          [disabled]="
+                            !canGlobalRoute('PATCH /api/templates/{id}')
+                          "
+                          [gTip]="
+                            globalDeniedReason(
+                              'PATCH /api/templates/{id}',
+                              'Editing a template'
+                            )
+                          "
                           (click)="openTemplateDialog(t)"
                         >
                           Edit
@@ -1102,7 +1128,15 @@ function isValidGitRef(raw: string): boolean {
                           type="button"
                           class="btn-text danger"
                           data-testid="tmpl-delete-btn"
-                          [disabled]="!access.can('DELETE /api/templates/{id}')"
+                          [disabled]="
+                            !canGlobalRoute('DELETE /api/templates/{id}')
+                          "
+                          [gTip]="
+                            globalDeniedReason(
+                              'DELETE /api/templates/{id}',
+                              'Deleting a template'
+                            )
+                          "
                           (click)="confirmDeleteTemplate(t)"
                         >
                           Delete
@@ -1240,9 +1274,8 @@ function isValidGitRef(raw: string): boolean {
                           type="button"
                           class="btn-tonal danger"
                           data-testid="suite-run-cancel-btn"
-                          [disabled]="
-                            !access.can('POST /api/tasks/{id}/close', sr.repo)
-                          "
+                          [disabled]="!canCancelSuiteRun(sr)"
+                          [gTip]="cancelSuiteRunDeniedReason(sr)"
                           (click)="confirmCancelSuiteRun(sr)"
                         >
                           Cancel suite run
@@ -1356,7 +1389,8 @@ function isValidGitRef(raw: string): boolean {
                         type="button"
                         class="btn-primary"
                         data-testid="suite-open-run-dialog-btn"
-                        [disabled]="!access.can('POST /api/suite-runs')"
+                        [disabled]="!canRunSuite(st)"
+                        [gTip]="runSuiteDeniedReason(st)"
                         (click)="openRunSuiteDialog(st)"
                       >
                         Run suite
@@ -1366,7 +1400,13 @@ function isValidGitRef(raw: string): boolean {
                           type="button"
                           class="btn-tonal"
                           data-testid="suite-edit-btn"
-                          [disabled]="!access.can('PATCH /api/suites/{id}')"
+                          [disabled]="!canGlobalRoute('PATCH /api/suites/{id}')"
+                          [gTip]="
+                            globalDeniedReason(
+                              'PATCH /api/suites/{id}',
+                              'Editing a suite'
+                            )
+                          "
                           (click)="openSuiteDialog(st)"
                         >
                           Edit
@@ -1375,7 +1415,15 @@ function isValidGitRef(raw: string): boolean {
                           type="button"
                           class="btn-text danger"
                           data-testid="suite-delete-btn"
-                          [disabled]="!access.can('DELETE /api/suites/{id}')"
+                          [disabled]="
+                            !canGlobalRoute('DELETE /api/suites/{id}')
+                          "
+                          [gTip]="
+                            globalDeniedReason(
+                              'DELETE /api/suites/{id}',
+                              'Deleting a suite'
+                            )
+                          "
                           (click)="confirmDeleteSuite(st)"
                         >
                           Delete
@@ -1486,9 +1534,16 @@ function isValidGitRef(raw: string): boolean {
                           aria-label="Sync .grain/ declarations"
                           data-testid="decl-toggle-switch"
                           [disabled]="
-                            !access.can(
+                            !canRouteForRepo(
                               'PUT /api/repos/{owner}/{name}/declarations',
                               repo
+                            )
+                          "
+                          [gTip]="
+                            repoDeniedReason(
+                              'PUT /api/repos/{owner}/{name}/declarations',
+                              repo,
+                              'Toggling declarations sync'
                             )
                           "
                           [attr.aria-checked]="def.declarations"
@@ -2599,6 +2654,7 @@ function isValidGitRef(raw: string): boolean {
             class="btn-primary"
             data-testid="launch-template-submit"
             [disabled]="submitting() || !canSubmitLaunchTemplate()"
+            [gTip]="launchSubmitDeniedReason()"
             (click)="submitLaunchTemplate()"
           >
             {{ submitting() ? "Launching…" : "Create task" }}
@@ -2758,6 +2814,7 @@ function isValidGitRef(raw: string): boolean {
             class="btn-primary"
             data-testid="tmpl-save-btn"
             [disabled]="submitting() || !canSaveTemplate()"
+            [gTip]="templateSaveDeniedReason()"
             (click)="saveTemplateDialog()"
           >
             {{ submitting() ? "Saving…" : "Save template" }}
@@ -2918,6 +2975,7 @@ function isValidGitRef(raw: string): boolean {
             class="btn-primary"
             data-testid="suite-save-btn"
             [disabled]="submitting() || !canSaveSuite()"
+            [gTip]="suiteSaveDeniedReason()"
             (click)="saveSuiteDialog()"
           >
             {{ submitting() ? "Saving…" : "Save suite" }}
@@ -2959,7 +3017,7 @@ function isValidGitRef(raw: string): boolean {
             </button>
             @if (openPicker() === "runSuite") {
               <ul class="pop-menu" role="listbox" aria-label="Suite">
-                @for (st of store.suites(); track st.id) {
+                @for (st of runnableSuites(); track st.id) {
                   <li role="none">
                     <button
                       type="button"
@@ -3008,6 +3066,7 @@ function isValidGitRef(raw: string): boolean {
             class="btn-primary"
             data-testid="run-suite-submit"
             [disabled]="submitting() || !canSubmitRunSuite()"
+            [gTip]="runSuiteSubmitDeniedReason()"
             (click)="submitRunSuite()"
           >
             {{ submitting() ? "Starting…" : "Start suite run" }}
@@ -3572,15 +3631,23 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
         } else if (launchParam === "1") {
           this.handledDeepLinkKey = key;
           if (this.canOpenLaunchTemplateDialog()) {
+            const sel = this.selectedTemplate();
             this.openLaunchTemplateDialog(
-              this.selectedTemplate() ?? this.store.templates()[0] ?? null,
+              (sel && this.store.canLaunchTemplate(sel) ? sel : null) ??
+                this.store
+                  .templates()
+                  .find((x) => this.store.canLaunchTemplate(x)) ??
+                null,
             );
           }
         } else if (runParam === "1") {
           this.handledDeepLinkKey = key;
-          if (this.access.can("POST /api/suite-runs")) {
+          if (this.canOpenRunSuiteDialog()) {
+            const sel = this.selectedSuite();
             this.openRunSuiteDialog(
-              this.selectedSuite() ?? this.store.suites()[0] ?? null,
+              (sel && this.canRunSuite(sel) ? sel : null) ??
+                this.runnableSuites()[0] ??
+                null,
             );
           }
         }
@@ -3650,7 +3717,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     this.selectedScheduleId.set(id);
     if (fromClick) this.mobileDetailOpen.set(true);
     this.scheduleComposition.set(null);
-    if (this.access.can("GET /api/schedules/{id}/composition")) {
+    if (this.canGlobalRoute("GET /api/schedules/{id}/composition")) {
       void this.store
         .fetchScheduleComposition(id)
         .then((c) => {
@@ -3665,7 +3732,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     if (fromClick) this.mobileDetailOpen.set(true);
     this.templateComposition.set(null);
     const tmpl = this.store.templates().find((t) => t.id === id);
-    if (tmpl && this.access.can("GET /api/templates/{id}/composition")) {
+    if (tmpl && this.canGlobalRoute("GET /api/templates/{id}/composition")) {
       const defaults: Record<string, string> = {};
       for (const f of tmpl.fields ?? []) {
         if (f.default) defaults[f.name] = f.default;
@@ -3690,7 +3757,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     this.selectedSuiteId.set(id);
     if (fromClick) this.mobileDetailOpen.set(true);
     this.suiteComposition.set(null);
-    if (this.access.can("GET /api/suites/{id}/composition")) {
+    if (this.canGlobalRoute("GET /api/suites/{id}/composition")) {
       void this.store
         .fetchSuiteComposition(id)
         .then((c) => {
@@ -3703,7 +3770,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected selectSuiteRun(id: number, fromClick: boolean): void {
     this.selectedSuiteRunId.set(id);
     if (fromClick) this.mobileDetailOpen.set(true);
-    if (this.access.can("GET /api/suite-runs/{id}")) {
+    if (this.canGlobalRoute("GET /api/suite-runs/{id}")) {
       void this.store.fetchSuiteRunDetail(id).catch(() => undefined);
     }
   }
@@ -3770,11 +3837,153 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     return `Accepting this declaration requires global scope(s): ${missing.join(", ")}.`;
   }
 
+  private scopeRepoLimits(route: RouteKey): string[] {
+    const scope = routeScope(route);
+    if (!scope || scope === "signed-in") return [];
+    const limits = this.access.repoLimits();
+    return limits?.[scope] ?? [];
+  }
+
+  protected canGlobalRoute(route: RouteKey): boolean {
+    return this.access.canGlobalScope(routeScope(route));
+  }
+
+  protected canRouteForRepo(route: RouteKey, repo?: string | null): boolean {
+    const trimmed = repo?.trim() || "";
+    return trimmed
+      ? this.access.can(route, trimmed)
+      : this.canGlobalRoute(route);
+  }
+
+  protected globalDeniedReason(route: RouteKey, label?: string): string {
+    const direct = this.access.deniedReason(route);
+    if (direct) return direct;
+    const scope = routeScope(route);
+    const limits = this.scopeRepoLimits(route);
+    if (limits.length > 0 && scope) {
+      const what = label || "This action";
+      return `${what} requires global ${scope} permission (currently scoped to ${limits.join(", ")}).`;
+    }
+    return this.access.canGlobalScope(scope)
+      ? ""
+      : "Requires permission outside your current scope.";
+  }
+
+  protected repoDeniedReason(
+    route: RouteKey,
+    repo?: string | null,
+    globalLabel?: string,
+  ): string {
+    const trimmed = repo?.trim() || "";
+    if (!trimmed) {
+      return this.globalDeniedReason(route, globalLabel);
+    }
+    return this.access.deniedReason(route, trimmed);
+  }
+
+  protected suiteBoundRepos(st: Suite): string[] {
+    const byId = new Map(this.store.templates().map((t) => [t.id, t]));
+    const seen = new Map<string, string>();
+    for (const it of st.items ?? []) {
+      const t = byId.get(it.templateId);
+      const repo = (t?.repo || t?.declaredIn?.repo || "").trim();
+      const key = repo.toLowerCase();
+      if (repo && !seen.has(key)) seen.set(key, repo);
+    }
+    return [...seen.values()];
+  }
+
+  protected canRunSuite(st: Suite | null | undefined): boolean {
+    if (!st) return false;
+    const repos = this.suiteBoundRepos(st);
+    if (repos.length === 1) {
+      return this.access.can("POST /api/suite-runs", repos[0]);
+    }
+    return this.canGlobalRoute("POST /api/suite-runs");
+  }
+
+  protected runSuiteDeniedReason(st: Suite): string {
+    const repos = this.suiteBoundRepos(st);
+    if (repos.length === 1) {
+      return this.access.deniedReason("POST /api/suite-runs", repos[0]);
+    }
+    return this.globalDeniedReason(
+      "POST /api/suite-runs",
+      "Running a cross-repo suite",
+    );
+  }
+
+  protected runnableSuites(): Suite[] {
+    return this.store.suites().filter((st) => this.canRunSuite(st));
+  }
+
+  protected canOpenRunSuiteDialog(): boolean {
+    return this.store.suites().some((st) => this.canRunSuite(st));
+  }
+
+  private suiteRunTaskRepos(sr: SuiteRun): {
+    repos: string[];
+    hasUnknownRepo: boolean;
+  } {
+    const byId = new Map(this.taskFeed.tasks().map((t) => [t.id, t]));
+    const repos = new Map<string, string>();
+    let hasUnknownRepo = false;
+    for (const rt of sr.tasks ?? []) {
+      const task = byId.get(rt.taskId);
+      const st = (task?.state || rt.state || "").toLowerCase();
+      if (!rt.taskId || st === "closed" || st === "merged") continue;
+      const repo = (task?.repo || sr.repo || "").trim();
+      if (repo) {
+        const key = repo.toLowerCase();
+        if (!repos.has(key)) repos.set(key, repo);
+      } else {
+        hasUnknownRepo = true;
+      }
+    }
+    if (repos.size === 0 && !hasUnknownRepo && sr.repo?.trim()) {
+      const repo = sr.repo.trim();
+      repos.set(repo.toLowerCase(), repo);
+    }
+    return { repos: [...repos.values()], hasUnknownRepo };
+  }
+
+  protected canCancelSuiteRun(sr: SuiteRun): boolean {
+    const { repos, hasUnknownRepo } = this.suiteRunTaskRepos(sr);
+    if (hasUnknownRepo || repos.length === 0) {
+      return this.canGlobalRoute("POST /api/tasks/{id}/close");
+    }
+    return this.access.can("POST /api/tasks/{id}/close", repos);
+  }
+
+  protected cancelSuiteRunDeniedReason(sr: SuiteRun): string {
+    const { repos, hasUnknownRepo } = this.suiteRunTaskRepos(sr);
+    if (hasUnknownRepo || repos.length === 0) {
+      return this.globalDeniedReason(
+        "POST /api/tasks/{id}/close",
+        "Canceling a cross-repo suite run",
+      );
+    }
+    return this.access.deniedReason("POST /api/tasks/{id}/close", repos);
+  }
+
   protected canOpenLaunchTemplateDialog(): boolean {
-    if (this.access.can("POST /api/tasks")) return true;
-    return (
-      this.store.templates().some((t) => !!t.declaredIn) &&
-      this.access.can("POST /api/tasks/from-template")
+    return this.store.templates().some((t) => this.store.canLaunchTemplate(t));
+  }
+
+  protected launchTemplateDeniedReason(t: Template): string {
+    if (t.declaredIn?.repo) {
+      if (this.store.canLaunchTemplate(t)) return "";
+      return (
+        this.access.deniedReason(
+          "POST /api/tasks/from-template",
+          t.declaredIn.repo,
+        ) || this.access.deniedReason("POST /api/tasks", t.declaredIn.repo)
+      );
+    }
+    return this.repoDeniedReason(
+      "POST /api/tasks",
+      t.repo,
+      "Launching this template",
     );
   }
 
@@ -3788,11 +3997,29 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       );
     }
     if (lt.system) {
-      return this.access.can("POST /api/tasks");
+      return this.canRouteForRepo("POST /api/tasks", lt.repo);
     }
     const targetRepo = (lt.repo || this.launchRepo()).trim();
     if (!targetRepo) return false;
     return this.access.can("POST /api/tasks", targetRepo);
+  }
+
+  protected launchSubmitDeniedReason(): string {
+    const lt = this.launchSelectedTemplate();
+    if (!lt) return "";
+    if (lt.declaredIn?.repo) {
+      return this.launchTemplateDeniedReason(lt);
+    }
+    if (lt.system) {
+      return this.repoDeniedReason(
+        "POST /api/tasks",
+        lt.repo,
+        "Launching a system template",
+      );
+    }
+    const targetRepo = (lt.repo || this.launchRepo()).trim();
+    if (!targetRepo) return "";
+    return this.access.deniedReason("POST /api/tasks", targetRepo);
   }
 
   protected readonly canEditWorkflow = computed(
@@ -4109,9 +4336,8 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     repo: string | undefined;
   } {
     const editing = this.editingSchedule();
-    const route = editing ? "PATCH /api/schedules/{id}" : "POST /api/schedules";
-    if (editing?.system) {
-      return { route, repo: editing.repo || undefined };
+    if (editing) {
+      return { route: "PATCH /api/schedules/{id}", repo: undefined };
     }
     const tk = this.schedTargetKind();
     const chosenTmpl =
@@ -4120,18 +4346,29 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
         : null;
     const targetRepo =
       this.sDraftRepo().trim() ||
-      (tk === "template" ? chosenTmpl?.repo || "" : "");
-    return { route, repo: targetRepo || undefined };
+      (tk === "template"
+        ? chosenTmpl?.repo || chosenTmpl?.declaredIn?.repo || ""
+        : "");
+    return {
+      route: "POST /api/schedules",
+      repo: targetRepo || undefined,
+    };
   }
 
   protected canAccessScheduleSave(): boolean {
     const { route, repo } = this.scheduleAccessTarget();
-    return this.access.can(route, repo);
+    return this.canRouteForRepo(route, repo);
   }
 
   protected scheduleSaveDeniedReason(): string {
     const { route, repo } = this.scheduleAccessTarget();
-    return this.access.deniedReason(route, repo);
+    return this.repoDeniedReason(
+      route,
+      repo,
+      route === "PATCH /api/schedules/{id}"
+        ? "Updating a schedule"
+        : "Creating an unbound schedule",
+    );
   }
 
   protected canSaveSchedule(): boolean {
@@ -4348,7 +4585,11 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
 
   protected openLaunchTemplateDialog(t: Template | null): void {
     this.openPicker.set(null);
-    const chosen = t ?? this.store.templates()[0] ?? null;
+    const chosen =
+      t ??
+      this.store.templates().find((x) => this.store.canLaunchTemplate(x)) ??
+      this.store.templates()[0] ??
+      null;
     this.launchTemplateId.set(chosen?.id ?? "");
     this.initLaunchFields(chosen);
     this.launchRepo.set(chosen?.repo || this.store.knownRepos()[0] || "");
@@ -4468,9 +4709,25 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected canSaveTemplate(): boolean {
     if (!this.tDraftName().trim() || !this.tDraftTitle().trim()) return false;
     const editing = this.editingTemplate();
-    const route = editing ? "PATCH /api/templates/{id}" : "POST /api/templates";
-    const targetRepo = this.tDraftRepo().trim() || editing?.repo || undefined;
-    return this.access.can(route, targetRepo);
+    if (editing) {
+      return this.canGlobalRoute("PATCH /api/templates/{id}");
+    }
+    return this.canRouteForRepo("POST /api/templates", this.tDraftRepo());
+  }
+
+  protected templateSaveDeniedReason(): string {
+    const editing = this.editingTemplate();
+    if (editing) {
+      return this.globalDeniedReason(
+        "PATCH /api/templates/{id}",
+        "Updating a template",
+      );
+    }
+    return this.repoDeniedReason(
+      "POST /api/templates",
+      this.tDraftRepo(),
+      "Creating an unbound template",
+    );
   }
 
   protected async saveTemplateDialog(): Promise<void> {
@@ -4570,15 +4827,16 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       return false;
     }
     const editing = this.editingSuite();
-    const route = editing ? "PATCH /api/suites/{id}" : "POST /api/suites";
-    const boundRepos = this.stDraftTemplateIds()
-      .map((id) => this.store.templates().find((t) => t.id === id))
-      .map((t) => t?.repo || t?.declaredIn?.repo || "")
-      .filter(Boolean);
-    return this.access.can(
-      route,
-      boundRepos.length > 0 ? boundRepos : undefined,
+    return this.canGlobalRoute(
+      editing ? "PATCH /api/suites/{id}" : "POST /api/suites",
     );
+  }
+
+  protected suiteSaveDeniedReason(): string {
+    const editing = this.editingSuite();
+    return editing
+      ? this.globalDeniedReason("PATCH /api/suites/{id}", "Updating a suite")
+      : this.globalDeniedReason("POST /api/suites", "Creating a suite");
   }
 
   private buildSuiteCreatePayload(): CreateSuiteRequest {
@@ -4646,10 +4904,19 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
 
   protected openRunSuiteDialog(st: Suite | null): void {
     this.openPicker.set(null);
-    const chosen = st ?? this.store.suites()[0] ?? null;
+    const chosen =
+      (st && this.canRunSuite(st) ? st : null) ??
+      this.runnableSuites()[0] ??
+      st ??
+      this.store.suites()[0] ??
+      null;
+    const bound = chosen ? this.suiteBoundRepos(chosen) : [];
     this.runSuiteId.set(chosen?.id ?? "");
     this.runSuiteRepo.set(
-      chosen?.declaredIn?.repo || this.store.knownRepos()[0] || "",
+      chosen?.declaredIn?.repo ||
+        (bound.length === 1 ? bound[0] : "") ||
+        this.store.knownRepos()[0] ||
+        "",
     );
     this.runSuiteBase.set("main");
     this.runSuiteDialogOpen.set(true);
@@ -4660,7 +4927,19 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     if (!this.runSuiteId() || !repo || !this.runSuiteBase().trim()) {
       return false;
     }
+    const chosen = this.store.suites().find((s) => s.id === this.runSuiteId());
+    if (!this.canRunSuite(chosen)) return false;
     return this.access.can("POST /api/suite-runs", repo);
+  }
+
+  protected runSuiteSubmitDeniedReason(): string {
+    const chosen = this.store.suites().find((s) => s.id === this.runSuiteId());
+    if (chosen && !this.canRunSuite(chosen)) {
+      return this.runSuiteDeniedReason(chosen);
+    }
+    const repo = this.runSuiteRepo().trim();
+    if (!repo) return "";
+    return this.access.deniedReason("POST /api/suite-runs", repo);
   }
 
   protected async submitRunSuite(): Promise<void> {

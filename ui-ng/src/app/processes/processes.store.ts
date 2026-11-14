@@ -14,7 +14,7 @@
 
 import { Injectable, NgZone, computed, inject, signal } from "@angular/core";
 import type { Subscription } from "rxjs";
-import { GrainApi, splitRepo } from "../api/grain-api.service";
+import { GrainApi, routeScope, splitRepo } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import type { TaskDetail } from "../api/models";
 import { AccessService } from "../services/access.service";
@@ -121,8 +121,7 @@ export class ProcessesStore {
     this.actionError.set(null);
     this.activeCount++;
     if (this.activeCount > 1) return;
-    void this.loadConfigAndRepos();
-    void this.refresh();
+    void this.bootstrap();
     this.eventSub = this.events.events().subscribe((ev) => {
       if (ev.type === "task.state") {
         void this.refresh();
@@ -133,6 +132,12 @@ export class ProcessesStore {
         this.zone.run(() => void this.refresh());
       }, POLL_MS);
     });
+  }
+
+  private async bootstrap(): Promise<void> {
+    await this.loadConfigAndRepos();
+    if (this.activeCount === 0) return;
+    await this.refresh();
   }
 
   stop(): void {
@@ -339,7 +344,10 @@ export class ProcessesStore {
         this.access.can("POST /api/tasks", t.declaredIn.repo)
       );
     }
-    return this.access.can("POST /api/tasks", targetRepo || undefined);
+    if (targetRepo) {
+      return this.access.can("POST /api/tasks", targetRepo);
+    }
+    return this.access.canGlobalScope(routeScope("POST /api/tasks"));
   }
 
   async launchTaskFromTemplate(
