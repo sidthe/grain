@@ -163,6 +163,16 @@ func Archive(ctx context.Context, dir, treeish string, w io.Writer) error {
 	return werr
 }
 
+// HashTree returns "empty" when data is nil or empty, or "tree-" followed by
+// the 64-character lowercase hex SHA-256 digest of data.
+func HashTree(data []byte) string {
+	if len(data) == 0 {
+		return "empty"
+	}
+	sum := sha256.Sum256(data)
+	return "tree-" + hex.EncodeToString(sum[:])
+}
+
 type entry struct{ mode, oid, path string }
 
 func gitTree(ctx context.Context, dir, treeish string) (string, error) {

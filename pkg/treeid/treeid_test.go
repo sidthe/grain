@@ -18,7 +18,9 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -188,5 +190,83 @@ func TestAnOptionLikeTreeishIsRefused(t *testing.T) {
 	dir, _ := repo(t, "sha1")
 	if _, err := Compute(context.Background(), dir, "--output=/tmp/x", 0); err == nil {
 		t.Error("Compute(--output=...) = nil error")
+	}
+}
+
+func TestHashTree(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{
+			name: "nil",
+			data: nil,
+			want: "empty",
+		},
+		{
+			name: "empty slice",
+			data: []byte{},
+			want: "empty",
+		},
+		{
+			name: "hello",
+			data: []byte("hello"),
+			want: "tree-2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+		},
+		{
+			name: "single zero byte",
+			data: []byte{0},
+			want: "tree-6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := HashTree(tc.data)
+			if got != tc.want {
+				t.Fatalf("HashTree(%v) = %q, want %q", tc.data, got, tc.want)
+			}
+			if len(tc.data) > 0 {
+				assertTreeHashFormat(t, got)
+			}
+		})
+	}
+
+	t.Run("large input", func(t *testing.T) {
+		large := bytes.Repeat([]byte{0xab}, 1<<20)
+		got := HashTree(large)
+		assertTreeHashFormat(t, got)
+		want := fmt.Sprintf("tree-%x", sha256.Sum256(large))
+		if got != want {
+			t.Fatalf("HashTree(1MiB) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("distinct inputs", func(t *testing.T) {
+		a := HashTree([]byte("a"))
+		b := HashTree([]byte("b"))
+		if a == b {
+			t.Fatalf("HashTree produced identical output %q for distinct inputs", a)
+		}
+		assertTreeHashFormat(t, a)
+		assertTreeHashFormat(t, b)
+	})
+}
+
+func assertTreeHashFormat(t *testing.T, got string) {
+	t.Helper()
+	if !strings.HasPrefix(got, "tree-") {
+		t.Fatalf("HashTree output %q missing \"tree-\" prefix", got)
+	}
+	if len(got) != 69 {
+		t.Fatalf("HashTree output %q has length %d, want 69", got, len(got))
+	}
+	hexPart := strings.TrimPrefix(got, "tree-")
+	for i := 0; i < len(hexPart); i++ {
+		c := hexPart[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("HashTree output %q has non-lowercase-hex char %q at index %d", got, c, i+5)
+		}
 	}
 }
