@@ -1,17 +1,3 @@
-// Copyright 2026 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 package qa
 
 import (
@@ -22,7 +8,6 @@ import (
 	"github.com/ai-on-gke/grain/pkg/trustboundary"
 )
 
-// BlastTier classifies the deterministic blast radius of a proposed diff at S1/S3.
 type BlastTier string
 
 const (
@@ -32,30 +17,85 @@ const (
 	BlastT3 BlastTier = "T3"
 )
 
-// RequiresS4 reports whether tier warrants the 1-round fresh-context S4 verifier on flows with EnableS4.
+func (t BlastTier) Rank() int {
+	switch t {
+	case BlastT0:
+		return 0
+	case BlastT1:
+		return 1
+	case BlastT2:
+		return 2
+	case BlastT3:
+		return 3
+	default:
+		return -1
+	}
+}
+
+func MaxBlastTier(a, b BlastTier) BlastTier {
+	if a.Rank() >= b.Rank() {
+		return a
+	}
+	return b
+}
+
 func (t BlastTier) RequiresS4() bool {
 	return t == BlastT2 || t == BlastT3
 }
 
-// DiffStats summarizes the deterministic structural footprint of a branch diff.
 type DiffStats struct {
 	Files                 []string
 	NonTestAdded          int
 	NonTestDeleted        int
 	SiblingCallerPackages int
+	TestTampered          bool
 }
 
-// ClassifyDiffBlast deterministically assigns T0..T3 from touched paths, non-test LOC delta,
-// and exported-symbol sibling fan-in without invoking any model.
+type RiskOverride struct {
+	Paths   []string
+	MinTier BlastTier
+	Reason  string
+}
+
+type RiskAssessment struct {
+	Tier             BlastTier
+	Score            int
+	Reasons          []string
+	TrustBoundaryHit bool
+	TestTampered     bool
+}
+
 func ClassifyDiffBlast(stats DiffStats) (BlastTier, []string) {
+	out := AssessDiffBlast(stats, nil, nil)
+	return out.Tier, out.Reasons
+}
+
+func AssessDiffBlast(stats DiffStats, overrides []RiskOverride, prof perfProfiler) RiskAssessment {
+	var out RiskAssessment
+	fn := func() (string, error) {
+		out = assessDiffBlastInternal(stats, overrides)
+		return string(out.Tier), nil
+	}
+	if prof != nil {
+		prof.Measure(PerfSample{Stage: "assess-blast", CheckID: "risk"}, fn)
+	} else {
+		fn()
+	}
+	return out
+}
+
+func assessDiffBlastInternal(stats DiffStats, overrides []RiskOverride) RiskAssessment {
 	if len(stats.Files) == 0 {
-		return BlastT0, []string{"empty diff"}
+		return RiskAssessment{Tier: BlastT0, Score: 0, Reasons: []string{"empty diff"}}
 	}
 
 	var normalized []string
 	allDocsOrTests := true
 	touchesT2Surface := false
-	var t2Reasons []string
+	trustBoundaryHit := false
+	var reasons []string
+
+	score := 0
 
 	for _, raw := range stats.Files {
 		f := strings.TrimPrefix(path.Clean(strings.TrimSpace(raw)), "./")
@@ -67,49 +107,185 @@ func ClassifyDiffBlast(stats DiffStats) (BlastTier, []string) {
 		if !isDocOrTestFile(f) {
 			allDocsOrTests = false
 		}
+
 		switch {
 		case strings.HasPrefix(f, "pkg/qa/"), f == "pkg/qa":
-			return BlastT3, []string{fmt.Sprintf("touches quality control engine (%s)", f)}
-		case strings.HasPrefix(f, "pkg/staterepo/"),
-			strings.HasPrefix(f, "pkg/declschema/"),
-			f == "pkg/model/schema.go",
-			f == "pkg/model/migrations.go":
-			if !touchesT2Surface {
-				touchesT2Surface = true
-				t2Reasons = append(t2Reasons, fmt.Sprintf("schema/config surface (%s)", f))
-			}
-		case strings.HasPrefix(f, "ui/"), strings.HasPrefix(f, "ui-ng/"):
-			if !isTestFile(f) && !touchesT2Surface {
-				touchesT2Surface = true
-				t2Reasons = append(t2Reasons, fmt.Sprintf("UI surface (%s)", f))
-			}
+			trustBoundaryHit = true
 		}
 	}
 
 	if tbMatches := trustboundary.Classify(normalized); len(tbMatches) > 0 {
-		reasons := make([]string, 0, len(tbMatches))
+		trustBoundaryHit = true
 		for _, m := range tbMatches {
 			reasons = append(reasons, fmt.Sprintf("trust boundary (%s)", m.Category.ID))
 		}
-		return BlastT3, reasons
+	} else if trustBoundaryHit {
+		reasons = append(reasons, "touches quality control engine")
 	}
 
-	if stats.SiblingCallerPackages >= 2 {
-		touchesT2Surface = true
-		t2Reasons = append(t2Reasons, fmt.Sprintf("modified export referenced by %d sibling packages", stats.SiblingCallerPackages))
+	if trustBoundaryHit {
+		score += 85
 	}
-	nonTestChurn := stats.NonTestAdded + stats.NonTestDeleted
-	if nonTestChurn > 250 {
+
+	if stats.TestTampered {
+		score += 50
+		reasons = append(reasons, "test tampered")
+	}
+
+	if stats.SiblingCallerPackages > 0 {
+		if stats.SiblingCallerPackages == 1 {
+			score += 15
+			reasons = append(reasons, "1 sibling caller")
+		} else if stats.SiblingCallerPackages <= 4 {
+			score += 35
+			touchesT2Surface = true
+			reasons = append(reasons, fmt.Sprintf("modified export referenced by %d sibling packages", stats.SiblingCallerPackages))
+		} else if stats.SiblingCallerPackages <= 9 {
+			score += 55
+			touchesT2Surface = true
+			reasons = append(reasons, fmt.Sprintf("modified export referenced by %d sibling packages", stats.SiblingCallerPackages))
+		} else {
+			score += 65
+			reasons = append(reasons, fmt.Sprintf("modified export referenced by %d sibling packages", stats.SiblingCallerPackages))
+		}
+	}
+
+	hasSchema := false
+	hasMigrations := false
+
+	for _, f := range normalized {
+		if strings.HasPrefix(f, "pkg/staterepo/") || strings.HasPrefix(f, "pkg/declschema/") || f == "route_scopes.go" {
+			hasSchema = true
+		}
+		if f == "pkg/model/schema.go" {
+			hasSchema = true
+		}
+		if f == "pkg/model/migrations.go" {
+			hasMigrations = true
+		}
+	}
+
+	if hasSchema || hasMigrations {
+		score += 40
 		touchesT2Surface = true
-		t2Reasons = append(t2Reasons, fmt.Sprintf("%d non-test lines changed (>250)", nonTestChurn))
+		reasons = append(reasons, "schema/config surface")
+	}
+
+	nonTestChurn := stats.NonTestAdded + stats.NonTestDeleted
+	if hasSchema && hasMigrations && nonTestChurn > 50 {
+		score += 75
+		reasons = append(reasons, "schema and migrations heavily modified")
+	}
+
+	for _, f := range normalized {
+		if strings.HasPrefix(f, "ui/") || strings.HasPrefix(f, "ui-ng/") {
+			if !isTestFile(f) {
+				score += 30
+				touchesT2Surface = true
+				reasons = append(reasons, "UI surface")
+				break
+			}
+		}
+	}
+
+	if nonTestChurn > 0 {
+		if nonTestChurn <= 40 {
+			score += 5
+		} else if nonTestChurn <= 250 {
+			score += 15
+		} else if nonTestChurn <= 600 {
+			score += 35
+			touchesT2Surface = true
+		} else {
+			score += 55
+			touchesT2Surface = true
+		}
+		reasons = append(reasons, fmt.Sprintf("%d non-test lines changed", nonTestChurn))
+	}
+
+	if score > 100 {
+		score = 100
+	}
+
+	var baseTier BlastTier
+	if allDocsOrTests && nonTestChurn == 0 && score <= 10 {
+		baseTier = BlastT0
+	} else if score <= 29 {
+		baseTier = BlastT1
+	} else if score <= 74 {
+		baseTier = BlastT2
+	} else {
+		baseTier = BlastT3
+	}
+
+	if trustBoundaryHit {
+		baseTier = MaxBlastTier(baseTier, BlastT3)
+		if score < 85 {
+			score = 85
+		}
+	}
+	if stats.TestTampered {
+		baseTier = MaxBlastTier(baseTier, BlastT3)
 	}
 	if touchesT2Surface {
-		return BlastT2, t2Reasons
+		baseTier = MaxBlastTier(baseTier, BlastT2)
 	}
-	if allDocsOrTests && nonTestChurn == 0 {
-		return BlastT0, []string{"docs/tests only"}
+	if hasSchema && hasMigrations && nonTestChurn > 50 {
+		baseTier = MaxBlastTier(baseTier, BlastT3)
 	}
-	return BlastT1, []string{"single-subsystem change"}
+	if stats.SiblingCallerPackages >= 10 {
+		baseTier = MaxBlastTier(baseTier, BlastT3)
+	}
+
+	for _, ov := range overrides {
+		matched := false
+		for _, fp := range normalized {
+			for _, pat := range ov.Paths {
+				if matchedGlob(pat, fp) {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				break
+			}
+		}
+		if matched {
+			baseTier = MaxBlastTier(baseTier, ov.MinTier)
+			reasons = append(reasons, ov.Reason)
+		}
+	}
+
+	if baseTier == BlastT1 && score < 15 {
+		score = 15
+	} else if baseTier == BlastT2 && score < 35 {
+		score = 35
+	} else if baseTier == BlastT3 && score < 75 {
+		score = 75
+	}
+
+	return RiskAssessment{
+		Tier:             baseTier,
+		Score:            score,
+		Reasons:          reasons,
+		TrustBoundaryHit: trustBoundaryHit,
+		TestTampered:     stats.TestTampered,
+	}
+}
+
+func matchedGlob(pattern, name string) bool {
+	matched, err := path.Match(pattern, name)
+	if err != nil {
+		return false
+	}
+	if matched {
+		return true
+	}
+	if strings.Contains(pattern, "**") {
+		prefix := strings.Split(pattern, "**")[0]
+		return strings.HasPrefix(name, prefix)
+	}
+	return false
 }
 
 func isTestFile(p string) bool {
