@@ -231,6 +231,50 @@ export interface DeleteRevokedHostdsResult {
   skipped: { name: string; reason: string }[];
 }
 
+export interface HostdInstallSnippet {
+  release?: string;
+  image?: string;
+  lines?: string[];
+  note?: string;
+  command?: string;
+}
+
+export interface HostEnrollmentCodeView {
+  name: string;
+  prefix?: string;
+  code?: string;
+  install?: HostdInstallSnippet | string;
+  default_labels?: Record<string, string> | null;
+  default_capacity?: number;
+  allowed_principals?: string[];
+  max_uses?: number;
+  uses?: number;
+  expires_at?: string | null;
+  created_by?: string;
+  created_at?: string;
+  rotated_at?: string | null;
+  revoked_at?: string | null;
+}
+
+export interface PendingHostJoinView {
+  id: string;
+  enrollment_code?: string;
+  rekey_hostd?: string;
+  hostname?: string;
+  suggested_name?: string;
+  os?: string;
+  arch?: string;
+  clis?: string[];
+  version?: string;
+  local_user?: string;
+  key_fingerprint?: string;
+  enrolled_by?: string;
+  default_labels?: Record<string, string> | null;
+  default_capacity?: number;
+  created_at?: string;
+  expires_at?: string;
+}
+
 export interface PipelinePauseStatus {
   paused: boolean;
   since?: string;
@@ -417,4 +461,75 @@ export function isPersistentActionAllowed(
     ALLOWED_PERSISTENT_ACTIONS.get(effectivePersistentState(ps))?.has(action) ??
     false
   );
+}
+
+/** Parses whitespace- or comma-separated `key=value` hostd labels. */
+export function parseHostdLabels(raw: string): {
+  labels: Record<string, string>;
+  error?: string;
+} {
+  const trimmed = raw.trim();
+  if (!trimmed) return { labels: {} };
+  const out: Record<string, string> = {};
+  for (const part of trimmed.split(/[\s,]+/).filter(Boolean)) {
+    const eq = part.indexOf("=");
+    if (eq <= 0 || eq === part.length - 1) {
+      return {
+        labels: {},
+        error: `Host label "${part}" must be key=value (no spaces or commas).`,
+      };
+    }
+    const k = part.slice(0, eq).trim();
+    const v = part.slice(eq + 1).trim();
+    if (!k || !v || v.includes("=")) {
+      return {
+        labels: {},
+        error: `Host label "${part}" must be key=value.`,
+      };
+    }
+    out[k] = v;
+  }
+  return { labels: out };
+}
+
+/** Formats a hostd label map as comma-separated `key=value` pairs. */
+export function formatHostdLabels(
+  labels?: Record<string, string> | null,
+): string {
+  if (!labels || typeof labels !== "object" || Array.isArray(labels)) {
+    return "";
+  }
+  return Object.entries(labels)
+    .map(([k, v]) => `${k}=${v}`)
+    .join(", ");
+}
+
+/** Formats a newly minted or rotated enrollment secret and install command. */
+export function formatIssuedHostdSecret(
+  label: string,
+  res?: {
+    code?: string;
+    token?: string;
+    install?: HostdInstallSnippet | string;
+  } | null,
+): string | null {
+  if (!res) return null;
+  const parts: string[] = [];
+  const secret = res.code ?? res.token;
+  if (typeof secret === "string" && secret) {
+    parts.push(`${label} (shown once): ${secret}`);
+  }
+  if (typeof res.install === "string" && res.install.trim()) {
+    parts.push(res.install.trim());
+  } else if (res.install && typeof res.install === "object") {
+    if (typeof res.install.command === "string" && res.install.command) {
+      parts.push(res.install.command);
+    } else if (Array.isArray(res.install.lines) && res.install.lines.length) {
+      parts.push(res.install.lines.join("\n"));
+    }
+    if (typeof res.install.note === "string" && res.install.note) {
+      parts.push(`# ${res.install.note}`);
+    }
+  }
+  return parts.length > 0 ? parts.join("\n\n") : null;
 }

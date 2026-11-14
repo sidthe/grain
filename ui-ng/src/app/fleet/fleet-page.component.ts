@@ -25,7 +25,8 @@ import {
 } from "@angular/core";
 import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
 import { ActivatedRoute, Router, RouterLink } from "@angular/router";
-import { GrainApi } from "../api/grain-api.service";
+import type { RouteKey } from "../api/generated-routes";
+import { GrainApi, routeScope } from "../api/grain-api.service";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
 import { TaskFeedStore } from "../services/task-feed.service";
@@ -44,6 +45,7 @@ import {
   type AgentPauseResponse,
   type DeleteRevokedHostdsResult,
   type FleetTab,
+  type HostEnrollmentCodeView,
   type HostTopResponse,
   type HostdView,
   type IssuedHostdToken,
@@ -51,6 +53,7 @@ import {
   type LogSourcesResponse,
   type LogUnit,
   type PackageCacheState,
+  type PendingHostJoinView,
   type PersistentAction,
   type PersistentSandboxStatus,
   type PipelinePauseResponse,
@@ -61,10 +64,13 @@ import {
   effectivePersistentState,
   extractTaskIdFromSandbox,
   formatBytes,
+  formatHostdLabels,
+  formatIssuedHostdSecret,
   formatMB,
   formatRelativeAge,
   isPersistentActionAllowed,
   parseArgv,
+  parseHostdLabels,
 } from "./fleet.models";
 
 const TABS: readonly { id: FleetTab; label: string }[] = [
@@ -982,6 +988,348 @@ sandbox={{ pr.sandbox }} pod={{ pr.pod }} exit={{ pr.exitCode }}
                 </div>
               }
             </article>
+
+            <article class="ops-card" data-testid="fleet-hostds-enrollment">
+              <div class="ops-card-head">
+                <div>
+                  <h2 class="ops-card-title">Host Enrollment Codes</h2>
+                  <p class="ops-card-sub">
+                    Reusable invite codes for remote hosts joining via grain
+                    host --join (operator-only)
+                  </p>
+                </div>
+              </div>
+
+              @if (!canReadEnrollmentCodes()) {
+                <p
+                  class="empty-state"
+                  data-testid="fleet-enrollment-restricted"
+                >
+                  {{ operatorDeniedReason("GET /api/hostds/enrollment-codes") }}
+                </p>
+              } @else {
+                @if (issuedEnrollmentCode(); as issued) {
+                  <div
+                    class="fleet-token-banner"
+                    data-testid="fleet-enrollment-issued"
+                  >
+                    <div class="fleet-item-head">
+                      <strong>Issued enrollment code {{ issued.name }}</strong>
+                      <div class="fleet-inline-bar">
+                        <button
+                          type="button"
+                          class="btn-tonal"
+                          (click)="
+                            copyText(issued.text, 'Copied enrollment details.')
+                          "
+                        >
+                          Copy
+                        </button>
+                        <button
+                          type="button"
+                          class="btn-text"
+                          (click)="issuedEnrollmentCode.set(null)"
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    </div>
+                    <pre class="fleet-token-code">{{ issued.text }}</pre>
+                  </div>
+                }
+
+                @if (enrollmentCodes().length === 0) {
+                  <p
+                    class="muted"
+                    style="margin: 0"
+                    data-testid="fleet-enrollment-empty"
+                  >
+                    No host enrollment codes created yet.
+                  </p>
+                } @else {
+                  <div class="fleet-card-list">
+                    @for (c of enrollmentCodes(); track c.name) {
+                      @let codeRevoked = !!c.revoked_at;
+                      <div
+                        class="fleet-item-card"
+                        [attr.data-testid]="'fleet-enrollment-row-' + c.name"
+                      >
+                        <div class="fleet-item-head">
+                          <div class="fleet-item-title">
+                            <span class="tabular">{{ c.name }}</span>
+                            <span
+                              [class]="
+                                codeRevoked
+                                  ? 'status-pill error'
+                                  : 'status-pill healthy'
+                              "
+                            >
+                              <g-status-icon
+                                [tone]="codeRevoked ? 'error' : 'healthy'"
+                                [kind]="codeRevoked ? 'error' : 'healthy'"
+                              />
+                              {{ codeRevoked ? "revoked" : "active" }}
+                            </span>
+                          </div>
+                          <div class="fleet-inline-bar">
+                            <button
+                              type="button"
+                              class="btn-tonal"
+                              [attr.data-testid]="
+                                'fleet-enrollment-rotate-' + c.name
+                              "
+                              [disabled]="
+                                !canRotateEnrollmentCode() || codeRevoked
+                              "
+                              [gTip]="
+                                canRotateEnrollmentCode()
+                                  ? codeRevoked
+                                    ? 'Revoked codes cannot be rotated.'
+                                    : 'Rotate enrollment code'
+                                  : operatorDeniedReason(
+                                      'POST /api/hostds/enrollment-codes/{name}/rotate'
+                                    )
+                              "
+                              (click)="confirmRotateEnrollmentCode(c.name)"
+                            >
+                              Rotate
+                            </button>
+                            <button
+                              type="button"
+                              class="btn-text danger"
+                              [attr.data-testid]="
+                                'fleet-enrollment-revoke-' + c.name
+                              "
+                              [disabled]="
+                                !canRevokeEnrollmentCode() || codeRevoked
+                              "
+                              [gTip]="
+                                canRevokeEnrollmentCode()
+                                  ? codeRevoked
+                                    ? 'Enrollment code already revoked.'
+                                    : 'Revoke enrollment code'
+                                  : operatorDeniedReason(
+                                      'POST /api/hostds/enrollment-codes/{name}/revoke'
+                                    )
+                              "
+                              (click)="confirmRevokeEnrollmentCode(c.name)"
+                            >
+                              Revoke
+                            </button>
+                          </div>
+                        </div>
+                        <div class="fleet-item-meta tabular">
+                          <span
+                            >uses: {{ c.uses ?? 0 }} /
+                            {{ c.max_uses || "∞" }}</span
+                          >
+                          <span>{{
+                            codeRevoked
+                              ? "revoked"
+                              : c.expires_at
+                                ? "expires " + c.expires_at
+                                : "never expires"
+                          }}</span>
+                          @if (c.created_by) {
+                            <span>by {{ c.created_by }}</span>
+                          }
+                        </div>
+                      </div>
+                    }
+                  </div>
+                }
+
+                <form
+                  autocomplete="off"
+                  class="fleet-inline-bar"
+                  (submit)="$event.preventDefault(); createEnrollmentCode()"
+                >
+                  <input
+                    type="text"
+                    name="grain-fleet-enrollment-code"
+                    autocomplete="off"
+                    spellcheck="false"
+                    data-lpignore="true"
+                    data-1p-ignore="true"
+                    class="ops-input tabular"
+                    aria-label="New enrollment code name"
+                    data-testid="fleet-enrollment-name-input"
+                    placeholder="team-workstations"
+                    [value]="newEnrollmentCodeName()"
+                    [disabled]="
+                      !canCreateEnrollmentCode() || creatingEnrollmentCode()
+                    "
+                    (input)="
+                      newEnrollmentCodeName.set($any($event.target).value)
+                    "
+                  />
+                  <button
+                    type="submit"
+                    class="btn-primary"
+                    data-testid="fleet-enrollment-create-btn"
+                    [disabled]="
+                      !canCreateEnrollmentCode() ||
+                      !newEnrollmentCodeName().trim() ||
+                      creatingEnrollmentCode()
+                    "
+                    [gTip]="
+                      canCreateEnrollmentCode()
+                        ? 'Create reusable enrollment code'
+                        : operatorDeniedReason(
+                            'POST /api/hostds/enrollment-codes'
+                          )
+                    "
+                  >
+                    Create enrollment code
+                  </button>
+                </form>
+              }
+            </article>
+
+            <article class="ops-card" data-testid="fleet-hostds-pending">
+              <div class="ops-card-head">
+                <div>
+                  <h2 class="ops-card-title">Pending Host Approvals</h2>
+                  <p class="ops-card-sub">
+                    Pending join requests awaiting operator verification of
+                    enrolling identity and Ed25519 key fingerprint
+                    (operator-only)
+                  </p>
+                </div>
+                @if (canReadPendingHostds()) {
+                  <span
+                    class="status-pill neutral tabular"
+                    data-testid="fleet-pending-count"
+                  >
+                    <g-status-icon tone="neutral" kind="progress" />
+                    {{ pendingHostds().length }} pending
+                  </span>
+                }
+              </div>
+
+              @if (!canReadPendingHostds()) {
+                <p class="empty-state" data-testid="fleet-pending-restricted">
+                  {{ operatorDeniedReason("GET /api/hostds/pending") }}
+                </p>
+              } @else if (pendingHostds().length === 0) {
+                <p
+                  class="muted"
+                  style="margin: 0"
+                  data-testid="fleet-pending-empty"
+                >
+                  No pending host join requests.
+                </p>
+              } @else {
+                <div class="fleet-card-list" data-testid="fleet-pending-list">
+                  @for (p of pendingHostds(); track p.id) {
+                    <div
+                      class="fleet-item-card"
+                      [attr.data-testid]="'fleet-pending-row-' + p.id"
+                    >
+                      <div class="fleet-item-head">
+                        <div class="fleet-item-title">
+                          <span class="tabular">{{
+                            p.suggested_name || p.hostname || p.id
+                          }}</span>
+                          <span class="status-pill quiet">
+                            <g-status-icon tone="quiet" kind="warning" />
+                            pending
+                          </span>
+                          @if (p.enrolled_by) {
+                            <g-actor-chip
+                              [label]="p.enrolled_by"
+                              kind="human"
+                            />
+                          }
+                        </div>
+                        <div class="fleet-inline-bar">
+                          <button
+                            type="button"
+                            class="btn-primary"
+                            [attr.data-testid]="'fleet-pending-accept-' + p.id"
+                            [disabled]="
+                              !canAcceptPendingHostd() ||
+                              busyPendingId() === p.id
+                            "
+                            [gTip]="
+                              canAcceptPendingHostd()
+                                ? 'Approve join request and bind Ed25519 key'
+                                : operatorDeniedReason(
+                                    'POST /api/hostds/pending/{id}/accept'
+                                  )
+                            "
+                            (click)="acceptPendingHostd(p)"
+                          >
+                            Accept
+                          </button>
+                          <button
+                            type="button"
+                            class="btn-text danger"
+                            [attr.data-testid]="'fleet-pending-reject-' + p.id"
+                            [disabled]="
+                              !canRejectPendingHostd() ||
+                              busyPendingId() === p.id
+                            "
+                            [gTip]="
+                              canRejectPendingHostd()
+                                ? 'Reject pending join request'
+                                : operatorDeniedReason(
+                                    'POST /api/hostds/pending/{id}/reject'
+                                  )
+                            "
+                            (click)="confirmRejectPendingHostd(p)"
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      </div>
+
+                      <div class="fleet-item-meta tabular">
+                        <span
+                          class="fleet-fingerprint"
+                          [attr.data-testid]="
+                            'fleet-pending-fingerprint-' + p.id
+                          "
+                        >
+                          key: {{ p.key_fingerprint || "—" }}
+                        </span>
+                        @if (p.hostname) {
+                          <span>host: {{ p.hostname }}</span>
+                        }
+                        @if (p.os || p.arch) {
+                          <span>{{ p.os || "?" }}/{{ p.arch || "?" }}</span>
+                        }
+                        @if (p.enrollment_code) {
+                          <span>code: {{ p.enrollment_code }}</span>
+                        }
+                      </div>
+
+                      <div class="fleet-inline-bar">
+                        <input
+                          type="text"
+                          class="ops-input tabular"
+                          [attr.aria-label]="
+                            'Labels for ' + (p.hostname || p.id)
+                          "
+                          [attr.data-testid]="'fleet-pending-labels-' + p.id"
+                          placeholder="k=v (optional)"
+                          [value]="pendingLabelsValue(p)"
+                          [disabled]="
+                            !canAcceptPendingHostd() || busyPendingId() === p.id
+                          "
+                          (input)="
+                            setPendingLabelDraft(
+                              p.id,
+                              $any($event.target).value
+                            )
+                          "
+                        />
+                      </div>
+                    </div>
+                  }
+                </div>
+              }
+            </article>
           </div>
         }
 
@@ -1557,6 +1905,18 @@ export class FleetPageComponent implements OnInit {
   protected readonly issuedToken = signal<IssuedHostdToken | null>(null);
   protected readonly renamingHostd = signal<string | null>(null);
   protected readonly renameDraft = signal<string>("");
+  protected readonly enrollmentCodes = signal<HostEnrollmentCodeView[]>([]);
+  protected readonly issuedEnrollmentCode = signal<{
+    name: string;
+    text: string;
+  } | null>(null);
+  protected readonly newEnrollmentCodeName = signal<string>("");
+  protected readonly creatingEnrollmentCode = signal<boolean>(false);
+  protected readonly pendingHostds = signal<PendingHostJoinView[]>([]);
+  protected readonly pendingLabelDrafts = signal<
+    Partial<Record<string, string>>
+  >({});
+  protected readonly busyPendingId = signal<string | null>(null);
 
   protected readonly pipelinePause = signal<PipelinePauseStatus | null>(null);
   protected readonly pauseReasonDraft = signal<string>("");
@@ -1625,6 +1985,49 @@ export class FleetPageComponent implements OnInit {
     () =>
       this.access.can("POST /api/hostds/{name}/revoke") &&
       !this.isScopeRepoLimited("capabilities:admin"),
+  );
+
+  private canOperatorRoute(route: RouteKey): boolean {
+    const allowed = this.access.can(route);
+    return (
+      this.access.configLoaded() &&
+      this.access.isFullAccess() &&
+      routeScope(route) === null &&
+      allowed
+    );
+  }
+
+  protected operatorDeniedReason(route: RouteKey): string {
+    if (this.canOperatorRoute(route)) return "";
+    if (!this.access.configLoaded()) {
+      return "Checking operator permissions…";
+    }
+    return (
+      this.access.deniedReason(route) ||
+      `Your role ${this.access.roleLabel() || "none"} cannot do this: it needs a role holding every scope (grain/operator).`
+    );
+  }
+
+  protected readonly canReadEnrollmentCodes = computed(() =>
+    this.canOperatorRoute("GET /api/hostds/enrollment-codes"),
+  );
+  protected readonly canCreateEnrollmentCode = computed(() =>
+    this.canOperatorRoute("POST /api/hostds/enrollment-codes"),
+  );
+  protected readonly canRotateEnrollmentCode = computed(() =>
+    this.canOperatorRoute("POST /api/hostds/enrollment-codes/{name}/rotate"),
+  );
+  protected readonly canRevokeEnrollmentCode = computed(() =>
+    this.canOperatorRoute("POST /api/hostds/enrollment-codes/{name}/revoke"),
+  );
+  protected readonly canReadPendingHostds = computed(() =>
+    this.canOperatorRoute("GET /api/hostds/pending"),
+  );
+  protected readonly canAcceptPendingHostd = computed(() =>
+    this.canOperatorRoute("POST /api/hostds/pending/{id}/accept"),
+  );
+  protected readonly canRejectPendingHostd = computed(() =>
+    this.canOperatorRoute("POST /api/hostds/pending/{id}/reject"),
   );
   protected readonly canReadDispatch = computed(
     () =>
@@ -1856,7 +2259,7 @@ export class FleetPageComponent implements OnInit {
   private async loadBootstrapConfig(): Promise<void> {
     if (!this.access.can("GET /api/config")) return;
     try {
-      const cfg = await this.api.config();
+      const cfg = await this.api.config().catch(() => null);
       if (cfg) {
         this.access.setConfig(cfg);
         this.hostSandboxes.set(Boolean(cfg["hostSandboxes"]));
@@ -1914,16 +2317,77 @@ export class FleetPageComponent implements OnInit {
   }
 
   async loadHostds(): Promise<void> {
-    if (!this.canReadHostds()) return;
+    await Promise.all([
+      this.loadRegisteredHostds(),
+      this.loadHostEnrollmentCodes(),
+      this.loadPendingHostds(),
+    ]);
+  }
+
+  private async loadRegisteredHostds(): Promise<void> {
+    if (!this.canReadHostds()) {
+      this.hostds.set([]);
+      return;
+    }
     try {
       const res = await this.api.get<
         HostdView[] | { items?: HostdView[]; hostds?: HostdView[] }
       >("GET /api/hostds");
+      if (!this.canReadHostds()) {
+        this.hostds.set([]);
+        return;
+      }
       this.hostds.set(
         Array.isArray(res) ? res : (res?.items ?? res?.hostds ?? []),
       );
     } catch {
       // Optional if caller lacks capabilities:read.
+    }
+  }
+
+  async loadHostEnrollmentCodes(): Promise<void> {
+    if (!this.canReadEnrollmentCodes()) {
+      this.enrollmentCodes.set([]);
+      this.issuedEnrollmentCode.set(null);
+      return;
+    }
+    try {
+      const res = await this.api.get<
+        | HostEnrollmentCodeView[]
+        | { codes?: HostEnrollmentCodeView[]; items?: HostEnrollmentCodeView[] }
+      >("GET /api/hostds/enrollment-codes");
+      if (!this.canReadEnrollmentCodes()) {
+        this.enrollmentCodes.set([]);
+        this.issuedEnrollmentCode.set(null);
+        return;
+      }
+      this.enrollmentCodes.set(
+        Array.isArray(res) ? res : (res?.codes ?? res?.items ?? []),
+      );
+    } catch {
+      // Non-fatal.
+    }
+  }
+
+  async loadPendingHostds(): Promise<void> {
+    if (!this.canReadPendingHostds()) {
+      this.pendingHostds.set([]);
+      return;
+    }
+    try {
+      const res = await this.api.get<
+        | PendingHostJoinView[]
+        | { pending?: PendingHostJoinView[]; items?: PendingHostJoinView[] }
+      >("GET /api/hostds/pending");
+      if (!this.canReadPendingHostds()) {
+        this.pendingHostds.set([]);
+        return;
+      }
+      this.pendingHostds.set(
+        Array.isArray(res) ? res : (res?.pending ?? res?.items ?? []),
+      );
+    } catch {
+      // Non-fatal.
     }
   }
 
@@ -2173,6 +2637,7 @@ export class FleetPageComponent implements OnInit {
   }
 
   protected confirmRevokeHostd(name: string): void {
+    if (!this.canAdminHostds()) return;
     this.confirmReq.set({
       title: `Revoke host ${name}?`,
       message:
@@ -2180,6 +2645,7 @@ export class FleetPageComponent implements OnInit {
       accept: "Revoke host",
       destructive: true,
       run: async () => {
+        if (!this.canAdminHostds()) return;
         await this.api.post("POST /api/hostds/{name}/revoke", { name }, {});
         this.snackbar.show(`Revoked host ${name}.`);
         await this.loadHostds();
@@ -2188,12 +2654,14 @@ export class FleetPageComponent implements OnInit {
   }
 
   protected confirmDeleteHostd(name: string): void {
+    if (!this.canAdminHostds()) return;
     this.confirmReq.set({
       title: `Delete revoked host ${name}?`,
       message: `Removes ${name} from the hostd registry and clears any host-scoped quota pauses.`,
       accept: "Delete host",
       destructive: true,
       run: async () => {
+        if (!this.canAdminHostds()) return;
         await this.api.delete("DELETE /api/hostds/{name}", { name });
         this.snackbar.show(`Deleted host ${name}.`);
         await this.loadHostds();
@@ -2202,6 +2670,7 @@ export class FleetPageComponent implements OnInit {
   }
 
   protected confirmDeleteRevokedHostds(): void {
+    if (!this.canAdminHostds()) return;
     this.confirmReq.set({
       title: "Delete all revoked hosts?",
       message:
@@ -2209,6 +2678,7 @@ export class FleetPageComponent implements OnInit {
       accept: "Delete revoked",
       destructive: true,
       run: async () => {
+        if (!this.canAdminHostds()) return;
         const res = await this.api.post<DeleteRevokedHostdsResult>(
           "POST /api/hostds/delete-revoked",
           undefined,
@@ -2218,6 +2688,159 @@ export class FleetPageComponent implements OnInit {
           `Deleted ${res?.deleted?.length ?? 0} revoked host(s).`,
         );
         await this.loadHostds();
+      },
+    });
+  }
+
+  protected async createEnrollmentCode(): Promise<void> {
+    if (!this.canCreateEnrollmentCode() || this.creatingEnrollmentCode()) {
+      return;
+    }
+    const name = this.newEnrollmentCodeName().trim();
+    if (!name) return;
+    this.creatingEnrollmentCode.set(true);
+    try {
+      const res = await this.api.post<HostEnrollmentCodeView>(
+        "POST /api/hostds/enrollment-codes",
+        undefined,
+        { name },
+      );
+      this.newEnrollmentCodeName.set("");
+      if (this.canReadEnrollmentCodes()) {
+        const text = formatIssuedHostdSecret(`Enrollment code (${name})`, res);
+        if (text) this.issuedEnrollmentCode.set({ name, text });
+        await this.loadHostEnrollmentCodes();
+      }
+      this.snackbar.show(`Created enrollment code ${name}.`);
+    } catch (err) {
+      this.snackbar.show(errorText(err));
+    } finally {
+      this.creatingEnrollmentCode.set(false);
+    }
+  }
+
+  protected confirmRotateEnrollmentCode(name: string): void {
+    if (!this.canRotateEnrollmentCode()) return;
+    this.confirmReq.set({
+      title: `Rotate enrollment code ${name}?`,
+      message:
+        "Its invite command stops working at once, so hosts not yet joined with it need the new one. Hosts already joined keep their credentials.",
+      accept: "Rotate code",
+      destructive: true,
+      run: async () => {
+        if (!this.canRotateEnrollmentCode()) return;
+        const res = await this.api.post<HostEnrollmentCodeView>(
+          "POST /api/hostds/enrollment-codes/{name}/rotate",
+          { name },
+          {},
+        );
+        if (this.canReadEnrollmentCodes()) {
+          const text = formatIssuedHostdSecret(
+            `Rotated enrollment code (${name})`,
+            res,
+          );
+          if (text) this.issuedEnrollmentCode.set({ name, text });
+          await this.loadHostEnrollmentCodes();
+        }
+        this.snackbar.show(`Rotated enrollment code ${name}.`);
+      },
+    });
+  }
+
+  protected confirmRevokeEnrollmentCode(name: string): void {
+    if (!this.canRevokeEnrollmentCode()) return;
+    this.confirmReq.set({
+      title: `Revoke enrollment code ${name}?`,
+      message:
+        "Its invite command stops working for good and the code cannot be restored. Hosts already joined keep their credentials.",
+      accept: "Revoke code",
+      destructive: true,
+      run: async () => {
+        if (!this.canRevokeEnrollmentCode()) return;
+        await this.api.post(
+          "POST /api/hostds/enrollment-codes/{name}/revoke",
+          { name },
+          {},
+        );
+        if (this.issuedEnrollmentCode()?.name === name) {
+          this.issuedEnrollmentCode.set(null);
+        }
+        await this.loadHostEnrollmentCodes();
+        this.snackbar.show(`Revoked enrollment code ${name}.`);
+      },
+    });
+  }
+
+  protected formatLabelsInput(labels?: Record<string, string> | null): string {
+    return formatHostdLabels(labels);
+  }
+
+  protected pendingLabelsValue(p: PendingHostJoinView): string {
+    return (
+      this.pendingLabelDrafts()[p.id] ??
+      this.formatLabelsInput(p.default_labels)
+    );
+  }
+
+  protected setPendingLabelDraft(id: string, value: string): void {
+    this.pendingLabelDrafts.update((prev) => ({ ...prev, [id]: value }));
+  }
+
+  protected async acceptPendingHostd(p: PendingHostJoinView): Promise<void> {
+    if (!this.canAcceptPendingHostd() || this.busyPendingId() === p.id) return;
+    const rawLabels = this.pendingLabelsValue(p);
+    const parsed = parseHostdLabels(rawLabels);
+    if (parsed.error) {
+      this.snackbar.show(parsed.error);
+      return;
+    }
+    const hostName = p.suggested_name || p.hostname || p.id;
+    this.busyPendingId.set(p.id);
+    try {
+      await this.api.post(
+        "POST /api/hostds/pending/{id}/accept",
+        { id: p.id },
+        {
+          name: hostName,
+          ...(Object.keys(parsed.labels).length > 0
+            ? { labels: parsed.labels }
+            : {}),
+          ...(p.default_capacity && p.default_capacity > 0
+            ? { capacity: p.default_capacity }
+            : {}),
+        },
+      );
+      this.snackbar.show(`Approved host ${hostName}.`);
+      await this.loadHostds();
+    } catch (err) {
+      this.snackbar.show(errorText(err));
+    } finally {
+      this.busyPendingId.set(null);
+    }
+  }
+
+  protected confirmRejectPendingHostd(p: PendingHostJoinView): void {
+    if (!this.canRejectPendingHostd() || this.busyPendingId() === p.id) return;
+    this.confirmReq.set({
+      title: `Reject join request from ${p.hostname || p.id}?`,
+      message:
+        "It is discarded, and that host has to run its join command again to ask once more.",
+      accept: "Reject request",
+      destructive: true,
+      run: async () => {
+        if (!this.canRejectPendingHostd()) return;
+        this.busyPendingId.set(p.id);
+        try {
+          await this.api.post(
+            "POST /api/hostds/pending/{id}/reject",
+            { id: p.id },
+            {},
+          );
+          this.snackbar.show(`Rejected pending host ${p.hostname || p.id}.`);
+          await this.loadPendingHostds();
+        } finally {
+          this.busyPendingId.set(null);
+        }
       },
     });
   }
