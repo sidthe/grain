@@ -156,10 +156,7 @@ test("M16 Director overlay: top-bar toggle, d/Alt+D/Escape, coplanar selection c
   await expect(editPanel.getByTestId("director-shaper-pane")).toBeVisible();
 });
 
-test("compact modal Director drawer: dialog semantics, phone bounds, Shift+Tab wrap, and Escape restore @phone", async ({
-  page,
-  axe,
-}) => {
+test("compact modal Director drawer @phone", async ({ page, axe }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/next/inbox");
   await page.waitForSelector(".main-stage > *:not(router-outlet)");
