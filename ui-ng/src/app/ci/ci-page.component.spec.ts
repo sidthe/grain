@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import fs from "node:fs";
+import path from "node:path";
 import { TestBed } from "@angular/core/testing";
 import {
   Router,
@@ -23,6 +25,7 @@ import { Subject } from "rxjs";
 import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents, type GrainEvent } from "../api/grain-events.service";
 import type { GrainConfig } from "../api/models";
+import { AccessService } from "../services/access.service";
 import { CIPageComponent } from "./ci-page.component";
 import {
   type CIFault,
@@ -1606,5 +1609,306 @@ describe("CIPageComponent (D-26)", () => {
       root.querySelector('[data-testid="ci-fault-artifacts-run-errored-1"]')
         ?.textContent,
     ).toContain("does not hold ci:read on this repository");
+  });
+
+  it("completely hides mutable CI action buttons before config loads and for grain/viewer, and scopes contributor buttons to ci:write", async () => {
+    let resolveConfig!: (cfg: GrainConfig) => void;
+    api.config = () =>
+      new Promise<GrainConfig>((resolve) => {
+        resolveConfig = resolve;
+      });
+
+    const harness = await RouterTestingHarness.create("/ci/runs/run-running-3");
+    harness.detectChanges();
+    const root = harness.routeNativeElement!;
+
+    const mutableSelectors = [
+      '[data-testid="ci-open-run-dialog"]',
+      '[data-testid="ci-caches-menu-btn"]',
+      '[data-testid="ci-cancel-run-btn"]',
+      '[data-testid="ci-rerun-btn"]',
+      '[data-testid="ci-rerun-failed-btn"]',
+      '[data-testid="ci-open-quarantine-btn"]',
+    ];
+    for (const sel of mutableSelectors) {
+      expect(root.querySelector(sel), `${sel} before config loads`).toBeNull();
+    }
+
+    // Resolve as grain/viewer (read-only): every mutable button stays completely absent.
+    resolveConfig({
+      access: {
+        role: "grain/viewer",
+        roles: ["grain/viewer"],
+        full: false,
+        scopes: ["ci:read", "tasks:read", "caches:read"],
+      },
+      targetRepos: ["acme/widgets", "acme/infra"],
+    });
+    await flush(harness);
+
+    for (const sel of mutableSelectors) {
+      expect(
+        root.querySelector(sel),
+        `${sel} on active run for viewer`,
+      ).toBeNull();
+    }
+    expect(
+      root.querySelector('[data-testid="ci-detail-title"]')?.textContent,
+    ).toContain("Checks");
+
+    // Inspect a failed/errored Grain run as viewer: Re-run all, Re-run failed, and Quarantine remain hidden.
+    root
+      .querySelector<HTMLElement>('[data-testid="ci-run-row-run-failed-2"]')!
+      .click();
+    await flush(harness);
+    for (const sel of mutableSelectors) {
+      expect(
+        root.querySelector(sel),
+        `${sel} on failed run for viewer`,
+      ).toBeNull();
+    }
+
+    // Upgrade to grain/contributor (has ci:write, lacks caches:write and tests:write).
+    const access = TestBed.inject(AccessService);
+    access.setConfig({
+      access: {
+        role: "grain/contributor",
+        roles: ["grain/contributor"],
+        full: false,
+        scopes: ["ci:read", "ci:write", "tasks:read", "tasks:write"],
+      },
+      targetRepos: ["acme/widgets", "acme/infra"],
+    });
+    await flush(harness);
+
+    expect(
+      root.querySelector('[data-testid="ci-open-run-dialog"]'),
+    ).not.toBeNull();
+    expect(root.querySelector('[data-testid="ci-rerun-btn"]')).not.toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-rerun-failed-btn"]'),
+    ).not.toBeNull();
+    expect(root.querySelector('[data-testid="ci-caches-menu-btn"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-open-quarantine-btn"]'),
+    ).toBeNull();
+
+    // Mid-session downgrade back to viewer immediately hides all mutable buttons and disables/blocks submission.
+    access.setConfig({
+      access: {
+        role: "grain/viewer",
+        roles: ["grain/viewer"],
+        full: false,
+        scopes: ["ci:read"],
+      },
+      targetRepos: ["acme/widgets", "acme/infra"],
+    });
+    await flush(harness);
+    for (const sel of mutableSelectors) {
+      expect(
+        root.querySelector(sel),
+        `${sel} after downgrade to viewer`,
+      ).toBeNull();
+    }
+  });
+
+  it("hides repo-scoped mutable CI buttons on unauthorized repositories and guards programmatic mutations", async () => {
+    api.runs.unshift({
+      id: "run-running-widgets",
+      provider: "grain",
+      repo: "acme/widgets",
+      ref: "refs/heads/main",
+      status: "running",
+      startedAt: "2026-11-12T00:08:00Z",
+      jobs: [],
+    });
+    api.configBody = {
+      access: {
+        role: "grain/repo-ci",
+        roles: ["grain/repo-ci"],
+        full: false,
+        scopes: ["ci:read", "ci:write", "tests:write", "caches:write"],
+        repoLimits: {
+          "ci:write": ["acme/infra"],
+          "caches:write": ["acme/infra"],
+        },
+      },
+      targetRepos: ["acme/widgets", "acme/infra"],
+    };
+
+    const harness = await RouterTestingHarness.create("/ci/runs/run-running-3");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    // Authorized repo acme/infra shows Cancel run, Re-run all, and Quarantine test.
+    expect(
+      root.querySelector('[data-testid="ci-cancel-run-btn"]'),
+    ).not.toBeNull();
+    expect(root.querySelector('[data-testid="ci-rerun-btn"]')).not.toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-open-quarantine-btn"]'),
+    ).not.toBeNull();
+
+    // Switching to active run on unauthorized repo acme/widgets hides Cancel run and Re-run buttons.
+    root
+      .querySelector<HTMLElement>(
+        '[data-testid="ci-run-row-run-running-widgets"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="ci-cancel-run-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="ci-rerun-btn"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-open-quarantine-btn"]'),
+    ).not.toBeNull();
+
+    // Failed run on unauthorized repo acme/widgets hides both Re-run all and Re-run failed.
+    root
+      .querySelector<HTMLElement>('[data-testid="ci-run-row-run-failed-2"]')!
+      .click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="ci-rerun-btn"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-rerun-failed-btn"]'),
+    ).toBeNull();
+
+    // Header Run workflow & Flush cache respect repoFilter when repoLimits apply.
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-repo-pill"]')!
+      .click();
+    await flush(harness);
+    const repoOptions = [
+      ...root.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="ci-repo-menu"] [role="option"]',
+      ),
+    ];
+    repoOptions.find((b) => b.textContent?.includes("acme/widgets"))!.click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="ci-open-run-dialog"]')).toBeNull();
+    expect(root.querySelector('[data-testid="ci-caches-menu-btn"]')).toBeNull();
+
+    // Switching repo filter to authorized acme/infra shows repo-scoped Actions cache flush only (not global caches).
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-repo-pill"]')!
+      .click();
+    await flush(harness);
+    const infraOpt = [
+      ...root.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="ci-repo-menu"] [role="option"]',
+      ),
+    ].find((b) => b.textContent?.includes("acme/infra"))!;
+    infraOpt.click();
+    await flush(harness);
+    expect(
+      root.querySelector('[data-testid="ci-open-run-dialog"]'),
+    ).not.toBeNull();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-caches-menu-btn"]')!
+      .click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="ci-flush-job-cache"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-flush-package-cache"]'),
+    ).toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-flush-actions-cache"]'),
+    ).not.toBeNull();
+
+    // Direct invocation of mutation handlers for an unauthorized repo sends zero API calls.
+    const cmp = harness.routeDebugElement!.componentInstance as unknown as {
+      rerunSelected(run: CIRun, failedOnly: boolean): Promise<void>;
+      confirmCancelRun(run: CIRun): void;
+      openQuarantineDialog(run: CIRun): void;
+    };
+    const widgetsRun = api.runs.find((r) => r.id === "run-failed-2")!;
+    const beforePosts = api.postCalls.length;
+    await cmp.rerunSelected(widgetsRun, true);
+    cmp.confirmCancelRun(api.runs[0]);
+    expect(api.postCalls.length).toBe(beforePosts);
+    expect(root.querySelector('[data-testid="ci-cancel-dialog"]')).toBeNull();
+  });
+
+  it("aligns filter pop-menus within 390px viewports and ships component-scoped filter wrap/containment rules", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 390,
+      configurable: true,
+      writable: true,
+    });
+    const harness = await RouterTestingHarness.create("/ci");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    const repoBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="ci-repo-pill"]',
+    )!;
+    const branchBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="ci-branch-pill"]',
+    )!;
+    const cachesBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="ci-caches-menu-btn"]',
+    )!;
+
+    repoBtn.getBoundingClientRect = () =>
+      ({
+        left: 16,
+        right: 110,
+        width: 94,
+        top: 180,
+        bottom: 214,
+        height: 34,
+      }) as DOMRect;
+    branchBtn.getBoundingClientRect = () =>
+      ({
+        left: 230,
+        right: 340,
+        width: 110,
+        top: 180,
+        bottom: 214,
+        height: 34,
+      }) as DOMRect;
+    cachesBtn.getBoundingClientRect = () =>
+      ({
+        left: 16,
+        right: 136,
+        width: 120,
+        top: 60,
+        bottom: 100,
+        height: 40,
+      }) as DOMRect;
+
+    repoBtn.click();
+    await flush(harness);
+    expect(
+      root
+        .querySelector('[data-testid="ci-repo-menu"]')!
+        .classList.contains("align-right"),
+    ).toBe(false);
+
+    branchBtn.click();
+    await flush(harness);
+    expect(
+      root
+        .querySelector('[data-testid="ci-branch-menu"]')!
+        .classList.contains("align-right"),
+    ).toBe(true);
+
+    cachesBtn.click();
+    await flush(harness);
+    expect(
+      root
+        .querySelector('[data-testid="ci-caches-menu"]')!
+        .classList.contains("align-right"),
+    ).toBe(false);
+
+    const listCss = fs.readFileSync(
+      path.join(__dirname, "ci-list.css"),
+      "utf8",
+    );
+    expect(listCss).toContain("g-ci-page .filter-strip");
+    expect(listCss).toContain("flex-wrap: wrap");
+    expect(listCss).toContain(".ci-toolbar .segmented");
+    expect(listCss).toContain("min-width: min(200px, calc(100vw - 32px))");
+    expect(listCss).toContain("grid-template-rows: minmax(0, 1fr)");
+    expect(listCss).toContain("border-right: 0");
   });
 });
