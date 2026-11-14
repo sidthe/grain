@@ -26,6 +26,7 @@ import { GrainEvents } from "../api/grain-events.service";
 import type { Task, TaskDetail } from "../api/models";
 import { CreateTaskService } from "../create/create-task.service";
 import { AccessService } from "../services/access.service";
+import { PHONE_QUERY } from "../shared/split";
 import {
   WS_VIEW_STORAGE_KEY,
   WorkstreamsPageComponent,
@@ -112,6 +113,7 @@ describe("WorkstreamsPageComponent", () => {
     localStorage.removeItem("grain.ws.treeRatio");
     api = new FakeApi();
     Object.defineProperty(window, "matchMedia", {
+      configurable: true,
       writable: true,
       value: () => ({
         matches: false,
@@ -963,6 +965,189 @@ describe("WorkstreamsPageComponent", () => {
       queryParams: { node: null },
       queryParamsHandling: "merge",
     });
+  });
+
+  it("applies is-mobile class below 600px, updates on media query change and resize, and cleans up listener", async () => {
+    let matches = false;
+    const listeners = new Set<(ev: MediaQueryListEvent) => void>();
+    const addEventListener = vi.fn(
+      (type: string, cb: (ev: MediaQueryListEvent) => void) => {
+        if (type === "change") listeners.add(cb);
+      },
+    );
+    const removeEventListener = vi.fn(
+      (type: string, cb: (ev: MediaQueryListEvent) => void) => {
+        if (type === "change") listeners.delete(cb);
+      },
+    );
+    const matchMediaSpy = vi.fn((query: string) => ({
+      matches: query === PHONE_QUERY ? matches : false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener,
+      removeEventListener,
+      dispatchEvent: () => false,
+    }));
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: matchMediaSpy,
+    });
+
+    const { fixture, router } = await mount("/workstreams");
+    const el = fixture.nativeElement as HTMLElement;
+    const pageEl = () =>
+      el.querySelector<HTMLElement>('[data-testid="ws-page"]');
+
+    expect(matchMediaSpy).toHaveBeenCalledWith(PHONE_QUERY);
+    expect(pageEl()?.classList.contains("is-mobile")).toBe(false);
+    expect(addEventListener).toHaveBeenCalledWith(
+      "change",
+      expect.any(Function),
+    );
+
+    // MediaQueryList change event enters and exits < 600px mobile mode.
+    for (const cb of listeners) {
+      cb({ matches: true, media: PHONE_QUERY } as MediaQueryListEvent);
+    }
+    fixture.detectChanges();
+    expect(pageEl()?.classList.contains("is-mobile")).toBe(true);
+
+    for (const cb of listeners) {
+      cb({ matches: false, media: PHONE_QUERY } as MediaQueryListEvent);
+    }
+    fixture.detectChanges();
+    expect(pageEl()?.classList.contains("is-mobile")).toBe(false);
+
+    // Window resize re-queries PHONE_QUERY and also marks ws-not-found as mobile.
+    matches = true;
+    window.dispatchEvent(new Event("resize"));
+    fixture.detectChanges();
+    expect(pageEl()?.classList.contains("is-mobile")).toBe(true);
+
+    await router.navigateByUrl("/workstreams/task:missing");
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(
+      el
+        .querySelector<HTMLElement>('[data-testid="ws-not-found"]')
+        ?.classList.contains("is-mobile"),
+    ).toBe(true);
+
+    fixture.destroy();
+    expect(removeEventListener).toHaveBeenCalledWith(
+      "change",
+      expect.any(Function),
+    );
+    expect(listeners.size).toBe(0);
+  });
+
+  it("applies is-mobile on ws-loading and falls back to innerWidth or legacy MediaQueryList when needed", async () => {
+    // 1. Minimal MediaQueryList mock without addEventListener/removeEventListener,
+    //    plus unresolved store (ws-loading branch).
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: () => ({ matches: true }) as unknown as MediaQueryList,
+    });
+    TestBed.configureTestingModule({
+      imports: [WorkstreamsPageComponent],
+      providers: [
+        provideRouter(
+          [{ path: "workstreams/:key", component: WorkstreamsPageComponent }],
+          withComponentInputBinding(),
+        ),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => NEVER } },
+      ],
+    });
+    const loadingHarness = await RouterTestingHarness.create(
+      "/workstreams/task:loading",
+      WorkstreamsPageComponent,
+    );
+    loadingHarness.detectChanges();
+    const loadingEl = (
+      loadingHarness.routeNativeElement as HTMLElement
+    ).querySelector('[data-testid="ws-loading"]');
+    expect(loadingEl?.classList.contains("is-mobile")).toBe(true);
+    loadingHarness.fixture.destroy();
+    TestBed.resetTestingModule();
+
+    // 1b. Legacy MediaQueryList with addListener/removeListener only.
+    let legacyCb: ((ev: MediaQueryListEvent) => void) | null = null;
+    const addListener = vi.fn((cb: (ev: MediaQueryListEvent) => void) => {
+      legacyCb = cb;
+    });
+    const removeListener = vi.fn((cb: (ev: MediaQueryListEvent) => void) => {
+      if (legacyCb === cb) legacyCb = null;
+    });
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: () =>
+        ({
+          matches: false,
+          addListener,
+          removeListener,
+        }) as unknown as MediaQueryList,
+    });
+    const legacyMount = await mount("/workstreams");
+    const legacyEl = legacyMount.fixture.nativeElement as HTMLElement;
+    expect(addListener).toHaveBeenCalledTimes(1);
+    expect(
+      legacyEl
+        .querySelector('[data-testid="ws-page"]')
+        ?.classList.contains("is-mobile"),
+    ).toBe(false);
+    legacyCb!({ matches: true } as MediaQueryListEvent);
+    legacyMount.fixture.detectChanges();
+    expect(
+      legacyEl
+        .querySelector('[data-testid="ws-page"]')
+        ?.classList.contains("is-mobile"),
+    ).toBe(true);
+    legacyMount.fixture.destroy();
+    expect(removeListener).toHaveBeenCalledTimes(1);
+    TestBed.resetTestingModule();
+
+    // 2. Fallback to window.innerWidth < 600 when matchMedia is unavailable.
+    const prevInnerWidth = window.innerWidth;
+    Reflect.deleteProperty(window, "matchMedia");
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: 390,
+    });
+    try {
+      const { fixture } = await mount("/workstreams");
+      const el = fixture.nativeElement as HTMLElement;
+      expect(
+        el
+          .querySelector<HTMLElement>('[data-testid="ws-page"]')
+          ?.classList.contains("is-mobile"),
+      ).toBe(true);
+
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        writable: true,
+        value: 600,
+      });
+      window.dispatchEvent(new Event("resize"));
+      fixture.detectChanges();
+      expect(
+        el
+          .querySelector<HTMLElement>('[data-testid="ws-page"]')
+          ?.classList.contains("is-mobile"),
+      ).toBe(false);
+    } finally {
+      Object.defineProperty(window, "innerWidth", {
+        configurable: true,
+        writable: true,
+        value: prevInnerWidth,
+      });
+    }
   });
 });
 
