@@ -17,6 +17,10 @@ package agent
 import (
 	"slices"
 	"testing"
+	"time"
+
+	"github.com/ai-on-gke/grain/pkg/metrics"
+	"github.com/ai-on-gke/grain/pkg/model"
 )
 
 // The two surfaces partition PublishedToolNames: every published tool is
@@ -46,5 +50,41 @@ func TestPublishedSurfacesPartitionTheRoster(t *testing.T) {
 	}
 	if got := ToolSurface("Bash"); got != "" {
 		t.Errorf("ToolSurface(Bash) = %q, want empty for a name grain does not publish", got)
+	}
+}
+
+// TestMetricsToolSurfaceMatchesRoster keeps pkg/metrics' local surface table
+// aligned with ToolSurface so pkg/metrics stays independent of pkg/agent.
+func TestMetricsToolSurfaceMatchesRoster(t *testing.T) {
+	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
+	names := append([]string(nil), PublishedToolNames()...)
+	names = append(names, "cap__widgets__ping", "Bash")
+	uses := make([]model.RunToolUse, 0, len(names))
+	for _, name := range names {
+		uses = append(uses, model.RunToolUse{RunID: "r1", Tool: name, Calls: 1})
+	}
+	rep := metrics.Compute(metrics.Input{
+		Window: metrics.Window{Since: now.Add(-time.Hour), Until: now.Add(time.Hour)},
+		Runs: []model.RunTiming{{
+			RunID: "r1", TaskID: "t1", Attempt: 1,
+			StartedAt: now.Add(-time.Minute), FinishedAt: &now, Outcome: "succeeded",
+		}},
+		ToolUses: uses,
+	})
+	got := make(map[string]string, len(rep.Tools.ByTool))
+	for _, u := range rep.Tools.ByTool {
+		got[u.Name] = u.Surface
+	}
+	for _, name := range names {
+		want := ToolSurface(name)
+		if got[name] != want {
+			t.Errorf("metrics surface for %q = %q, want %q (update pkg/metrics/tools.go toolSurfaces)", name, got[name], want)
+		}
+	}
+	if want := len(PublishedControlToolNames()); rep.Tools.ControlCalls != want {
+		t.Errorf("ControlCalls = %d, want %d", rep.Tools.ControlCalls, want)
+	}
+	if want := len(PublishedCLICommandNames()) + 1; rep.Tools.CLICalls != want {
+		t.Errorf("CLICalls = %d, want %d", rep.Tools.CLICalls, want)
 	}
 }
