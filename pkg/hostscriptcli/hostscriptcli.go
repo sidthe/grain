@@ -38,6 +38,8 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Dir is where a grant places its descriptor in the sandbox.
@@ -279,3 +281,49 @@ func DecodeFrame(s string) []byte {
 }
 
 func isOctal(c byte) bool { return c >= '0' && c <= '7' }
+
+const (
+	minScriptNameLen = 3
+	maxScriptNameLen = 32
+)
+
+// ValidateScriptName checks whether name is a valid host script name.
+// It rejects empty names, any whitespace, '/' or '\', lengths outside
+// 3..32 characters inclusive, and characters other than ASCII alphanumeric
+// characters, '-', and '_'.
+func ValidateScriptName(name string) error {
+	if name == "" {
+		return errors.New("hostscriptcli: script name must not be empty")
+	}
+	// Reject oversized inputs before scanning: every valid character is 1 byte,
+	// and even multi-byte UTF-8 runes are at most utf8.UTFMax bytes, so any
+	// string exceeding maxScriptNameLen*utf8.UTFMax bytes has > 32 characters.
+	if len(name) > maxScriptNameLen*utf8.UTFMax {
+		return fmt.Errorf("hostscriptcli: script name length must be between %d and %d characters", minScriptNameLen, maxScriptNameLen)
+	}
+	runeCount := 0
+	hasInvalidChar := false
+	for _, r := range name {
+		if unicode.IsSpace(r) {
+			return errors.New("hostscriptcli: script name must not contain whitespace")
+		}
+		if r == '/' || r == '\\' {
+			return errors.New("hostscriptcli: script name must not contain '/' or '\\'")
+		}
+		if !isScriptNameRune(r) {
+			hasInvalidChar = true
+		}
+		runeCount++
+	}
+	if runeCount < minScriptNameLen || runeCount > maxScriptNameLen {
+		return fmt.Errorf("hostscriptcli: script name length %d must be between %d and %d characters", runeCount, minScriptNameLen, maxScriptNameLen)
+	}
+	if hasInvalidChar {
+		return errors.New("hostscriptcli: script name may only contain ASCII alphanumeric characters, '-' and '_'")
+	}
+	return nil
+}
+
+func isScriptNameRune(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_'
+}

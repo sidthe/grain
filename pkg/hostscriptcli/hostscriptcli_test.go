@@ -165,3 +165,125 @@ func TestRunWithStdinAndApprovalHelp(t *testing.T) {
 		t.Errorf("approve: true help = %q, want approval note", helpOut)
 	}
 }
+
+func TestValidateScriptNameValid(t *testing.T) {
+	t.Parallel()
+
+	valid := []string{
+		"abc",
+		"ABC",
+		"123",
+		"---",
+		"___",
+		"-a_",
+		"_A-",
+		"deploy",
+		"bad-token",
+		"My_Script-01",
+		"HOST_SCRIPT_99",
+		"0123456789",
+		strings.Repeat("a", 3),
+		strings.Repeat("Z", 32),
+		"abcdefghijklmnopqrstuvwxyz012345",
+		"A1_-bcdefghijklmnopqrstuvwxyz012",
+	}
+	for _, name := range valid {
+		if err := ValidateScriptName(name); err != nil {
+			t.Errorf("ValidateScriptName(%q) unexpected error: %v", name, err)
+		}
+	}
+}
+
+func TestValidateScriptNameInvalid(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		desc string
+		name string
+	}{
+		{desc: "empty", name: ""},
+		{desc: "len_1_letter", name: "a"},
+		{desc: "len_1_digit", name: "1"},
+		{desc: "len_1_dash", name: "-"},
+		{desc: "len_1_underscore", name: "_"},
+		{desc: "len_2", name: "ab"},
+		{desc: "len_2_symbols", name: "-_"},
+		{desc: "len_33", name: strings.Repeat("a", 33)},
+		{desc: "len_64", name: strings.Repeat("a", 64)},
+		{desc: "len_128", name: strings.Repeat("a", 128)},
+		{desc: "len_129", name: strings.Repeat("a", 129)},
+		{desc: "space_only", name: "   "},
+		{desc: "space_single", name: " "},
+		{desc: "space_middle", name: "a b"},
+		{desc: "space_leading", name: " abc"},
+		{desc: "space_trailing", name: "abc "},
+		{desc: "tab", name: "a\tb"},
+		{desc: "newline", name: "a\nb"},
+		{desc: "carriage_return", name: "a\rb"},
+		{desc: "vertical_tab", name: "a\vb"},
+		{desc: "form_feed", name: "a\fb"},
+		{desc: "unicode_nbsp", name: "a\u00a0b"},
+		{desc: "unicode_em_space", name: "a\u2003b"},
+		{desc: "unicode_ideographic_space", name: "a\u3000b"},
+		{desc: "slash_middle", name: "foo/bar"},
+		{desc: "slash_leading", name: "/abc"},
+		{desc: "slash_trailing", name: "abc/"},
+		{desc: "slash_only", name: "///"},
+		{desc: "backslash_middle", name: `foo\bar`},
+		{desc: "backslash_leading", name: `\abc`},
+		{desc: "backslash_trailing", name: `abc\`},
+		{desc: "backslash_only", name: `\\\`},
+		{desc: "dot_traversal_slash", name: "../foo"},
+		{desc: "dot_traversal_backslash", name: `..\foo`},
+		{desc: "dot", name: "foo.sh"},
+		{desc: "colon", name: "foo:bar"},
+		{desc: "at", name: "foo@bar"},
+		{desc: "plus", name: "foo+bar"},
+		{desc: "dollar", name: "foo$bar"},
+		{desc: "asterisk", name: "foo*bar"},
+		{desc: "nul_byte", name: "foo\x00bar"},
+		{desc: "control_char", name: "foo\x1fbar"},
+		{desc: "del_char", name: "foo\x7fbar"},
+		{desc: "non_ascii_latin", name: "café"},
+		{desc: "non_ascii_3_runes", name: "ééé"},
+		{desc: "non_ascii_2_runes", name: "éé"},
+		{desc: "non_ascii_greek", name: "αβγ"},
+		{desc: "non_ascii_digit", name: "foo０bar"},
+		{desc: "non_ascii_arabic_digit", name: "foo٢bar"},
+		{desc: "emoji", name: "foo😀bar"},
+		{desc: "invalid_utf8_0x80", name: "foo\x80bar"},
+		{desc: "invalid_utf8_0xff", name: "foo\xffbar"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.desc, func(t *testing.T) {
+			if err := ValidateScriptName(tc.name); err == nil {
+				t.Errorf("ValidateScriptName(%q) = nil, want error", tc.name)
+			}
+		})
+	}
+}
+
+func TestValidateScriptNameHugeInputs(t *testing.T) {
+	t.Parallel()
+
+	hugeInputs := []struct {
+		desc string
+		name string
+	}{
+		{desc: "huge_ascii", name: strings.Repeat("a", 1<<20)},
+		{desc: "huge_whitespace", name: strings.Repeat(" ", 1<<20)},
+		{desc: "huge_slashes", name: strings.Repeat("/", 1<<20)},
+		{desc: "huge_multibyte", name: strings.Repeat("é", 1<<18)},
+	}
+	for _, tc := range hugeInputs {
+		t.Run(tc.desc, func(t *testing.T) {
+			err := ValidateScriptName(tc.name)
+			if err == nil {
+				t.Fatalf("ValidateScriptName(huge len=%d) = nil, want error", len(tc.name))
+			}
+			if len(err.Error()) >= 256 {
+				t.Fatalf("ValidateScriptName(huge) error message unexpectedly large (%d bytes)", len(err.Error()))
+			}
+		})
+	}
+}
