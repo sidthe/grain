@@ -57,12 +57,13 @@ import {
   type Memory,
   type MemoryDocument,
   buildMemoryScopes,
+  buildGrepTruncationNotice,
   documentSize,
   estimateTokens,
   highlightSyntaxHtml,
   isStaleMemory,
   memoryAge,
-  parseGrepOutput,
+  parseGrepResult,
   repoFromMemoryFsPath,
   scopeKey,
   scopeLabel,
@@ -658,7 +659,7 @@ type ReachableReposPayload =
                   <button
                     type="button"
                     class="btn-text"
-                    (click)="fsGrepHits.set(null)"
+                    (click)="clearFsGrep()"
                   >
                     Clear search
                   </button>
@@ -691,6 +692,22 @@ type ReachableReposPayload =
                     </li>
                   }
                 </ul>
+                @if (fsGrepTruncated()) {
+                  <div
+                    class="ctx-fs-grep-footer"
+                    role="status"
+                    data-testid="fs-grep-truncated"
+                  >
+                    <g-status-icon tone="blast" kind="warning" />
+                    <div class="ctx-fs-grep-footer-body">
+                      @for (notice of fsGrepNotices(); track $index) {
+                        <p class="ctx-fs-grep-footer-line tabular">
+                          {{ notice }}
+                        </p>
+                      }
+                    </div>
+                  </div>
+                }
               } @else if (fsEntries().length === 0) {
                 <p class="empty-state" data-testid="fs-empty">
                   No files in {{ fsScheme() }}://{{ fsDir() }}.
@@ -1251,6 +1268,9 @@ export class ContextPageComponent implements OnInit, OnDestroy {
   protected readonly fsRenderMd = signal(false);
   protected readonly fsGrepQuery = signal<string>("");
   protected readonly fsGrepHits = signal<FsGrepHit[] | null>(null);
+  protected readonly fsGrepTruncated = signal<boolean>(false);
+  protected readonly fsGrepNotices = signal<string[]>([]);
+  private fsGrepSeq = 0;
   private hasLoadedMemory = false;
 
   constructor() {
@@ -1691,7 +1711,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
         this.fsEntries.set([]);
         this.fsSelectedFile.set("");
         this.fsFileContent.set("");
-        this.fsGrepHits.set(null);
+        this.clearFsGrep();
       }
       if (this.tab() === "namespace") {
         await this.loadFsDir(this.fsDir());
@@ -2032,7 +2052,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     this.fsDir.set("");
     this.fsSelectedFile.set("");
     this.fsFileContent.set("");
-    this.fsGrepHits.set(null);
+    this.clearFsGrep();
     void this.loadFsDir("");
   }
 
@@ -2041,7 +2061,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
   }
 
   protected openFsDir(dir: string): void {
-    this.fsGrepHits.set(null);
+    this.clearFsGrep();
     void this.loadFsDir(dir);
   }
 
@@ -2049,7 +2069,14 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     const cur = this.fsDir();
     if (!cur) return;
     const idx = cur.lastIndexOf("/");
-    void this.loadFsDir(idx < 0 ? "" : cur.slice(0, idx));
+    this.openFsDir(idx < 0 ? "" : cur.slice(0, idx));
+  }
+
+  protected clearFsGrep(): void {
+    this.fsGrepSeq++;
+    this.fsGrepHits.set(null);
+    this.fsGrepTruncated.set(false);
+    this.fsGrepNotices.set([]);
   }
 
   async loadFsDir(dir: string): Promise<void> {
@@ -2102,10 +2129,27 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     }
   }
 
+  private sanitizeGrepNotice(notice: string, grepDir: string): string {
+    if (!this.isMemoryReadRepoLimited()) return notice;
+    const m = /\bstopped at ([^;\]]+)/i.exec(notice);
+    if (!m) return notice;
+    const rawPath = m[1].trim();
+    const clean = rawPath.replace(/^\/+|\/+$/g, "");
+    const isFile = !rawPath.endsWith("/") && /\.[^/]+$/.test(clean);
+    const candidates = [clean];
+    if (grepDir && !clean.startsWith(`${grepDir}/`) && clean !== grepDir) {
+      candidates.push(this.joinPath(grepDir, clean));
+    }
+    if (candidates.some((p) => this.canReadFsPath(p, isFile))) {
+      return notice;
+    }
+    return "[truncated: walked entry limit reached; narrow the directory path to search the rest]";
+  }
+
   protected async runFsGrep(): Promise<void> {
     const q = this.fsGrepQuery().trim();
     if (!q) {
-      this.fsGrepHits.set(null);
+      this.clearFsGrep();
       return;
     }
     const dir = this.fsDir();
@@ -2122,17 +2166,53 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     params.set("grep", q);
     params.set("i", "1");
     params.set("n", "1");
+    const reqSeq = ++this.fsGrepSeq;
     try {
-      const raw = await this.api.getText(
-        route,
-        { path: grepDir },
-        params.toString(),
+      let raw = "";
+      let headerTruncated = false;
+      let headerWalkTruncated = false;
+      let headerMatches: number | null = null;
+      if (typeof this.api.getTextResponse === "function") {
+        const res = await this.api.getTextResponse(
+          route,
+          { path: grepDir },
+          params.toString(),
+        );
+        raw = res?.body ?? "";
+        headerTruncated =
+          res?.headers?.get("X-Grain-Truncated")?.trim().toLowerCase() ===
+          "true";
+        headerWalkTruncated =
+          res?.headers?.get("X-Grain-Walk-Truncated")?.trim().toLowerCase() ===
+          "true";
+        const mRaw = res?.headers?.get("X-Grain-Matches")?.trim();
+        if (mRaw && /^\d+$/.test(mRaw)) {
+          headerMatches = Number(mRaw);
+        }
+      } else {
+        raw =
+          (await this.api.getText(
+            route,
+            { path: grepDir },
+            params.toString(),
+          )) ?? "";
+      }
+      if (reqSeq !== this.fsGrepSeq) return;
+      const parsed = parseGrepResult(raw, grepDir);
+      const hits = parsed.hits.filter((h) => this.canReadFsPath(h.file, true));
+      const walkTruncated = headerWalkTruncated || parsed.walkTruncated;
+      const truncated = headerTruncated || walkTruncated || parsed.truncated;
+      const notices = parsed.notices.map((n) =>
+        this.sanitizeGrepNotice(n, grepDir),
       );
-      const hits = parseGrepOutput(raw, grepDir).filter((h) =>
-        this.canReadFsPath(h.file, true),
-      );
+      if (truncated && notices.length === 0) {
+        notices.push(buildGrepTruncationNotice(walkTruncated, headerMatches));
+      }
       this.fsGrepHits.set(hits);
+      this.fsGrepTruncated.set(truncated);
+      this.fsGrepNotices.set(notices);
     } catch (err) {
+      if (reqSeq !== this.fsGrepSeq) return;
       this.snackbar.show(errorText(err));
     }
   }

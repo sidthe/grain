@@ -1016,4 +1016,138 @@ describe("SessionsPageComponent", () => {
     expect(readsAll().disabled).toBe(false);
     f.destroy();
   });
+
+  it("renders unadvertised and disabled-only model badges across catalog edge cases", async () => {
+    const api1 = new FakeApi();
+    api1.sessions[0] = { ...api1.sessions[0], model: "retired-model" };
+    const f1 = await render(api1);
+    expect(q(f1, '[data-testid="chat-head-model"]')).not.toBeNull();
+    expect(text(f1, '[data-testid="chat-head-model-unadvertised"]')).toBe(
+      "not advertised by any connection",
+    );
+    (
+      q(f1, '[data-testid="session-settings-toggle"]') as HTMLButtonElement
+    ).click();
+    await settle(f1);
+    expect(text(f1, '[data-testid="session-model-unadvertised"]')).toBe(
+      "not advertised by any connection",
+    );
+    f1.destroy();
+  });
+
+  it("matches advertised models case-insensitively without showing an unadvertised badge", async () => {
+    const apiCase = new FakeApi();
+    apiCase.sessions[0] = { ...apiCase.sessions[0], model: "GEMINI-PRO" };
+    const fCase = await render(apiCase);
+    expect(q(fCase, '[data-testid="chat-head-model"]')).not.toBeNull();
+    expect(q(fCase, '[data-testid="chat-head-model-unadvertised"]')).toBeNull();
+    fCase.destroy();
+  });
+
+  it("renders read-only default and unadvertised badge when models are omitted and hides empty whitespace models", async () => {
+    const apiEmpty = new FakeApi();
+    apiEmpty.config = () =>
+      Promise.resolve({
+        access: null,
+        modelsConfigured: false,
+        defaultModel: "vanished-default",
+      } as never);
+    const fEmpty = await render(apiEmpty);
+    expect(q(fEmpty, '[data-testid="chat-head-model"]')).toBeNull();
+    expect(text(fEmpty, '[data-testid="chat-head-model-readonly"]')).toBe(
+      "Deployment default (vanished-default)",
+    );
+    expect(text(fEmpty, '[data-testid="chat-head-model-unadvertised"]')).toBe(
+      "not advertised by any connection",
+    );
+    fEmpty.destroy();
+    TestBed.inject(SessionsStore).stop();
+    TestBed.resetTestingModule();
+
+    const apiNone = new FakeApi();
+    apiNone.sessions[0] = { ...apiNone.sessions[0], model: "   " };
+    apiNone.config = () =>
+      Promise.resolve({ access: null, models: [], defaultModel: "" } as never);
+    const fNone = await render(apiNone);
+    expect(q(fNone, '[data-testid="chat-head-model"]')).toBeNull();
+    expect(q(fNone, '[data-testid="chat-head-model-readonly"]')).toBeNull();
+    expect(q(fNone, '[data-testid="chat-head-model-unadvertised"]')).toBeNull();
+    fNone.destroy();
+  });
+
+  it("flags models served only by disabled connections in the session header", async () => {
+    const apiDisabled = new FakeApi();
+    apiDisabled.sessions[0] = {
+      ...apiDisabled.sessions[0],
+      model: "claude-disabled",
+    };
+    apiDisabled.config = () =>
+      Promise.resolve({
+        access: null,
+        models: ["claude-disabled"],
+        agentBackends: [
+          {
+            id: "claude-1",
+            framework: "claude",
+            disabled: true,
+            models: ["claude-disabled"],
+          },
+        ],
+        defaultModel: "",
+      } as never);
+    const fDisabled = await render(apiDisabled);
+    expect(
+      text(fDisabled, '[data-testid="chat-head-model-unadvertised"]'),
+    ).toBe("disabled connections only");
+    fDisabled.destroy();
+  });
+
+  it("renders a read-only model fallback and unadvertised badge for viewers", async () => {
+    const apiViewer = new FakeApi();
+    apiViewer.sessions[0] = { ...apiViewer.sessions[0], model: "legacy-view" };
+    apiViewer.config = () =>
+      Promise.resolve({
+        access: {
+          role: "grain/viewer",
+          roles: ["grain/viewer"],
+          full: false,
+          scopes: ["sessions:read", "tasks:read", "settings:read"],
+        },
+        models: [],
+        defaultModel: "",
+      } as never);
+    const fViewer = await render(apiViewer);
+    expect(q(fViewer, '[data-testid="chat-head-model"]')).toBeNull();
+    expect(text(fViewer, '[data-testid="chat-head-model-readonly"]')).toBe(
+      "legacy-view",
+    );
+    expect(text(fViewer, '[data-testid="chat-head-model-unadvertised"]')).toBe(
+      "not advertised by any connection",
+    );
+    fViewer.destroy();
+    TestBed.inject(SessionsStore).stop();
+    TestBed.resetTestingModule();
+
+    const apiViewerAdv = new FakeApi();
+    apiViewerAdv.config = () =>
+      Promise.resolve({
+        access: {
+          role: "grain/viewer",
+          roles: ["grain/viewer"],
+          full: false,
+          scopes: ["sessions:read", "tasks:read", "settings:read"],
+        },
+        models: ["gemini-fast", "gemini-pro"],
+        defaultModel: "gemini-pro",
+      } as never);
+    const fViewerAdv = await render(apiViewerAdv);
+    expect(q(fViewerAdv, '[data-testid="chat-head-model"]')).toBeNull();
+    expect(text(fViewerAdv, '[data-testid="chat-head-model-readonly"]')).toBe(
+      "Deployment default (gemini-pro)",
+    );
+    expect(
+      q(fViewerAdv, '[data-testid="chat-head-model-unadvertised"]'),
+    ).toBeNull();
+    fViewerAdv.destroy();
+  });
 });

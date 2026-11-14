@@ -149,4 +149,28 @@ describe("GrainApi.getIfChanged", () => {
     delReq.flush({ ok: true });
     await delP;
   });
+
+  it("reads plain text with HTTP response headers via getTextResponse", async () => {
+    const respP = api.getTextResponse(
+      "GET /api/fs/memory/{path...}",
+      { path: "" },
+      "grep=policy&i=1&n=1",
+    );
+    const req = http.expectOne("/api/fs/memory/?grep=policy&i=1&n=1");
+    expect(req.request.responseType).toBe("text");
+    req.flush(
+      "global.md:1:policy\n[truncated at match limit (100 matches); pass --max 200 (grain grep) to raise the limit]\n",
+      {
+        headers: {
+          "X-Grain-Truncated": "true",
+          "X-Grain-Matches": "100",
+        },
+      },
+    );
+    const res = await respP;
+    expect(res.headers.get("X-Grain-Truncated")).toBe("true");
+    expect(res.headers.get("X-Grain-Walk-Truncated")).toBeNull();
+    expect(res.headers.get("X-Grain-Matches")).toBe("100");
+    expect(res.body).toContain("[truncated at match limit");
+  });
 });

@@ -13,7 +13,11 @@
 // limitations under the License.
 
 import { TestBed } from "@angular/core/testing";
-import { provideRouter, withComponentInputBinding } from "@angular/router";
+import {
+  Router,
+  provideRouter,
+  withComponentInputBinding,
+} from "@angular/router";
 import { RouterTestingHarness } from "@angular/router/testing";
 import { Subject } from "rxjs";
 import { GrainApi } from "../api/grain-api.service";
@@ -27,6 +31,11 @@ import {
   type CIRunLogResponse,
   type CIWorkflowOption,
   faultsForRun,
+  isActionsRunId,
+  parseProviderQueryParam,
+  providerQueryParam,
+  repoFromActionsRunId,
+  runProviderQueryParams,
   safeExternalUrl,
 } from "./ci.models";
 
@@ -800,5 +809,137 @@ describe("CIPageComponent (D-26)", () => {
     ]);
     expect(root.querySelector('[data-testid="ci-cancel-dialog"]')).toBeNull();
     expect(root.querySelector('[data-testid="ci-cancel-reason"]')).toBeNull();
+  });
+
+  it("serializes and restores provider=github-actions query params on deep links, filter changes, run navigation, and Back/Forward", async () => {
+    expect(isActionsRunId("gha:acme:widgets:9001")).toBe(true);
+    expect(isActionsRunId("run-1")).toBe(false);
+    expect(repoFromActionsRunId("gha:acme:widgets:9001")).toBe("acme/widgets");
+    expect(repoFromActionsRunId("gha:bad")).toBe("");
+    expect(providerQueryParam("github")).toBe("github-actions");
+    expect(providerQueryParam("grain")).toBe("grain");
+    expect(providerQueryParam("all")).toBeNull();
+    expect(parseProviderQueryParam("github-actions")).toBe("github");
+    expect(parseProviderQueryParam("grain")).toBe("grain");
+    expect(parseProviderQueryParam("anything-else")).toBe("all");
+    expect(runProviderQueryParams("gha:acme:widgets:9001")).toEqual({
+      provider: "github-actions",
+    });
+    expect(runProviderQueryParams("run-1")).toBeNull();
+
+    // 1. Deep-link directly to /ci?provider=github-actions
+    const harness = await RouterTestingHarness.create(
+      "/ci?provider=github-actions",
+    );
+    await flush(harness);
+    const router = TestBed.inject(Router);
+    const root = harness.routeNativeElement!;
+
+    expect(router.url).toBe("/ci?provider=github-actions");
+    expect(
+      root
+        .querySelector('[data-testid="ci-provider-github"]')
+        ?.getAttribute("aria-pressed"),
+    ).toBe("true");
+    expect(
+      api.runListQueries.some(
+        (q) =>
+          q.includes("provider=github-actions") &&
+          q.includes("repo=acme%2Fwidgets"),
+      ),
+    ).toBe(true);
+    expect(
+      root.querySelector('[data-testid="ci-run-row-gha:acme:widgets:9001"]'),
+    ).not.toBeNull();
+
+    // 2. Selecting a repo with provider=github-actions preserves both in URL and shows Clear filters when empty
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-repo-pill"]')!
+      .click();
+    await flush(harness);
+    const infraOption = [
+      ...root.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="ci-repo-menu"] [role="option"]',
+      ),
+    ].find((b) => b.textContent?.includes("acme/infra"))!;
+    infraOption.click();
+    await flush(harness);
+    expect(router.url).toBe("/ci?provider=github-actions&repo=acme%2Finfra");
+    expect(
+      root.querySelector('[data-testid="ci-empty"] button')?.textContent,
+    ).toContain("Clear filters");
+
+    // Clicking Clear filters removes query params and restores all runs
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-empty"] button')!
+      .click();
+    await flush(harness);
+    expect(router.url).toBe("/ci");
+
+    // 3. Clicking GitHub Actions filter from /ci appends ?provider=github-actions
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="ci-provider-github"]')!
+      .click();
+    await flush(harness);
+    expect(router.url).toBe("/ci?provider=github-actions");
+
+    // Switching back to /ci via Router (Back/Forward simulation) updates filter
+    await router.navigateByUrl("/ci");
+    await flush(harness);
+    expect(
+      root
+        .querySelector('[data-testid="ci-provider-all"]')
+        ?.getAttribute("aria-pressed"),
+    ).toBe("true");
+  });
+
+  it("preserves and appends provider=github-actions when opening or exiting GitHub Actions runs on /ci/runs/:id", async () => {
+    const harness = await RouterTestingHarness.create(
+      "/ci/runs/run-failed-2?repo=acme%2Fwidgets",
+    );
+    await flush(harness);
+    const router = TestBed.inject(Router);
+    const root = harness.routeNativeElement!;
+
+    // Navigating to a GitHub Actions run from /ci/runs/:id appends provider=github-actions.
+    root
+      .querySelector<HTMLElement>(
+        '[data-testid="ci-run-row-gha:acme:widgets:9001"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(router.url).toBe(
+      "/ci/runs/gha:acme:widgets:9001?repo=acme%2Fwidgets&provider=github-actions",
+    );
+
+    // Exiting mobile detail preserves provider=github-actions and repo in /ci URL.
+    Object.defineProperty(window, "innerWidth", {
+      value: 390,
+      configurable: true,
+      writable: true,
+    });
+    const backBtn = root.querySelector<HTMLButtonElement>(".ci-mobile-back")!;
+    backBtn.click();
+    await flush(harness);
+    expect(router.url).toBe("/ci?repo=acme%2Fwidgets&provider=github-actions");
+  });
+
+  it("discovers repository from deep-linked gha: run ID even when config targetRepos is empty", async () => {
+    api.configBody = {
+      ...api.configBody,
+      targetRepos: [],
+    };
+    const harness = await RouterTestingHarness.create(
+      "/ci/runs/gha:acme:widgets:9001",
+    );
+    await flush(harness);
+    expect(harness.routeNativeElement).not.toBeNull();
+    expect(
+      api.runListQueries.some(
+        (q) =>
+          q.includes("provider=github-actions") &&
+          q.includes("repo=acme%2Fwidgets"),
+      ),
+    ).toBe(true);
   });
 });

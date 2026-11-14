@@ -5,9 +5,15 @@ g-workstreams-page {
 }
 
 .ws-page {
+  box-sizing: border-box;
   height: 100%;
   overflow: auto;
   padding: 16px 24px 56px;
+}
+
+.ws-page.is-mobile {
+  padding: 12px 16px
+    max(108px, calc(var(--grain-bottombar-height, 92px) + 16px));
 }
 
 .ws-vh {
@@ -303,7 +309,8 @@ g-workstreams-page {
 
 @media (max-width: 599.95px) {
   .ws-page {
-    padding: 12px 16px 88px;
+    padding: 12px 16px
+      max(108px, calc(var(--grain-bottombar-height, 92px) + 16px));
   }
   .ws-row {
     grid-template-columns: 28px minmax(0, 1fr);
@@ -320,6 +327,16 @@ g-workstreams-page {
     grid-template-columns: 1fr;
   }
   .ws-search {
+    box-sizing: border-box;
     width: 100%;
+  }
+}
+
+@media (max-height: 480px) and (orientation: landscape) {
+  .ws-page {
+    padding-bottom: max(
+      108px,
+      calc(var(--grain-bottombar-height, 92px) + 16px)
+    );
   }
 }

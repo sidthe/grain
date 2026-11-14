@@ -634,7 +634,7 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
           <div class="s-toggle-row">
             <div class="s-toggle-copy">
               <span class="s-toggle-name">Accept external agent tokens</span>
-              <span class="s-hint"
+              <span id="external-agent-api-hint" class="s-hint"
                 >Allow external callers bearing gma_ tokens to
                 authenticate.</span
               >
@@ -644,7 +644,9 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
               class="g-switch"
               role="switch"
               data-testid="switch-external-agent-api"
-              [attr.aria-checked]="Boolean(state.val('externalAgentApi', true))"
+              [attr.aria-checked]="
+                Boolean(state.val('externalAgentApi', true)) ? 'true' : 'false'
+              "
               [attr.title]="
                 !canWriteSettings()
                   ? access.deniedReason('POST /api/settings')
@@ -652,6 +654,7 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
               "
               [disabled]="!canWriteSettings()"
               aria-label="Accept external agent tokens"
+              aria-describedby="external-agent-api-hint"
               (click)="
                 state.setField(
                   'externalAgentApi',
@@ -675,7 +678,11 @@ const DEFAULT_ROLE_OPTIONS: readonly PillOption[] = [
           }
 
           @if (mintedTokenSecret(); as secret) {
-            <div class="s-banner ok" data-testid="minted-gma-token">
+            <div
+              class="s-banner ok"
+              role="status"
+              data-testid="minted-gma-token"
+            >
               <span
                 >Copy token now (shown once):
                 <strong>{{ secret }}</strong></span

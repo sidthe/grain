@@ -16,6 +16,7 @@ import { Injectable, NgZone, computed, inject, signal } from "@angular/core";
 import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import type {
+  AgentBackendOption,
   AgentModel,
   AgentModelsResponse,
   AttachmentUpload,
@@ -104,6 +105,8 @@ export class SessionsStore {
   readonly offered = signal<CapabilityOption[]>([]);
   readonly networkOptions = signal<string[]>(["open", "none"]);
   readonly models = signal<string[]>([]);
+  readonly agentBackends = signal<AgentBackendOption[]>([]);
+  readonly configModelsLoaded = signal(false);
   readonly agentModels = signal<AgentModel[]>([]);
   readonly agentModelsError = signal<string | null>(null);
   readonly defaultModel = signal<string>("");
@@ -241,12 +244,31 @@ export class SessionsStore {
   private async loadConfigModels(): Promise<void> {
     try {
       const cfg = (await this.api.config()) as GrainConfig | null;
-      if (cfg && !this.access.configLoaded()) {
-        this.access.setConfig(cfg);
-      }
-      if (Array.isArray(cfg?.models)) this.models.set(cfg.models);
-      if (typeof cfg?.defaultModel === "string") {
-        this.defaultModel.set(cfg.defaultModel);
+      if (cfg) {
+        if (!this.access.configLoaded()) {
+          this.access.setConfig(cfg);
+        }
+        if (Array.isArray(cfg.agentBackends)) {
+          this.agentBackends.set(cfg.agentBackends);
+        }
+        if (Array.isArray(cfg.models)) {
+          this.models.set(cfg.models);
+        } else if (Array.isArray(cfg.agentBackends)) {
+          const fromBackends: string[] = [];
+          for (const b of cfg.agentBackends) {
+            for (const m of b.models ?? []) {
+              const trimmed = m.trim();
+              if (trimmed && !fromBackends.includes(trimmed)) {
+                fromBackends.push(trimmed);
+              }
+            }
+          }
+          this.models.set(fromBackends);
+        }
+        if (typeof cfg.defaultModel === "string") {
+          this.defaultModel.set(cfg.defaultModel);
+        }
+        this.configModelsLoaded.set(true);
       }
     } catch {
       // Optional model list read.
