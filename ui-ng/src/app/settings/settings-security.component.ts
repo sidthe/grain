@@ -341,6 +341,23 @@ export function isGcpKeyIncomplete(gk: GcpKeyRow): boolean {
   return !asString(gk.projectId) && !asString(gk.serviceAccountEmail);
 }
 
+/** Normalizes boolean and string/numeric boolean-like setting values safely. */
+export function parseSettingBoolean(raw: unknown, fallback: boolean): boolean {
+  if (typeof raw === "boolean") return raw;
+  if (typeof raw === "number") return raw !== 0;
+  if (typeof raw === "string") {
+    const norm = raw.trim().toLowerCase();
+    if (!norm) return fallback;
+    if (norm === "false" || norm === "0" || norm === "off" || norm === "no") {
+      return false;
+    }
+    if (norm === "true" || norm === "1" || norm === "on" || norm === "yes") {
+      return true;
+    }
+  }
+  return raw === undefined || raw === null ? fallback : Boolean(raw);
+}
+
 @Component({
   selector: "g-settings-security",
   imports: [PillSelectComponent, ConfirmDialogComponent],
@@ -573,7 +590,7 @@ export function isGcpKeyIncomplete(gk: GcpKeyRow): boolean {
           <div class="s-toggle-row">
             <div class="s-toggle-copy">
               <span class="s-toggle-name">Accept external agent tokens</span>
-              <span class="s-hint"
+              <span class="s-hint" id="switch-external-agent-api-hint"
                 >Allow external callers bearing gma_ tokens to
                 authenticate.</span
               >
@@ -583,18 +600,14 @@ export function isGcpKeyIncomplete(gk: GcpKeyRow): boolean {
               class="g-switch"
               role="switch"
               data-testid="switch-external-agent-api"
-              [attr.aria-checked]="Boolean(state.val('externalAgentApi', true))"
+              [attr.aria-checked]="externalAgentApiEnabled() ? 'true' : 'false'"
               [disabled]="!canWriteSettings()"
               [attr.title]="
                 !canWriteSettings() ? writeSettingsDeniedReason() : null
               "
               aria-label="Accept external agent tokens"
-              (click)="
-                state.setField(
-                  'externalAgentApi',
-                  !state.val('externalAgentApi', true)
-                )
-              "
+              aria-describedby="switch-external-agent-api-hint"
+              (click)="toggleExternalAgentApi()"
             ></button>
           </div>
 
@@ -1221,7 +1234,6 @@ export class SettingsSecurityComponent implements OnInit, OnChanges {
 
   readonly section = input.required<SettingsSectionId>();
 
-  protected readonly Boolean = Boolean;
   private initialized = false;
 
   protected readonly confirmRequest = signal<ConfirmRequest | null>(null);
@@ -1271,6 +1283,13 @@ export class SettingsSecurityComponent implements OnInit, OnChanges {
   protected readonly auditKindFilter = signal("all");
   protected readonly auditTimeFilter = signal("all");
   protected readonly auditError = signal<string | null>(null);
+
+  protected readonly externalAgentApiEnabled = computed(() =>
+    parseSettingBoolean(
+      this.state.val<unknown>("externalAgentApi", true),
+      true,
+    ),
+  );
 
   protected readonly missingScopeTokensCount = computed(
     () => this.tokens().filter((tok) => !externalTokenHasScopes(tok)).length,
@@ -1353,6 +1372,11 @@ export class SettingsSecurityComponent implements OnInit, OnChanges {
       return "This settings section is locked by deployment configuration.";
     }
     return "";
+  }
+
+  protected toggleExternalAgentApi(): void {
+    if (!this.canWriteSettings()) return;
+    this.state.setField("externalAgentApi", !this.externalAgentApiEnabled());
   }
 
   protected tokenHasScopes(tok: ExternalTokenRow): boolean {
