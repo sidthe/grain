@@ -12,9 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { DOCUMENT } from "@angular/common";
 import {
   ChangeDetectionStrategy,
   Component,
+  ElementRef,
+  NgZone,
+  OnDestroy,
   OnInit,
   ViewEncapsulation,
   computed,
@@ -24,6 +28,7 @@ import {
   output,
   signal,
   untracked,
+  viewChild,
 } from "@angular/core";
 import { Router, RouterLink } from "@angular/router";
 import { DomSanitizer, type SafeHtml } from "@angular/platform-browser";
@@ -36,8 +41,13 @@ import type {
   WorkTree,
 } from "../api/models";
 import { AccessService } from "../services/access.service";
+import { isTypingTarget } from "../services/keyboard.service";
 import { SnackbarService } from "../services/snackbar.service";
 import { MarkdownDirective } from "../shared/code-highlight";
+import {
+  ConfirmDialogComponent,
+  type ConfirmRequest,
+} from "../shared/confirm-dialog.component";
 import {
   extractSessionArtifacts,
   wrapSandboxedHtml,
@@ -49,15 +59,22 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
 
 @Component({
   selector: "g-session-canvas",
-  imports: [RouterLink, MarkdownDirective],
+  imports: [RouterLink, MarkdownDirective, ConfirmDialogComponent],
   encapsulation: ViewEncapsulation.None,
   styleUrl: "./session-canvas.css",
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: {
+    "(keydown.escape)": "onEscape($event)",
+    "(document:keydown.escape)": "onEscape($event)",
+    "(focusin)": "onHostFocusIn($event)",
+  },
   template: `
     <aside
+      #canvasAside
       class="session-canvas"
       aria-label="Session artifacts and workspace canvas"
       data-testid="session-canvas"
+      [attr.inert]="confirmReq() ? '' : null"
     >
       <header class="canvas-head">
         <div class="canvas-tabs" role="tablist" aria-label="Artifact types">
@@ -113,7 +130,7 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
           class="icon-btn"
           aria-label="Close workspace canvas"
           data-testid="canvas-close"
-          (click)="closed.emit()"
+          (click)="requestClose(true)"
         >
           ✕
         </button>
@@ -136,7 +153,7 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
                       type="button"
                       class="canvas-chip"
                       [class.is-active]="activeDocId() === d.id"
-                      (click)="selectedDocId.set(d.id)"
+                      (click)="selectDoc(d.id)"
                     >
                       {{ d.title }}
                     </button>
@@ -149,6 +166,7 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
                     <strong>{{ doc.title }}</strong>
                     @if (canWriteMemory()) {
                       <button
+                        #pinToggleBtn
                         type="button"
                         class="btn-outlined"
                         data-testid="canvas-pin-memory-toggle"
@@ -181,18 +199,27 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
                         <span class="muted" style="font-size: 11px">{{
                           repo() || "Deployment memory"
                         }}</span>
-                        <button
-                          type="submit"
-                          class="btn-primary"
-                          data-testid="pin-memory-save"
-                          [disabled]="
-                            pinBusy() ||
-                            !pinName().trim() ||
-                            !pinSummary().trim()
-                          "
-                        >
-                          {{ pinBusy() ? "Saving..." : "Save to Memory" }}
-                        </button>
+                        <div class="canvas-btn-group">
+                          @if (pinDirty()) {
+                            <span
+                              class="status-pill blast"
+                              data-testid="canvas-pin-dirty"
+                              >Unsaved</span
+                            >
+                          }
+                          <button
+                            type="submit"
+                            class="btn-primary"
+                            data-testid="pin-memory-save"
+                            [disabled]="
+                              pinBusy() ||
+                              !pinName().trim() ||
+                              !pinSummary().trim()
+                            "
+                          >
+                            {{ pinBusy() ? "Saving..." : "Save to Memory" }}
+                          </button>
+                        </div>
                       </div>
                     </form>
                   }
@@ -369,7 +396,9 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
                   </div>
                   @for (n of proposedTreeNodes(); track n.id) {
                     <div class="plan-node">
-                      <a [routerLink]="['/task', n.id]"
+                      <a
+                        [routerLink]="['/task', n.id]"
+                        (click)="onTaskLinkClick($event, n.id)"
                         >#{{ n.id }} · {{ n.title }}</a
                       >
                       <span class="status-pill neutral">{{ n.status }}</span>
@@ -392,7 +421,7 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
                   <button
                     type="button"
                     class="canvas-chip"
-                    [class.is-active]="activeMemName() === m.name"
+                    [class.is-active]="isActiveMemoryDoc(m)"
                     (click)="selectMemoryDoc(m)"
                   >
                     {{ m.repo ? m.repo + " / " : "" }}{{ m.name }}
@@ -403,9 +432,18 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
                 <div class="canvas-card" data-testid="canvas-memory-editor">
                   <div class="canvas-toolbar">
                     <strong>{{ mdoc.name }}</strong>
-                    <span class="muted" style="font-size: 11px">{{
-                      mdoc.repo || "deployment"
-                    }}</span>
+                    <div class="canvas-btn-group">
+                      @if (memDirty()) {
+                        <span
+                          class="status-pill blast"
+                          data-testid="canvas-memory-dirty"
+                          >Unsaved</span
+                        >
+                      }
+                      <span class="muted" style="font-size: 11px">{{
+                        mdoc.repo || "deployment"
+                      }}</span>
+                    </div>
                   </div>
                   @if (canWriteMemory()) {
                     <form
@@ -415,12 +453,14 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
                       <input
                         type="text"
                         aria-label="Memory summary"
+                        data-testid="canvas-memory-summary"
                         [value]="memSummary()"
                         (input)="memSummary.set($any($event.target).value)"
                       />
                       <textarea
                         rows="8"
                         aria-label="Memory document text"
+                        data-testid="canvas-memory-text"
                         [value]="memText()"
                         (input)="memText.set($any($event.target).value)"
                       ></textarea>
@@ -431,6 +471,7 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
                         <button
                           type="submit"
                           class="btn-primary"
+                          data-testid="canvas-memory-save"
                           [disabled]="pinBusy()"
                         >
                           {{ pinBusy() ? "Saving..." : "Save Memory doc" }}
@@ -452,23 +493,36 @@ export type CanvasTab = "docs" | "html" | "plan" | "memory";
         }
       </div>
     </aside>
+
+    @if (confirmReq(); as req) {
+      <g-confirm-dialog [request]="req" (done)="onConfirmDone($event)" />
+    }
   `,
 })
-export class SessionCanvasComponent implements OnInit {
+export class SessionCanvasComponent implements OnInit, OnDestroy {
   protected readonly sessions = inject(SessionsStore);
   private readonly api = inject(GrainApi);
   private readonly access = inject(AccessService);
   private readonly snackbar = inject(SnackbarService);
   private readonly router = inject(Router);
   private readonly sanitizer = inject(DomSanitizer);
+  private readonly doc = inject(DOCUMENT);
+  private readonly hostEl = inject<ElementRef<HTMLElement>>(ElementRef);
+  private readonly zone = inject(NgZone);
 
   readonly sessionTaskId = input<string | undefined>(undefined);
   readonly repo = input<string | undefined>(undefined);
   readonly comments = input<Comment[]>([]);
   readonly requestedTab = input<CanvasTab | null>(null);
   readonly requestedArtifactId = input<string | null>(null);
+  readonly returnFocusTo = input<HTMLElement | null>(null);
 
   readonly closed = output<void>();
+
+  private readonly canvasAside =
+    viewChild<ElementRef<HTMLElement>>("canvasAside");
+  private readonly pinToggleBtn =
+    viewChild<ElementRef<HTMLButtonElement>>("pinToggleBtn");
 
   protected readonly activeTab = signal<CanvasTab>("docs");
   protected readonly selectedDocId = signal<string | null>(null);
@@ -480,6 +534,9 @@ export class SessionCanvasComponent implements OnInit {
   protected readonly pinName = signal("");
   protected readonly pinSummary = signal("");
   protected readonly pinBusy = signal(false);
+  private readonly pinBaselineName = signal("");
+  private readonly pinBaselineSummary = signal("");
+  private readonly pinTargetDocId = signal("");
 
   protected readonly treeNodes = signal<TreeNode[]>([]);
   protected readonly treeBusy = signal(false);
@@ -490,6 +547,22 @@ export class SessionCanvasComponent implements OnInit {
   protected readonly activeMemName = signal<string>("");
   protected readonly memSummary = signal("");
   protected readonly memText = signal("");
+  private readonly memBaselineSummary = signal("");
+  private readonly memBaselineText = signal("");
+
+  protected readonly confirmReq = signal<ConfirmRequest | null>(null);
+
+  private previousFocus: HTMLElement | null = null;
+  private pinOpener: HTMLElement | null = null;
+  private confirmReturnFocus: HTMLElement | null = null;
+  private lastHandledEscape: Event | null = null;
+  private lastSessionTaskId: string | undefined;
+
+  private readonly onDocFocusIn = (ev: FocusEvent): void => {
+    if (this.isValidReturnTarget(ev.target)) {
+      this.previousFocus = ev.target;
+    }
+  };
 
   protected readonly artifacts = computed(() =>
     extractSessionArtifacts(this.comments()),
@@ -572,7 +645,32 @@ export class SessionCanvasComponent implements OnInit {
       : this.access.canGlobalScope("tasks:admin");
   });
 
+  readonly pinDirty = computed(
+    () =>
+      this.canWriteMemory() &&
+      this.pinOpen() &&
+      (this.pinName() !== this.pinBaselineName() ||
+        this.pinSummary() !== this.pinBaselineSummary()),
+  );
+
+  readonly memDirty = computed(
+    () =>
+      this.canWriteMemory() &&
+      !!this.activeMemDoc() &&
+      (this.memSummary() !== this.memBaselineSummary() ||
+        this.memText() !== this.memBaselineText()),
+  );
+
+  readonly hasUnsavedChanges = computed(
+    () => this.pinDirty() || this.memDirty(),
+  );
+
   constructor() {
+    const active = this.doc.activeElement;
+    if (this.isValidReturnTarget(active)) {
+      this.previousFocus = active;
+    }
+
     effect(() => {
       const tab = this.requestedTab();
       const aid = this.requestedArtifactId();
@@ -580,7 +678,7 @@ export class SessionCanvasComponent implements OnInit {
         if (tab) this.activeTab.set(tab);
         if (aid) {
           if (tab === "html") this.selectedHtmlId.set(aid);
-          if (tab === "docs") this.selectedDocId.set(aid);
+          if (tab === "docs") this.selectDoc(aid);
         }
       });
     });
@@ -588,6 +686,17 @@ export class SessionCanvasComponent implements OnInit {
     effect(() => {
       const tid = this.sessionTaskId();
       untracked(() => {
+        if (
+          this.lastSessionTaskId !== undefined &&
+          tid !== this.lastSessionTaskId
+        ) {
+          this.closePinForm(false);
+          this.selectedDocId.set(null);
+          this.selectedHtmlId.set(null);
+          this.confirmReq.set(null);
+          this.confirmReturnFocus = null;
+        }
+        this.lastSessionTaskId = tid;
         if (tid) {
           void this.loadTree(tid);
         } else {
@@ -598,9 +707,219 @@ export class SessionCanvasComponent implements OnInit {
   }
 
   ngOnInit(): void {
+    if (
+      !this.previousFocus &&
+      this.isValidReturnTarget(this.doc.activeElement)
+    ) {
+      this.previousFocus = this.doc.activeElement;
+    }
+    this.zone.runOutsideAngular(() => {
+      this.doc.addEventListener("focusin", this.onDocFocusIn, true);
+    });
     if (this.canReadMemory()) {
       void this.loadMemoryDocs();
     }
+  }
+
+  ngOnDestroy(): void {
+    this.doc.removeEventListener("focusin", this.onDocFocusIn, true);
+  }
+
+  requestClose(restoreFocus = true): void {
+    if (this.confirmReq()) return;
+    if (this.hasUnsavedChanges()) {
+      this.openConfirm({
+        title: "Discard unsaved canvas changes?",
+        message: this.unsavedDiscardMessage("Closing the canvas"),
+        accept: "Discard",
+        destructive: true,
+        run: async () => {
+          this.discardUnsavedState();
+          this.emitClosed(restoreFocus);
+        },
+      });
+      return;
+    }
+    this.emitClosed(restoreFocus);
+  }
+
+  requestOpenArtifact(tab: CanvasTab, id: string, apply: () => void): void {
+    const switchArtifact = () => {
+      this.activeTab.set(tab);
+      if (tab === "docs") this.selectedDocId.set(id);
+      if (tab === "html") this.selectedHtmlId.set(id);
+      apply();
+    };
+    if (
+      tab === "docs" &&
+      this.pinOpen() &&
+      id !== this.activeDocId() &&
+      this.pinDirty()
+    ) {
+      this.openConfirm({
+        title: "Discard Pin to Memory draft?",
+        message:
+          "Switching documents will discard your unsaved edits in the Pin to Memory form.",
+        accept: "Discard",
+        destructive: true,
+        run: async () => {
+          this.closePinForm(false);
+          switchArtifact();
+        },
+      });
+      return;
+    }
+    if (tab === "docs" && this.pinOpen() && id !== this.activeDocId()) {
+      this.closePinForm(false);
+    }
+    switchArtifact();
+  }
+
+  confirmDiscard(onDiscard: () => void): void {
+    if (!this.hasUnsavedChanges()) {
+      onDiscard();
+      return;
+    }
+    this.openConfirm({
+      title: "Discard unsaved canvas changes?",
+      message: this.unsavedDiscardMessage("Leaving this session"),
+      accept: "Discard",
+      destructive: true,
+      run: async () => {
+        this.discardUnsavedState();
+        onDiscard();
+      },
+    });
+  }
+
+  protected onHostFocusIn(ev: FocusEvent): void {
+    if (this.isValidReturnTarget(ev.relatedTarget)) {
+      this.previousFocus = ev.relatedTarget;
+    }
+  }
+
+  protected onEscape(ev: Event): void {
+    if (ev.defaultPrevented || this.lastHandledEscape === ev) return;
+    if (this.hasHigherOverlay()) return;
+    const target = ev.target as Node | null;
+    const insideCanvas = !!(
+      target && this.hostEl.nativeElement.contains(target)
+    );
+    if (this.confirmReq()) {
+      this.lastHandledEscape = ev;
+      ev.preventDefault();
+      ev.stopPropagation();
+      void this.onConfirmDone(false);
+      return;
+    }
+    if (!insideCanvas && isTypingTarget(ev.target)) {
+      return;
+    }
+    if (this.activeTab() === "docs" && this.pinOpen()) {
+      this.lastHandledEscape = ev;
+      ev.preventDefault();
+      ev.stopPropagation();
+      this.requestClosePinForm(true);
+      return;
+    }
+    this.lastHandledEscape = ev;
+    ev.preventDefault();
+    ev.stopPropagation();
+    this.requestClose(true);
+  }
+
+  protected async onConfirmDone(ok: boolean): Promise<void> {
+    const req = this.confirmReq();
+    const back = this.confirmReturnFocus;
+    this.confirmReq.set(null);
+    this.confirmReturnFocus = null;
+    this.canvasAside()?.nativeElement.removeAttribute("inert");
+    if (!ok) {
+      if (back?.isConnected) {
+        back.focus();
+      }
+      return;
+    }
+    if (req) {
+      await req.run();
+    }
+  }
+
+  private openConfirm(req: ConfirmRequest): void {
+    const active = this.doc.activeElement;
+    this.confirmReturnFocus =
+      active instanceof HTMLElement &&
+      active !== this.doc.body &&
+      !active.closest('[data-testid="confirm-dialog"]')
+        ? active
+        : null;
+    this.confirmReq.set(req);
+  }
+
+  private isValidReturnTarget(el: EventTarget | null): el is HTMLElement {
+    return (
+      el instanceof HTMLElement &&
+      el !== this.doc.body &&
+      el !== this.doc.documentElement &&
+      !this.hostEl.nativeElement.contains(el)
+    );
+  }
+
+  private hasHigherOverlay(): boolean {
+    const host = this.hostEl.nativeElement;
+    const modals = Array.from(
+      this.doc.querySelectorAll<HTMLElement>(
+        '[aria-modal="true"], dialog[open]',
+      ),
+    );
+    for (const m of modals) {
+      if (!host.contains(m)) {
+        return true;
+      }
+    }
+    if (
+      this.doc.querySelector(
+        "#create-menu, #rail-more-menu, #more-sheet, #account-popover, .pill-select-menu, #director-drawer:not([hidden])",
+      )
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  private unsavedDiscardMessage(actionLabel: string): string {
+    const hasPin = this.pinDirty();
+    const hasMem = this.memDirty();
+    const memName = this.activeMemDoc()?.name;
+    if (hasPin && hasMem) {
+      return `You have unsaved Pin to Memory edits and changes to "${memName ?? "Memory"}". ${actionLabel} will discard them.`;
+    }
+    if (hasMem) {
+      return `You have unsaved changes to "${memName ?? "this Memory document"}". ${actionLabel} will discard them.`;
+    }
+    return `You have unsaved edits in the Pin to Memory form. ${actionLabel} will discard them.`;
+  }
+
+  private discardUnsavedState(): void {
+    this.closePinForm(false);
+    if (this.memDirty()) {
+      this.memSummary.set(this.memBaselineSummary());
+      this.memText.set(this.memBaselineText());
+    }
+  }
+
+  private emitClosed(restoreFocus: boolean): void {
+    if (restoreFocus) {
+      this.restoreCanvasFocus();
+    }
+    this.closed.emit();
+  }
+
+  private restoreCanvasFocus(): void {
+    const target =
+      (this.previousFocus?.isConnected ? this.previousFocus : null) ??
+      (this.returnFocusTo()?.isConnected ? this.returnFocusTo() : null);
+    target?.focus();
   }
 
   private async loadTree(id: string): Promise<void> {
@@ -637,9 +956,55 @@ export class SessionCanvasComponent implements OnInit {
     }
   }
 
-  protected async selectMemoryDoc(doc: MemoryDocument): Promise<void> {
+  protected isActiveMemoryDoc(doc: MemoryDocument): boolean {
+    const cur = this.activeMemDoc();
+    if (!cur) return this.activeMemName() === doc.name;
+    return cur.name === doc.name && (cur.repo || "") === (doc.repo || "");
+  }
+
+  protected selectDoc(docId: string): void {
+    if (docId === this.activeDocId()) return;
+    if (this.pinDirty()) {
+      this.openConfirm({
+        title: "Discard Pin to Memory draft?",
+        message:
+          "Switching documents will discard your unsaved edits in the Pin to Memory form.",
+        accept: "Discard",
+        destructive: true,
+        run: async () => {
+          this.closePinForm(false);
+          this.selectedDocId.set(docId);
+        },
+      });
+      return;
+    }
+    if (this.pinOpen()) {
+      this.closePinForm(false);
+    }
+    this.selectedDocId.set(docId);
+  }
+
+  protected selectMemoryDoc(doc: MemoryDocument): void {
+    if (this.isActiveMemoryDoc(doc)) return;
+    if (this.memDirty()) {
+      const curName = this.activeMemDoc()?.name ?? "this document";
+      this.openConfirm({
+        title: "Discard unsaved Memory changes?",
+        message: `You have unsaved changes to "${curName}". Switching documents will discard them.`,
+        accept: "Discard",
+        destructive: true,
+        run: () => this.loadSelectedMemoryDoc(doc),
+      });
+      return;
+    }
+    void this.loadSelectedMemoryDoc(doc);
+  }
+
+  private async loadSelectedMemoryDoc(doc: MemoryDocument): Promise<void> {
     this.activeMemName.set(doc.name);
     this.activeMemDoc.set(doc);
+    this.memBaselineSummary.set(doc.summary);
+    this.memBaselineText.set(doc.text ?? "");
     this.memSummary.set(doc.summary);
     this.memText.set(doc.text ?? "");
     if (typeof this.api.get !== "function") return;
@@ -649,27 +1014,86 @@ export class SessionCanvasComponent implements OnInit {
         { name: doc.name },
         doc.repo ? `repo=${encodeURIComponent(doc.repo)}` : undefined,
       );
-      if (full && this.activeMemName() === doc.name) {
+      if (full && this.isActiveMemoryDoc(doc) && !this.memDirty()) {
+        const nextSummary = full.summary || doc.summary;
+        const nextText = full.text ?? "";
         this.activeMemDoc.set(full);
-        this.memSummary.set(full.summary || doc.summary);
-        this.memText.set(full.text ?? "");
+        this.memBaselineSummary.set(nextSummary);
+        this.memBaselineText.set(nextText);
+        this.memSummary.set(nextSummary);
+        this.memText.set(nextText);
       }
     } catch {
       // Keep cached index metadata on read failure.
     }
   }
 
-  protected togglePinForm(doc: { title: string; summary: string }): void {
-    const next = !this.pinOpen();
-    this.pinOpen.set(next);
-    if (next) {
-      const slug = doc.title
+  protected togglePinForm(doc: {
+    id?: string;
+    title: string;
+    summary: string;
+  }): void {
+    if (this.pinOpen()) {
+      this.requestClosePinForm(true);
+      return;
+    }
+    const active = this.doc.activeElement;
+    this.pinOpener =
+      active instanceof HTMLElement &&
+      this.hostEl.nativeElement.contains(active)
+        ? active
+        : (this.pinToggleBtn()?.nativeElement ?? null);
+    const slug =
+      doc.title
         .toLowerCase()
         .replace(/[^a-z0-9]+/g, "-")
         .replace(/^-|-$/g, "")
-        .slice(0, 48);
-      this.pinName.set(slug || "session-note");
-      this.pinSummary.set(doc.summary || doc.title);
+        .slice(0, 48) || "session-note";
+    const summary = doc.summary || doc.title;
+    if (doc.id) {
+      this.selectedDocId.set(doc.id);
+      this.pinTargetDocId.set(doc.id);
+    }
+    this.pinBaselineName.set(slug);
+    this.pinBaselineSummary.set(summary);
+    this.pinName.set(slug);
+    this.pinSummary.set(summary);
+    this.pinOpen.set(true);
+  }
+
+  private requestClosePinForm(restoreFocus: boolean): void {
+    if (!this.pinOpen()) return;
+    if (this.pinDirty()) {
+      this.openConfirm({
+        title: "Discard Pin to Memory draft?",
+        message:
+          "You have unsaved edits in the Pin to Memory form. Cancelling will discard them.",
+        accept: "Discard",
+        destructive: true,
+        run: async () => {
+          this.closePinForm(restoreFocus);
+        },
+      });
+      return;
+    }
+    this.closePinForm(restoreFocus);
+  }
+
+  private closePinForm(restoreFocus: boolean): void {
+    const opener = this.pinOpener;
+    this.pinOpener = null;
+    this.pinOpen.set(false);
+    this.pinName.set("");
+    this.pinSummary.set("");
+    this.pinBaselineName.set("");
+    this.pinBaselineSummary.set("");
+    this.pinTargetDocId.set("");
+    if (restoreFocus) {
+      const target =
+        (opener?.isConnected ? opener : null) ??
+        this.pinToggleBtn()?.nativeElement ??
+        null;
+      target?.focus();
     }
   }
 
@@ -677,15 +1101,16 @@ export class SessionCanvasComponent implements OnInit {
     ev.preventDefault();
     if (this.pinBusy()) return;
     this.pinBusy.set(true);
+    const pinnedName = this.pinName().trim();
     try {
       await this.api.put("PUT /api/memory/documents", undefined, {
         ...(this.repo() ? { repo: this.repo() } : {}),
-        name: this.pinName().trim(),
+        name: pinnedName,
         summary: this.pinSummary().trim(),
         text: doc.markdown,
       });
-      this.pinOpen.set(false);
-      this.snackbar.show(`Pinned "${this.pinName().trim()}" to Memory`);
+      this.closePinForm(false);
+      this.snackbar.show(`Pinned "${pinnedName}" to Memory`);
       void this.loadMemoryDocs();
     } catch (err) {
       this.snackbar.show(`Could not pin Memory document: ${errorText(err)}`);
@@ -699,13 +1124,23 @@ export class SessionCanvasComponent implements OnInit {
     const doc = this.activeMemDoc();
     if (!doc || this.pinBusy()) return;
     this.pinBusy.set(true);
+    const savedSummary = this.memSummary().trim() || doc.summary;
+    const savedText = this.memText();
     try {
       await this.api.put("PUT /api/memory/documents", undefined, {
         ...(doc.repo ? { repo: doc.repo } : {}),
         name: doc.name,
-        summary: this.memSummary().trim() || doc.summary,
-        text: this.memText(),
+        summary: savedSummary,
+        text: savedText,
       });
+      this.activeMemDoc.set({
+        ...doc,
+        summary: savedSummary,
+        text: savedText,
+      });
+      this.memBaselineSummary.set(savedSummary);
+      this.memBaselineText.set(savedText);
+      this.memSummary.set(savedSummary);
       this.snackbar.show(`Saved Memory "${doc.name}"`);
       void this.loadMemoryDocs();
     } catch (err) {
@@ -715,7 +1150,50 @@ export class SessionCanvasComponent implements OnInit {
     }
   }
 
+  protected onTaskLinkClick(ev: MouseEvent, taskId: string): void {
+    if (
+      ev.button !== 0 ||
+      ev.ctrlKey ||
+      ev.metaKey ||
+      ev.shiftKey ||
+      ev.altKey
+    ) {
+      return;
+    }
+    if (!this.hasUnsavedChanges()) return;
+    ev.preventDefault();
+    this.openConfirm({
+      title: "Discard unsaved canvas changes?",
+      message: this.unsavedDiscardMessage(`Opening #${taskId}`),
+      accept: "Discard & Leave",
+      destructive: true,
+      run: async () => {
+        this.discardUnsavedState();
+        await this.router.navigate(["/task", taskId]);
+      },
+    });
+  }
+
   protected async launchPlan(
+    plan: Parameters<SessionsStore["launchWorkstreamPlan"]>[0],
+  ): Promise<void> {
+    if (this.hasUnsavedChanges()) {
+      this.openConfirm({
+        title: "Discard unsaved canvas changes?",
+        message: this.unsavedDiscardMessage("Launching this workstream"),
+        accept: "Discard & Launch",
+        destructive: true,
+        run: async () => {
+          this.discardUnsavedState();
+          await this.performLaunchPlan(plan);
+        },
+      });
+      return;
+    }
+    await this.performLaunchPlan(plan);
+  }
+
+  private async performLaunchPlan(
     plan: Parameters<SessionsStore["launchWorkstreamPlan"]>[0],
   ): Promise<void> {
     const origin = await this.sessions.launchWorkstreamPlan(plan);
