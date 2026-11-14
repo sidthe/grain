@@ -190,3 +190,12 @@ export function errorText(err: unknown): string {
   }
   return e?.message || "The request failed.";
 }
+
+// formatSessionDuration formats a duration in milliseconds as a compact
+// unit string ("ms", "s", or "m"), or "Invalid" for negative/non-finite inputs.
+export function formatSessionDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "Invalid";
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${Math.floor(ms / 1000)}s`;
+  return `${Math.floor(ms / 60000)}m`;
+}
