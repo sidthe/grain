@@ -1,8 +1,0 @@
-name: Prune GHCR packages
-template: prune-packages
-base: main
-weekly:
-  day: sunday
-  at: "04:00"
-overlap: skip
-auto-approve-proposals: true
