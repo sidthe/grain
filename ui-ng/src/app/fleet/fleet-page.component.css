@@ -144,3 +144,24 @@ g-fleet-page {
   color: var(--md-sys-color-primary);
   border-bottom-color: var(--md-sys-color-primary);
 }
+
+g-fleet-page .view-panel.is-mobile .ops-scroll {
+  padding: 16px 16px
+    max(108px, calc(var(--grain-bottombar-height, 92px) + 16px));
+}
+
+@media (max-width: 599.95px) {
+  g-fleet-page .ops-scroll {
+    padding: 16px 16px
+      max(108px, calc(var(--grain-bottombar-height, 92px) + 16px));
+  }
+}
+
+@media (max-height: 480px) and (orientation: landscape) {
+  g-fleet-page .ops-scroll {
+    padding-bottom: max(
+      108px,
+      calc(var(--grain-bottombar-height, 92px) + 16px)
+    );
+  }
+}
