@@ -134,3 +134,7 @@ g-fleet-page {
   color: var(--md-sys-color-primary);
   border-bottom-color: var(--md-sys-color-primary);
 }
+
+.fleet-fingerprint {
+  overflow-wrap: anywhere;
+}
