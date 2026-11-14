@@ -33,6 +33,7 @@ g-fleet-page {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
 }
 
 :root[data-theme="dark"] .fleet-item-card {
@@ -98,6 +99,7 @@ g-fleet-page {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-width: 0;
 }
 
 .fleet-token-code {
@@ -106,7 +108,15 @@ g-fleet-page {
   background: var(--grain-well-bg, #13151a);
   color: var(--grain-well-fg, #e4e6eb);
   font: 12px/18px var(--grain-font-mono);
+  max-width: 100%;
+  box-sizing: border-box;
   overflow-x: auto;
+}
+
+.fleet-fingerprint {
+  font-family: var(--grain-font-mono);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .fleet-log-toolbar {
