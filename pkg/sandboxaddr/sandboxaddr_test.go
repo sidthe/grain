@@ -17,6 +17,8 @@ package sandboxaddr
 import (
 	"fmt"
 	"net/netip"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -443,5 +445,99 @@ func TestReserveRootRefusals(t *testing.T) {
 		if err := pool.ReserveRoot(tc.sandbox, netip.MustParseAddr(tc.addr)); err == nil {
 			t.Errorf("%s: ReserveRoot(%q, %s) succeeded", tc.name, tc.sandbox, tc.addr)
 		}
+	}
+}
+
+func TestJoinClean(t *testing.T) {
+	if got := JoinClean(); got != "" {
+		t.Errorf("JoinClean() = %q, want \"\"", got)
+	}
+	var nilParts []string
+	if got := JoinClean(nilParts...); got != "" {
+		t.Errorf("JoinClean(nil...) = %q, want \"\"", got)
+	}
+	if got := JoinClean([]string{}...); got != "" {
+		t.Errorf("JoinClean([]string{}...) = %q, want \"\"", got)
+	}
+
+	tests := []struct {
+		name  string
+		parts []string
+		want  string
+	}{
+		// Empty element handling.
+		{name: "single empty string", parts: []string{""}, want: ""},
+		{name: "all empty strings", parts: []string{"", "", ""}, want: ""},
+		{name: "leading empty string", parts: []string{"", "a"}, want: "a"},
+		{name: "trailing empty string", parts: []string{"a", ""}, want: "a"},
+		{name: "surrounding and middle empty strings", parts: []string{"", "a", "", "b", ""}, want: filepath.Join("a", "b")},
+
+		// Traversal prevention.
+		{name: "bare dotdot", parts: []string{".."}, want: ""},
+		{name: "leading dotdot slash", parts: []string{"../a"}, want: ""},
+		{name: "dotdot part then child", parts: []string{"..", "a"}, want: ""},
+		{name: "nested dotdot", parts: []string{"..", ".."}, want: ""},
+		{name: "relative escape to dotdot", parts: []string{"a", "..", ".."}, want: ""},
+		{name: "relative escape with suffix", parts: []string{"a", "..", "..", "b"}, want: ""},
+		{name: "dot then dotdot", parts: []string{".", ".."}, want: ""},
+		{name: "dot slash dotdot", parts: []string{"./.."}, want: ""},
+		{name: "dot slash dotdot child", parts: []string{"./../a"}, want: ""},
+		{name: "deep escape", parts: []string{"a/b", "../../.."}, want: ""},
+		{name: "internal dotdot stays inside", parts: []string{"a", "..", "b"}, want: "b"},
+		{name: "double dot prefix in filename", parts: []string{"..a"}, want: "..a"},
+		{name: "double dot prefix in child filename", parts: []string{"a", "..b"}, want: filepath.Join("a", "..b")},
+		{name: "triple dot filename", parts: []string{"..."}, want: "..."},
+
+		// Absolute first non-empty part remains absolute.
+		{name: "absolute base and child", parts: []string{"/a", "b"}, want: filepath.Join("/a", "b")},
+		{name: "empty then absolute", parts: []string{"", "/a", "b"}, want: filepath.Join("/a", "b")},
+		{name: "root and child", parts: []string{"/", "a", "b"}, want: filepath.Join("/a", "b")},
+		{name: "root and dotdot", parts: []string{"/", ".."}, want: "/"},
+		{name: "absolute clamped at root", parts: []string{"/a", "..", ".."}, want: "/"},
+		{name: "absolute clamped at root with child", parts: []string{"/a", "..", "..", "b"}, want: "/b"},
+		{name: "double leading slash", parts: []string{"//a", "b"}, want: filepath.Join("/a", "b")},
+		{name: "only slashes and empties", parts: []string{"", "///", ""}, want: "/"},
+		{name: "relative first then slash part", parts: []string{"a", "/b"}, want: filepath.Join("a", "b")},
+		{name: "dot first then slash part", parts: []string{".", "/b"}, want: "b"},
+
+		// Dot resolution.
+		{name: "single dot", parts: []string{"."}, want: "."},
+		{name: "multiple dots", parts: []string{".", "."}, want: "."},
+		{name: "dots with empties", parts: []string{"", ".", "", "."}, want: "."},
+		{name: "dot with trailing slash", parts: []string{"./"}, want: "."},
+		{name: "self cancel to dot", parts: []string{"a", ".."}, want: "."},
+		{name: "dot and self cancel", parts: []string{"./a", "..", "."}, want: "."},
+		{name: "dot and dot slash dot", parts: []string{".", "./."}, want: "."},
+
+		// Cleaning redundant slashes and trailing separators.
+		{name: "redundant and trailing slashes", parts: []string{"a//b/", "./c", "d/../e/"}, want: filepath.Join("a", "b", "c", "e")},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := JoinClean(tc.parts...)
+			if got != tc.want {
+				t.Fatalf("JoinClean(%q) = %q, want %q", tc.parts, got, tc.want)
+			}
+			for _, p := range tc.parts {
+				if p == "" {
+					continue
+				}
+				if filepath.IsAbs(p) && !filepath.IsAbs(got) {
+					t.Fatalf("JoinClean(%q) = %q, want absolute result because first non-empty part %q is absolute", tc.parts, got, p)
+				}
+				break
+			}
+		})
+	}
+
+	// Huge slice boundary check.
+	many := make([]string, 2000)
+	for i := range many {
+		many[i] = "seg"
+	}
+	wantMany := strings.Join(many, string(filepath.Separator))
+	if got := JoinClean(many...); got != wantMany {
+		t.Fatalf("JoinClean(2000 segments) len = %d, want %d", len(got), len(wantMany))
 	}
 }
