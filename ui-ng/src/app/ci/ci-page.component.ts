@@ -31,7 +31,8 @@ import {
   untracked,
   viewChild,
 } from "@angular/core";
-import { Router, RouterLink } from "@angular/router";
+import { ActivatedRoute, Router, RouterLink } from "@angular/router";
+import type { Subscription } from "rxjs";
 import { routePath } from "../api/grain-api.service";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
@@ -55,6 +56,7 @@ import {
   type CIRunArtifact,
   type CIWorkflowOption,
   type QuarantineTestResponse,
+  GITHUB_ACTIONS_PROVIDER,
   cleanRef,
   extractFailedTests,
   faultRefCount,
@@ -64,8 +66,11 @@ import {
   faultsForRun,
   formatBytes,
   formatDuration,
+  isActionsRunId,
   isRunActive,
+  parseProviderQueryParam,
   providerOfRun,
+  providerQueryParam,
   runBadge,
   runBranch,
   runBucket,
@@ -517,7 +522,7 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
           } @else if (store.loaded() && filteredRuns().length === 0) {
             <div class="empty-state" data-testid="ci-empty">
               <p>No CI runs match the current filters.</p>
-              @if (bucketFilter() !== "all" || repoFilter() || branchFilter()) {
+              @if (hasActiveFilters()) {
                 <button
                   type="button"
                   class="btn-tonal"
@@ -1435,10 +1440,12 @@ export class CIPageComponent implements OnInit, OnDestroy {
   protected readonly store = inject(CIStore);
   protected readonly access = inject(AccessService);
   protected readonly filter = inject(ViewFilter);
+  private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
   private readonly snackbar = inject(SnackbarService);
   private readonly doc = inject(DOCUMENT);
   private readonly zone = inject(NgZone);
+  private querySub: Subscription | null = null;
 
   protected readonly filters = FILTERS;
   protected readonly providers = PROVIDERS;
@@ -1569,6 +1576,16 @@ export class CIPageComponent implements OnInit, OnDestroy {
     extractFailedTests(this.store.activeRun()),
   );
 
+  protected readonly hasActiveFilters = computed(
+    () =>
+      this.bucketFilter() !== "all" ||
+      !!this.repoFilter() ||
+      !!this.branchFilter() ||
+      this.providerFilter() !== "all" ||
+      !!this.faultDigestFilter() ||
+      !!this.filter.query().trim(),
+  );
+
   protected readonly canFlushAnyCache = computed(
     () =>
       this.access.can("DELETE /api/ci/cache") ||
@@ -1649,6 +1666,12 @@ export class CIPageComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
+    this.querySub = this.route.queryParamMap.subscribe((qp) => {
+      this.providerFilter.set(parseProviderQueryParam(qp.get("provider")));
+      this.repoFilter.set((qp.get("repo") ?? "").trim());
+      this.branchFilter.set((qp.get("branch") ?? "").trim());
+    });
+    this.store.setQueryScope(this.repoFilter(), this.providerFilter());
     this.zone.runOutsideAngular(() => {
       this.doc.addEventListener("keydown", this.onCaptureKeydown, true);
     });
@@ -1656,6 +1679,8 @@ export class CIPageComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.querySub?.unsubscribe();
+    this.querySub = null;
     this.doc.removeEventListener("keydown", this.onCaptureKeydown, true);
     if (this.clockTimer) {
       clearInterval(this.clockTimer);
@@ -1714,17 +1739,20 @@ export class CIPageComponent implements OnInit, OnDestroy {
 
   protected setProviderFilter(id: CIProviderFilter): void {
     this.providerFilter.set(id);
+    this.syncQueryParams();
   }
 
   protected pickRepo(repo: string): void {
     this.repoFilter.set(repo);
     this.branchFilter.set("");
     this.openMenu.set(null);
+    this.syncQueryParams();
   }
 
   protected pickBranch(branch: string): void {
     this.branchFilter.set(branch);
     this.openMenu.set(null);
+    this.syncQueryParams();
   }
 
   protected resetFilters(): void {
@@ -1734,6 +1762,7 @@ export class CIPageComponent implements OnInit, OnDestroy {
     this.providerFilter.set("all");
     this.faultDigestFilter.set("");
     this.filter.query.set("");
+    this.syncQueryParams();
   }
 
   protected inspectFault(f: CIFault): void {
@@ -1744,24 +1773,74 @@ export class CIPageComponent implements OnInit, OnDestroy {
     }
     this.faultDigestFilter.set(f.digest || faultTitle(f));
     const firstRunId = f.runs?.[0]?.runId;
-    if (firstRunId) {
-      this.openRun(firstRunId, true);
+    const navigated = firstRunId ? this.openRun(firstRunId, true) : false;
+    if (!navigated) {
+      this.syncQueryParams();
     }
   }
 
-  protected openRun(runId: string, fromUserClick = false): void {
+  protected openRun(runId: string, fromUserClick = false): boolean {
     if (fromUserClick) this.mobileDetailOpen.set(true);
     void this.store.selectRun(runId);
     if (this.id() && this.id() !== runId) {
-      void this.router.navigate(["/ci", "runs", runId]);
+      void this.router.navigate(["/ci", "runs", runId], {
+        queryParams: this.runNavigationQueryParams(runId),
+        queryParamsHandling: "merge",
+      });
+      return true;
     }
+    return false;
   }
 
   protected closeMobileDetail(): void {
     this.mobileDetailOpen.set(false);
     if (this.id()) {
-      void this.router.navigate(["/ci"]);
+      void this.router.navigate(["/ci"], {
+        queryParams: this.filterQueryParams(),
+        queryParamsHandling: "merge",
+      });
     }
+  }
+
+  private filterQueryParams() {
+    return {
+      provider: providerQueryParam(this.providerFilter()),
+      repo: this.repoFilter().trim() || null,
+      branch: this.branchFilter().trim() || null,
+    };
+  }
+
+  private runNavigationQueryParams(runId: string) {
+    const params = this.filterQueryParams();
+    if (!params.provider && this.isGitHubRun(runId)) {
+      params.provider = GITHUB_ACTIONS_PROVIDER;
+    }
+    return params;
+  }
+
+  private isGitHubRun(runId: string): boolean {
+    if (isActionsRunId(runId)) return true;
+    const found =
+      this.store.runs().find((r) => r.id === runId) ??
+      (this.store.detail()?.id === runId ? this.store.detail() : null);
+    return !!found && providerOfRun(found) === "github";
+  }
+
+  private syncQueryParams(): void {
+    const desired = this.filterQueryParams();
+    const cur = this.route.snapshot.queryParamMap;
+    if (
+      (cur.get("provider") ?? null) === desired.provider &&
+      (cur.get("repo") ?? null) === desired.repo &&
+      (cur.get("branch") ?? null) === desired.branch
+    ) {
+      return;
+    }
+    void this.router.navigate([], {
+      relativeTo: this.route,
+      queryParams: desired,
+      queryParamsHandling: "merge",
+    });
   }
 
   protected badgeOf(run: CIRun) {

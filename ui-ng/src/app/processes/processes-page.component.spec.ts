@@ -1473,6 +1473,31 @@ describe("ProcessesPageComponent (D-9)", () => {
     ).toBe("refs/tags/latest");
   });
 
+  it("appends provider=github-actions to lastWorkflowRun links when runId is a GitHub Actions run", async () => {
+    api.schedules[0] = {
+      ...api.schedules[0],
+      lastWorkflowRun: {
+        runId: "gha:acme:widgets:9001",
+        conclusion: "failure",
+      },
+    };
+    const harness = await RouterTestingHarness.create("/processes");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    root
+      .querySelector<HTMLElement>('[data-testid="sched-row-sched-1"]')!
+      .click();
+    await flush(harness);
+
+    const runLink = Array.from(root.querySelectorAll("a")).find(
+      (a) => a.textContent?.trim() === "gha:acme:widgets:9001",
+    );
+    expect(runLink?.getAttribute("href")).toBe(
+      "/ci/runs/gha:acme:widgets:9001?provider=github-actions",
+    );
+  });
+
   it("disables mutating buttons and blocks deep-link dialogs for grain/viewer across all tabs", async () => {
     api.configBody = {
       access: {

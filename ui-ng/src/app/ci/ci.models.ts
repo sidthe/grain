@@ -300,9 +300,69 @@ export function runBranch(run: CIRun): string {
   return cleanRef(run.branch || run.ref || "");
 }
 
-export function providerOfRun(run: CIRun): "grain" | "github" {
+export const GITHUB_ACTIONS_PROVIDER = "github-actions";
+export const GRAIN_PROVIDER = "grain";
+
+export function isActionsRunId(runId: string | undefined | null): boolean {
+  return (runId ?? "").startsWith("gha:");
+}
+
+export function repoFromActionsRunId(runId: string | undefined | null): string {
+  const id = runId ?? "";
+  if (!id.startsWith("gha:")) return "";
+  const rest = id.slice(4);
+  const parts = rest.split(":");
+  if (parts.length >= 3 && parts[0] && parts[1]) {
+    return `${parts[0]}/${parts[1]}`;
+  }
+  return "";
+}
+
+export function providerQueryParam(
+  provider: CIProviderFilter | string | undefined | null,
+): string | null {
+  if (provider === "github" || provider === GITHUB_ACTIONS_PROVIDER) {
+    return GITHUB_ACTIONS_PROVIDER;
+  }
+  if (provider === GRAIN_PROVIDER) {
+    return GRAIN_PROVIDER;
+  }
+  return null;
+}
+
+export function parseProviderQueryParam(
+  raw: string | undefined | null,
+): CIProviderFilter {
+  const v = (raw ?? "").trim().toLowerCase();
+  if (v === GITHUB_ACTIONS_PROVIDER || v === "github") {
+    return "github";
+  }
+  if (v === GRAIN_PROVIDER) {
+    return "grain";
+  }
+  return "all";
+}
+
+export function runProviderQueryParams(
+  runOrId:
+    Pick<CIRun, "id" | "provider" | "source"> | string | undefined | null,
+): Record<string, string> | null {
+  if (!runOrId) return null;
+  if (typeof runOrId === "string") {
+    return isActionsRunId(runOrId)
+      ? { provider: GITHUB_ACTIONS_PROVIDER }
+      : null;
+  }
+  return providerOfRun(runOrId) === "github"
+    ? { provider: GITHUB_ACTIONS_PROVIDER }
+    : null;
+}
+
+export function providerOfRun(
+  run: Pick<CIRun, "id" | "provider" | "source">,
+): "grain" | "github" {
   const p = (run.provider || run.source || "").toLowerCase();
-  if (p.includes("github") || run.id.startsWith("gha:")) return "github";
+  if (p.includes("github") || isActionsRunId(run.id)) return "github";
   return "grain";
 }
 

@@ -37,6 +37,11 @@ import type {
   MergeGate,
   TaskDetail,
 } from "../api/models";
+import {
+  GITHUB_ACTIONS_PROVIDER,
+  isActionsRunId,
+  runProviderQueryParams,
+} from "../ci/ci.models";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
 import { errorText } from "../sessions/session-helpers";
@@ -296,6 +301,7 @@ import { TaskStore } from "./task.store";
               @if (obsCi.runId) {
                 <a
                   [routerLink]="['/ci/runs', obsCi.runId]"
+                  [queryParams]="ciRunQueryParams(obsCi.runId)"
                   data-testid="ci-run-link"
                   >Open run #{{ obsCi.runId }}</a
                 >
@@ -326,6 +332,7 @@ import { TaskStore } from "./task.store";
                 }
                 <a
                   [routerLink]="['/ci/runs', run.id]"
+                  [queryParams]="ciRunQueryParams(run)"
                   [attr.data-testid]="'ci-run-link-' + run.id"
                   >View run #{{ run.id }}</a
                 >
@@ -487,6 +494,16 @@ export class TaskChangesTabComponent {
   protected readonly ciLoading = signal(false);
   protected readonly ciError = signal<string | null>(null);
 
+  protected ciRunQueryParams(
+    runOrId: CIRun | string | undefined | null,
+  ): Record<string, string> | null {
+    if (typeof runOrId === "string") {
+      const matched = this.ciRuns().find((r) => r.id === runOrId);
+      return runProviderQueryParams(matched ?? runOrId);
+    }
+    return runProviderQueryParams(runOrId);
+  }
+
   readonly forceMerge =
     output<import("./force-merge-dialog.component").ForceMergeRequest>();
 
@@ -645,15 +662,38 @@ export class TaskChangesTabComponent {
         const t = this.task();
         // GET /api/ci/runs has no task filter (pkg/ui/ci.go ciRunFilterFrom):
         // scope by repo + ref, and fall back to the task's own run id.
-        const res: CIRunsResponse | CIRun[] =
-          t.repo && t.branch
-            ? await this.api.get<CIRunsResponse | CIRun[]>(
-                "GET /api/ci/runs",
-                undefined,
-                `repo=${encodeURIComponent(t.repo)}&ref=${encodeURIComponent(t.branch)}&limit=10`,
-              )
-            : [];
-        if (this.task().id !== id) return;
+        let res: CIRunsResponse | CIRun[] = [];
+        if (t.repo && t.branch) {
+          const baseQuery = `repo=${encodeURIComponent(t.repo)}&ref=${encodeURIComponent(t.branch)}&limit=10`;
+          const actionsKnown = isActionsRunId(t.ci?.runId);
+          res = await this.api.get<CIRunsResponse | CIRun[]>(
+            "GET /api/ci/runs",
+            undefined,
+            actionsKnown
+              ? `${baseQuery}&provider=${GITHUB_ACTIONS_PROVIDER}`
+              : baseQuery,
+          );
+          if (this.task().id !== id) return;
+          if (
+            !actionsKnown &&
+            !Array.isArray(res) &&
+            res?.repoProvider === GITHUB_ACTIONS_PROVIDER
+          ) {
+            const ghaRes = await this.api.get<CIRunsResponse | CIRun[]>(
+              "GET /api/ci/runs",
+              undefined,
+              `${baseQuery}&provider=${GITHUB_ACTIONS_PROVIDER}`,
+            );
+            if (this.task().id !== id) return;
+            const byId = new Map<string, CIRun>();
+            for (const r of res?.runs ?? []) byId.set(r.id, r);
+            const ghaRuns = Array.isArray(ghaRes)
+              ? ghaRes
+              : (ghaRes?.runs ?? []);
+            for (const r of ghaRuns) byId.set(r.id, r);
+            res = [...byId.values()];
+          }
+        }
         const runs = Array.isArray(res) ? res : (res?.runs ?? []);
         this.ciRuns.set(runs);
         const autoRunId = this.task().ci?.runId || runs[0]?.id;
