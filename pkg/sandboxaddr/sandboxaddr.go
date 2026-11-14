@@ -70,7 +70,9 @@ import (
 	"fmt"
 	"math/bits"
 	"net/netip"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 )
 
@@ -516,4 +518,26 @@ func addrPlus(addr netip.Addr, n uint64) netip.Addr {
 		n += sum >> 8
 	}
 	return netip.AddrFrom16(b)
+}
+
+// JoinClean joins non-empty path parts using filepath.Join and returns the
+// cleaned path. It returns an empty string when no non-empty parts are given
+// or when the cleaned path escapes via ".." or "../". When the first non-empty
+// part is absolute, the returned path is absolute; when all non-empty parts
+// resolve to ".", it returns ".".
+func JoinClean(parts ...string) string {
+	nonEmpty := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part != "" {
+			nonEmpty = append(nonEmpty, part)
+		}
+	}
+	if len(nonEmpty) == 0 {
+		return ""
+	}
+	cleaned := filepath.Join(nonEmpty...)
+	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	return cleaned
 }

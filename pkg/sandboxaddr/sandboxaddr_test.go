@@ -17,6 +17,7 @@ package sandboxaddr
 import (
 	"fmt"
 	"net/netip"
+	"path/filepath"
 	"sync"
 	"testing"
 )
@@ -443,5 +444,80 @@ func TestReserveRootRefusals(t *testing.T) {
 		if err := pool.ReserveRoot(tc.sandbox, netip.MustParseAddr(tc.addr)); err == nil {
 			t.Errorf("%s: ReserveRoot(%q, %s) succeeded", tc.name, tc.sandbox, tc.addr)
 		}
+	}
+}
+
+func TestJoinClean(t *testing.T) {
+	if got := JoinClean(); got != "" {
+		t.Errorf("JoinClean() = %q, want %q", got, "")
+	}
+	var nilParts []string
+	if got := JoinClean(nilParts...); got != "" {
+		t.Errorf("JoinClean(nil...) = %q, want %q", got, "")
+	}
+
+	for _, tc := range []struct {
+		name    string
+		parts   []string
+		want    string
+		wantAbs bool
+	}{
+		{name: "empty slice", parts: []string{}, want: ""},
+		{name: "single empty string", parts: []string{""}, want: ""},
+		{name: "all empty strings", parts: []string{"", "", ""}, want: ""},
+		{name: "ignores empty parts", parts: []string{"", "a", "", "b", ""}, want: filepath.Join("a", "b")},
+		{name: "normal multi-part clean", parts: []string{"a/b/", "./c//d/"}, want: filepath.Join("a", "b", "c", "d")},
+
+		// Traversal prevention.
+		{name: "dot dot alone", parts: []string{".."}, want: ""},
+		{name: "dot dot slash", parts: []string{"../"}, want: ""},
+		{name: "dot dot prefix", parts: []string{"../a"}, want: ""},
+		{name: "dot dot part then sub", parts: []string{"..", "a"}, want: ""},
+		{name: "empty then dot dot", parts: []string{"", "..", "a"}, want: ""},
+		{name: "dot then dot dot", parts: []string{".", ".."}, want: ""},
+		{name: "relative climbs past root", parts: []string{"a", "..", ".."}, want: ""},
+		{name: "relative climbs past root with suffix", parts: []string{"a", "..", "..", "b"}, want: ""},
+		{name: "nested climbs to parent", parts: []string{"a/b", "../../.."}, want: ""},
+		{name: "nested climbs past root", parts: []string{"a/b", "../../../etc/passwd"}, want: ""},
+		{name: "leading double dot filename", parts: []string{"..a"}, want: "..a"},
+		{name: "trailing double dot filename", parts: []string{"foo.."}, want: "foo.."},
+		{name: "nested double dot filename", parts: []string{"a", "..b"}, want: filepath.Join("a", "..b")},
+		{name: "triple dot filename", parts: []string{"..."}, want: "..."},
+		{name: "in-bounds parent resolves cleanly", parts: []string{"a", "../b"}, want: "b"},
+		{name: "nested in-bounds parent", parts: []string{"a/b", "../c"}, want: filepath.Join("a", "c")},
+
+		// Absolute first non-empty part stays absolute.
+		{name: "root only", parts: []string{"/"}, want: "/", wantAbs: true},
+		{name: "empty then root", parts: []string{"", "/", ""}, want: "/", wantAbs: true},
+		{name: "absolute join", parts: []string{"/a", "b"}, want: "/a/b", wantAbs: true},
+		{name: "empty then absolute join", parts: []string{"", "/a", "", "b"}, want: "/a/b", wantAbs: true},
+		{name: "absolute cleans slashes and dots", parts: []string{"/a//b/", "/c/./d/"}, want: "/a/b/c/d", wantAbs: true},
+		{name: "absolute parent clamps to root", parts: []string{"/a", "..", ".."}, want: "/", wantAbs: true},
+		{name: "empty then absolute parent and child", parts: []string{"", "/..", "a"}, want: "/a", wantAbs: true},
+		{name: "root with parent and child", parts: []string{"/", "..", "a"}, want: "/a", wantAbs: true},
+		{name: "absolute dot", parts: []string{"/."}, want: "/", wantAbs: true},
+		{name: "double leading slashes", parts: []string{"//a", "b"}, want: "/a/b", wantAbs: true},
+		{name: "multiple leading slashes", parts: []string{"///a", "b"}, want: "/a/b", wantAbs: true},
+		{name: "relative first with slashed second stays relative", parts: []string{"a", "/b"}, want: filepath.Join("a", "b")},
+
+		// Dot resolution.
+		{name: "single dot", parts: []string{"."}, want: "."},
+		{name: "multiple dots", parts: []string{".", "."}, want: "."},
+		{name: "dots with empty strings", parts: []string{"", ".", "", "./.", ""}, want: "."},
+		{name: "dot slash", parts: []string{"./"}, want: "."},
+		{name: "child cancelled by parent resolves to dot", parts: []string{"a", ".."}, want: "."},
+		{name: "nested cancelled by parents resolves to dot", parts: []string{"a/b", "../.."}, want: "."},
+		{name: "dot then child drops dot", parts: []string{".", "a"}, want: "a"},
+		{name: "middle dot is cleaned", parts: []string{"a", ".", "b"}, want: filepath.Join("a", "b")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := JoinClean(tc.parts...)
+			if got != tc.want {
+				t.Errorf("JoinClean(%q) = %q, want %q", tc.parts, got, tc.want)
+			}
+			if tc.wantAbs && !filepath.IsAbs(got) {
+				t.Errorf("JoinClean(%q) = %q, want absolute path", tc.parts, got)
+			}
+		})
 	}
 }
