@@ -34,6 +34,7 @@ import {
   ConfirmDialogComponent,
   type ConfirmRequest,
 } from "../shared/confirm-dialog.component";
+import { QaV3StudioComponent } from "./qa-v3-studio.component";
 import { DiffViewerComponent } from "../shared/diff-viewer.component";
 import {
   type PillOption,
@@ -50,6 +51,7 @@ import {
 @Component({
   selector: "g-qa-flows-panel",
   imports: [
+    QaV3StudioComponent,
     DiffViewerComponent,
     PillSelectComponent,
     ConfirmDialogComponent,
@@ -132,6 +134,7 @@ import {
                   Publish version
                 </button>
               </div>
+              }
             </div>
 
             @if (dryRunResult(); as dr) {
@@ -174,6 +177,9 @@ import {
             </div>
 
             <div class="editor-scroll-area">
+              @if (draftDeclaration().schema === "grain.dev/qa-flow/v3") {
+                <g-qa-v3-studio [decl]="draftDeclaration().declarationV3" />
+              } @else {
               <div id="section-basics" class="editor-section">
                 <h3>Basics</h3>
                 <label for="qa-flow-key-input">Key</label>

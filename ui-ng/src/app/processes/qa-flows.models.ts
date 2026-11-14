@@ -45,6 +45,32 @@ export interface FlowDeclarationV2 {
   };
 }
 
+export interface FlowDeclarationV3 {
+  schema: "grain.dev/qa-flow/v3";
+  skills?: Record<string, unknown>;
+  stages?: {
+    "s0-intent"?: boolean;
+    "s1-risk"?: boolean;
+    "s2-plan-critic"?: boolean;
+    "s5-merge-triage"?: "off" | "shadow" | "enforced";
+    custom?: unknown[];
+  };
+  customChecks?: Record<
+    string,
+    {
+      engine: "pattern" | "diff-budget" | "companion" | "jsonschema";
+      fixtures: { fail: unknown[]; pass: unknown[] };
+    }
+  >;
+  "custom-checks"?: Record<
+    string,
+    {
+      engine: "pattern" | "diff-budget" | "companion" | "jsonschema";
+      fixtures: { fail: unknown[]; pass: unknown[] };
+    }
+  >;
+}
+
 export interface QAFlowVersionItem {
   hash: string;
   key: string;
@@ -59,6 +85,12 @@ export interface QAFlowVersionItem {
   retiredAt?: string | null;
   sourceYaml?: string;
   declaration?: FlowDeclarationV2;
+  declarationV3?: FlowDeclarationV3;
+  schemaVer?: string;
+  sourceKind?: string;
+  sourceRepo?: string;
+  sourcePath?: string;
+  sourceCommit?: string;
   resolved?: QAFlowSpec;
 }
 
@@ -96,3 +128,38 @@ export type QAFlowPublishRequest =
   | { declaration: FlowDeclarationV2 }
   | { yaml: string }
   | { action: "retire"; hash: string };
+
+export interface QAAdoptResponse {
+  dryRun?: boolean;
+  valid?: boolean;
+  hash: string;
+  version?: QAFlowVersionItem;
+  sampledPRs?: number;
+  wouldBlockPRs?: number;
+}
+
+export interface QAProbeResponse {
+  complexity: {
+    tier: "low" | "medium" | "high";
+    score: number;
+    signals: string[];
+    hasDesignItem: boolean;
+  };
+  risk: {
+    tier: "T0" | "T1" | "T2" | "T3";
+    score: number;
+    signals: string[];
+    testTampered: boolean;
+    trustBoundary: boolean;
+  };
+  stagesFired: string[];
+  triage: {
+    decision: "auto_merge" | "require_human";
+    enforced: boolean;
+    mode: "off" | "shadow" | "enforced";
+    tier: string;
+    blastScore: number;
+    reasons: string[];
+    blockedByFloor: boolean;
+  };
+}

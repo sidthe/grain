@@ -286,6 +286,8 @@ export const ROUTE_SCOPES = {
   "POST /api/qa/experiments/{id}/readout": "qa:admin",
   "POST /api/qa/experiments/{id}/transition": "qa:admin",
   "POST /api/qa/flow-versions": "qa:admin",
+    "POST /api/qa/flow-versions/adopt": "qa:admin",
+    "POST /api/qa/probe": "qa:read",
   "POST /api/registry/heartbeat": "settings:write",
   "POST /api/releases/{version}/rollback": "releases:write",
   "POST /api/repos": "repos:write",

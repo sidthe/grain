@@ -404,6 +404,15 @@ const ONE_KEY = new Set(["approve"]);
                                     >{{ c.text }}</span
                                   >
                                 }
+                                @if (e.task && qaTriageChip(e.task); as qc) {
+                                  <span
+                                    class="gate-chip"
+                                    style="margin-left: 6px; padding: 2px 6px; border-radius: 4px; font-size: 11px; background: var(--md-sys-color-surface-container-high);"
+                                    data-testid="row-qa-triage"
+                                  >
+                                    {{ qc }}
+                                  </span>
+                                }
                                 @if (e.gone) {
                                   <span class="muted row-gone"
                                     >left the Inbox</span
@@ -1199,6 +1208,17 @@ const ONE_KEY = new Set(["approve"]);
   ],
 })
 export class InboxPageComponent implements OnInit, OnDestroy {
+  protected qaTriageChip(t: TaskDetail): string | null {
+    const hr = (
+      t as TaskDetail & {
+        humanReview?: Array<{ source?: string; reason?: string }>;
+      }
+    ).humanReview?.find((h) => h.source === "qa-triage");
+    if (!hr) return null;
+    const m = hr.reason?.match(/\[(T[0-3])\b/);
+    return m ? `[${m[1]} · Review]` : "[T2 · Review]";
+  }
+
   protected readonly store = inject(InboxStore);
   protected readonly wsStore = inject(WorkstreamsStore);
   protected readonly access = inject(AccessService);

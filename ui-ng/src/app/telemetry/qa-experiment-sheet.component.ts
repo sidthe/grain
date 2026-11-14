@@ -119,6 +119,15 @@ interface FlowVersionDetailPayload {
                 (input)="onTextInput(name, $event)"
               />
             </div>
+            <div class="qa-exp-field" style="margin-top: 16px;">
+              <label for="f-exp-ref">Reference arm</label>
+              <g-pill-select
+                id="f-exp-ref"
+                [value]="referenceArmId()"
+                (valueChange)="referenceArmId.set($event)"
+                [options]="referenceArmOptions()"
+              />
+            </div>
             <div class="qa-exp-field">
               <label for="f-exp-hyp">Hypothesis</label>
               <textarea
@@ -406,6 +415,14 @@ interface FlowVersionDetailPayload {
   `,
 })
 export class QaExperimentSheetComponent implements OnInit {
+  referenceArmOptions = computed(() => {
+    const opts = [{ value: "control", label: "Canonical baseline (no QA)" }];
+    for (const v of this.flowOptions()) {
+      opts.push({ value: v.value, label: v.label });
+    }
+    return opts;
+  });
+
   readonly dismiss = output<void>();
   readonly done = output<string>();
 
@@ -415,6 +432,7 @@ export class QaExperimentSheetComponent implements OnInit {
   private readonly snackbar = inject(SnackbarService);
 
   readonly name = signal("");
+  referenceArmId = signal<string>("control");
   readonly hypothesis = signal("");
   readonly controlHash = signal("control");
   readonly treatmentHash = signal("golden-v2@1");

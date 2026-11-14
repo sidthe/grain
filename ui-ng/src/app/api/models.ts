@@ -890,6 +890,11 @@ export interface QACheckRun {
   shadow: boolean;
   verdict: string;
   durationMs: number;
+  blastTier?: string;
+  blastScore?: number;
+  complexityTier?: string;
+  triageDecision?: string;
+  repairedInNextSha?: number;
   tokensIn: number;
   tokensOut: number;
   allocBytes: number;

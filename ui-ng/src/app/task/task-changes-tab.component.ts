@@ -266,6 +266,55 @@ import { TaskStore } from "./task.store";
             </p>
           }
 
+          @if (qaSummaryStats(); as stats) {
+            <div
+              class="tc-run-row"
+              data-testid="qa-summary-stats"
+              style="gap: 12px; background: var(--md-sys-color-surface-container-lowest);"
+            >
+              @if (stats.complexityTier) {
+                <span
+                  class="status-pill info"
+                  gTip="Task complexity assessment"
+                >
+                  Complexity: {{ stats.complexityTier }}
+                </span>
+              }
+              @if (stats.blastTier) {
+                <span
+                  class="status-pill warning"
+                  gTip="Blast radius assessment"
+                >
+                  Blast: {{ stats.blastTier }} &middot;
+                  {{ stats.blastScore }}/100
+                </span>
+              }
+              @if (stats.triageDecision) {
+                <span
+                  class="status-pill"
+                  [class.success]="stats.triageDecision === 'auto_merge'"
+                  [class.error]="stats.triageDecision !== 'auto_merge'"
+                  gTip="Triage decision"
+                >
+                  {{
+                    stats.triageDecision === "auto_merge"
+                      ? "Auto-merge eligible"
+                      : "Human review required"
+                  }}
+                </span>
+              }
+              @if (stats.repairedInNextSha === 1) {
+                <span
+                  class="badge"
+                  style="background: var(--md-sys-color-tertiary-container); color: var(--md-sys-color-on-tertiary-container);"
+                  gTip="Issues repaired in next push"
+                >
+                  Repaired in next push
+                </span>
+              }
+            </div>
+          }
+
           @for (chk of visibleQaCheckRuns(); track chk.id) {
             <div class="tc-run-row" [attr.data-testid]="'qa-check-' + chk.id">
               <div class="ci-run-summary">
@@ -628,6 +677,21 @@ import { TaskStore } from "./task.store";
   `,
 })
 export class TaskChangesTabComponent {
+  protected qaSummaryStats = computed(() => {
+    const runs = this.visibleQaCheckRuns();
+    const withTiers = runs.find((x) => x.complexityTier || x.blastTier);
+    const withTriage = runs.find((x) => x.triageDecision);
+    const withRepair = runs.find((x) => x.repairedInNextSha === 1);
+    if (!withTiers && !withTriage && !withRepair) return null;
+    return {
+      complexityTier: withTiers?.complexityTier,
+      blastTier: withTiers?.blastTier,
+      blastScore: withTiers?.blastScore,
+      triageDecision: withTriage?.triageDecision,
+      repairedInNextSha: withRepair?.repairedInNextSha,
+    };
+  });
+
   protected readonly store = inject(TaskStore);
   private readonly api = inject(GrainApi);
   private readonly access = inject(AccessService);

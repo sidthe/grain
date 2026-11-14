@@ -527,3 +527,14 @@ Rules:
 - [ ] This book updated if the change sets or changes a rule.
 - [ ] No internal hostnames, people's names or credentials in code, fixtures,
       screenshots or commit messages.
+
+## 12. V3 Studio, Telemetry, & Inbox Badges
+
+The **V3 Studio** (`/next/processes`) separates pipeline stages (S0 Intent, S2 Plan Critic, S5 Merge Triage) and custom checks (pattern, diff-budget, companion, jsonschema) into a dedicated component (`g-qa-v3-studio`), maintaining strict component constraints (`< 6,500` bytes CSS). It also introduces the "Adopt from repo commit" modal and a "What-if probe" drawer to simulate pipeline execution.
+
+The **Telemetry Cards** (`/next/telemetry?tab=quality`) adds three new compact elements in `g-quality-v3-cards`:
+- A **Diff Strip** to highlight pipeline modifications against the reference arm (`+S0`, `+custom checks`, `Verifier changed`).
+- A **Stage Funnel & Cost Attribution** ops-card, measuring `p95 latency`, `runs`, and `tokensMedian` per stage and arm.
+- A **Human-Review Triage (S5)** ops-card highlighting escape rates, human-routed precision, and reviews saved.
+
+The **Inbox & Tasks views** now integrate a compact `[T2/T3 · Review]` triage chip natively in queue rows (via `qaTriageChip()`), reducing UI noise while ensuring safety-critical `qa-triage` tasks are immediately identifiable in `<span class="row-line3">`. The Task Changes tab also explicitly flags `Complexity` and `Blast` tiers.

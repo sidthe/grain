@@ -34,6 +34,7 @@ import {
 } from "../shared/pill-select.component";
 import { StatusIconComponent } from "../shared/status-icon.component";
 import { TipDirective } from "../shared/tip.directive";
+import { QualityV3CardsComponent } from "./quality-v3-cards.component";
 import {
   QaExperimentSheetComponent,
   QaStartDialogComponent,
@@ -80,6 +81,7 @@ interface MetricRow {
   selector: "g-telemetry-quality",
   imports: [
     RouterLink,
+    QualityV3CardsComponent,
     TipDirective,
     StatusIconComponent,
     PillSelectComponent,
@@ -327,6 +329,7 @@ interface MetricRow {
           (!res()!.assignmentAudit || res()!.assignmentAudit.passed)
         ) {
           @let r = res()!;
+          <g-quality-v3-cards [results]="r" />
           <article class="ops-card tq-card" data-testid="qa-exp-results-card">
             <div class="ops-card-head">
               <div>
