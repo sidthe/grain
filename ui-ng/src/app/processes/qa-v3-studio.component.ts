@@ -16,6 +16,7 @@ import {
   ChangeDetectionStrategy,
   Component,
   ViewEncapsulation,
+  computed,
   effect,
   inject,
   input,
@@ -36,6 +37,46 @@ import type {
 
 type CustomCheckEngine = "pattern" | "diff-budget" | "companion" | "jsonschema";
 type InsertAfterStage = "s2" | "s3" | "s4";
+
+interface EditableCustomStage {
+  readonly uid: number;
+  readonly id: string;
+  readonly label: string;
+  readonly insertAfter: InsertAfterStage;
+  readonly timeoutSeconds: number;
+}
+
+interface EditableCustomCheck {
+  readonly uid: number;
+  readonly engine: CustomCheckEngine;
+  readonly passJson: string;
+  readonly failJson: string;
+}
+
+function inputTextValue(ev: Event): string {
+  if (
+    ev.target instanceof HTMLInputElement ||
+    ev.target instanceof HTMLTextAreaElement
+  ) {
+    return ev.target.value;
+  }
+  return "";
+}
+
+function inputNumberValue(ev: Event): number {
+  if (ev.target instanceof HTMLInputElement) {
+    const parsed = ev.target.valueAsNumber;
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+  return 0;
+}
+
+function inputCheckedValue(ev: Event): boolean {
+  if (ev.target instanceof HTMLInputElement) {
+    return ev.target.checked;
+  }
+  return false;
+}
 
 @Component({
   selector: "g-qa-v3-studio",
@@ -73,49 +114,57 @@ type InsertAfterStage = "s2" | "s3" | "s4";
         >
           + Custom stage
         </button>
-        @for (s of customStages(); track $index) {
-          <div class="check-row" style="margin-top: 16px;">
+        @for (stage of customStages(); track stage.uid) {
+          <div
+            class="check-row"
+            data-testid="qa-v3-custom-stage-row"
+            style="margin-top: 16px;"
+          >
             <div class="check-name">
               <strong>Custom Stage</strong>
               <button
                 type="button"
                 class="btn-text danger"
-                (click)="removeCustomStage($index)"
+                (click)="removeCustomStage(stage.uid)"
               >
                 Remove
               </button>
             </div>
             <div class="check-params">
-              <label [attr.for]="'stg-id-' + $index">ID</label>
+              <label [attr.for]="'stage-id-' + stage.uid">ID</label>
               <input
-                [id]="'stg-id-' + $index"
+                [id]="'stage-id-' + stage.uid"
                 type="text"
-                [value]="s.id"
-                (input)="updateStageId($index, textValue($event))"
+                [value]="stage.id"
+                (input)="updateStageId(stage.uid, textValue($event))"
               />
 
-              <label [attr.for]="'stg-lbl-' + $index">Label</label>
+              <label [attr.for]="'stage-label-' + stage.uid">Label</label>
               <input
-                [id]="'stg-lbl-' + $index"
+                [id]="'stage-label-' + stage.uid"
                 type="text"
-                [value]="s.label"
-                (input)="updateStageLabel($index, textValue($event))"
+                [value]="stage.label"
+                (input)="updateStageLabel(stage.uid, textValue($event))"
               />
 
-              <label [attr.for]="'stg-after-' + $index">Insert After</label>
+              <label [attr.for]="'stage-after-' + stage.uid"
+                >Insert After</label
+              >
               <g-pill-select
                 ariaLabel="Insert after"
-                [value]="s.insertAfter"
-                (valueChange)="updateStageInsertAfter($index, $event)"
+                [value]="stage.insertAfter"
+                (valueChange)="updateStageInsertAfter(stage.uid, $event)"
                 [options]="insertAfterOptions"
               />
 
-              <label [attr.for]="'stg-to-' + $index">Timeout (s)</label>
+              <label [attr.for]="'stage-timeout-' + stage.uid"
+                >Timeout (s)</label
+              >
               <input
-                [id]="'stg-to-' + $index"
+                [id]="'stage-timeout-' + stage.uid"
                 type="number"
-                [value]="s.timeoutSeconds"
-                (input)="updateStageTimeout($index, numValue($event))"
+                [value]="stage.timeoutSeconds"
+                (input)="updateStageTimeout(stage.uid, numValue($event))"
               />
             </div>
           </div>
@@ -166,35 +215,51 @@ type InsertAfterStage = "s2" | "s3" | "s4";
           </button>
         </div>
 
-        @for (c of customChecks(); track $index) {
-          <div class="check-row" style="margin-top: 16px;">
+        @for (check of customChecks(); track check.uid) {
+          <div
+            class="check-row"
+            data-testid="qa-v3-custom-check-row"
+            style="margin-top: 16px;"
+          >
             <div class="check-name">
-              <strong>Engine:</strong> {{ c.engine }}
+              <strong>Engine:</strong> {{ check.engine }}
               <button
                 type="button"
                 class="btn-text danger"
-                (click)="removeCheck($index)"
+                (click)="removeCheck(check.uid)"
               >
                 Remove
               </button>
             </div>
             <div class="check-params fixture-stack">
-              <label [attr.for]="'pass-' + $index">
+              <label [attr.for]="'pass-' + check.uid">
                 Pass fixture (JSON array)
               </label>
               <textarea
-                [id]="'pass-' + $index"
-                [value]="c.passJson"
-                (input)="updateFixture($index, 'pass', textValue($event))"
+                [id]="'pass-' + check.uid"
+                [value]="check.passJson"
+                (input)="
+                  updateFixture({
+                    uid: check.uid,
+                    kind: 'pass',
+                    val: textValue($event),
+                  })
+                "
                 rows="2"
               ></textarea>
-              <label [attr.for]="'fail-' + $index">
+              <label [attr.for]="'fail-' + check.uid">
                 Fail fixture (JSON array)
               </label>
               <textarea
-                [id]="'fail-' + $index"
-                [value]="c.failJson"
-                (input)="updateFixture($index, 'fail', textValue($event))"
+                [id]="'fail-' + check.uid"
+                [value]="check.failJson"
+                (input)="
+                  updateFixture({
+                    uid: check.uid,
+                    kind: 'fail',
+                    val: textValue($event),
+                  })
+                "
                 rows="2"
               ></textarea>
             </div>
@@ -257,9 +322,10 @@ type InsertAfterStage = "s2" | "s3" | "s4";
           role="dialog"
           aria-modal="true"
           aria-labelledby="qa-v3-adopt-title"
+          data-testid="qa-v3-adopt-dialog"
           class="modal-content-full"
           (click)="$event.stopPropagation()"
-          (keydown.escape)="showAdopt.set(false)"
+          (gDialogClose)="showAdopt.set(false)"
         >
           <h3 id="qa-v3-adopt-title">Adopt Flow from Commit</h3>
           <label for="adoptRepo">Repo</label>
@@ -316,9 +382,10 @@ type InsertAfterStage = "s2" | "s3" | "s4";
           role="dialog"
           aria-modal="true"
           aria-labelledby="qa-v3-probe-title"
+          data-testid="qa-v3-probe-dialog"
           class="probe-drawer-full"
           (click)="$event.stopPropagation()"
-          (keydown.escape)="showProbe.set(false)"
+          (gDialogClose)="showProbe.set(false)"
         >
           <h3 id="qa-v3-probe-title">What-if Probe</h3>
           <label for="probeTitle">Title</label>
@@ -377,7 +444,7 @@ type InsertAfterStage = "s2" | "s3" | "s4";
               <p>Score: {{ pr.risk.score }}/100</p>
               <p>Blast Tier: {{ pr.risk.tier }}</p>
               <p>S5 Triage: {{ pr.triage.decision }} ({{ pr.triage.mode }})</p>
-              <p>Stages Fired: {{ pr.stagesFired.join(", ") }}</p>
+              <p>Stages Fired: {{ probeStagesText() }}</p>
             </div>
           }
         </div>
@@ -388,20 +455,14 @@ type InsertAfterStage = "s2" | "s3" | "s4";
 export class QaV3StudioComponent {
   private readonly api = inject(GrainApi);
   private readonly snackbar = inject(SnackbarService);
+  private nextUid = 1;
 
   readonly decl = input<FlowDeclarationV3>();
 
   readonly s0Intent = signal(false);
   readonly s2PlanCritic = signal(false);
   readonly s5Triage = signal<"off" | "shadow" | "enforced">("off");
-  readonly customStages = signal<
-    Array<{
-      id: string;
-      label: string;
-      insertAfter: InsertAfterStage;
-      timeoutSeconds: number;
-    }>
-  >([]);
+  readonly customStages = signal<readonly EditableCustomStage[]>([]);
 
   readonly insertAfterOptions = [
     { value: "s2", label: "s2" },
@@ -415,13 +476,7 @@ export class QaV3StudioComponent {
     { value: "enforced", label: "enforced" },
   ];
 
-  readonly customChecks = signal<
-    Array<{
-      engine: CustomCheckEngine;
-      passJson: string;
-      failJson: string;
-    }>
-  >([]);
+  readonly customChecks = signal<readonly EditableCustomCheck[]>([]);
 
   readonly verifying = signal(false);
   readonly dryRunResult = signal<QADryRunResponse | null>(null);
@@ -439,6 +494,13 @@ export class QaV3StudioComponent {
   readonly probeNonTest = signal(0);
   readonly probing = signal(false);
   readonly probeResult = signal<QAProbeResponse | null>(null);
+  readonly probeStagesText = computed<string>(() =>
+    (this.probeResult()?.stagesFired ?? []).join(", "),
+  );
+
+  protected readonly textValue = inputTextValue;
+  protected readonly numValue = inputNumberValue;
+  protected readonly checkedValue = inputCheckedValue;
 
   constructor() {
     effect(() => {
@@ -456,6 +518,7 @@ export class QaV3StudioComponent {
         mode === "shadow" || mode === "enforced" ? mode : "off",
       );
       const stages = (d.stages?.custom ?? []).map((cs) => ({
+        uid: this.nextUid++,
         id: cs.id,
         label: cs.label ?? cs.id,
         insertAfter: cs["insert-after"] ?? cs.insertAfter ?? "s3",
@@ -464,13 +527,14 @@ export class QaV3StudioComponent {
       this.customStages.set(stages);
 
       const rawChecks = d["custom-checks"] ?? d.customChecks;
-      const list: CustomCheckDeclarationV3[] = Array.isArray(rawChecks)
+      const list: readonly CustomCheckDeclarationV3[] = Array.isArray(rawChecks)
         ? rawChecks
         : rawChecks
           ? Object.values(rawChecks)
           : [];
       this.customChecks.set(
         list.map((cc) => ({
+          uid: this.nextUid++,
           engine: cc.kind ?? cc.engine ?? "pattern",
           passJson: JSON.stringify(cc.fixtures?.pass ?? []),
           failJson: JSON.stringify(cc.fixtures?.fail ?? []),
@@ -479,48 +543,38 @@ export class QaV3StudioComponent {
     });
   }
 
-  protected textValue(ev: Event): string {
-    return (ev.target as HTMLInputElement | HTMLTextAreaElement).value;
-  }
-
-  protected numValue(ev: Event): number {
-    return (ev.target as HTMLInputElement).valueAsNumber || 0;
-  }
-
-  protected checkedValue(ev: Event): boolean {
-    return (ev.target as HTMLInputElement).checked;
-  }
-
-  protected updateStageId(idx: number, id: string): void {
+  protected updateStageId(uid: number, id: string): void {
     this.customStages.update((list) =>
-      list.map((s, i) => (i === idx ? { ...s, id } : s)),
+      list.map((s) => (s.uid === uid ? { ...s, id } : s)),
     );
   }
 
-  protected updateStageLabel(idx: number, label: string): void {
+  protected updateStageLabel(uid: number, label: string): void {
     this.customStages.update((list) =>
-      list.map((s, i) => (i === idx ? { ...s, label } : s)),
+      list.map((s) => (s.uid === uid ? { ...s, label } : s)),
     );
   }
 
-  protected updateStageInsertAfter(idx: number, val: string): void {
+  protected updateStageInsertAfter(uid: number, val: string): void {
     const insertAfter: InsertAfterStage =
       val === "s3" || val === "s4" ? val : "s2";
     this.customStages.update((list) =>
-      list.map((s, i) => (i === idx ? { ...s, insertAfter } : s)),
+      list.map((s) => (s.uid === uid ? { ...s, insertAfter } : s)),
     );
   }
 
-  protected updateStageTimeout(idx: number, timeoutSeconds: number): void {
+  protected updateStageTimeout(uid: number, timeoutSeconds: number): void {
     this.customStages.update((list) =>
-      list.map((s, i) => (i === idx ? { ...s, timeoutSeconds } : s)),
+      list.map((s) => (s.uid === uid ? { ...s, timeoutSeconds } : s)),
     );
   }
 
   addCustomStage(): void {
+    const uid = this.nextUid++;
     this.customStages.update((s) => [
       ...s,
       {
+        uid,
         id: `custom:stage-${s.length}`,
         label: `Custom ${s.length}`,
         insertAfter: "s3",
@@ -529,43 +583,50 @@ export class QaV3StudioComponent {
     ]);
   }
 
-  removeCustomStage(idx: number): void {
-    this.customStages.update((s) => s.filter((_, i) => i !== idx));
+  removeCustomStage(uid: number): void {
+    this.customStages.update((s) => s.filter((item) => item.uid !== uid));
   }
 
   addCheck(engine: CustomCheckEngine): void {
+    const uid = this.nextUid++;
     this.customChecks.update((c) => [
       ...c,
-      { engine, passJson: "[]", failJson: "[]" },
+      { uid, engine, passJson: "[]", failJson: "[]" },
     ]);
   }
 
-  removeCheck(idx: number): void {
-    this.customChecks.update((c) => c.filter((_, i) => i !== idx));
+  removeCheck(uid: number): void {
+    this.customChecks.update((c) => c.filter((item) => item.uid !== uid));
   }
 
-  updateFixture(idx: number, kind: "pass" | "fail", val: string): void {
+  updateFixture(options: {
+    uid: number;
+    kind: "pass" | "fail";
+    val: string;
+  }): void {
     this.customChecks.update((c) =>
-      c.map((item, i) =>
-        i === idx
-          ? kind === "pass"
-            ? { ...item, passJson: val }
-            : { ...item, failJson: val }
+      c.map((item) =>
+        item.uid === options.uid
+          ? options.kind === "pass"
+            ? { ...item, passJson: options.val }
+            : { ...item, failJson: options.val }
           : item,
       ),
     );
   }
 
   async verifyDryRun(): Promise<void> {
+    if (this.verifying()) return;
     this.verifying.set(true);
     try {
       let customChecksYaml = "";
-      for (let i = 0; i < this.customChecks().length; i++) {
-        const c = this.customChecks()[i];
+      const checks = this.customChecks();
+      for (let i = 0; i < checks.length; i++) {
+        const c = checks[i];
         try {
           JSON.parse(c.passJson);
           JSON.parse(c.failJson);
-        } catch (e) {
+        } catch (e: unknown) {
           this.snackbar.show(`JSON parse error in check-${i}: ${errorText(e)}`);
           return;
         }
@@ -590,7 +651,7 @@ export class QaV3StudioComponent {
         "dryRun=1",
       );
       if (res) this.dryRunResult.set(res);
-    } catch (err) {
+    } catch (err: unknown) {
       this.snackbar.show(`Dry run failed: ${errorText(err)}`);
     } finally {
       this.verifying.set(false);
@@ -598,6 +659,7 @@ export class QaV3StudioComponent {
   }
 
   async doAdopt(): Promise<void> {
+    if (this.adopting()) return;
     this.adopting.set(true);
     try {
       const res = await this.api.post<QAAdoptResponse>(
@@ -613,7 +675,7 @@ export class QaV3StudioComponent {
         this.snackbar.show(`Adopted flow ${res.hash}`);
         this.showAdopt.set(false);
       }
-    } catch (err) {
+    } catch (err: unknown) {
       this.snackbar.show(`Adopt failed: ${errorText(err)}`);
     } finally {
       this.adopting.set(false);
@@ -621,6 +683,7 @@ export class QaV3StudioComponent {
   }
 
   async doProbe(): Promise<void> {
+    if (this.probing()) return;
     this.probing.set(true);
     try {
       const files = this.probeFiles()
@@ -638,7 +701,7 @@ export class QaV3StudioComponent {
         },
       );
       if (res) this.probeResult.set(res);
-    } catch (err) {
+    } catch (err: unknown) {
       this.snackbar.show(`Probe failed: ${errorText(err)}`);
     } finally {
       this.probing.set(false);

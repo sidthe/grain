@@ -13,21 +13,30 @@
   padding-bottom: 8px;
 }
 
-.qa-v3-studio .editor-section label {
+.qa-v3-studio .editor-section label,
+.modal-content-full label,
+.probe-drawer-full label {
   display: block;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
-  margin-bottom: 4px;
-  margin-top: 12px;
+  margin-bottom: 6px;
+  margin-top: 14px;
 }
 
 .qa-v3-studio .editor-section input[type="text"],
 .qa-v3-studio .editor-section input[type="number"],
-.qa-v3-studio .editor-section textarea {
+.qa-v3-studio .editor-section textarea,
+.modal-content-full input[type="text"],
+.modal-content-full input[type="number"],
+.modal-content-full textarea,
+.probe-drawer-full input[type="text"],
+.probe-drawer-full input[type="number"],
+.probe-drawer-full textarea {
   width: 100%;
-  padding: 8px 10px;
+  box-sizing: border-box;
+  padding: 8px 12px;
   border: 1px solid var(--md-sys-color-outline);
-  border-radius: 6px;
+  border-radius: 8px;
   font-size: 14px;
   line-height: 20px;
   background: var(--md-sys-color-surface-container-lowest);
@@ -193,22 +202,34 @@
   margin-top: 0;
 }
 
-.qa-v3-studio .section-divider {
+.qa-v3-studio .section-divider,
+.probe-drawer-full .section-divider {
   margin-top: 24px;
   border-top: 1px solid var(--md-sys-color-outline-variant);
   padding-top: 20px;
 }
 
 .qa-v3-studio .check-engine-bar,
-.qa-v3-studio .dialog-actions {
+.qa-v3-studio .dialog-actions,
+.modal-content-full .dialog-actions,
+.probe-drawer-full .dialog-actions {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
 }
 
-.qa-v3-studio .dialog-actions {
+.qa-v3-studio .dialog-actions,
+.modal-content-full .dialog-actions,
+.probe-drawer-full .dialog-actions {
   margin-top: 20px;
   gap: 12px;
+}
+
+.modal-content-full h3,
+.probe-drawer-full h3 {
+  margin: 0 0 8px;
+  font-size: 18px;
+  line-height: 24px;
 }
 
 .qa-v3-studio .fixture-stack {

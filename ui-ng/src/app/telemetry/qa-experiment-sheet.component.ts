@@ -415,7 +415,9 @@ interface FlowVersionDetailPayload {
   `,
 })
 export class QaExperimentSheetComponent implements OnInit {
-  referenceArmOptions = computed(() => {
+  readonly referenceArmOptions = computed<
+    Array<{ value: string; label: string }>
+  >(() => {
     const opts = [{ value: "control", label: "Canonical baseline (no QA)" }];
     for (const v of this.flowOptions()) {
       opts.push({ value: v.value, label: v.label });
@@ -554,7 +556,7 @@ export class QaExperimentSheetComponent implements OnInit {
       const refOpt = this.referenceArmOptions().find((o) => o.value === refVal);
       const refKey = isControlRef
         ? "control"
-        : (refOpt?.label || refVal)
+        : (refOpt?.label ?? refVal)
             .split("@")[0]
             .replace(/^builtin:/, "")
             .trim() || "reference";

@@ -70,6 +70,13 @@ import { InboxStore } from "./inbox.store";
 import { replyRefusal, whyGone } from "./departure";
 import { WorkstreamsStore } from "../workstreams/workstreams.store";
 
+function qaTriageChip(t: Task): string | null {
+  const hr = t.humanReviewHold?.find((h) => h.source === "qa-triage");
+  if (!hr) return null;
+  const m = hr.reason?.match(/\[(T[0-3])\b/);
+  return m ? `[${m[1]} · Review]` : "[T2 · Review]";
+}
+
 const FILTERS: { id: FilterId; label: string }[] = [
   { id: "all", label: "All" },
   { id: "asked", label: "Asked" },
@@ -1208,16 +1215,7 @@ const ONE_KEY = new Set(["approve"]);
   ],
 })
 export class InboxPageComponent implements OnInit, OnDestroy {
-  protected qaTriageChip(t: TaskDetail): string | null {
-    const hr = (
-      t as TaskDetail & {
-        humanReview?: Array<{ source?: string; reason?: string }>;
-      }
-    ).humanReview?.find((h) => h.source === "qa-triage");
-    if (!hr) return null;
-    const m = hr.reason?.match(/\[(T[0-3])\b/);
-    return m ? `[${m[1]} · Review]` : "[T2 · Review]";
-  }
+  protected readonly qaTriageChip = qaTriageChip;
 
   protected readonly store = inject(InboxStore);
   protected readonly wsStore = inject(WorkstreamsStore);

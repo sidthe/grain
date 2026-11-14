@@ -47,37 +47,45 @@ export interface FlowDeclarationV2 {
 }
 
 export interface CustomCheckDeclarationV3 {
-  id?: string;
-  label?: string;
-  kind?: "pattern" | "diff-budget" | "companion" | "jsonschema";
-  engine?: "pattern" | "diff-budget" | "companion" | "jsonschema";
-  fixtures?: { fail?: unknown[]; pass?: unknown[] };
+  readonly id?: string;
+  readonly label?: string;
+  readonly kind?: "pattern" | "diff-budget" | "companion" | "jsonschema";
+  readonly engine?: "pattern" | "diff-budget" | "companion" | "jsonschema";
+  readonly fixtures?: {
+    readonly fail?: readonly unknown[];
+    readonly pass?: readonly unknown[];
+  };
 }
 
 export interface CustomStageDeclarationV3 {
-  id: string;
-  label?: string;
-  "insert-after"?: "s2" | "s3" | "s4";
-  insertAfter?: "s2" | "s3" | "s4";
-  "timeout-seconds"?: number;
-  timeoutSeconds?: number;
+  readonly id: string;
+  readonly label?: string;
+  readonly "insert-after"?: "s2" | "s3" | "s4";
+  readonly insertAfter?: "s2" | "s3" | "s4";
+  readonly "timeout-seconds"?: number;
+  readonly timeoutSeconds?: number;
 }
 
 export interface FlowDeclarationV3 {
-  schema: "grain.dev/qa-flow/v3";
-  skills?: Record<string, unknown>;
-  stages?: {
-    "s0-intent"?: boolean | { enabled?: boolean };
-    "s1-risk"?: boolean | Record<string, unknown>;
-    "s2-plan-critic"?: boolean | { enabled?: boolean };
-    "s5-merge-triage"?:
-      "off" | "shadow" | "enforced" | { mode?: "off" | "shadow" | "enforced" };
-    custom?: CustomStageDeclarationV3[];
+  readonly schema: "grain.dev/qa-flow/v3";
+  readonly skills?: Readonly<Record<string, unknown>>;
+  readonly stages?: {
+    readonly "s0-intent"?: boolean | { readonly enabled?: boolean };
+    readonly "s1-risk"?: boolean | Readonly<Record<string, unknown>>;
+    readonly "s2-plan-critic"?: boolean | { readonly enabled?: boolean };
+    readonly "s5-merge-triage"?:
+      | "off"
+      | "shadow"
+      | "enforced"
+      | { readonly mode?: "off" | "shadow" | "enforced" };
+    readonly custom?: readonly CustomStageDeclarationV3[];
   };
-  customChecks?:
-    CustomCheckDeclarationV3[] | Record<string, CustomCheckDeclarationV3>;
-  "custom-checks"?:
-    CustomCheckDeclarationV3[] | Record<string, CustomCheckDeclarationV3>;
+  readonly customChecks?:
+    | readonly CustomCheckDeclarationV3[]
+    | Readonly<Record<string, CustomCheckDeclarationV3>>;
+  readonly "custom-checks"?:
+    | readonly CustomCheckDeclarationV3[]
+    | Readonly<Record<string, CustomCheckDeclarationV3>>;
 }
 
 export interface QAFlowVersionItem {

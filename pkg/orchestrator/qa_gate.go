@@ -1548,8 +1548,14 @@ func EvaluateAndApplyQATriage(
 		humTiers = append(humTiers, qa.BlastTier(s))
 	}
 
+	isControlOrShadow := assign.Shadow || assign.ArmID == model.QAArmControl
+	effectiveMode := assign.Spec.S5MergeTriage.Mode
+	if isControlOrShadow {
+		effectiveMode = string(qa.TriageShadow)
+	}
+
 	triageIn := qa.TriageInput{
-		Mode:                       assign.Spec.S5MergeTriage.Mode,
+		Mode:                       effectiveMode,
 		AutoMergeTiers:             autoTiers,
 		RequireHumanTiers:          humTiers,
 		Assessment:                 risk,
@@ -1568,7 +1574,7 @@ func EvaluateAndApplyQATriage(
 		Stage:          "S5",
 		CheckID:        "qa:merge-triage",
 		Arm:            model.QAArmTreatment,
-		Shadow:         assign.Shadow || verdict.Mode == string(qa.TriageShadow),
+		Shadow:         isControlOrShadow || verdict.Mode == string(qa.TriageShadow),
 		Verdict:        "pass",
 		ExperimentID:   assign.ExperimentID,
 		ArmID:          assign.ArmID,
@@ -1580,12 +1586,12 @@ func EvaluateAndApplyQATriage(
 		ComplexityTier: string(comp.Tier),
 		TriageDecision: string(verdict.Decision),
 	}
-	if assign.ArmID == model.QAArmControl || assign.Shadow {
+	if isControlOrShadow {
 		cr.Arm = model.QAArmControl
 	}
 	_, _ = store.RecordQACheckRun(ctx, cr, nil)
 
-	if !assign.Shadow && verdict.Enforced {
+	if !isControlOrShadow && effectiveMode == string(qa.TriageEnforced) {
 		if verdict.Decision == qa.TriageRequireHuman && verdict.SetTriageHold {
 			reasonSummary := strings.Join(verdict.Reasons, ", ")
 			_ = store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
@@ -1600,7 +1606,12 @@ func EvaluateAndApplyQATriage(
 			if !hasTaskLink(task, model.LinkQATriageHold) {
 				_ = noteOnTask(ctx, store, task.ID, notePrefix+": "+reasonSummary, time.Now().UTC())
 			}
-		} else if verdict.Decision == qa.TriageAutoMerge && hasTaskLink(task, model.LinkQATriageHold) {
+		} else if verdict.Decision == qa.TriageRequireHuman && verdict.WithdrawAutoMerge {
+			_ = store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
+				t.AutoMerge = false
+				return nil
+			})
+		} else if verdict.Decision == qa.TriageAutoMerge && !verdict.BlockedByFloor && hasTaskLink(task, model.LinkQATriageHold) {
 			_ = store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
 				t.Links = slices.DeleteFunc(t.Links, func(l model.Link) bool {
 					if l.Kind == model.LinkQATriageHold {

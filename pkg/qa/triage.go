@@ -115,31 +115,35 @@ func evaluateTriageInternal(in TriageInput) TriageVerdict {
 	withdrawAutoMerge := false
 	setTriageHold := false
 
-	if in.Mode == string(TriageEnforced) {
-		if decision == TriageRequireHuman {
-			tierRequiresHuman := false
-			for _, t := range in.RequireHumanTiers {
-				if t == tier {
-					tierRequiresHuman = true
-					break
-				}
-			}
-			isAuto := false
-			for _, t := range in.AutoMergeTiers {
-				if t == tier {
-					isAuto = true
-					break
-				}
-			}
-			if !isAuto {
+	if in.Mode == string(TriageEnforced) && decision == TriageRequireHuman {
+		tierRequiresHuman := false
+		for _, t := range in.RequireHumanTiers {
+			if t == tier {
 				tierRequiresHuman = true
+				break
 			}
+		}
+		isAuto := false
+		for _, t := range in.AutoMergeTiers {
+			if t == tier {
+				isAuto = true
+				break
+			}
+		}
+		if !isAuto {
+			tierRequiresHuman = true
+		}
 
-			if !blockedByFloor || (in.OperatorAutoMergeEnabled && tierRequiresHuman) {
-				enforced = true
-				withdrawAutoMerge = true
-				setTriageHold = true
-			}
+		// Fail closed: whenever AutoMerge is enabled and Decision == require_human
+		// (whether from tier or floor checks such as trustboundary, merge-rules,
+		// truncated file list, or red CI), enforced triage withdraws AutoMerge.
+		if in.OperatorAutoMergeEnabled {
+			withdrawAutoMerge = true
+		}
+		if !blockedByFloor || (in.OperatorAutoMergeEnabled && (tierRequiresHuman || in.FilesTruncated)) {
+			enforced = true
+			withdrawAutoMerge = true
+			setTriageHold = true
 		}
 	}
 

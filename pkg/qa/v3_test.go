@@ -202,4 +202,33 @@ custom-checks:
 	if _, err := ResolveAnyFlowDeclaration([]byte(badStageYAML), 1, nil); err == nil {
 		t.Fatal("expected custom stage insert-after: s5 to be rejected")
 	}
+
+	// Verify cyclic YAML-alias jsonschema is rejected without stack overflow
+	cyclicSchemaYAML := `schema: grain.dev/qa-flow/v3
+key: cyclic-schema
+extends: golden-v2@1
+custom-checks:
+  - id: custom:cyclic
+    label: Cyclic schema
+    kind: jsonschema
+    severity: blocking
+    paths: ["manifests/**/*.json"]
+    message: Cyclic
+    schema-json: &self
+      type: object
+      properties:
+        next: *self
+    fixtures:
+      fail:
+        - name: bad
+          file: manifests/a.json
+          content: "123"
+      pass:
+        - name: ok
+          file: manifests/a.json
+          content: "{}"
+`
+	if _, err := ResolveAnyFlowDeclaration([]byte(cyclicSchemaYAML), 1, nil); err == nil {
+		t.Fatal("expected cyclic YAML alias jsonschema to be rejected by depth limit")
+	}
 }

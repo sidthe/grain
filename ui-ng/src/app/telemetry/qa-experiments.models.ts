@@ -135,36 +135,36 @@ export interface QAExperimentResults {
   state?: string;
   periodLabel?: string;
   scopeRepos?: string[];
-  referenceArmId?: string;
-  declarationDiff?: {
-    addedStages: string[];
-    removedStages: string[];
-    changedSkills: string[];
-    addedCustomChecks: string[];
-    removedCustomChecks: string[];
-    changedChecks: string[];
-    changedVerifier: boolean;
-    changedTriage: boolean;
+  readonly referenceArmId?: string;
+  readonly declarationDiff?: {
+    readonly addedStages?: readonly string[];
+    readonly removedStages?: readonly string[];
+    readonly changedSkills?: readonly string[];
+    readonly addedCustomChecks?: readonly string[];
+    readonly removedCustomChecks?: readonly string[];
+    readonly changedChecks?: readonly string[];
+    readonly changedVerifier?: boolean;
+    readonly changedTriage?: boolean;
   };
-  stageFunnel?: Array<{
-    armId: string;
-    stage: string;
-    runs: number;
-    applicablePct: number;
-    findingsCount: number;
-    repairedInNextShaPct: number;
-    durationP50Ms: number;
-    durationP95Ms: number;
-    tokensMedian: number;
-    notHelpfulWilsonLB: number;
+  readonly stageFunnel?: ReadonlyArray<{
+    readonly armId: string;
+    readonly stage: string;
+    readonly runs: number;
+    readonly applicablePct: number;
+    readonly findingsCount: number;
+    readonly repairedInNextShaPct: number;
+    readonly durationP50Ms: number;
+    readonly durationP95Ms: number;
+    readonly tokensMedian: number;
+    readonly notHelpfulWilsonLB: number;
   }>;
-  triageMetrics?: Array<{
-    armId: string;
-    mode: string;
-    autoMergeEligiblePct: number;
-    humanRoutedPct: number;
-    autoMergedEscapeRate: number;
-    humanRoutedTruePositiveRate: number;
+  readonly triageMetrics?: ReadonlyArray<{
+    readonly armId: string;
+    readonly mode: string;
+    readonly autoMergeEligiblePct: number;
+    readonly humanRoutedPct: number;
+    readonly autoMergedEscapeRate: number;
+    readonly humanRoutedTruePositiveRate: number;
   }>;
   verdicts: QAExperimentVerdict[];
   forestRows: QAExperimentForestRow[];

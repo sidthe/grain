@@ -545,9 +545,10 @@ import {
                     Status:
                     <span class="s-mono">{{
                       detail.declaration?.verifier?.tiers?.length
-                        ? detail.declaration!.verifier.tiers.join("/") +
+                        ? (detail.declaration?.verifier?.tiers?.join("/") ??
+                            "") +
                           " diffs (max " +
-                          detail.declaration!.verifier.maxRepairRounds +
+                          (detail.declaration?.verifier?.maxRepairRounds ?? 1) +
                           " round)"
                         : "T2/T3 diffs (max " +
                           (detail.resolved?.maxS4RepairRounds ?? 1) +
@@ -803,17 +804,19 @@ export class QaFlowsPanelComponent {
 
   async loadVersions(): Promise<void> {
     if (this.access.can("GET /api/settings")) {
-      const settings = (await this.api
-        .get("GET /api/settings")
-        .catch(() => null)) as {
-        qaEnabled?: boolean;
-        qaFlowId?: string;
-        qaRolloutPct?: number;
-      } | null;
-      if (settings) {
-        this.qaEnabled.set(Boolean(settings.qaEnabled));
-        this.activeFlowId.set(settings.qaFlowId ?? "");
-        this.activeRolloutPct.set(settings.qaRolloutPct ?? 0);
+      try {
+        const settings = (await this.api.get("GET /api/settings")) as {
+          qaEnabled?: boolean;
+          qaFlowId?: string;
+          qaRolloutPct?: number;
+        } | null;
+        if (settings) {
+          this.qaEnabled.set(Boolean(settings.qaEnabled));
+          this.activeFlowId.set(settings.qaFlowId ?? "");
+          this.activeRolloutPct.set(settings.qaRolloutPct ?? 0);
+        }
+      } catch {
+        // Optional settings read when operator holds narrower scope.
       }
     }
 
@@ -830,9 +833,14 @@ export class QaFlowsPanelComponent {
     }
 
     if (loaded.length === 0) {
-      const fallback = (await this.api
-        .get<QAFlowsResponse>("GET /api/qa/flows")
-        .catch(() => null)) as QAFlowsResponse | null;
+      let fallback: QAFlowsResponse | null = null;
+      try {
+        fallback = (await this.api.get<QAFlowsResponse>(
+          "GET /api/qa/flows",
+        )) as QAFlowsResponse | null;
+      } catch {
+        fallback = null;
+      }
       loaded = (fallback?.flows ?? []).map((f) => ({
         hash: f.id,
         key: f.id,

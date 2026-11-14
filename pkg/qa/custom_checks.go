@@ -265,7 +265,7 @@ func EvaluateCustomCheck(check CustomCheckDecl, ctx CustomCheckContext) ([]Custo
 					continue
 				}
 			}
-			if err := validateJSONSchema(data, check.SchemaJSON); err != nil {
+			if err := validateJSONSchema(data, check.SchemaJSON, 0); err != nil {
 				findings = append(findings, CustomCheckFinding{
 					RuleID:   check.ID,
 					Severity: severity,
@@ -282,7 +282,33 @@ func EvaluateCustomCheck(check CustomCheckDecl, ctx CustomCheckContext) ([]Custo
 	return findings, nil
 }
 
-func validateJSONSchema(data interface{}, schema map[string]interface{}) error {
+const maxJSONSchemaDepth = 32
+
+func validateJSONSchemaStructure(schema map[string]interface{}, depth int) error {
+	if depth > maxJSONSchemaDepth {
+		return fmt.Errorf("schema nesting exceeds maximum depth %d", maxJSONSchemaDepth)
+	}
+	if props, ok := schema["properties"].(map[string]interface{}); ok {
+		for k, v := range props {
+			if sub, okS := v.(map[string]interface{}); okS {
+				if err := validateJSONSchemaStructure(sub, depth+1); err != nil {
+					return fmt.Errorf("property %q: %w", k, err)
+				}
+			}
+		}
+	}
+	if items, ok := schema["items"].(map[string]interface{}); ok {
+		if err := validateJSONSchemaStructure(items, depth+1); err != nil {
+			return fmt.Errorf("items: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateJSONSchema(data interface{}, schema map[string]interface{}, depth int) error {
+	if depth > maxJSONSchemaDepth {
+		return fmt.Errorf("maximum schema depth %d exceeded", maxJSONSchemaDepth)
+	}
 	t, _ := schema["type"].(string)
 	switch t {
 	case "object":
@@ -310,7 +336,7 @@ func validateJSONSchema(data interface{}, schema map[string]interface{}) error {
 		for k, v := range props {
 			if val, exists := obj[k]; exists {
 				if sub, okS := v.(map[string]interface{}); okS {
-					if err := validateJSONSchema(val, sub); err != nil {
+					if err := validateJSONSchema(val, sub, depth+1); err != nil {
 						return fmt.Errorf("property %q invalid: %v", k, err)
 					}
 				}
@@ -323,7 +349,7 @@ func validateJSONSchema(data interface{}, schema map[string]interface{}) error {
 		}
 		if items, okI := schema["items"].(map[string]interface{}); okI {
 			for idx, elem := range arr {
-				if err := validateJSONSchema(elem, items); err != nil {
+				if err := validateJSONSchema(elem, items, depth+1); err != nil {
 					return fmt.Errorf("item[%d] invalid: %v", idx, err)
 				}
 			}
@@ -412,6 +438,11 @@ func ValidateCustomCheck(c CustomCheckDecl) error {
 	if c.RequireAdded != "" {
 		if _, err := regexp.Compile(c.RequireAdded); err != nil {
 			return err
+		}
+	}
+	if len(c.SchemaJSON) > 0 {
+		if err := validateJSONSchemaStructure(c.SchemaJSON, 0); err != nil {
+			return fmt.Errorf("custom check %q invalid schema-json: %w", c.ID, err)
 		}
 	}
 

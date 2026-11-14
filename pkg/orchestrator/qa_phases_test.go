@@ -171,4 +171,36 @@ func TestEvaluateAndApplyQATriageEnforcesHoldOnT2AndPreservesT1AutoMerge(t *test
 	if _, err := store.ReleaseHumanReviewHold(ctx, t2.ID, model.Principal{Kind: model.PrincipalHuman, ID: "alice@example.com"}, "reviewed"); err != nil {
 		t.Fatalf("expected PrincipalHuman ReleaseHumanReviewHold to succeed, got %v", err)
 	}
+
+	// 3. Control arm with ShadowOnControl=true must NEVER lose AutoMerge or receive LinkQATriageHold even when spec.Mode == "enforced".
+	ctrlTask := model.Task{
+		ID:        "t2-ctrl-shadow",
+		Title:     "Control UI task under shadow scoring",
+		Target:    &repo,
+		AutoMerge: true,
+	}
+	if err := store.PutTask(ctx, ctrlTask); err != nil {
+		t.Fatalf("PutTask ctrlTask: %v", err)
+	}
+	ctrlAssign := &resolve.Resolution{
+		ArmID:       model.QAArmControl,
+		Shadow:      true,
+		FlowID:      "golden-v3-enforced",
+		FlowHash:    assign.FlowHash,
+		QAEngineRev: qa.QAEngineRev,
+		Spec:        enforcedSpec,
+	}
+	orchestrator.EvaluateAndApplyQATriage(ctx, store, nil, ctrlTask, ctrlAssign, "3333333333333333", []string{"ui-ng/src/app/inbox/inbox-page.component.ts"}, true)
+	gotCtrl, err := store.GetTask(ctx, ctrlTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask ctrlTask: %v", err)
+	}
+	if !gotCtrl.AutoMerge {
+		t.Fatalf("control task under ShadowOnControl unexpectedly lost AutoMerge")
+	}
+	for _, l := range gotCtrl.Links {
+		if l.Kind == model.LinkQATriageHold {
+			t.Fatalf("control task must never get LinkQATriageHold watermark")
+		}
+	}
 }

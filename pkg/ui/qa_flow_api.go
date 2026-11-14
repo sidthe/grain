@@ -15,12 +15,13 @@
 package ui
 
 import (
-	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/qa"
+	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 )
 
 func (s *Server) lookupFlowBundle(ctx context.Context, ref string) (qa.FlowVersionBundle, *time.Time, string, *time.Time, bool, error) {
@@ -518,9 +520,33 @@ type postQAFlowVersionAdoptReq struct {
 	DryRun bool   `json:"dryRun"`
 }
 
+func isValidAdoptHexSHA(s string) bool {
+	if len(s) != 40 {
+		return false
+	}
+	_, err := hex.DecodeString(s)
+	return err == nil
+}
+
+func isValidAdoptFlowPath(p string) bool {
+	if p == "" || strings.Contains(p, "\\") || strings.HasPrefix(p, "/") {
+		return false
+	}
+	cleaned := path.Clean(p)
+	if cleaned != p || !strings.HasPrefix(cleaned, ".grain/") {
+		return false
+	}
+	lower := strings.ToLower(cleaned)
+	return strings.HasSuffix(lower, ".yml") || strings.HasSuffix(lower, ".yaml")
+}
+
 func (s *Server) handlePostQAFlowVersionAdopt(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	actor := s.tasks.requestActor(ctx)
+	if actor.Actor.Kind == model.PrincipalAgent {
+		writeError(w, http.StatusForbidden, errors.New("agent tokens cannot adopt quality flow versions"))
+		return
+	}
 
 	var req postQAFlowVersionAdoptReq
 	if !readJSON(w, r, &req) {
@@ -529,12 +555,26 @@ func (s *Server) handlePostQAFlowVersionAdopt(w http.ResponseWriter, r *http.Req
 
 	isDryRun := req.DryRun || r.URL.Query().Get("dryRun") == "1"
 
-	if len(req.Commit) != 40 {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("commit must be a 40-char hex string"))
+	repoTrimmed := strings.TrimSpace(req.Repo)
+	owner, repoName, hasSlash := strings.Cut(repoTrimmed, "/")
+	if !hasSlash || owner == "" || repoName == "" || strings.Contains(repoName, "/") || strings.ContainsAny(repoTrimmed, " \t\r\n") {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("repo must be in owner/name format"))
 		return
 	}
-	if req.Path == "" || strings.Contains(req.Path, "..") || strings.HasPrefix(req.Path, "/") {
-		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid path"))
+	req.Repo = owner + "/" + repoName
+	if ar := accessRoleFromContext(ctx); ar != nil && (!ar.allows("qa:admin", "") || !ar.allows("qa:admin", req.Repo)) {
+		writeError(w, http.StatusForbidden, fmt.Errorf("%s cannot adopt global flow versions from %s", ar.label(), req.Repo))
+		return
+	}
+
+	req.Commit = strings.ToLower(strings.TrimSpace(req.Commit))
+	if !isValidAdoptHexSHA(req.Commit) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("commit must be a 40-char hexadecimal SHA"))
+		return
+	}
+	req.Path = strings.TrimSpace(req.Path)
+	if !isValidAdoptFlowPath(req.Path) {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("path must be a normalized .yml/.yaml file under .grain/"))
 		return
 	}
 

@@ -25,6 +25,8 @@ func TestEvaluateTriage(t *testing.T) {
 		wantDecision TriageDecision
 		wantBlocked  bool
 		wantEnforced bool
+		wantWithdraw bool
+		wantHold     bool
 	}{
 		{
 			name: "t0 auto merge",
@@ -44,6 +46,8 @@ func TestEvaluateTriage(t *testing.T) {
 			},
 			wantDecision: TriageRequireHuman,
 			wantEnforced: true,
+			wantWithdraw: true,
+			wantHold:     true,
 		},
 		{
 			name: "trust boundary blocks all",
@@ -56,9 +60,10 @@ func TestEvaluateTriage(t *testing.T) {
 			wantDecision: TriageRequireHuman,
 			wantBlocked:  true,
 			wantEnforced: false,
+			wantWithdraw: true,
 		},
 		{
-			name: "files truncated blocks",
+			name: "files truncated blocks fail-closed with hold",
 			in: TriageInput{
 				Mode:                     "enforced",
 				AutoMergeTiers:           []BlastTier{BlastT0, BlastT1, BlastT2, BlastT3},
@@ -68,6 +73,9 @@ func TestEvaluateTriage(t *testing.T) {
 			},
 			wantDecision: TriageRequireHuman,
 			wantBlocked:  true,
+			wantEnforced: true,
+			wantWithdraw: true,
+			wantHold:     true,
 		},
 		{
 			name: "operator auto merge disabled blocks",
@@ -92,6 +100,12 @@ func TestEvaluateTriage(t *testing.T) {
 			}
 			if got.Enforced != tt.wantEnforced {
 				t.Errorf("got enforced %v want %v", got.Enforced, tt.wantEnforced)
+			}
+			if got.WithdrawAutoMerge != tt.wantWithdraw {
+				t.Errorf("got withdrawAutoMerge %v want %v", got.WithdrawAutoMerge, tt.wantWithdraw)
+			}
+			if got.SetTriageHold != tt.wantHold {
+				t.Errorf("got setTriageHold %v want %v", got.SetTriageHold, tt.wantHold)
 			}
 		})
 	}

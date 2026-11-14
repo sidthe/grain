@@ -96,7 +96,7 @@ import { TaskStore } from "./task.store";
         }
         @if (task().changelists?.length) {
           <dt>Changelists</dt>
-          <dd class="mono">{{ task().changelists!.join(", ") }}</dd>
+          <dd class="mono">{{ task().changelists?.join(", ") ?? "" }}</dd>
         }
       </dl>
 
@@ -677,7 +677,13 @@ import { TaskStore } from "./task.store";
   `,
 })
 export class TaskChangesTabComponent {
-  protected qaSummaryStats = computed(() => {
+  protected readonly qaSummaryStats = computed<{
+    complexityTier?: string;
+    blastTier?: string;
+    blastScore?: number;
+    triageDecision?: string;
+    repairedInNextSha?: number;
+  } | null>(() => {
     const runs = this.visibleQaCheckRuns();
     const withTiers = runs.find((x) => x.complexityTier || x.blastTier);
     const withTriage = runs.find((x) => x.triageDecision);

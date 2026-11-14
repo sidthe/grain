@@ -15,10 +15,13 @@
 package cli
 
 import (
-	"github.com/ai-on-gke/grain/pkg/ui"
 	"context"
+	"encoding/hex"
 	"fmt"
+	"path"
 	"strings"
+
+	"github.com/ai-on-gke/grain/pkg/ui"
 )
 
 type adoptFlags struct {
@@ -29,17 +32,22 @@ type adoptFlags struct {
 }
 
 func runQAFlowAdopt(ctx context.Context, c *ui.HTTPClient, out *printer, f adoptFlags) error {
-	if len(f.Commit) != 40 {
-		return fmt.Errorf("commit must be a 40-char hex string")
+	commit := strings.ToLower(strings.TrimSpace(f.Commit))
+	if len(commit) != 40 {
+		return fmt.Errorf("commit must be a 40-char hexadecimal SHA")
 	}
-	if f.Path == "" {
-		return fmt.Errorf("path is required")
+	if _, err := hex.DecodeString(commit); err != nil {
+		return fmt.Errorf("commit must be a 40-char hexadecimal SHA")
+	}
+	cleanPath := strings.TrimSpace(f.Path)
+	if cleanPath == "" || strings.Contains(cleanPath, "\\") || path.Clean(cleanPath) != cleanPath || !strings.HasPrefix(cleanPath, ".grain/") {
+		return fmt.Errorf("path must be a normalized .yml/.yaml file under .grain/")
 	}
 
 	req := map[string]any{
-		"repo":   f.Repo,
-		"path":   f.Path,
-		"commit": f.Commit,
+		"repo":   strings.TrimSpace(f.Repo),
+		"path":   cleanPath,
+		"commit": commit,
 		"dryRun": f.DryRun,
 	}
 

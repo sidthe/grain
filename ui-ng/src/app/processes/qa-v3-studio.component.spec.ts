@@ -13,91 +13,78 @@
 // limitations under the License.
 
 import { ComponentFixture, TestBed } from "@angular/core/testing";
+import { vi } from "vitest";
 import { GrainApi } from "../api/grain-api.service";
 import { SnackbarService } from "../services/snackbar.service";
 import type { FlowDeclarationV3 } from "./qa-flows.models";
 import { QaV3StudioComponent } from "./qa-v3-studio.component";
 
-class FakeV3StudioApi {
-  readonly calls: Array<{
-    route: string;
-    body: unknown;
-    query?: string;
-  }> = [];
-
-  async post(
-    route: string,
-    _params?: unknown,
-    body?: unknown,
-    query?: string,
-  ): Promise<unknown> {
-    this.calls.push({ route, body, query });
-    if (route === "POST /api/qa/flow-versions") {
-      return {
-        dryRun: true,
-        valid: true,
-        hash: "sha256:v3preview",
-        sampledPRs: 12,
-        wouldBlockPRs: 2,
-        byCheck: [],
-      };
-    }
-    if (route === "POST /api/qa/flow-versions/adopt") {
-      return { hash: "sha256:adopted123" };
-    }
-    if (route === "POST /api/qa/probe") {
-      return {
-        complexity: {
-          tier: "high",
-          score: 80,
-          signals: ["cross-subsystem"],
-          hasDesignItem: false,
-        },
-        risk: {
-          tier: "T3",
-          score: 85,
-          signals: ["schema-migration"],
-          testTampered: false,
-          trustBoundary: true,
-        },
-        stagesFired: ["s0-intent", "s1-risk", "s2-plan-critic", "s3", "s4"],
-        triage: {
-          decision: "require_human",
-          enforced: true,
-          mode: "enforced",
-          tier: "T3",
-          blastScore: 85,
-          reasons: ["trust-boundary"],
-          blockedByFloor: true,
-        },
-      };
-    }
-    return {};
-  }
-}
+const ROUTE_RESPONSES: Readonly<Record<string, unknown>> = {
+  "POST /api/qa/flow-versions": {
+    dryRun: true,
+    valid: true,
+    hash: "sha256:v3preview",
+    sampledPRs: 12,
+    wouldBlockPRs: 2,
+    byCheck: [],
+  },
+  "POST /api/qa/flow-versions/adopt": {
+    hash: "sha256:adopted123",
+  },
+  "POST /api/qa/probe": {
+    complexity: {
+      tier: "high",
+      score: 80,
+      signals: ["cross-subsystem"],
+      hasDesignItem: false,
+    },
+    risk: {
+      tier: "T3",
+      score: 85,
+      signals: ["schema-migration"],
+      testTampered: false,
+      trustBoundary: true,
+    },
+    stagesFired: ["s0-intent", "s1-risk", "s2-plan-critic", "s3", "s4"],
+    triage: {
+      decision: "require_human",
+      enforced: true,
+      mode: "enforced",
+      tier: "T3",
+      blastScore: 85,
+      reasons: ["trust-boundary"],
+      blockedByFloor: true,
+    },
+  },
+};
 
 describe("QaV3StudioComponent", () => {
   let fixture: ComponentFixture<QaV3StudioComponent>;
-  let component: QaV3StudioComponent;
-  let api: FakeV3StudioApi;
-  let messages: string[];
+  let postSpy: ReturnType<
+    typeof vi.fn<
+      (
+        route: string,
+        params?: unknown,
+        body?: unknown,
+        query?: string,
+      ) => Promise<unknown>
+    >
+  >;
+  let showSpy: ReturnType<typeof vi.fn<(msg: string) => void>>;
 
   beforeEach(async () => {
-    api = new FakeV3StudioApi();
-    messages = [];
+    postSpy = vi.fn(async (route: string) => ROUTE_RESPONSES[route] ?? {});
+    showSpy = vi.fn();
+
     await TestBed.configureTestingModule({
       imports: [QaV3StudioComponent],
       providers: [
-        { provide: GrainApi, useValue: api },
-        {
-          provide: SnackbarService,
-          useValue: { show: (msg: string) => messages.push(msg) },
-        },
+        { provide: GrainApi, useValue: { post: postSpy } },
+        { provide: SnackbarService, useValue: { show: showSpy } },
       ],
     }).compileComponents();
 
     fixture = TestBed.createComponent(QaV3StudioComponent);
-    component = fixture.componentInstance;
     fixture.detectChanges();
   });
 
@@ -132,58 +119,113 @@ describe("QaV3StudioComponent", () => {
     fixture.componentRef.setInput("decl", decl);
     fixture.detectChanges();
 
-    expect(component.s0Intent()).toBe(true);
-    expect(component.s2PlanCritic()).toBe(true);
-    expect(component.s5Triage()).toBe("enforced");
-    expect(component.customStages().length).toBe(1);
-    expect(component.customChecks().length).toBe(1);
-    expect(fixture.nativeElement.textContent).toContain("companion");
+    const root = fixture.nativeElement as HTMLElement;
+    expect(root.querySelector<HTMLInputElement>("#s0Intent")!.checked).toBe(
+      true,
+    );
+    expect(root.querySelector<HTMLInputElement>("#s2PlanCritic")!.checked).toBe(
+      true,
+    );
+    expect(
+      root.querySelectorAll('[data-testid="qa-v3-custom-stage-row"]').length,
+    ).toBe(1);
+    expect(
+      root.querySelectorAll('[data-testid="qa-v3-custom-check-row"]').length,
+    ).toBe(1);
+    expect(root.textContent).toContain("companion");
   });
 
   it("verifies inline fixtures via dryRun=1 with strict kebab-case YAML keys", async () => {
-    component.addCustomStage();
-    component.addCheck("pattern");
+    const root = fixture.nativeElement as HTMLElement;
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="qa-v3-add-stage"]')!
+      .click();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="qa-v3-add-pattern"]')!
+      .click();
     fixture.detectChanges();
 
-    await component.verifyDryRun();
+    expect(
+      root.querySelectorAll('[data-testid="qa-v3-custom-stage-row"]').length,
+    ).toBe(1);
+    expect(
+      root.querySelectorAll('[data-testid="qa-v3-custom-check-row"]').length,
+    ).toBe(1);
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="qa-v3-verify-dry-run"]')!
+      .click();
+    await fixture.whenStable();
     fixture.detectChanges();
 
-    expect(api.calls.length).toBe(1);
-    expect(api.calls[0].route).toBe("POST /api/qa/flow-versions");
-    expect(api.calls[0].query).toBe("dryRun=1");
-    const yamlBody = (api.calls[0].body as { yaml: string }).yaml;
+    expect(postSpy).toHaveBeenCalledTimes(1);
+    expect(postSpy.mock.calls[0][0]).toBe("POST /api/qa/flow-versions");
+    expect(postSpy.mock.calls[0][3]).toBe("dryRun=1");
+    const yamlBody = (postSpy.mock.calls[0][2] as { yaml: string }).yaml;
     expect(yamlBody).toContain("insert-after: s3");
     expect(yamlBody).toContain("timeout-seconds: 30");
-    expect(fixture.nativeElement.textContent).toContain("sha256:v3preview");
+    expect(root.textContent).toContain("sha256:v3preview");
   });
 
   it("runs what-if probe and adopts repo-committed flow declarations", async () => {
     const root = fixture.nativeElement as HTMLElement;
+
     root
       .querySelector<HTMLButtonElement>('[data-testid="qa-v3-open-probe"]')!
       .click();
     fixture.detectChanges();
 
-    component.probeTitle.set("Migrate schema 149");
-    component.probeFiles.set("pkg/model/schema.go, pkg/model/migrations.go");
-    await component.doProbe();
+    expect(
+      root.querySelector('[data-testid="qa-v3-probe-dialog"]'),
+    ).toBeTruthy();
+
+    const probeTitleInput =
+      root.querySelector<HTMLInputElement>("#probeTitle")!;
+    probeTitleInput.value = "Migrate schema 149";
+    probeTitleInput.dispatchEvent(new Event("input"));
+    const probeFilesInput =
+      root.querySelector<HTMLTextAreaElement>("#probeFiles")!;
+    probeFilesInput.value = "pkg/model/schema.go, pkg/model/migrations.go";
+    probeFilesInput.dispatchEvent(new Event("input"));
+    fixture.detectChanges();
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="qa-v3-submit-probe"]')!
+      .click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const probeResultEl = root.querySelector(
+      '[data-testid="qa-v3-probe-result"]',
+    );
+    expect(probeResultEl?.textContent).toContain("Score: 85/100");
+    expect(probeResultEl?.textContent).toContain("require_human (enforced)");
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="qa-v3-open-adopt"]')!
+      .click();
     fixture.detectChanges();
 
     expect(
-      root.querySelector('[data-testid="qa-v3-probe-result"]')?.textContent,
-    ).toContain("Score: 85/100");
-    expect(
-      root.querySelector('[data-testid="qa-v3-probe-result"]')?.textContent,
-    ).toContain("require_human (enforced)");
+      root.querySelector('[data-testid="qa-v3-adopt-dialog"]'),
+    ).toBeTruthy();
 
-    component.showProbe.set(false);
-    component.showAdopt.set(true);
-    component.adoptRepo.set("sidthe/grain");
-    component.adoptCommit.set("0123456789abcdef0123456789abcdef01234567");
-    await component.doAdopt();
+    const repoInput = root.querySelector<HTMLInputElement>("#adoptRepo")!;
+    repoInput.value = "sidthe/grain";
+    repoInput.dispatchEvent(new Event("input"));
+    const commitInput = root.querySelector<HTMLInputElement>("#adoptCommit")!;
+    commitInput.value = "0123456789abcdef0123456789abcdef01234567";
+    commitInput.dispatchEvent(new Event("input"));
     fixture.detectChanges();
 
-    expect(messages).toContain("Adopted flow sha256:adopted123");
-    expect(component.showAdopt()).toBe(false);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="qa-v3-submit-adopt"]')!
+      .click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(showSpy).toHaveBeenCalledWith("Adopted flow sha256:adopted123");
+    expect(root.querySelector('[data-testid="qa-v3-adopt-dialog"]')).toBeNull();
   });
 });

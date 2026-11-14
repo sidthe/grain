@@ -285,4 +285,22 @@ stages:
 	if code != http.StatusOK && code != http.StatusCreated {
 		t.Fatalf("adopt status=%d body=%+v", code, adoptResp)
 	}
+
+	// Non-hex 40-char commit and paths outside .grain/ must be rejected (400).
+	badHexCode, _ := doJSON("POST", "/api/qa/flow-versions/adopt", map[string]any{
+		"repo":   "acme/grain",
+		"path":   ".grain/qa/flow.yml",
+		"commit": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+	})
+	if badHexCode != http.StatusBadRequest {
+		t.Fatalf("expected non-hex 40-char commit to return 400, got %d", badHexCode)
+	}
+	outsideGrainCode, _ := doJSON("POST", "/api/qa/flow-versions/adopt", map[string]any{
+		"repo":   "acme/grain",
+		"path":   "pkg/ui/server.go",
+		"commit": "0123456789abcdef0123456789abcdef01234567",
+	})
+	if outsideGrainCode != http.StatusBadRequest {
+		t.Fatalf("expected non-.grain/ adopt path to return 400, got %d", outsideGrainCode)
+	}
 }
