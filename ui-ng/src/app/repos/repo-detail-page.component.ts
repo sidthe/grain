@@ -15,6 +15,7 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  ElementRef,
   OnDestroy,
   OnInit,
   ViewEncapsulation,
@@ -27,6 +28,7 @@ import { ActivatedRoute, Router, RouterLink } from "@angular/router";
 import type { Subscription } from "rxjs";
 import type { RouteKey } from "../api/generated-routes";
 import { GrainApi, splitRepo } from "../api/grain-api.service";
+import type { GrainConfig, GrantCheck } from "../api/models";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
 import { errText } from "../settings/settings-state.service";
@@ -40,6 +42,13 @@ import {
   PillSelectComponent,
 } from "../shared/pill-select.component";
 import { StatusIconComponent } from "../shared/status-icon.component";
+import {
+  type AgentFieldKey,
+  type RepoCiCapabilitiesState,
+  normalizeRepoCiCapabilitiesState,
+  validateAgentSettingsForm,
+} from "./repo-capabilities.helpers";
+import { RepoCiCapabilitiesCardComponent } from "./repo-ci-capabilities-card.component";
 
 export type RepoTabId =
   | "overview"
@@ -339,6 +348,7 @@ function normalizeUnfixableChecks(raw: unknown): RepoUnfixableChecksState {
     PillSelectComponent,
     ConfirmDialogComponent,
     StatusIconComponent,
+    RepoCiCapabilitiesCardComponent,
   ],
   encapsulation: ViewEncapsulation.None,
   styleUrls: [
@@ -794,6 +804,44 @@ function normalizeUnfixableChecks(raw: unknown): RepoUnfixableChecksState {
                     </div>
                   </div>
                 </div>
+
+                <g-repo-ci-capabilities-card
+                  [repoSlug]="repoSlug()"
+                  [data]="ciCapsData()"
+                  [config]="config()"
+                  [saving]="ciCapsSaving()"
+                  [loadError]="ciCapsError()"
+                  [saveError]="ciCapsSaveError()"
+                  [canRead]="
+                    access.can(
+                      'GET /api/repos/{owner}/{name}/ci-capabilities',
+                      repoSlug()
+                    )
+                  "
+                  [canWrite]="canWriteCiCapabilities()"
+                  [configRepoOnly]="configRepoOnly()"
+                  [readDeniedReason]="
+                    access.deniedReason(
+                      'GET /api/repos/{owner}/{name}/ci-capabilities',
+                      repoSlug()
+                    )
+                  "
+                  [writeDeniedReason]="
+                    hasValidRepo() &&
+                    !access.can(
+                      'PUT /api/repos/{owner}/{name}/ci-capabilities',
+                      repoSlug()
+                    )
+                      ? access.deniedReason(
+                          'PUT /api/repos/{owner}/{name}/ci-capabilities',
+                          repoSlug()
+                        )
+                      : ''
+                  "
+                  (save)="saveCiCapabilities($event)"
+                  (retry)="loadCiCapabilities(true)"
+                  (dismissSaveError)="dismissCiCapsSaveError()"
+                />
               }
 
               @case ("merge-queue") {
@@ -1082,10 +1130,57 @@ function normalizeUnfixableChecks(raw: unknown): RepoUnfixableChecksState {
               }
 
               @case ("agents") {
-                <div class="s-card" data-testid="card-repo-agents">
+                <form
+                  class="s-card"
+                  data-testid="card-repo-agents"
+                  novalidate
+                  (submit)="saveAgentTabSettings($event)"
+                >
                   <h2 class="s-card-title">
                     Repository instructions, setup &amp; capability grants
                   </h2>
+                  @if (agentsCapsError(); as capsErr) {
+                    <div
+                      class="s-banner error"
+                      role="alert"
+                      data-testid="agent-caps-error-banner"
+                    >
+                      <span>{{ capsErr }}</span>
+                      <button
+                        type="button"
+                        class="btn-tonal s-btn-sm"
+                        data-testid="retry-agent-caps-btn"
+                        (click)="loadAgentsCapabilities(true)"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  }
+                  @if (
+                    hasValidRepo() &&
+                    !configRepoOnly() &&
+                    (!access.can(
+                      "PUT /api/repos/{owner}/{name}/setup-command",
+                      repoSlug()
+                    ) ||
+                      !access.can(
+                        "PUT /api/repos/{owner}/{name}/prompt-extension",
+                        repoSlug()
+                      ))
+                  ) {
+                    <p
+                      class="s-hint"
+                      id="repo-agent-repos-denied-reason"
+                      data-testid="agent-repos-write-denied"
+                    >
+                      {{
+                        access.deniedReason(
+                          "PUT /api/repos/{owner}/{name}/setup-command",
+                          repoSlug()
+                        )
+                      }}
+                    </p>
+                  }
                   <div class="s-field">
                     <label class="s-label" for="rp-setup"
                       >Sandbox setup command</label
@@ -1104,8 +1199,21 @@ function normalizeUnfixableChecks(raw: unknown): RepoUnfixableChecksState {
                           repoSlug()
                         )
                       "
-                      (input)="setupCommand.set($any($event.target).value)"
+                      [attr.aria-invalid]="
+                        agentFieldErrors().setupCommand ? 'true' : null
+                      "
+                      [attr.aria-describedby]="agentSetupDescribedBy()"
+                      (input)="onAgentSetupInput($any($event.target).value)"
                     />
+                    @if (agentFieldErrors().setupCommand; as setupErr) {
+                      <span
+                        id="rp-setup-error"
+                        class="s-field-error"
+                        role="alert"
+                        data-testid="error-repo-setup-cmd"
+                        >{{ setupErr }}</span
+                      >
+                    }
                   </div>
                   <div class="s-field">
                     <label class="s-label" for="rp-prompt"
@@ -1124,13 +1232,47 @@ function normalizeUnfixableChecks(raw: unknown): RepoUnfixableChecksState {
                           repoSlug()
                         )
                       "
-                      (input)="promptExtension.set($any($event.target).value)"
+                      [attr.aria-invalid]="
+                        agentFieldErrors().promptExtension ? 'true' : null
+                      "
+                      [attr.aria-describedby]="agentPromptDescribedBy()"
+                      (input)="onAgentPromptInput($any($event.target).value)"
                     ></textarea>
+                    @if (agentFieldErrors().promptExtension; as promptErr) {
+                      <span
+                        id="rp-prompt-error"
+                        class="s-field-error"
+                        role="alert"
+                        data-testid="error-repo-prompt-ext"
+                        >{{ promptErr }}</span
+                      >
+                    }
                   </div>
                   <div class="s-field">
                     <label class="s-label" for="rp-caps"
                       >Default capabilities (comma-separated)</label
                     >
+                    @if (
+                      hasValidRepo() &&
+                      !configRepoOnly() &&
+                      !access.can(
+                        "PUT /api/repos/{owner}/{name}/capabilities",
+                        repoSlug()
+                      )
+                    ) {
+                      <p
+                        class="s-hint"
+                        id="repo-agent-caps-denied-reason"
+                        data-testid="agent-caps-write-denied"
+                      >
+                        {{
+                          access.deniedReason(
+                            "PUT /api/repos/{owner}/{name}/capabilities",
+                            repoSlug()
+                          )
+                        }}
+                      </p>
+                    }
                     <input
                       id="rp-caps"
                       class="s-input tabular"
@@ -1144,21 +1286,54 @@ function normalizeUnfixableChecks(raw: unknown): RepoUnfixableChecksState {
                           repoSlug()
                         )
                       "
-                      (input)="repoCaps.set($any($event.target).value)"
+                      [attr.aria-invalid]="
+                        agentFieldErrors().repoCaps ? 'true' : null
+                      "
+                      [attr.aria-describedby]="agentCapsDescribedBy()"
+                      (input)="onAgentCapsInput($any($event.target).value)"
                     />
+                    <span class="s-hint" id="rp-caps-hint"
+                      >Comma-separated capability IDs, api: scopes, or
+                      capability method refs. Leave empty to add no repo-level
+                      defaults.</span
+                    >
+                    @if (agentFieldErrors().repoCaps; as capsFieldErr) {
+                      <span
+                        id="rp-caps-error"
+                        class="s-field-error"
+                        role="alert"
+                        data-testid="error-repo-caps"
+                        >{{ capsFieldErr }}</span
+                      >
+                    }
                   </div>
+                  @if (agentsSaveError(); as saveErr) {
+                    <div
+                      class="s-banner error"
+                      role="alert"
+                      data-testid="agents-save-error"
+                    >
+                      <span>{{ saveErr }}</span>
+                      <button
+                        type="button"
+                        class="btn-text s-btn-sm"
+                        (click)="dismissAgentsSaveError()"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  }
                   <div class="s-inline">
                     <button
-                      type="button"
+                      type="submit"
                       class="btn-primary s-btn-sm"
                       data-testid="save-repo-agents-btn"
-                      [disabled]="!canSaveRepoAgents()"
-                      (click)="saveAgentTabSettings()"
+                      [disabled]="!canSaveRepoAgents() || agentsSaving()"
                     >
-                      Save agent settings
+                      {{ agentsSaving() ? "Saving…" : "Save agent settings" }}
                     </button>
                   </div>
-                </div>
+                </form>
               }
 
               @case ("branches") {
@@ -2450,6 +2625,7 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   private readonly snackbar = inject(SnackbarService);
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
+  private readonly hostRef = inject<ElementRef<HTMLElement>>(ElementRef);
 
   readonly host = input<string | undefined>(undefined);
   readonly owner = input<string | undefined>(undefined);
@@ -2474,6 +2650,7 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   private readonly routeTab = signal<string | null>(null);
 
   protected readonly ready = signal(false);
+  protected readonly config = signal<GrainConfig | null>(null);
   protected readonly configRepoOnly = signal(false);
   protected readonly error = signal<string | null>(null);
 
@@ -2502,6 +2679,25 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   protected readonly setupCommand = signal("");
   protected readonly promptExtension = signal("");
   protected readonly repoCaps = signal("");
+  protected readonly agentsSaving = signal(false);
+  protected readonly agentsSaveError = signal<string | null>(null);
+  protected readonly agentFieldErrors = signal<
+    Partial<Record<AgentFieldKey, string>>
+  >({});
+  protected readonly agentsCapsLoading = signal(false);
+  protected readonly agentsCapsError = signal<string | null>(null);
+  private agentsCapsDirty = false;
+  private agentsCapsInFlightRepo = "";
+  private agentsCapsReadSeq = 0;
+
+  protected readonly ciCapsData = signal<RepoCiCapabilitiesState | null>(null);
+  protected readonly ciCapsLoading = signal(false);
+  protected readonly ciCapsSaving = signal(false);
+  protected readonly ciCapsError = signal<string | null>(null);
+  protected readonly ciCapsSaveError = signal<string | null>(null);
+  private ciCapsInFlightRepo = "";
+  private ciCapsReadSeq = 0;
+  private ciCapsSaveSeq = 0;
 
   protected readonly branches = signal<BranchRow[]>([]);
   protected readonly branchesLoading = signal(false);
@@ -2556,11 +2752,13 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   private branchesInFlightRepo = "";
   private branchesReadSeq = 0;
   private lastScopedErrors: Record<
-    "workOwnership" | "unfixable",
+    "workOwnership" | "unfixable" | "ciCaps" | "agents",
     string | null
   > = {
     workOwnership: null,
     unfixable: null,
+    ciCaps: null,
+    agents: null,
   };
 
   private readonly normalizedRouteParts = computed(() => {
@@ -2685,6 +2883,42 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     return this.access.can(
       "PUT /api/repos/{owner}/{name}/unfixable-checks",
       this.repoSlug(),
+    );
+  }
+
+  protected canWriteCiCapabilities(): boolean {
+    if (this.configRepoOnly() || !this.hasValidRepo()) return false;
+    return this.access.can(
+      "PUT /api/repos/{owner}/{name}/ci-capabilities",
+      this.repoSlug(),
+    );
+  }
+
+  protected agentSetupDescribedBy(): string | null {
+    return this.describedByIds(
+      "PUT /api/repos/{owner}/{name}/setup-command",
+      "repo-agent-repos-denied-reason",
+      true,
+      this.agentFieldErrors().setupCommand ? "rp-setup-error" : null,
+    );
+  }
+
+  protected agentPromptDescribedBy(): string | null {
+    return this.describedByIds(
+      "PUT /api/repos/{owner}/{name}/prompt-extension",
+      "repo-agent-repos-denied-reason",
+      true,
+      this.agentFieldErrors().promptExtension ? "rp-prompt-error" : null,
+    );
+  }
+
+  protected agentCapsDescribedBy(): string | null {
+    return this.describedByIds(
+      "PUT /api/repos/{owner}/{name}/capabilities",
+      "repo-agent-caps-denied-reason",
+      true,
+      "rp-caps-hint",
+      this.agentFieldErrors().repoCaps ? "rp-caps-error" : null,
     );
   }
 
@@ -2842,10 +3076,30 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     this.branchesError.set(null);
     this.branchesInFlightRepo = "";
     this.branchesReadSeq++;
+    this.ciCapsData.set(null);
+    this.ciCapsLoading.set(false);
+    this.ciCapsSaving.set(false);
+    this.ciCapsError.set(null);
+    this.ciCapsSaveError.set(null);
+    this.ciCapsInFlightRepo = "";
+    this.ciCapsReadSeq++;
+    this.ciCapsSaveSeq++;
+    this.clearBannerError("ciCaps");
     this.releases.set([]);
     this.candidates.set([]);
     this.pendingReleases.set([]);
+    this.setupCommand.set("");
+    this.promptExtension.set("");
     this.repoCaps.set("");
+    this.agentsSaving.set(false);
+    this.agentsSaveError.set(null);
+    this.agentFieldErrors.set({});
+    this.agentsCapsLoading.set(false);
+    this.agentsCapsError.set(null);
+    this.agentsCapsDirty = false;
+    this.agentsCapsInFlightRepo = "";
+    this.agentsCapsReadSeq++;
+    this.clearBannerError("agents");
   }
 
   private async reloadRepoAndTab(): Promise<void> {
@@ -2853,20 +3107,33 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     await this.loadTabData();
   }
 
+  private applyConfig(cfg: GrainConfig | null): void {
+    if (!cfg) return;
+    this.config.set(cfg);
+    this.access.setConfig(cfg);
+    const rec = cfg as Record<string, unknown>;
+    this.configRepoOnly.set(
+      Boolean(
+        rec["configRepoOnly"] ||
+        rec["externalConfigRepo"] ||
+        rec["settingsLocked"],
+      ),
+    );
+  }
+
+  private async refreshConfigQuietly(): Promise<void> {
+    try {
+      const cfg = await this.api.config();
+      this.applyConfig(cfg);
+    } catch {
+      // Non-fatal: the page already holds the prior config snapshot.
+    }
+  }
+
   private async initPage(): Promise<void> {
     try {
       const cfg = await this.api.config();
-      if (cfg) {
-        this.access.setConfig(cfg);
-        const rec = cfg as Record<string, unknown>;
-        this.configRepoOnly.set(
-          Boolean(
-            rec["configRepoOnly"] ||
-            rec["externalConfigRepo"] ||
-            rec["settingsLocked"],
-          ),
-        );
-      }
+      this.applyConfig(cfg);
       await this.loadCoreRepo();
       await this.loadTabData();
       this.ready.set(true);
@@ -3007,22 +3274,11 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
           })
           .catch(() => undefined);
       }
+      await this.loadCiCapabilities();
     } else if (t === "merge-queue") {
       await this.loadUnfixableChecks();
     } else if (t === "agents") {
-      if (this.access.can("GET /api/repos/{owner}/{name}/capabilities", repo)) {
-        void this.api
-          .get<{ defaultCapabilities?: string[] }>(
-            "GET /api/repos/{owner}/{name}/capabilities",
-            p,
-          )
-          .then((c) => {
-            if (Array.isArray(c?.defaultCapabilities)) {
-              this.repoCaps.set(c.defaultCapabilities.join(", "));
-            }
-          })
-          .catch(() => undefined);
-      }
+      await this.loadAgentsCapabilities();
     } else if (t === "branches") {
       await this.loadBranches();
     } else if (t === "releases") {
@@ -3685,39 +3941,253 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     }
   }
 
-  protected async saveAgentTabSettings(): Promise<void> {
-    if (!this.canSaveRepoAgents()) return;
-    const p = this.params();
+  protected onAgentSetupInput(value: string): void {
+    this.setupCommand.set(value);
+    this.clearAgentFieldError("setupCommand");
+  }
+
+  protected onAgentPromptInput(value: string): void {
+    this.promptExtension.set(value);
+    this.clearAgentFieldError("promptExtension");
+  }
+
+  protected onAgentCapsInput(value: string): void {
+    this.agentsCapsDirty = true;
+    this.repoCaps.set(value);
+    this.clearAgentFieldError("repoCaps");
+  }
+
+  protected dismissAgentsSaveError(): void {
+    this.agentsSaveError.set(null);
+    this.clearBannerError("agents");
+  }
+
+  private clearAgentFieldError(field: AgentFieldKey): void {
+    const cur = this.agentFieldErrors();
+    if (!(field in cur)) return;
+    const next = { ...cur };
+    delete next[field];
+    this.agentFieldErrors.set(next);
+    if (Object.keys(next).length === 0) {
+      this.agentsSaveError.set(null);
+      this.clearBannerError("agents");
+    }
+  }
+
+  private focusAgentField(field: AgentFieldKey): void {
+    const idMap: Record<AgentFieldKey, string> = {
+      setupCommand: "rp-setup",
+      promptExtension: "rp-prompt",
+      repoCaps: "rp-caps",
+    };
+    this.hostRef.nativeElement
+      .querySelector<HTMLElement>(`#${idMap[field]}`)
+      ?.focus();
+  }
+
+  protected async saveAgentTabSettings(event?: Event): Promise<void> {
+    event?.preventDefault();
+    if (this.agentsSaving()) return;
+    this.clearBannerError("agents");
+    this.agentsSaveError.set(null);
+    this.agentFieldErrors.set({});
+
+    if (!this.hasValidRepo()) {
+      const msg =
+        "Cannot save agent settings: repository owner and name are missing.";
+      this.agentsSaveError.set(msg);
+      this.recordBannerError("agents", msg);
+      return;
+    }
+    if (this.configRepoOnly()) {
+      const msg =
+        "Cannot save agent settings: repository configuration is managed in the config repository.";
+      this.agentsSaveError.set(msg);
+      this.recordBannerError("agents", msg);
+      return;
+    }
+
     const repo = this.repoSlug();
+    const canWriteSetup = this.access.can(
+      "PUT /api/repos/{owner}/{name}/setup-command",
+      repo,
+    );
+    const canWritePrompt = this.access.can(
+      "PUT /api/repos/{owner}/{name}/prompt-extension",
+      repo,
+    );
+    const canWriteCaps = this.access.can(
+      "PUT /api/repos/{owner}/{name}/capabilities",
+      repo,
+    );
+    if (!canWriteSetup && !canWritePrompt && !canWriteCaps) {
+      const msg =
+        "Cannot save agent settings: your role lacks write permission for setup command, prompt extension, and capabilities on this repository.";
+      this.agentsSaveError.set(msg);
+      this.recordBannerError("agents", msg);
+      return;
+    }
+
+    const validation = validateAgentSettingsForm({
+      canWriteSetup,
+      setupCommand: this.setupCommand(),
+      canWritePrompt,
+      promptExtension: this.promptExtension(),
+      canWriteCaps,
+      repoCaps: this.repoCaps(),
+      agentsCapsLoadFailed: this.agentsCapsError() !== null,
+      agentsCapsDirty: this.agentsCapsDirty,
+    });
+    if (!validation.valid) {
+      this.agentFieldErrors.set(validation.fieldErrors);
+      const summary =
+        validation.orderedErrors.length === 1
+          ? validation.orderedErrors[0].message
+          : `Fix validation errors before saving: ${validation.orderedErrors
+              .map((e, i) => `${i + 1}) ${e.label}: ${e.message}`)
+              .join(" ")}`;
+      this.agentsSaveError.set(summary);
+      this.recordBannerError("agents", summary);
+      this.focusAgentField(validation.orderedErrors[0].field);
+      return;
+    }
+
+    const p = this.params();
+    this.agentsSaving.set(true);
     try {
       if (
-        this.access.can("PUT /api/repos/{owner}/{name}/setup-command", repo)
+        canWriteCaps &&
+        validation.capabilities.length > 0 &&
+        this.access.can("POST /api/capability-grants/check", repo)
       ) {
-        await this.api.put("PUT /api/repos/{owner}/{name}/setup-command", p, {
-          setupCommand: this.setupCommand(),
+        try {
+          const checkRes = await this.api.post<
+            GrantCheck[] | { checks?: GrantCheck[] } | Record<string, unknown>
+          >("POST /api/capability-grants/check", undefined, {
+            grants: validation.capabilities.map((grant) => ({ grant })),
+            subject: { repo },
+          });
+          const checks = Array.isArray(checkRes)
+            ? checkRes
+            : Array.isArray((checkRes as { checks?: GrantCheck[] })?.checks)
+              ? ((checkRes as { checks: GrantCheck[] }).checks ?? [])
+              : [];
+          const badChecks = checks.filter(
+            (c) =>
+              Boolean(c?.error) ||
+              Boolean(c?.catalogueRefusal) ||
+              Boolean(c?.fields?.length),
+          );
+          if (badChecks.length > 0) {
+            const firstReason = badChecks
+              .map((c) => {
+                const detail =
+                  c.error ||
+                  c.catalogueRefusal ||
+                  (c.fields ?? [])
+                    .map((f) => `${f.field}: ${f.message}`)
+                    .join(", ");
+                return `${c.grant ? `"${c.grant}": ` : ""}${detail}`;
+              })
+              .join("; ");
+            this.agentFieldErrors.set({ repoCaps: firstReason });
+            const msg = `Default capabilities validation failed: ${firstReason}`;
+            this.agentsSaveError.set(msg);
+            this.recordBannerError("agents", msg);
+            this.focusAgentField("repoCaps");
+            return;
+          }
+        } catch (err) {
+          const status = (err as { status?: number })?.status;
+          if (status === 400) {
+            const reason = errText(err);
+            this.agentFieldErrors.set({ repoCaps: reason });
+            const msg = `Default capabilities validation failed: ${reason}`;
+            this.agentsSaveError.set(msg);
+            this.recordBannerError("agents", msg);
+            this.focusAgentField("repoCaps");
+            return;
+          }
+        }
+      }
+
+      const steps: {
+        field: AgentFieldKey;
+        label: string;
+        run: () => Promise<void>;
+      }[] = [];
+      if (canWriteSetup) {
+        steps.push({
+          field: "setupCommand",
+          label: "Sandbox setup command",
+          run: async () => {
+            await this.api.put(
+              "PUT /api/repos/{owner}/{name}/setup-command",
+              p,
+              { setupCommand: this.setupCommand() },
+            );
+          },
         });
       }
-      if (
-        this.access.can("PUT /api/repos/{owner}/{name}/prompt-extension", repo)
-      ) {
-        await this.api.put(
-          "PUT /api/repos/{owner}/{name}/prompt-extension",
-          p,
-          { promptExtension: this.promptExtension() },
-        );
-      }
-      if (this.access.can("PUT /api/repos/{owner}/{name}/capabilities", repo)) {
-        const defaultCapabilities = this.repoCaps()
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        await this.api.put("PUT /api/repos/{owner}/{name}/capabilities", p, {
-          defaultCapabilities,
+      if (canWritePrompt) {
+        steps.push({
+          field: "promptExtension",
+          label: "Standing prompt extension",
+          run: async () => {
+            await this.api.put(
+              "PUT /api/repos/{owner}/{name}/prompt-extension",
+              p,
+              { promptExtension: this.promptExtension() },
+            );
+          },
         });
+      }
+      if (canWriteCaps) {
+        steps.push({
+          field: "repoCaps",
+          label: "Default capabilities",
+          run: async () => {
+            const res = await this.api.put<{ defaultCapabilities?: string[] }>(
+              "PUT /api/repos/{owner}/{name}/capabilities",
+              p,
+              { defaultCapabilities: validation.capabilities },
+            );
+            if (Array.isArray(res?.defaultCapabilities)) {
+              this.repoCaps.set(res.defaultCapabilities.join(", "));
+            }
+            this.agentsCapsDirty = false;
+            this.agentsCapsError.set(null);
+          },
+        });
+      }
+
+      const savedLabels: string[] = [];
+      for (let i = 0; i < steps.length; i++) {
+        const step = steps[i];
+        try {
+          await step.run();
+          savedLabels.push(step.label);
+        } catch (err) {
+          const reason = errText(err);
+          this.agentFieldErrors.set({ [step.field]: reason });
+          const remainingLabels = steps.slice(i + 1).map((s) => s.label);
+          const parts = [`${step.label} failed to save: ${reason}.`];
+          if (savedLabels.length > 0) {
+            parts.push(`Already saved: ${savedLabels.join(", ")}.`);
+          }
+          if (remainingLabels.length > 0) {
+            parts.push(`Not saved: ${remainingLabels.join(", ")}.`);
+          }
+          const summary = parts.join(" ");
+          this.agentsSaveError.set(summary);
+          this.recordBannerError("agents", summary);
+          this.focusAgentField(step.field);
+          return;
+        }
       }
       this.snackbar.show("Saved repository agent settings");
-    } catch (err) {
-      this.error.set(errText(err));
+    } finally {
+      this.agentsSaving.set(false);
     }
   }
 
@@ -4292,6 +4762,162 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     }
   }
 
+  protected async loadAgentsCapabilities(force = false): Promise<void> {
+    if (!this.hasValidRepo()) return;
+    const expectedRepo = this.repoSlug();
+    if (
+      !this.access.can(
+        "GET /api/repos/{owner}/{name}/capabilities",
+        expectedRepo,
+      )
+    ) {
+      return;
+    }
+    if (
+      !force &&
+      this.agentsCapsLoading() &&
+      this.agentsCapsInFlightRepo === expectedRepo
+    ) {
+      return;
+    }
+    const readSeq = ++this.agentsCapsReadSeq;
+    this.agentsCapsInFlightRepo = expectedRepo;
+    this.agentsCapsLoading.set(true);
+    this.agentsCapsError.set(null);
+    try {
+      const c = await this.api.get<{ defaultCapabilities?: string[] | null }>(
+        "GET /api/repos/{owner}/{name}/capabilities",
+        this.params(),
+      );
+      if (
+        this.repoSlug() !== expectedRepo ||
+        readSeq !== this.agentsCapsReadSeq
+      ) {
+        return;
+      }
+      if (!this.agentsCapsDirty) {
+        if (Array.isArray(c?.defaultCapabilities)) {
+          this.repoCaps.set(c.defaultCapabilities.join(", "));
+        } else if (c?.defaultCapabilities === null) {
+          this.repoCaps.set("");
+        }
+      }
+      this.clearAgentFieldError("repoCaps");
+    } catch (err) {
+      if (
+        this.repoSlug() === expectedRepo &&
+        readSeq === this.agentsCapsReadSeq
+      ) {
+        this.agentsCapsError.set(errText(err));
+      }
+    } finally {
+      if (
+        this.agentsCapsInFlightRepo === expectedRepo &&
+        readSeq === this.agentsCapsReadSeq
+      ) {
+        this.agentsCapsInFlightRepo = "";
+        this.agentsCapsLoading.set(false);
+      }
+    }
+  }
+
+  protected async loadCiCapabilities(force = false): Promise<void> {
+    if (!this.hasValidRepo()) return;
+    const expectedRepo = this.repoSlug();
+    if (
+      !this.access.can(
+        "GET /api/repos/{owner}/{name}/ci-capabilities",
+        expectedRepo,
+      )
+    ) {
+      return;
+    }
+    if (
+      !force &&
+      this.ciCapsLoading() &&
+      this.ciCapsInFlightRepo === expectedRepo
+    ) {
+      return;
+    }
+    const readSeq = ++this.ciCapsReadSeq;
+    this.ciCapsInFlightRepo = expectedRepo;
+    this.ciCapsLoading.set(true);
+    this.ciCapsError.set(null);
+    try {
+      const res = await this.api.get<unknown>(
+        "GET /api/repos/{owner}/{name}/ci-capabilities",
+        this.params(),
+      );
+      if (this.repoSlug() !== expectedRepo || readSeq !== this.ciCapsReadSeq) {
+        return;
+      }
+      this.ciCapsData.set(normalizeRepoCiCapabilitiesState(res));
+      this.ciCapsSaveError.set(null);
+      this.clearBannerError("ciCaps");
+    } catch (err) {
+      if (this.repoSlug() === expectedRepo && readSeq === this.ciCapsReadSeq) {
+        this.ciCapsError.set(errText(err));
+      }
+    } finally {
+      if (
+        this.ciCapsInFlightRepo === expectedRepo &&
+        readSeq === this.ciCapsReadSeq
+      ) {
+        this.ciCapsInFlightRepo = "";
+        this.ciCapsLoading.set(false);
+      }
+    }
+  }
+
+  protected dismissCiCapsSaveError(): void {
+    this.ciCapsSaveError.set(null);
+    this.clearBannerError("ciCaps");
+  }
+
+  protected async saveCiCapabilities(
+    nextCapabilities: string[],
+  ): Promise<void> {
+    if (!this.canWriteCiCapabilities() || this.ciCapsSaving()) return;
+    const expectedRepo = this.repoSlug();
+    const token = ++this.ciCapsSaveSeq;
+    this.ciCapsReadSeq++;
+    this.ciCapsSaveError.set(null);
+    this.clearBannerError("ciCaps");
+    this.ciCapsSaving.set(true);
+    try {
+      const res = await this.api.put<unknown>(
+        "PUT /api/repos/{owner}/{name}/ci-capabilities",
+        this.params(),
+        { ciCapabilities: nextCapabilities },
+      );
+      if (this.repoSlug() !== expectedRepo || token !== this.ciCapsSaveSeq) {
+        return;
+      }
+      if (
+        res &&
+        typeof res === "object" &&
+        ("ciCapabilities" in res || "availableCICapabilities" in res)
+      ) {
+        this.ciCapsData.set(normalizeRepoCiCapabilitiesState(res));
+        this.ciCapsError.set(null);
+      } else {
+        await this.loadCiCapabilities(true);
+      }
+      this.snackbar.show("CI capabilities updated");
+      void this.refreshConfigQuietly();
+    } catch (err) {
+      if (this.repoSlug() === expectedRepo && token === this.ciCapsSaveSeq) {
+        const msg = errText(err);
+        this.ciCapsSaveError.set(msg);
+        this.recordBannerError("ciCaps", msg);
+      }
+    } finally {
+      if (this.ciCapsSaveSeq === token) {
+        this.ciCapsSaving.set(false);
+      }
+    }
+  }
+
   private syncReleaseEnabledFromOwnership(
     work: RepoWorkOwnershipResponse,
   ): void {
@@ -4302,14 +4928,16 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   }
 
   private recordBannerError(
-    slot: "workOwnership" | "unfixable",
+    slot: "workOwnership" | "unfixable" | "ciCaps" | "agents",
     msg: string,
   ): void {
     this.lastScopedErrors[slot] = msg;
     this.error.set(msg);
   }
 
-  private clearBannerError(slot: "workOwnership" | "unfixable"): void {
+  private clearBannerError(
+    slot: "workOwnership" | "unfixable" | "ciCaps" | "agents",
+  ): void {
     const prev = this.lastScopedErrors[slot];
     if (prev !== null && this.error() === prev) {
       this.error.set(null);

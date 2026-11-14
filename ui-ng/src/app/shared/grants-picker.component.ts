@@ -110,7 +110,12 @@ export interface GrantAttachEvent {
               [attr.data-testid]="(testid() || 'gp') + '-add-open'"
               (click)="openBuilder()"
             >
-              + Add API scope or method grant
+              {{
+                addLabel() ||
+                  (runKind() === "ci"
+                    ? "+ Add capability method grant"
+                    : "+ Add API scope or method grant")
+              }}
             </button>
           </div>
         } @else {
@@ -119,19 +124,21 @@ export interface GrantAttachEvent {
             [attr.data-testid]="(testid() || 'gp') + '-builder'"
           >
             <div class="grants-mode-tabs" role="group" aria-label="Grant kind">
+              @if (runKind() !== "ci") {
+                <button
+                  type="button"
+                  class="grant-pill"
+                  [attr.aria-pressed]="effectiveMode() === 'api'"
+                  [attr.data-testid]="(testid() || 'gp') + '-mode-api'"
+                  (click)="mode.set('api')"
+                >
+                  API scope
+                </button>
+              }
               <button
                 type="button"
                 class="grant-pill"
-                [attr.aria-pressed]="mode() === 'api'"
-                [attr.data-testid]="(testid() || 'gp') + '-mode-api'"
-                (click)="mode.set('api')"
-              >
-                API scope
-              </button>
-              <button
-                type="button"
-                class="grant-pill"
-                [attr.aria-pressed]="mode() === 'method'"
+                [attr.aria-pressed]="effectiveMode() === 'method'"
                 [attr.data-testid]="(testid() || 'gp') + '-mode-method'"
                 (click)="mode.set('method')"
               >
@@ -140,7 +147,7 @@ export interface GrantAttachEvent {
               <button
                 type="button"
                 class="grant-pill"
-                [attr.aria-pressed]="mode() === 'raw'"
+                [attr.aria-pressed]="effectiveMode() === 'raw'"
                 [attr.data-testid]="(testid() || 'gp') + '-mode-raw'"
                 (click)="mode.set('raw')"
               >
@@ -148,7 +155,7 @@ export interface GrantAttachEvent {
               </button>
             </div>
 
-            @switch (mode()) {
+            @switch (effectiveMode()) {
               @case ("api") {
                 <div class="grants-builder-row">
                   <g-pill-select
@@ -198,7 +205,11 @@ export interface GrantAttachEvent {
                   <input
                     type="text"
                     class="grants-builder-input"
-                    placeholder="e.g. api:tasks-read or server#method"
+                    [attr.placeholder]="
+                      runKind() === 'ci'
+                        ? 'e.g. server#method or https://example.com/server#method'
+                        : 'e.g. api:tasks-read or server#method'
+                    "
                     aria-label="Grant string"
                     [attr.data-testid]="(testid() || 'gp') + '-raw-input'"
                     [value]="rawGrant()"
@@ -249,6 +260,8 @@ export class GrantsPickerComponent {
   readonly offered = input<readonly CapabilityOption[]>([]);
   readonly held = input<readonly string[]>([]);
   readonly repo = input<string | undefined>(undefined);
+  readonly runKind = input<"task" | "process" | "ci">("task");
+  readonly addLabel = input<string>("");
   readonly disabled = input<boolean>(false);
   readonly testid = input<string>("");
 
@@ -260,6 +273,9 @@ export class GrantsPickerComponent {
 
   protected readonly builderOpen = signal(false);
   protected readonly mode = signal<"api" | "method" | "raw">("api");
+  protected readonly effectiveMode = computed<"api" | "method" | "raw">(() =>
+    this.runKind() === "ci" && this.mode() === "api" ? "method" : this.mode(),
+  );
   protected readonly scopeSets = signal<APIScopeSetRow[]>([]);
   protected readonly methods = signal<CapabilityMethod[]>([]);
   protected readonly selectedApiSet = signal("");
@@ -269,7 +285,7 @@ export class GrantsPickerComponent {
   protected readonly rawGrant = signal("");
   protected readonly checking = signal(false);
   protected readonly checkError = signal<string | null>(null);
-  private loadedCatalogue = false;
+  private loadedCatalogueKey = "";
 
   protected readonly heldSet = computed(() => new Set(this.held()));
 
@@ -304,9 +320,23 @@ export class GrantsPickerComponent {
       }));
   });
 
+  private static readonly CI_EXCLUDED_REFS = new Set([
+    "https://grain.dev/capabilities/grain#ci",
+    "https://grain.dev/capabilities/repo#target",
+    "https://grain.dev/capabilities/repo#credential",
+  ]);
+
   protected readonly methodOptions = computed<PillOption[]>(() =>
     this.methods()
-      .filter((m) => !m.policyRefusal)
+      .filter(
+        (m) =>
+          !m.policyRefusal &&
+          !(
+            this.runKind() === "ci" &&
+            (isApiCapability(m.ref) ||
+              GrantsPickerComponent.CI_EXCLUDED_REFS.has(m.ref))
+          ),
+      )
       .map((m) => ({
         value: m.ref,
         label: m.description ? `${m.ref} — ${m.description}` : m.ref,
@@ -316,7 +346,8 @@ export class GrantsPickerComponent {
   protected canReadCatalogue(): boolean {
     return (
       this.access.can("GET /api/capability-methods", this.repo()) ||
-      this.access.can("GET /api/api-scope-sets", this.repo()) ||
+      (this.runKind() !== "ci" &&
+        this.access.can("GET /api/api-scope-sets", this.repo())) ||
       this.access.can("POST /api/capability-grants/check", this.repo())
     );
   }
@@ -359,14 +390,16 @@ export class GrantsPickerComponent {
   protected async openBuilder(): Promise<void> {
     this.builderOpen.set(true);
     this.checkError.set(null);
-    if (this.loadedCatalogue) return;
-    this.loadedCatalogue = true;
     const repo = this.repo();
+    const kind = this.runKind();
+    const key = `${kind}|${repo ?? ""}`;
+    if (this.loadedCatalogueKey === key) return;
+    this.loadedCatalogueKey = key;
     const query = repo
-      ? `kind=task&repo=${encodeURIComponent(repo)}`
-      : "kind=task";
+      ? `kind=${encodeURIComponent(kind)}&repo=${encodeURIComponent(repo)}`
+      : `kind=${encodeURIComponent(kind)}`;
     const [setsRes, methodsRes] = await Promise.allSettled([
-      this.access.can("GET /api/api-scope-sets", repo)
+      kind !== "ci" && this.access.can("GET /api/api-scope-sets", repo)
         ? this.api.get<APIScopeSetsResponse>("GET /api/api-scope-sets")
         : Promise.resolve({ sets: [] }),
       this.access.can("GET /api/capability-methods", repo)
@@ -393,8 +426,9 @@ export class GrantsPickerComponent {
         ? val
         : (val?.items ?? val?.methods ?? []);
       this.methods.set(list);
-      if (!this.selectedMethod() && list[0]) {
-        this.selectedMethod.set(list[0].ref);
+      const firstOpt = this.methodOptions()[0];
+      if (!this.selectedMethod() && firstOpt) {
+        this.selectedMethod.set(firstOpt.value);
       }
     }
     if (!this.selectedApiSet()) {
@@ -405,7 +439,7 @@ export class GrantsPickerComponent {
   protected async attachFromBuilder(): Promise<void> {
     if (this.checking()) return;
     this.checkError.set(null);
-    const mode = this.mode();
+    const mode = this.effectiveMode();
     let reqItem: {
       capability?: string;
       with?: Record<string, unknown>;
@@ -465,6 +499,10 @@ export class GrantsPickerComponent {
         this.checkError.set("Enter a capability or API grant.");
         return;
       }
+      if (this.runKind() === "ci" && isApiCapability(g)) {
+        this.checkError.set("CI jobs cannot hold API scope grants.");
+        return;
+      }
       reqItem = { grant: g };
       fallbackRecorded = g;
     }
@@ -477,12 +515,18 @@ export class GrantsPickerComponent {
           GrantCheck[] | { checks?: GrantCheck[] }
         >("POST /api/capability-grants/check", undefined, {
           grants: [reqItem],
-          ...(this.repo() ? { subject: { repo: this.repo() } } : {}),
+          ...(this.runKind() !== "ci" && this.repo()
+            ? { subject: { repo: this.repo() } }
+            : {}),
         });
         const list = Array.isArray(res) ? res : (res?.checks ?? []);
         const check = list[0];
         if (check?.error) {
           this.checkError.set(check.error);
+          return;
+        }
+        if (this.runKind() !== "ci" && check?.catalogueRefusal) {
+          this.checkError.set(check.catalogueRefusal);
           return;
         }
         if (check?.recorded) recorded = check.recorded;
