@@ -86,3 +86,68 @@ func TestTheConversionCommandIsQuotedForAShell(t *testing.T) {
 		t.Fatalf("the message does not offer %q:\n%s", want, msg)
 	}
 }
+
+func TestParseRefName(t *testing.T) {
+	huge := strings.Repeat("a", 1<<20)
+
+	valid := []struct {
+		name string
+		ref  string
+		want string
+	}{
+		{name: "branch", ref: "refs/heads/main", want: "heads/main"},
+		{name: "tag with single dots", ref: "refs/tags/v1.0.0", want: "tags/v1.0.0"},
+		{name: "remote branch", ref: "refs/remotes/origin/main", want: "remotes/origin/main"},
+		{name: "single segment after prefix", ref: "refs/stash", want: "stash"},
+		{name: "nested refs prefix kept in remainder", ref: "refs/heads/refs/heads/main", want: "heads/refs/heads/main"},
+		{name: "leading single dot in segment", ref: "refs/heads/.hidden", want: "heads/.hidden"},
+		{name: "huge valid ref", ref: "refs/heads/" + huge, want: "heads/" + huge},
+	}
+	for _, tc := range valid {
+		t.Run("valid/"+tc.name, func(t *testing.T) {
+			got, err := gitrefs.ParseRefName(tc.ref)
+			if err != nil {
+				t.Fatalf("ParseRefName(%q) unexpected error: %v", tc.ref, err)
+			}
+			if got != tc.want {
+				t.Fatalf("ParseRefName(%q) = %q, want %q", tc.ref, got, tc.want)
+			}
+		})
+	}
+
+	invalid := []struct {
+		name string
+		ref  string
+	}{
+		{name: "empty", ref: ""},
+		{name: "prefix only", ref: "refs/"},
+		{name: "missing slash after refs", ref: "refs"},
+		{name: "missing refs prefix", ref: "heads/main"},
+		{name: "leading slash", ref: "/refs/heads/main"},
+		{name: "wrong prefix case", ref: "REFS/heads/main"},
+		{name: "leading space", ref: " refs/heads/main"},
+		{name: "trailing nul byte", ref: "refs/heads/main\x00"},
+		{name: "nul byte only after prefix", ref: "refs/\x00"},
+		{name: "embedded nul byte", ref: "refs/heads/\x00main"},
+		{name: "leading nul byte", ref: "\x00refs/heads/main"},
+		{name: "double dot right after prefix", ref: "refs/.."},
+		{name: "double dot path traversal", ref: "refs/../heads/main"},
+		{name: "double dot in component", ref: "refs/heads/a..b"},
+		{name: "trailing double dot", ref: "refs/heads/.."},
+		{name: "triple dot contains double dot", ref: "refs/heads/..."},
+		{name: "huge without prefix", ref: huge},
+		{name: "huge with trailing nul byte", ref: "refs/heads/" + huge + "\x00"},
+		{name: "huge with trailing double dot", ref: "refs/heads/" + huge + ".."},
+	}
+	for _, tc := range invalid {
+		t.Run("invalid/"+tc.name, func(t *testing.T) {
+			got, err := gitrefs.ParseRefName(tc.ref)
+			if err == nil {
+				t.Fatalf("ParseRefName(%q) = %q, nil; want error", tc.ref, got)
+			}
+			if got != "" {
+				t.Fatalf("ParseRefName(%q) returned non-empty %q alongside error %v", tc.ref, got, err)
+			}
+		})
+	}
+}
