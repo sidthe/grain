@@ -227,18 +227,26 @@ g-context-page {
 @media (max-width: 839.95px) {
   .ctx-split {
     grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: max-content;
     overflow-y: auto;
     overflow-x: hidden;
   }
   .ctx-list-pane {
     border-right: none;
     border-bottom: 1px solid var(--md-sys-color-outline-variant);
-    max-height: 40vh;
+    max-height: 48vh;
     overflow-y: auto;
   }
   .ctx-detail-pane {
     overflow-y: visible;
     padding: 16px;
+  }
+  g-context-page .ctx-list:not(.is-empty) {
+    min-height: 96px;
+  }
+  g-context-page .ctx-grep-truncated {
+    margin: 6px 12px 8px;
+    padding: 8px 10px;
   }
 }
 
@@ -386,4 +394,37 @@ g-context-page {
 .ctx-tok-cmt {
   color: #9ca3af;
   font-style: italic;
+}
+
+/* Scoped to g-context-page so ViewEncapsulation.None never leaks styles out */
+g-context-page .ctx-list.is-empty {
+  flex: 0 0 auto;
+}
+
+g-context-page .ctx-grep-truncated {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 8px 12px 12px;
+  padding: 10px 12px;
+  border-radius: var(--md-sys-shape-corner-small);
+  border: 1px solid var(--md-sys-color-warning);
+  background: var(--md-sys-color-warning-container);
+  color: var(--md-sys-color-on-warning-container);
+  font-size: 12px;
+  line-height: 17px;
+  min-width: 0;
+}
+
+g-context-page .ctx-grep-truncated-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+
+g-context-page .ctx-grep-truncated-msg {
+  margin: 0;
+  overflow-wrap: anywhere;
 }

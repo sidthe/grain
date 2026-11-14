@@ -46,7 +46,7 @@ import {
   type ContextTab,
   type EditorMode,
   type FsEntry,
-  type FsGrepHit,
+  type FsGrepResult,
   type FsListResponse,
   type FsScheme,
   MAX_MEMORY_DOCUMENT_LENGTH,
@@ -64,13 +64,23 @@ import {
   isStaleMemory,
   memoryAge,
   normalizeMemoryFsSegments,
-  parseGrepOutput,
+  parseGrepResponse,
   repoFromMemoryFsPath,
   scopeKey,
   scopeLabel,
   utf8ByteLength,
   validateDocumentSlug,
 } from "./context.models";
+
+function isTruthyHeader(
+  headers: { get?(name: string): string | null } | undefined,
+  name: string,
+): boolean {
+  const val = (headers?.get?.(name) ?? headers?.get?.(name.toLowerCase()) ?? "")
+    .trim()
+    .toLowerCase();
+  return val === "true" || val === "1";
+}
 
 const TABS: readonly { id: ContextTab; label: string }[] = [
   { id: "instructions", label: "Standing Instructions" },
@@ -654,18 +664,24 @@ type ReachableReposPayload =
 
               @if (fsGrepHits() !== null) {
                 <div class="ctx-pane-head-row" style="padding: 8px 16px">
-                  <span class="muted tabular"
-                    >{{ fsGrepHits()?.length ?? 0 }} matches</span
-                  >
+                  <span class="muted tabular" data-testid="fs-grep-count">
+                    {{ fsGrepHits()?.length ?? 0 }}
+                    {{ (fsGrepHits()?.length ?? 0) === 1 ? "match" : "matches"
+                    }}{{ fsGrepTruncated() ? " (truncated)" : "" }}
+                  </span>
                   <button
                     type="button"
                     class="btn-text"
-                    (click)="fsGrepHits.set(null)"
+                    (click)="clearFsGrep()"
                   >
                     Clear search
                   </button>
                 </div>
-                <ul class="ctx-list" data-testid="fs-grep-results">
+                <ul
+                  class="ctx-list"
+                  [class.is-empty]="(fsGrepHits()?.length ?? 0) === 0"
+                  data-testid="fs-grep-results"
+                >
                   @for (hit of fsGrepHits() ?? []; track $index) {
                     <li>
                       <button
@@ -693,6 +709,28 @@ type ReachableReposPayload =
                     </li>
                   }
                 </ul>
+                @if (fsGrepTruncated()) {
+                  <div
+                    class="ctx-grep-truncated"
+                    role="status"
+                    aria-live="polite"
+                    data-testid="fs-grep-truncated"
+                  >
+                    <div class="ctx-grep-truncated-head">
+                      <g-status-icon tone="blast" kind="warning" />
+                      <span>
+                        {{
+                          fsGrepWalkTruncated()
+                            ? "Search walk truncated"
+                            : "Search results truncated"
+                        }}
+                      </span>
+                    </div>
+                    @for (notice of fsGrepNotices(); track $index) {
+                      <p class="ctx-grep-truncated-msg tabular">{{ notice }}</p>
+                    }
+                  </div>
+                }
               } @else if (fsEntries().length === 0) {
                 <p class="empty-state" data-testid="fs-empty">
                   No files in {{ fsScheme() }}://{{ fsDir() }}.
@@ -1252,7 +1290,20 @@ export class ContextPageComponent implements OnInit, OnDestroy {
   protected readonly fsFileContent = signal<string>("");
   protected readonly fsRenderMd = signal(false);
   protected readonly fsGrepQuery = signal<string>("");
-  protected readonly fsGrepHits = signal<FsGrepHit[] | null>(null);
+  protected readonly fsGrepResult = signal<FsGrepResult | null>(null);
+  protected readonly fsGrepHits = computed(
+    () => this.fsGrepResult()?.hits ?? null,
+  );
+  protected readonly fsGrepTruncated = computed(
+    () => this.fsGrepResult()?.truncated ?? false,
+  );
+  protected readonly fsGrepWalkTruncated = computed(
+    () => this.fsGrepResult()?.walkTruncated ?? false,
+  );
+  protected readonly fsGrepNotices = computed(
+    () => this.fsGrepResult()?.notices ?? [],
+  );
+  private fsGrepSeq = 0;
 
   constructor() {
     afterNextRender(() => this.sp.attach());
@@ -2005,6 +2056,11 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     return this.access.deniedReason(route);
   }
 
+  protected clearFsGrep(): void {
+    this.fsGrepSeq++;
+    this.fsGrepResult.set(null);
+  }
+
   protected pickFsScheme(s: FsScheme): void {
     if (this.fsScheme() === s) return;
     if (s === "config" && !this.canReadConfigFs()) return;
@@ -2012,7 +2068,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     this.fsDir.set("");
     this.fsSelectedFile.set("");
     this.fsFileContent.set("");
-    this.fsGrepHits.set(null);
+    this.clearFsGrep();
     void this.loadFsDir("");
   }
 
@@ -2021,13 +2077,14 @@ export class ContextPageComponent implements OnInit, OnDestroy {
   }
 
   protected openFsDir(dir: string): void {
-    this.fsGrepHits.set(null);
+    this.clearFsGrep();
     void this.loadFsDir(dir);
   }
 
   protected navigateFsUp(): void {
     const cur = this.fsDir();
     if (!cur) return;
+    this.clearFsGrep();
     const idx = cur.lastIndexOf("/");
     void this.loadFsDir(idx < 0 ? "" : cur.slice(0, idx));
   }
@@ -2082,10 +2139,34 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     }
   }
 
+  private async fetchGrepResult(
+    route: "GET /api/fs/memory/{path...}" | "GET /api/fs/config/{path...}",
+    path: string,
+    query: string,
+    subtreeLabel?: string,
+  ): Promise<FsGrepResult> {
+    const apiWithResponse = this.api as Partial<
+      Pick<GrainApi, "getTextResponse">
+    >;
+    if (typeof apiWithResponse.getTextResponse === "function") {
+      const res = await apiWithResponse.getTextResponse(route, { path }, query);
+      return parseGrepResponse(res.body ?? "", path, {
+        truncatedHeader: isTruthyHeader(res.headers, "X-Grain-Truncated"),
+        walkTruncatedHeader: isTruthyHeader(
+          res.headers,
+          "X-Grain-Walk-Truncated",
+        ),
+        subtreeLabel,
+      });
+    }
+    const raw = await this.api.getText(route, { path }, query);
+    return parseGrepResponse(raw ?? "", path, { subtreeLabel });
+  }
+
   protected async runFsGrep(): Promise<void> {
     const q = this.fsGrepQuery().trim();
     if (!q) {
-      this.fsGrepHits.set(null);
+      this.clearFsGrep();
       return;
     }
     const dir = this.fsDir();
@@ -2093,6 +2174,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
       this.snackbar.show(this.deniedFsPathReason(dir));
       return;
     }
+    const seq = ++this.fsGrepSeq;
     const route = this.fsRouteKey();
     const params = new URLSearchParams();
     params.set("grep", q);
@@ -2116,27 +2198,32 @@ export class ContextPageComponent implements OnInit, OnDestroy {
           return;
         }
         const results = await Promise.all(
-          targetRepos.map(async (r) => {
+          targetRepos.map((r) => {
             const subDir = `repos/${r}`;
-            const raw = await this.api.getText(
+            return this.fetchGrepResult(
               route,
-              { path: subDir },
+              subDir,
               params.toString(),
+              targetRepos.length > 1 ? subDir : undefined,
             );
-            return parseGrepOutput(raw, subDir);
           }),
         );
-        this.fsGrepHits.set(results.flat());
+        if (seq !== this.fsGrepSeq) return;
+        this.fsGrepResult.set({
+          hits: results.flatMap((r) => r.hits),
+          truncated: results.some((r) => r.truncated),
+          walkTruncated: results.some((r) => r.walkTruncated),
+          notices: [...new Set(results.flatMap((r) => r.notices))],
+        });
         return;
       }
-      const raw = await this.api.getText(
-        route,
-        { path: dir },
-        params.toString(),
-      );
-      this.fsGrepHits.set(parseGrepOutput(raw, dir));
+      const res = await this.fetchGrepResult(route, dir, params.toString());
+      if (seq !== this.fsGrepSeq) return;
+      this.fsGrepResult.set(res);
     } catch (err) {
-      this.snackbar.show(errorText(err));
+      if (seq === this.fsGrepSeq) {
+        this.snackbar.show(errorText(err));
+      }
     }
   }
 
