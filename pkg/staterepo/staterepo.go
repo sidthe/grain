@@ -58,6 +58,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	stdsync "sync"
 	"time"
@@ -580,6 +581,34 @@ func ValidateBranch(branch string) error {
 	out, err := cmd.Output()
 	if err != nil || strings.TrimSpace(string(out)) != branch {
 		return fmt.Errorf("staterepo: invalid branch name %q", branch)
+	}
+	return nil
+}
+
+const maxStateVersionLength = 20
+
+// ValidateStateVersion checks that version starts with 'v', is at most 20 bytes
+// long, and contains exactly three non-empty dot-separated base-10 non-negative
+// integers after 'v' (e.g. "v1.2.3").
+func ValidateStateVersion(version string) error {
+	if len(version) > maxStateVersionLength {
+		return fmt.Errorf("staterepo: state version length %d exceeds maximum of %d", len(version), maxStateVersionLength)
+	}
+	rest, ok := strings.CutPrefix(version, "v")
+	if !ok {
+		return fmt.Errorf("staterepo: invalid state version %q: must start with v", version)
+	}
+	parts := strings.Split(rest, ".")
+	if len(parts) != 3 {
+		return fmt.Errorf("staterepo: invalid state version %q: must have three dot-separated integers", version)
+	}
+	for _, part := range parts {
+		if part == "" {
+			return fmt.Errorf("staterepo: invalid state version %q: empty version component", version)
+		}
+		if _, err := strconv.ParseUint(part, 10, 64); err != nil {
+			return fmt.Errorf("staterepo: invalid state version %q: invalid component %q: %w", version, part, err)
+		}
 	}
 	return nil
 }

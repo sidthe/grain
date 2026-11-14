@@ -1199,3 +1199,76 @@ func TestSettingsLockedRoundTripsAndUIEditsPersistAcrossReconcileCycles(t *testi
 		t.Fatalf("loadedCfg = %+v (err %v), want SettingsLocked == true", loadedCfg, err)
 	}
 }
+
+func TestValidateStateVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		wantErr bool
+	}{
+		{name: "zeros", version: "v0.0.0"},
+		{name: "standard", version: "v1.2.3"},
+		{name: "multi_digit", version: "v10.20.30"},
+		{name: "leading_zeros", version: "v01.02.03"},
+		{name: "max_len_20", version: "v12345.123456.123456"},
+		{name: "max_len_20_major", version: "v999999999999999.0.0"},
+		{name: "max_len_20_minor", version: "v0.999999999999999.0"},
+		{name: "max_len_20_patch", version: "v0.0.999999999999999"},
+		{name: "empty", version: "", wantErr: true},
+		{name: "missing_v", version: "1.2.3", wantErr: true},
+		{name: "uppercase_V", version: "V1.2.3", wantErr: true},
+		{name: "leading_space", version: " v1.2.3", wantErr: true},
+		{name: "leading_tab", version: "\tv1.2.3", wantErr: true},
+		{name: "double_v", version: "vv1.2.3", wantErr: true},
+		{name: "only_v", version: "v", wantErr: true},
+		{name: "one_part", version: "v1", wantErr: true},
+		{name: "two_parts", version: "v1.2", wantErr: true},
+		{name: "four_parts", version: "v1.2.3.4", wantErr: true},
+		{name: "dots_only", version: "v..", wantErr: true},
+		{name: "empty_major", version: "v.2.3", wantErr: true},
+		{name: "empty_minor", version: "v1..3", wantErr: true},
+		{name: "empty_patch", version: "v1.2.", wantErr: true},
+		{name: "trailing_dot", version: "v1.2.3.", wantErr: true},
+		{name: "leading_dot_after_v", version: "v.1.2.3", wantErr: true},
+		{name: "negative_major", version: "v-1.2.3", wantErr: true},
+		{name: "negative_minor", version: "v1.-2.3", wantErr: true},
+		{name: "negative_patch", version: "v1.2.-3", wantErr: true},
+		{name: "negative_zero", version: "v-0.0.0", wantErr: true},
+		{name: "plus_major", version: "v+1.2.3", wantErr: true},
+		{name: "plus_minor", version: "v1.+2.3", wantErr: true},
+		{name: "plus_patch", version: "v1.2.+3", wantErr: true},
+		{name: "alpha_major", version: "va.2.3", wantErr: true},
+		{name: "alpha_minor", version: "v1.b.3", wantErr: true},
+		{name: "alpha_patch", version: "v1.2.c", wantErr: true},
+		{name: "alphanumeric_suffix", version: "v1.2.3a", wantErr: true},
+		{name: "prerelease_suffix", version: "v1.2.3-rc.1", wantErr: true},
+		{name: "build_metadata", version: "v1.2.3+build", wantErr: true},
+		{name: "hex_prefix", version: "v0x1.2.3", wantErr: true},
+		{name: "underscore", version: "v1_0.2.3", wantErr: true},
+		{name: "space_in_major", version: "v 1.2.3", wantErr: true},
+		{name: "space_in_minor", version: "v1. 2.3", wantErr: true},
+		{name: "trailing_space", version: "v1.2.3 ", wantErr: true},
+		{name: "trailing_newline", version: "v1.2.3\n", wantErr: true},
+		{name: "nul_byte", version: "v1.2.3\x00", wantErr: true},
+		{name: "unicode_digit", version: "v\u0661.2.3", wantErr: true},
+		{name: "len_21", version: "v123456.123456.123456", wantErr: true},
+		{name: "len_21_trailing_zeros", version: "v1.2.3000000000000000", wantErr: true},
+		{name: "multibyte_over_20", version: "v1.2." + strings.Repeat("é", 8), wantErr: true},
+		{name: "huge_input", version: "v" + strings.Repeat("1", 1<<20) + ".2.3", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := staterepo.ValidateStateVersion(tc.version)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("ValidateStateVersion(%q) = nil, want error", tc.version)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ValidateStateVersion(%q) unexpected error: %v", tc.version, err)
+			}
+		})
+	}
+}
