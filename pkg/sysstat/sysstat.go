@@ -59,6 +59,11 @@
 // nothing about them had to be chosen twice.
 package sysstat
 
+import (
+	"fmt"
+	"math"
+)
+
 // Snapshot is one point-in-time reading Read returns.
 //
 // Disk usage is deliberately not among these: /proc has no equivalent to
@@ -155,4 +160,24 @@ func Read() (Snapshot, error) {
 func MemTotalMB() (int, error) {
 	total, _, _, _, err := readMemory()
 	return total, err
+}
+
+// IsOverloaded reports whether CPU and memory usage percentages indicate an
+// overloaded host: true when cpuUsage > 90.0 and memUsage > 80.0, and false
+// otherwise. Both values must be finite percentages in [0, 100].
+func IsOverloaded(cpuUsage, memUsage float64) (bool, error) {
+	if err := validateUsagePercent("cpu", cpuUsage); err != nil {
+		return false, err
+	}
+	if err := validateUsagePercent("mem", memUsage); err != nil {
+		return false, err
+	}
+	return cpuUsage > 90.0 && memUsage > 80.0, nil
+}
+
+func validateUsagePercent(name string, v float64) error {
+	if math.IsNaN(v) || v < 0 || v > 100 {
+		return fmt.Errorf("sysstat: %s usage %v must be between 0 and 100", name, v)
+	}
+	return nil
 }
