@@ -272,44 +272,46 @@ type ReachableReposPayload =
             }
           </div>
 
-          <div class="ops-toolbar-end">
-            @if (addingRepo()) {
-              <input
-                type="text"
-                class="ops-input tabular"
-                placeholder="owner/name"
-                aria-label="Add repository scope"
-                data-testid="context-add-repo-input"
-                [value]="newRepoDraft()"
-                (input)="newRepoDraft.set($any($event.target).value)"
-                (keydown.enter)="commitAddRepo()"
-              />
-              <button
-                type="button"
-                class="btn-primary"
-                data-testid="context-add-repo-confirm"
-                (click)="commitAddRepo()"
-              >
-                Select
-              </button>
-              <button
-                type="button"
-                class="btn-text"
-                (click)="addingRepo.set(false)"
-              >
-                Cancel
-              </button>
-            } @else {
-              <button
-                type="button"
-                class="btn-text"
-                data-testid="context-add-repo-btn"
-                (click)="addingRepo.set(true)"
-              >
-                + Add repository scope
-              </button>
-            }
-          </div>
+          @if (canAddRepoScope()) {
+            <div class="ops-toolbar-end">
+              @if (addingRepo()) {
+                <input
+                  type="text"
+                  class="ops-input tabular"
+                  placeholder="owner/name"
+                  aria-label="Add repository scope"
+                  data-testid="context-add-repo-input"
+                  [value]="newRepoDraft()"
+                  (input)="newRepoDraft.set($any($event.target).value)"
+                  (keydown.enter)="commitAddRepo()"
+                />
+                <button
+                  type="button"
+                  class="btn-primary"
+                  data-testid="context-add-repo-confirm"
+                  (click)="commitAddRepo()"
+                >
+                  Select
+                </button>
+                <button
+                  type="button"
+                  class="btn-text"
+                  (click)="addingRepo.set(false)"
+                >
+                  Cancel
+                </button>
+              } @else {
+                <button
+                  type="button"
+                  class="btn-text"
+                  data-testid="context-add-repo-btn"
+                  (click)="openAddRepo()"
+                >
+                  + Add repository scope
+                </button>
+              }
+            </div>
+          }
         </div>
 
         <div
@@ -465,25 +467,21 @@ type ReachableReposPayload =
               <div class="ctx-pane-head">
                 <div class="ctx-pane-head-row">
                   <strong>Memory Packs</strong>
-                  <button
-                    type="button"
-                    class="btn-primary"
-                    style="min-height: 32px; padding: 0 12px"
-                    data-testid="doc-new-btn"
-                    [disabled]="!canCreateDoc()"
-                    [gTip]="
-                      canCreateDoc()
-                        ? 'Create a new memory document in ' +
-                          scopeLabel(selectedRepo())
-                        : deniedWriteReason(
-                            'PUT /api/memory/documents',
-                            selectedRepo()
-                          )
-                    "
-                    (click)="startNewDocument()"
-                  >
-                    + New pack
-                  </button>
+                  @if (canCreateDoc()) {
+                    <button
+                      type="button"
+                      class="btn-primary"
+                      style="min-height: 32px; padding: 0 12px"
+                      data-testid="doc-new-btn"
+                      [gTip]="
+                        'Create a new memory document in ' +
+                        scopeLabel(selectedRepo())
+                      "
+                      (click)="startNewDocument()"
+                    >
+                      + New pack
+                    </button>
+                  }
                 </div>
                 <form
                   role="search"
@@ -789,33 +787,35 @@ type ReachableReposPayload =
                   </p>
                 </div>
 
-                <div class="headline-actions">
-                  @if (memoryDirty()) {
-                    <span
-                      class="status-pill blast"
-                      data-testid="memory-dirty-pill"
-                    >
-                      <g-status-icon tone="blast" kind="warning" />
-                      Unsaved changes
-                    </span>
-                  }
-                  <div
-                    class="segmented"
-                    role="group"
-                    aria-label="Standing instructions editor mode"
-                  >
-                    @for (m of ["edit", "split", "preview"]; track m) {
-                      <button
-                        type="button"
-                        [attr.aria-pressed]="editorMode() === m"
-                        [attr.data-testid]="'memory-mode-' + m"
-                        (click)="setEditorMode(m)"
+                @if (canWriteMemory()) {
+                  <div class="headline-actions">
+                    @if (memoryDirty()) {
+                      <span
+                        class="status-pill blast"
+                        data-testid="memory-dirty-pill"
                       >
-                        {{ m }}
-                      </button>
+                        <g-status-icon tone="blast" kind="warning" />
+                        Unsaved changes
+                      </span>
                     }
+                    <div
+                      class="segmented"
+                      role="group"
+                      aria-label="Standing instructions editor mode"
+                    >
+                      @for (m of ["edit", "split", "preview"]; track m) {
+                        <button
+                          type="button"
+                          [attr.aria-pressed]="editorMode() === m"
+                          [attr.data-testid]="'memory-mode-' + m"
+                          (click)="setEditorMode(m)"
+                        >
+                          {{ m }}
+                        </button>
+                      }
+                    </div>
                   </div>
-                </div>
+                }
               </div>
 
               @if (isStale(cur.updatedAt)) {
@@ -848,22 +848,22 @@ type ReachableReposPayload =
 
               <div
                 class="ctx-editor-grid"
-                [class.is-split]="editorMode() === 'split'"
+                [class.is-split]="canWriteMemory() && editorMode() === 'split'"
               >
-                @if (editorMode() !== "preview") {
+                @if (canWriteMemory() && editorMode() !== "preview") {
                   <textarea
                     class="ctx-textarea"
                     aria-label="Standing memory markdown"
                     data-testid="memory-textarea"
-                    [readonly]="!canWriteMemory()"
                     placeholder="Write standing patterns, build gotchas, or architectural invariants for runs in this scope…"
                     [value]="memoryDraft()"
                     (input)="onMemoryInput($any($event.target).value)"
                   ></textarea>
                 }
-                @if (editorMode() !== "edit") {
+                @if (!canWriteMemory() || editorMode() !== "edit") {
                   <div
                     class="ctx-md-preview"
+                    tabindex="0"
                     data-testid="memory-preview"
                     [innerHTML]="memoryPreviewHtml()"
                   ></div>
@@ -908,17 +908,22 @@ type ReachableReposPayload =
 
             <!-- Right Pane 2: Memory Documents (Packs) Viewer & Editor -->
             @if (tab() === "documents") {
-              @if (!creatingDoc() && !selectedDocName()) {
+              @if (!(canCreateDoc() && creatingDoc()) && !selectedDocName()) {
                 <div class="empty-state" data-testid="doc-placeholder">
-                  Select a memory document pack on the left to read or edit its
-                  contents, or create a new pack.
+                  @if (canCreateDoc()) {
+                    Select a memory document pack on the left to read or edit
+                    its contents, or create a new pack.
+                  } @else {
+                    Select a memory document pack on the left to inspect its
+                    contents.
+                  }
                 </div>
               } @else {
                 <div class="ops-card-head">
                   <div>
                     <h2 class="ops-card-title" data-testid="doc-editor-title">
                       {{
-                        creatingDoc()
+                        canCreateDoc() && creatingDoc()
                           ? "New Memory Document (" +
                             scopeLabel(selectedRepo()) +
                             ")"
@@ -930,35 +935,38 @@ type ReachableReposPayload =
                       agents fetch full text on demand.
                     </p>
                   </div>
-                  <div class="headline-actions">
-                    @if (docDirty()) {
-                      <span
-                        class="status-pill blast"
-                        data-testid="doc-dirty-pill"
-                      >
-                        <g-status-icon tone="blast" kind="warning" />
-                        Unsaved
-                      </span>
-                    }
-                    <div
-                      class="segmented"
-                      role="group"
-                      aria-label="Document editor mode"
-                    >
-                      @for (m of ["edit", "split", "preview"]; track m) {
-                        <button
-                          type="button"
-                          [attr.aria-pressed]="editorMode() === m"
-                          (click)="setEditorMode(m)"
+                  @if (canWriteDoc()) {
+                    <div class="headline-actions">
+                      @if (docDirty()) {
+                        <span
+                          class="status-pill blast"
+                          data-testid="doc-dirty-pill"
                         >
-                          {{ m }}
-                        </button>
+                          <g-status-icon tone="blast" kind="warning" />
+                          Unsaved
+                        </span>
                       }
+                      <div
+                        class="segmented"
+                        role="group"
+                        aria-label="Document editor mode"
+                      >
+                        @for (m of ["edit", "split", "preview"]; track m) {
+                          <button
+                            type="button"
+                            [attr.aria-pressed]="editorMode() === m"
+                            [attr.data-testid]="'doc-mode-' + m"
+                            (click)="setEditorMode(m)"
+                          >
+                            {{ m }}
+                          </button>
+                        }
+                      </div>
                     </div>
-                  </div>
+                  }
                 </div>
 
-                @if (creatingDoc()) {
+                @if (canCreateDoc() && creatingDoc()) {
                   <label class="ctx-summary-box">
                     <div class="ctx-pane-head-row">
                       <span class="ops-kpi-label">Document name (slug)</span>
@@ -978,7 +986,7 @@ type ReachableReposPayload =
                       aria-describedby="doc-name-hint"
                       data-testid="doc-name-input"
                       [value]="newDocNameDraft()"
-                      (input)="newDocNameDraft.set($any($event.target).value)"
+                      (input)="onNewDocNameInput($any($event.target).value)"
                     />
                     <span
                       id="doc-name-hint"
@@ -999,38 +1007,62 @@ type ReachableReposPayload =
                   </label>
                 }
 
-                <label class="ctx-summary-box">
-                  <div class="ctx-pane-head-row">
-                    <span class="ops-kpi-label"
-                      >Prompt index summary (injected into every run)</span
+                @if (canWriteDoc()) {
+                  <label class="ctx-summary-box">
+                    <div class="ctx-pane-head-row">
+                      <span class="ops-kpi-label"
+                        >Prompt index summary (injected into every run)</span
+                      >
+                      <span
+                        class="ctx-counter tabular"
+                        [class.is-over]="summaryOverLimit()"
+                        data-testid="doc-summary-counter"
+                      >
+                        {{ summaryByteLen() }} / {{ maxSummaryLen }} bytes
+                      </span>
+                    </div>
+                    <input
+                      type="text"
+                      class="ops-input"
+                      aria-label="Document prompt index summary"
+                      data-testid="doc-summary-input"
+                      placeholder="One crisp line explaining when an agent should open this document (max 200 bytes)…"
+                      [value]="docSummaryDraft()"
+                      (input)="onDocSummaryInput($any($event.target).value)"
+                    />
+                    @if (summaryValidationError(); as serr) {
+                      <span
+                        class="ctx-counter is-over"
+                        role="alert"
+                        data-testid="doc-summary-error"
+                        >{{ serr }}</span
+                      >
+                    }
+                  </label>
+                } @else {
+                  <div class="ctx-summary-box">
+                    <div class="ctx-pane-head-row">
+                      <span class="ops-kpi-label"
+                        >Prompt index summary (injected into every run)</span
+                      >
+                      <span
+                        class="ctx-counter tabular"
+                        data-testid="doc-summary-counter"
+                      >
+                        {{ summaryByteLen() }} / {{ maxSummaryLen }} bytes
+                      </span>
+                    </div>
+                    <p
+                      class="ctx-md-preview ctx-readonly-summary"
+                      data-testid="doc-summary-readonly"
                     >
-                    <span
-                      class="ctx-counter tabular"
-                      [class.is-over]="summaryOverLimit()"
-                      data-testid="doc-summary-counter"
-                    >
-                      {{ summaryByteLen() }} / {{ maxSummaryLen }} bytes
-                    </span>
+                      {{
+                        docSummaryDraft().trim() ||
+                          "No prompt index summary configured."
+                      }}
+                    </p>
                   </div>
-                  <input
-                    type="text"
-                    class="ops-input"
-                    aria-label="Document prompt index summary"
-                    data-testid="doc-summary-input"
-                    [readonly]="!canWriteDoc()"
-                    placeholder="One crisp line explaining when an agent should open this document (max 200 bytes)…"
-                    [value]="docSummaryDraft()"
-                    (input)="docSummaryDraft.set($any($event.target).value)"
-                  />
-                  @if (summaryValidationError(); as serr) {
-                    <span
-                      class="ctx-counter is-over"
-                      role="alert"
-                      data-testid="doc-summary-error"
-                      >{{ serr }}</span
-                    >
-                  }
-                </label>
+                }
 
                 <div class="tel-legend tabular">
                   <span
@@ -1045,22 +1077,22 @@ type ReachableReposPayload =
 
                 <div
                   class="ctx-editor-grid"
-                  [class.is-split]="editorMode() === 'split'"
+                  [class.is-split]="canWriteDoc() && editorMode() === 'split'"
                 >
-                  @if (editorMode() !== "preview") {
+                  @if (canWriteDoc() && editorMode() !== "preview") {
                     <textarea
                       class="ctx-textarea"
                       aria-label="Memory document markdown body"
                       data-testid="doc-text-input"
-                      [readonly]="!canWriteDoc()"
                       placeholder="Detailed domain reference, architecture notes, or troubleshooting playbook…"
                       [value]="docTextDraft()"
-                      (input)="docTextDraft.set($any($event.target).value)"
+                      (input)="onDocTextInput($any($event.target).value)"
                     ></textarea>
                   }
-                  @if (editorMode() !== "edit") {
+                  @if (!canWriteDoc() || editorMode() !== "edit") {
                     <div
                       class="ctx-md-preview"
+                      tabindex="0"
                       data-testid="doc-preview"
                       [innerHTML]="docPreviewHtml()"
                     ></div>
@@ -1106,6 +1138,19 @@ type ReachableReposPayload =
                       </button>
                     </div>
                   </div>
+                } @else {
+                  <p
+                    class="ctx-counter"
+                    style="margin: 0"
+                    data-testid="doc-write-denied"
+                  >
+                    {{
+                      deniedWriteReason(
+                        "PUT /api/memory/documents",
+                        selectedDocName() ? selectedDocRepo() : selectedRepo()
+                      )
+                    }}
+                  </p>
                 }
               }
             }
@@ -1169,6 +1214,7 @@ type ReachableReposPayload =
                 @if (fsSelectedFile().endsWith(".md") && fsRenderMd()) {
                   <div
                     class="ctx-md-preview"
+                    tabindex="0"
                     data-testid="fs-md-preview"
                     [innerHTML]="fsMarkdownHtml()"
                   ></div>
@@ -1300,6 +1346,14 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     return this.access.can(route, clean);
   }
 
+  private canWriteRoute(
+    route: "PUT /api/memory" | "PUT /api/memory/documents",
+    repo: string,
+  ): boolean {
+    // Fail closed until /api/config resolves so viewers never see transient write UI.
+    return this.access.configLoaded() && this.canRouteForScope(route, repo);
+  }
+
   protected readonly memoryReadLimits = computed<string[]>(() =>
     this.scopeRepoLimits("GET /api/memory"),
   );
@@ -1326,12 +1380,19 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     this.canRouteForScope("GET /api/memory", this.selectedRepo()),
   );
 
+  protected readonly canAddRepoScope = computed(
+    () =>
+      this.access.configLoaded() &&
+      (this.canGlobalRoute("PUT /api/memory") ||
+        this.canGlobalRoute("PUT /api/memory/documents")),
+  );
+
   protected readonly canWriteMemory = computed(() =>
-    this.canRouteForScope("PUT /api/memory", this.selectedRepo()),
+    this.canWriteRoute("PUT /api/memory", this.selectedRepo()),
   );
 
   protected readonly canCreateDoc = computed(() =>
-    this.canRouteForScope("PUT /api/memory/documents", this.selectedRepo()),
+    this.canWriteRoute("PUT /api/memory/documents", this.selectedRepo()),
   );
 
   protected readonly canWriteDoc = computed(() => {
@@ -1339,7 +1400,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
       this.creatingDoc() || !this.selectedDocName()
         ? this.selectedRepo()
         : this.selectedDocRepo();
-    return this.canRouteForScope("PUT /api/memory/documents", repo);
+    return this.canWriteRoute("PUT /api/memory/documents", repo);
   });
 
   // config:// exposes deployment-wide memory (memory/deployment.md, tables/memory.json),
@@ -1491,6 +1552,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
 
   protected readonly docDirty = computed<boolean>(() => {
     if (this.creatingDoc()) {
+      if (!this.canCreateDoc()) return false;
       return (
         this.newDocNameDraft().trim().length > 0 ||
         this.docSummaryDraft().trim().length > 0 ||
@@ -1517,6 +1579,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
 
   protected readonly canSubmitDocument = computed<boolean>(() => {
     if (!this.canWriteDoc()) return false;
+    if (this.creatingDoc() && !this.canCreateDoc()) return false;
     const name = this.creatingDoc()
       ? this.newDocNameDraft().trim()
       : this.selectedDocName().trim();
@@ -1607,6 +1670,16 @@ export class ContextPageComponent implements OnInit, OnDestroy {
 
   private async bootstrap(): Promise<void> {
     await this.loadBootstrapRepos();
+    if (!this.canAddRepoScope()) {
+      this.addingRepo.set(false);
+      this.newRepoDraft.set("");
+    }
+    if (!this.canCreateDoc() && this.creatingDoc()) {
+      this.creatingDoc.set(false);
+      this.newDocNameDraft.set("");
+      this.docSummaryDraft.set("");
+      this.docTextDraft.set("");
+    }
     this.ensurePermittedRepoSelected();
     await this.refreshAll();
   }
@@ -1818,7 +1891,17 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     }
   }
 
+  protected openAddRepo(): void {
+    if (!this.canAddRepoScope()) return;
+    this.addingRepo.set(true);
+  }
+
   protected commitAddRepo(): void {
+    if (!this.canAddRepoScope()) {
+      this.addingRepo.set(false);
+      this.newRepoDraft.set("");
+      return;
+    }
     const r = this.newRepoDraft().trim();
     this.addingRepo.set(false);
     this.newRepoDraft.set("");
@@ -1838,6 +1921,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
   }
 
   protected onMemoryInput(val: string): void {
+    if (!this.canWriteMemory()) return;
     const k = this.currentScopeRow().key;
     const saved = this.currentScopeRow().text;
     this.memoryDrafts.update((prev) => {
@@ -1852,6 +1936,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
   }
 
   protected revertMemory(): void {
+    if (!this.canWriteMemory()) return;
     const k = this.currentScopeRow().key;
     this.memoryDrafts.update((prev) => {
       const next = { ...prev };
@@ -1862,10 +1947,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
 
   protected saveMemory(): void {
     const repo = this.selectedRepo().trim();
-    if (
-      !this.canRouteForScope("PUT /api/memory", repo) ||
-      this.savingMemory()
-    ) {
+    if (!this.canWriteRoute("PUT /api/memory", repo) || this.savingMemory()) {
       return;
     }
     const text = this.memoryDraft();
@@ -1885,7 +1967,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
 
   private async performSaveMemory(repo: string, text: string): Promise<void> {
     const cleanRepo = repo.trim();
-    if (!this.canRouteForScope("PUT /api/memory", cleanRepo)) {
+    if (!this.canWriteRoute("PUT /api/memory", cleanRepo)) {
       this.snackbar.show(this.deniedWriteReason("PUT /api/memory", cleanRepo));
       return;
     }
@@ -1984,7 +2066,23 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     }
   }
 
+  protected onNewDocNameInput(val: string): void {
+    if (!this.canCreateDoc()) return;
+    this.newDocNameDraft.set(val);
+  }
+
+  protected onDocSummaryInput(val: string): void {
+    if (!this.canWriteDoc()) return;
+    this.docSummaryDraft.set(val);
+  }
+
+  protected onDocTextInput(val: string): void {
+    if (!this.canWriteDoc()) return;
+    this.docTextDraft.set(val);
+  }
+
   protected revertDocument(): void {
+    if (!this.canWriteDoc()) return;
     if (this.creatingDoc()) {
       this.creatingDoc.set(false);
       return;
@@ -1998,7 +2096,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     const repo = (
       this.creatingDoc() ? this.selectedRepo() : this.selectedDocRepo()
     ).trim();
-    if (!this.canRouteForScope("PUT /api/memory/documents", repo)) {
+    if (!this.canWriteRoute("PUT /api/memory/documents", repo)) {
       this.snackbar.show(
         this.deniedWriteReason("PUT /api/memory/documents", repo),
       );
@@ -2036,7 +2134,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
   protected confirmDeleteDocument(): void {
     const name = this.selectedDocName();
     const repo = this.selectedDocRepo().trim();
-    if (!name || !this.canRouteForScope("PUT /api/memory/documents", repo)) {
+    if (!name || !this.canWriteRoute("PUT /api/memory/documents", repo)) {
       return;
     }
     this.confirmReq.set({
@@ -2045,6 +2143,12 @@ export class ContextPageComponent implements OnInit, OnDestroy {
       accept: "Delete document",
       destructive: true,
       run: async () => {
+        if (!this.canWriteRoute("PUT /api/memory/documents", repo)) {
+          this.snackbar.show(
+            this.deniedWriteReason("PUT /api/memory/documents", repo),
+          );
+          return;
+        }
         await this.api.put("PUT /api/memory/documents", undefined, {
           repo,
           name,

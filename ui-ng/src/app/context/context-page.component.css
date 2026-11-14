@@ -110,12 +110,18 @@ g-context-page {
   }
 }
 
-.ctx-list-pane {
-  position: relative;
+.ctx-list-pane,
+.ctx-row,
+.ctx-pane-head,
+.ctx-detail-pane {
   display: flex;
   flex-direction: column;
-  min-height: 0;
   min-width: 0;
+}
+
+.ctx-list-pane {
+  position: relative;
+  min-height: 0;
   overflow-x: hidden;
   border-right: 1px solid var(--md-sys-color-outline-variant);
   background: var(--md-sys-color-surface);
@@ -137,10 +143,7 @@ g-context-page {
 }
 
 .ctx-row {
-  display: flex;
-  flex-direction: column;
   padding: 0;
-  min-width: 0;
   overflow: hidden;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
   background: var(--md-sys-color-surface);
@@ -156,12 +159,11 @@ g-context-page {
 
 .ctx-row-btn {
   width: 100%;
-  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 6px;
   padding: 12px 16px;
-  border: none;
+  border: 0;
   background: transparent;
   color: inherit;
   font: inherit;
@@ -201,10 +203,7 @@ g-context-page {
   padding: 12px 16px;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
   background: var(--md-sys-color-surface-container-low);
-  display: flex;
-  flex-direction: column;
   gap: 8px;
-  min-width: 0;
 }
 
 .ctx-pane-head-row {
@@ -217,40 +216,45 @@ g-context-page {
 }
 
 .ctx-detail-pane {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
   min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 20px 24px;
+  overflow: hidden auto;
+  padding: 20px 24px 32px;
   gap: 16px;
   background: var(--md-sys-color-surface);
 }
 
-@media (max-width: 839.95px) {
-  .ctx-split {
-    grid-template-columns: minmax(0, 1fr);
-    grid-auto-rows: max-content;
-    overflow-y: auto;
-    overflow-x: hidden;
-  }
-  .ctx-list-pane {
-    border-right: none;
-    border-bottom: 1px solid var(--md-sys-color-outline-variant);
-    max-height: 40vh;
-    overflow-y: auto;
-  }
-  .ctx-list {
-    flex: 0 1 auto;
-  }
-  .ctx-list:not(:empty) {
-    min-height: 88px;
-  }
-  .ctx-detail-pane {
-    overflow-y: visible;
-    padding: 16px;
-  }
+.ctx-row-btn,
+.ctx-textarea,
+.ctx-md-preview,
+.ctx-fs-row {
+  box-sizing: border-box;
+}
+
+g-context-page
+  :is(
+    .headline-cluster,
+    .pop-wrap,
+    .pop-trigger,
+    .ops-card-head > div,
+    .ctx-detail-pane > *
+  ) {
+  min-width: 0;
+  max-width: 100%;
+}
+
+g-context-page :is(.headline-cluster, .tel-legend) {
+  display: flex;
+  flex-wrap: wrap;
+}
+
+g-context-page .pop-trigger {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+g-context-page .tel-legend {
+  align-items: center;
+  gap: 8px 14px;
 }
 
 .ctx-editor-grid {
@@ -271,20 +275,29 @@ g-context-page {
   }
 }
 
+.ctx-textarea,
+.ctx-md-preview,
+.ctx-fs-row {
+  color: var(--md-sys-color-on-surface);
+}
+
+.ctx-textarea,
+.ctx-md-preview {
+  background: var(--md-sys-color-surface-container-lowest);
+}
+
 .ctx-textarea {
   width: 100%;
   min-height: 300px;
   padding: 12px 14px;
   border-radius: var(--md-sys-shape-corner-medium);
   border: 1px solid var(--md-sys-color-outline);
-  background: var(--md-sys-color-surface-container-lowest);
-  color: var(--md-sys-color-on-surface);
   font: 13px/20px var(--grain-font-mono);
   resize: vertical;
-  box-sizing: border-box;
 }
 
-.ctx-textarea:focus-visible {
+.ctx-textarea:focus-visible,
+.ctx-md-preview:focus-visible {
   outline: 2px solid var(--md-sys-color-primary);
   outline-offset: 1px;
 }
@@ -293,12 +306,19 @@ g-context-page {
   padding: 14px 16px;
   border-radius: var(--md-sys-shape-corner-medium);
   border: 1px solid var(--md-sys-color-outline-variant);
-  background: var(--md-sys-color-surface-container-lowest);
-  color: var(--md-sys-color-on-surface);
   font-size: 14px;
   line-height: 22px;
-  overflow-y: auto;
+  overflow: auto;
   min-height: 260px;
+}
+
+.ctx-readonly-summary {
+  margin: 0;
+  min-height: 0;
+  padding: 10px 12px;
+  border-radius: var(--md-sys-shape-corner-small);
+  font-size: 13px;
+  line-height: 19px;
 }
 
 .ctx-md-preview h1,
@@ -309,7 +329,24 @@ g-context-page {
   font-family: var(--grain-font-display);
 }
 
-.ctx-md-preview code {
+.ctx-md-preview :is(pre, table, img) {
+  max-width: 100%;
+}
+
+.ctx-md-preview pre {
+  white-space: pre-wrap;
+}
+
+.ctx-md-preview table {
+  table-layout: fixed;
+  width: 100%;
+}
+
+.ctx-md-preview img {
+  height: auto;
+}
+
+.ctx-md-preview :not(pre) > code {
   padding: 1px 5px;
   border-radius: 4px;
   background: var(--md-sys-color-surface-container-high);
@@ -324,7 +361,8 @@ g-context-page {
   min-width: 0;
 }
 
-.ctx-counter {
+.ctx-counter,
+g-context-page .tel-legend {
   font-size: 12px;
   color: var(--md-sys-color-on-surface-variant);
 }
@@ -345,10 +383,9 @@ g-context-page {
 .ctx-fs-row {
   width: 100%;
   padding: 10px 16px;
-  border: none;
+  border: 0;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
   background: transparent;
-  color: var(--md-sys-color-on-surface);
   font: inherit;
   text-align: left;
   display: flex;
@@ -356,6 +393,65 @@ g-context-page {
   justify-content: space-between;
   gap: 8px;
   cursor: pointer;
+}
+
+g-context-page
+  :is(
+    .ops-card-title,
+    .ops-card-sub,
+    .ctx-row-btn strong,
+    .ctx-fs-row > span:first-child,
+    .ctx-md-preview,
+    .ctx-md-preview :not(pre) > code,
+    .ctx-fs-crumbs
+  ) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.ctx-detail-pane * {
+  scroll-margin-bottom: 92px;
+}
+
+@media (max-width: 839.95px), (max-height: 480px) and (orientation: landscape) {
+  g-context-page .view-panel.is-active {
+    overflow: hidden auto;
+  }
+  g-context-page .stage-header {
+    flex: none;
+    padding: 12px 16px 14px;
+  }
+  g-context-page .ops-toolbar-end {
+    margin-left: 0;
+    width: 100%;
+  }
+  .ctx-split {
+    grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: max-content;
+    flex: 1 0 auto;
+    overflow: visible;
+  }
+  .ctx-list-pane {
+    border-right: 0;
+    border-bottom: 1px solid var(--md-sys-color-outline-variant);
+    max-height: 40vh;
+    overflow-y: auto;
+  }
+  .ctx-list {
+    flex: 0 1 auto;
+  }
+  .ctx-list:not(:empty) {
+    min-height: 88px;
+  }
+  .ctx-detail-pane,
+  g-context-page .view-panel > .empty-state {
+    overflow-y: visible;
+    padding: 16px 16px calc(92px + env(safe-area-inset-bottom, 0px));
+  }
+  .ctx-editor-grid,
+  .ctx-editor-grid > * {
+    min-height: 180px;
+  }
 }
 
 .ctx-fs-row:hover {
