@@ -49,6 +49,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -670,4 +671,23 @@ func quoted(paths []string) []string {
 		out[i] = "`" + p + "`"
 	}
 	return out
+}
+
+// FormatPortRange formats a single port or inclusive port range [start, end].
+// Both ports must be between 0 and 65535 inclusive and start must not exceed
+// end. When start equals end it returns the single port; otherwise "start-end".
+func FormatPortRange(start, end int) (string, error) {
+	if start < 0 || end < 0 {
+		return "", fmt.Errorf("portpick: port range %d-%d contains a negative port", start, end)
+	}
+	if start > 65535 || end > 65535 {
+		return "", fmt.Errorf("portpick: port range %d-%d exceeds 65535", start, end)
+	}
+	if start > end {
+		return "", fmt.Errorf("portpick: invalid port range %d-%d: start exceeds end", start, end)
+	}
+	if start == end {
+		return strconv.Itoa(start), nil
+	}
+	return fmt.Sprintf("%d-%d", start, end), nil
 }

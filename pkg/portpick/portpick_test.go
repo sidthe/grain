@@ -16,6 +16,7 @@ package portpick
 
 import (
 	"context"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -281,5 +282,62 @@ func TestPortUsesRemoteCommitterIdentityAndSSHSigningKey(t *testing.T) {
 	rawCommit := f.git(f.remote, "cat-file", "commit", res.Head)
 	if !strings.Contains(rawCommit, "gpgsig -----BEGIN SSH SIGNATURE-----") {
 		t.Errorf("ported commit missing SSH signature header:\n%s", rawCommit)
+	}
+}
+
+func TestFormatPortRange(t *testing.T) {
+	tests := []struct {
+		name    string
+		start   int
+		end     int
+		want    string
+		wantErr bool
+	}{
+		{name: "single zero port", start: 0, end: 0, want: "0"},
+		{name: "single port 1", start: 1, end: 1, want: "1"},
+		{name: "single standard port", start: 80, end: 80, want: "80"},
+		{name: "single max port", start: 65535, end: 65535, want: "65535"},
+		{name: "range from zero", start: 0, end: 1, want: "0-1"},
+		{name: "full valid range", start: 0, end: 65535, want: "0-65535"},
+		{name: "typical range", start: 8000, end: 8080, want: "8000-8080"},
+		{name: "upper boundary range", start: 65534, end: 65535, want: "65534-65535"},
+		{name: "start greater than end", start: 8080, end: 8000, wantErr: true},
+		{name: "start greater than end by one", start: 1, end: 0, wantErr: true},
+		{name: "negative start", start: -1, end: 80, wantErr: true},
+		{name: "negative end", start: 80, end: -1, wantErr: true},
+		{name: "both negative equal", start: -1, end: -1, wantErr: true},
+		{name: "both negative ordered", start: -10, end: -5, wantErr: true},
+		{name: "both negative reversed", start: -5, end: -10, wantErr: true},
+		{name: "end exceeds 65535", start: 100, end: 65536, wantErr: true},
+		{name: "both exceed 65535 equal", start: 65536, end: 65536, wantErr: true},
+		{name: "both exceed 65535 range", start: 65536, end: 70000, wantErr: true},
+		{name: "start exceeds 65535 and end valid", start: 65536, end: 65535, wantErr: true},
+		{name: "min int start", start: math.MinInt, end: 0, wantErr: true},
+		{name: "min int both", start: math.MinInt, end: math.MinInt, wantErr: true},
+		{name: "max int end", start: 0, end: math.MaxInt, wantErr: true},
+		{name: "max int both", start: math.MaxInt, end: math.MaxInt, wantErr: true},
+		{name: "min to max int", start: math.MinInt, end: math.MaxInt, wantErr: true},
+		{name: "max to min int", start: math.MaxInt, end: math.MinInt, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := FormatPortRange(tc.start, tc.end)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("FormatPortRange(%d, %d) = (%q, nil), want error", tc.start, tc.end, got)
+				}
+				if got != "" {
+					t.Errorf("FormatPortRange(%d, %d) returned non-empty string %q alongside error %v", tc.start, tc.end, got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("FormatPortRange(%d, %d) unexpected error: %v", tc.start, tc.end, err)
+			}
+			if got != tc.want {
+				t.Errorf("FormatPortRange(%d, %d) = %q, want %q", tc.start, tc.end, got, tc.want)
+			}
+		})
 	}
 }
