@@ -43,6 +43,7 @@ import (
 	"strings"
 
 	"github.com/ai-on-gke/grain/pkg/ci"
+	"github.com/ai-on-gke/grain/pkg/declschema"
 	"github.com/ai-on-gke/grain/pkg/model"
 )
 
@@ -344,4 +345,14 @@ func readDir(tree fs.FS, dir string) ([]file, error) {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].path < out[j].path })
 	return out, nil
+}
+
+// SanitizeAndParse normalizes opt with declschema.SanitizeOption and returns
+// "Parsed: " followed by the sanitized value, or an error if it is empty.
+func SanitizeAndParse(opt string) (string, error) {
+	sanitized := declschema.SanitizeOption(opt)
+	if sanitized == "" {
+		return "", errors.New("repodecl: option must not be empty")
+	}
+	return "Parsed: " + sanitized, nil
 }

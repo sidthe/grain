@@ -1061,3 +1061,54 @@ func TestDeclaredCapabilitiesRefuseRepoTargetAndRequestFieldShapes(t *testing.T)
 		}
 	}
 }
+
+func TestSanitizeAndParse(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{name: "empty", in: "", wantErr: true},
+		{name: "spaces only", in: "   ", wantErr: true},
+		{name: "ascii whitespace only", in: " \t\n\r\v\f ", wantErr: true},
+		{name: "unicode whitespace only", in: "\u00a0\u2003\u3000", wantErr: true},
+		{name: "huge whitespace only", in: strings.Repeat(" ", 1<<20), wantErr: true},
+		{name: "already sanitized", in: "foo", want: "Parsed: foo"},
+		{name: "uppercase", in: "FOO", want: "Parsed: foo"},
+		{name: "surrounding whitespace and mixed case", in: "  \tFooBar \r\n", want: "Parsed: foobar"},
+		{name: "internal whitespace preserved", in: "  Foo  Bar  ", want: "Parsed: foo  bar"},
+		{name: "unicode whitespace and case", in: "\u00a0ÜBER_Opt\u3000", want: "Parsed: über_opt"},
+		{
+			name: "huge padded input",
+			in:   strings.Repeat(" ", 1<<20) + "OptValue" + strings.Repeat("\n", 1<<20),
+			want: "Parsed: optvalue",
+		},
+		{
+			name: "huge payload",
+			in:   strings.Repeat("X", 1<<20),
+			want: "Parsed: " + strings.Repeat("x", 1<<20),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := repodecl.SanitizeAndParse(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("SanitizeAndParse(%q) = (%q, nil), want error", tc.in, got)
+				}
+				if got != "" {
+					t.Errorf("SanitizeAndParse(%q) returned non-empty string %q alongside error %v", tc.in, got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SanitizeAndParse(%q) unexpected error: %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("SanitizeAndParse(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
