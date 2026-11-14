@@ -16,9 +16,11 @@ import { DOCUMENT } from "@angular/common";
 import {
   ChangeDetectionStrategy,
   Component,
+  Injector,
   OnDestroy,
   OnInit,
   ViewEncapsulation,
+  afterNextRender,
   computed,
   inject,
   input,
@@ -28,14 +30,17 @@ import { ActivatedRoute, Router, RouterLink } from "@angular/router";
 import type { Subscription } from "rxjs";
 import type { RouteKey } from "../api/generated-routes";
 import { GrainApi, splitRepo } from "../api/grain-api.service";
+import type { CapabilityOption } from "../api/models";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
+import { grantName, isApiCapability } from "../sessions/session-helpers";
 import { errText } from "../settings/settings-state.service";
 import {
   ConfirmDialogComponent,
   bypassConfirm,
   type ConfirmRequest,
 } from "../shared/confirm-dialog.component";
+import { GrantsPickerComponent } from "../shared/grants-picker.component";
 import {
   type PillOption,
   PillSelectComponent,
@@ -331,6 +336,297 @@ function normalizeUnfixableChecks(
   return { unfixableChecks, grainCICheckName };
 }
 
+interface CiCapabilitiesData {
+  ciCapabilities: string[];
+  availableCICapabilities: string[];
+}
+
+const KNOWN_CI_CAPABILITY_LABELS: Record<string, string> = {
+  "github-sandbox": "GitHub sandbox",
+  "https://grain.dev/capabilities/github#sandbox-repo={}": "GitHub sandbox",
+  "package-publish": "Package publish",
+  "https://grain.dev/capabilities/release#package-publish={}":
+    "Package publish",
+  "registry-push": "Registry push",
+  "https://grain.dev/capabilities/release#registry-push={}": "Registry push",
+  "image-signing": "Image signing",
+  "https://grain.dev/capabilities/release#image-signing={}": "Image signing",
+  "gcp-key": "GCP key",
+};
+
+function formatCiCapabilityLabel(id: string): string {
+  const known = KNOWN_CI_CAPABILITY_LABELS[id];
+  if (known) return known;
+  if (id.startsWith("https://")) return grantName(id);
+  return id;
+}
+
+function normalizeCiCapabilities(
+  res: Partial<CiCapabilitiesData> | Record<string, unknown> | null | undefined,
+): CiCapabilitiesData {
+  const dedupeList = (raw: unknown): string[] => {
+    if (!Array.isArray(raw)) return [];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const entry of raw) {
+      const id =
+        typeof entry === "string"
+          ? entry.trim()
+          : entry &&
+              typeof entry === "object" &&
+              typeof (entry as { id?: unknown }).id === "string"
+            ? ((entry as { id: string }).id ?? "").trim()
+            : "";
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      out.push(id);
+    }
+    return out;
+  };
+  return {
+    ciCapabilities: dedupeList(res?.["ciCapabilities"]),
+    availableCICapabilities: dedupeList(res?.["availableCICapabilities"]),
+  };
+}
+
+export type AgentFieldKey = "setup" | "prompt" | "caps";
+
+export interface AgentSettingsValidation {
+  valid: boolean;
+  setupCommand: string;
+  promptExtension: string;
+  defaultCapabilities: string[];
+  fieldErrors: Partial<Record<AgentFieldKey, string>>;
+  orderedErrors: { field: AgentFieldKey; label: string; message: string }[];
+}
+
+function hasDisallowedControlChars(
+  value: string,
+  allowLineBreaks = false,
+): boolean {
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (
+      code === 0x7f ||
+      (code < 0x20 &&
+        (!allowLineBreaks || (code !== 0x09 && code !== 0x0a && code !== 0x0d)))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export function parseDefaultCapabilitiesList(raw: string): {
+  capabilities: string[];
+  error: string | null;
+} {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    if (raw.includes(",")) {
+      return {
+        capabilities: [],
+        error:
+          "Default capabilities contains an empty entry between commas — clear the field or remove extra commas.",
+      };
+    }
+    return { capabilities: [], error: null };
+  }
+
+  const segments: string[] = [];
+  let start = 0;
+  let braceDepth = 0;
+  let bracketDepth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      braceDepth++;
+    } else if (ch === "}") {
+      if (braceDepth > 0) braceDepth--;
+    } else if (ch === "[") {
+      bracketDepth++;
+    } else if (ch === "]") {
+      if (bracketDepth > 0) bracketDepth--;
+    } else if (ch === "," && braceDepth === 0 && bracketDepth === 0) {
+      segments.push(raw.slice(start, i));
+      start = i + 1;
+    }
+  }
+  segments.push(raw.slice(start));
+
+  if (inString || braceDepth !== 0 || bracketDepth !== 0) {
+    return {
+      capabilities: [],
+      error: "Default capabilities has unclosed braces, brackets, or quotes.",
+    };
+  }
+
+  const capabilities: string[] = [];
+  for (const seg of segments) {
+    const token = seg.trim();
+    if (!token) {
+      return {
+        capabilities: [],
+        error:
+          "Default capabilities contains an empty entry between commas — remove leading, trailing, or repeated commas.",
+      };
+    }
+    if (hasDisallowedControlChars(token, false)) {
+      return {
+        capabilities: [],
+        error: `Capability "${token}" contains invalid control characters.`,
+      };
+    }
+    const eq = token.indexOf("=");
+    const ref = eq >= 0 ? token.slice(0, eq) : token;
+    if (ref.startsWith("https://") || eq >= 0) {
+      if (/\s/.test(ref) || !ref.includes("#") || ref.endsWith("#")) {
+        return {
+          capabilities: [],
+          error: ref.startsWith("https://")
+            ? `Capability reference "${token}" must have the form https://host/path#method.`
+            : `Capability "${token}" must have the form <capability>#<method>=<json>.`,
+        };
+      }
+      if (eq >= 0) {
+        try {
+          const parsed = JSON.parse(token.slice(eq + 1)) as unknown;
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+            return {
+              capabilities: [],
+              error: `Capability "${token}" JSON arguments must be a JSON object.`,
+            };
+          }
+        } catch {
+          return {
+            capabilities: [],
+            error: `Capability "${token}" has invalid JSON arguments.`,
+          };
+        }
+      }
+    } else if (/\s/.test(token)) {
+      return {
+        capabilities: [],
+        error: `Capability "${token}" cannot contain spaces — separate capabilities with ",".`,
+      };
+    }
+
+    const refPart = ref.toLowerCase();
+    if (
+      refPart === "grain-ci" ||
+      refPart === "grain#ci" ||
+      refPart === "https://grain.dev/capabilities/grain#ci"
+    ) {
+      return {
+        capabilities: [],
+        error: `${token} is managed by the repository's CI mode and cannot be added to default task capabilities.`,
+      };
+    }
+    if (
+      refPart === "package-publish" ||
+      refPart === "registry-push" ||
+      refPart === "image-signing" ||
+      refPart === "release-gate-read" ||
+      refPart === "release#package-publish" ||
+      refPart === "release#registry-push" ||
+      refPart === "release#image-signing" ||
+      refPart === "https://grain.dev/capabilities/release#package-publish" ||
+      refPart === "https://grain.dev/capabilities/release#registry-push" ||
+      refPart === "https://grain.dev/capabilities/release#image-signing" ||
+      refPart.startsWith("repo-read:") ||
+      refPart.startsWith("repo-write:") ||
+      refPart === "repo#read" ||
+      refPart === "https://grain.dev/capabilities/repo#read" ||
+      refPart === "repo#target" ||
+      refPart === "https://grain.dev/capabilities/repo#target"
+    ) {
+      return {
+        capabilities: [],
+        error: `Capability "${token}" cannot be added to repository default task capabilities.`,
+      };
+    }
+    capabilities.push(token);
+  }
+  return { capabilities, error: null };
+}
+
+export function validateAgentSettingsForm(input: {
+  setupCommand: string;
+  promptExtension: string;
+  repoCaps: string;
+  canSetup: boolean;
+  canPrompt: boolean;
+  canCaps: boolean;
+}): AgentSettingsValidation {
+  const fieldErrors: Partial<Record<AgentFieldKey, string>> = {};
+  const orderedErrors: {
+    field: AgentFieldKey;
+    label: string;
+    message: string;
+  }[] = [];
+
+  if (input.canSetup && hasDisallowedControlChars(input.setupCommand, true)) {
+    const msg = "Sandbox setup command cannot contain control characters.";
+    fieldErrors.setup = msg;
+    orderedErrors.push({
+      field: "setup",
+      label: "Sandbox setup command",
+      message: msg,
+    });
+  }
+
+  if (
+    input.canPrompt &&
+    hasDisallowedControlChars(input.promptExtension, true)
+  ) {
+    const msg = "Standing prompt extension cannot contain control characters.";
+    fieldErrors.prompt = msg;
+    orderedErrors.push({
+      field: "prompt",
+      label: "Standing prompt extension",
+      message: msg,
+    });
+  }
+
+  let defaultCapabilities: string[] = [];
+  if (input.canCaps) {
+    const parsed = parseDefaultCapabilitiesList(input.repoCaps);
+    if (parsed.error) {
+      fieldErrors.caps = parsed.error;
+      orderedErrors.push({
+        field: "caps",
+        label: "Default capabilities",
+        message: parsed.error,
+      });
+    } else {
+      defaultCapabilities = parsed.capabilities;
+    }
+  }
+
+  return {
+    valid: orderedErrors.length === 0,
+    setupCommand: input.setupCommand.trim(),
+    promptExtension: input.promptExtension.trim(),
+    defaultCapabilities,
+    fieldErrors,
+    orderedErrors,
+  };
+}
+
 @Component({
   selector: "g-repo-detail-page",
   imports: [
@@ -338,6 +634,7 @@ function normalizeUnfixableChecks(
     PillSelectComponent,
     StatusIconComponent,
     ConfirmDialogComponent,
+    GrantsPickerComponent,
     TipDirective,
   ],
   encapsulation: ViewEncapsulation.None,
@@ -763,6 +1060,134 @@ function normalizeUnfixableChecks(
                     </div>
                   </div>
                 </div>
+
+                <div
+                  class="s-card"
+                  data-testid="card-repo-ci-capabilities"
+                  [attr.aria-busy]="
+                    ciCapsLoading() || ciCapsSaving() ? 'true' : null
+                  "
+                >
+                  <div class="s-card-head">
+                    <div>
+                      <h2 class="s-card-title">CI capabilities</h2>
+                      <p class="s-card-desc">
+                        Granted to every CI job in {{ repoSlug() }}, starting
+                        with the next run. Each job gets its own credentials,
+                        which are revoked when it finishes. Task defaults are
+                        configured separately.
+                      </p>
+                    </div>
+                  </div>
+
+                  @if (
+                    !access.can(
+                      "GET /api/repos/{owner}/{name}/ci-capabilities",
+                      repoSlug()
+                    )
+                  ) {
+                    <div
+                      class="s-banner readonly"
+                      data-testid="repo-ci-caps-denied"
+                    >
+                      {{
+                        access.deniedReason(
+                          "GET /api/repos/{owner}/{name}/ci-capabilities",
+                          repoSlug()
+                        )
+                      }}
+                    </div>
+                  } @else if (ciCapsLoadError() && ciCapsData() === null) {
+                    <div
+                      class="s-banner error"
+                      role="alert"
+                      data-testid="repo-ci-caps-load-error"
+                    >
+                      <span>{{ ciCapsLoadError() }}</span>
+                      <button
+                        type="button"
+                        class="btn-text s-btn-sm"
+                        data-testid="repo-ci-caps-retry"
+                        (click)="loadCiCapabilities()"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  } @else if (ciCapsData() === null) {
+                    <p class="repo-note" data-testid="repo-ci-caps-loading">
+                      Loading CI capabilities…
+                    </p>
+                  } @else {
+                    @if (
+                      !configRepoOnly() &&
+                      !access.can(
+                        "PUT /api/repos/{owner}/{name}/ci-capabilities",
+                        repoSlug()
+                      )
+                    ) {
+                      <div
+                        id="repo-ci-caps-readonly"
+                        class="s-banner readonly"
+                        data-testid="repo-ci-caps-readonly"
+                      >
+                        {{ ciCapsDeniedReason() }}
+                      </div>
+                    }
+
+                    @if (ciCapsError(); as ciErr) {
+                      <div
+                        id="repo-ci-caps-error"
+                        class="s-banner error"
+                        role="alert"
+                        data-testid="repo-ci-caps-error"
+                      >
+                        <span>{{ ciErr }}</span>
+                        <button
+                          type="button"
+                          class="btn-text s-btn-sm"
+                          (click)="ciCapsError.set(null)"
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    }
+
+                    @if (
+                      visibleCiCapOptions().length === 0 &&
+                      ciCapabilities().length === 0
+                    ) {
+                      <p class="repo-note" data-testid="repo-ci-caps-empty">
+                        None offered -- grant access under Grants
+                      </p>
+                    }
+
+                    <g-grants-picker
+                      testid="repo-ci-grants"
+                      toggleAriaLabel="CI capabilities"
+                      [offered]="ciCapOptions()"
+                      [held]="ciCapabilities()"
+                      [repo]="repoSlug()"
+                      runKind="ci"
+                      [describedBy]="ciCapsDescribedBy()"
+                      [gTip]="ciCapsDeniedReason()"
+                      [disabled]="!canWriteCiCaps() || ciCapsSaving()"
+                      (heldChange)="saveCiCapabilities($event)"
+                    />
+
+                    @if (ciCapWarnings().length > 0) {
+                      <div
+                        class="s-banner warn"
+                        data-testid="repo-ci-caps-warnings"
+                      >
+                        <ul class="repo-error-list">
+                          @for (w of ciCapWarnings(); track w) {
+                            <li>{{ w }}</li>
+                          }
+                        </ul>
+                      </div>
+                    }
+                  }
+                </div>
               }
 
               @case ("merge-queue") {
@@ -1042,10 +1467,50 @@ function normalizeUnfixableChecks(
               }
 
               @case ("agents") {
-                <div class="s-card" data-testid="card-repo-agents">
+                <div
+                  class="s-card"
+                  data-testid="card-repo-agents"
+                  [attr.aria-busy]="agentsSaving() ? 'true' : null"
+                >
                   <h2 class="s-card-title">
                     Repository instructions, setup &amp; capability grants
                   </h2>
+                  @if (!configRepoOnly() && !canSaveRepoAgents()) {
+                    <div
+                      id="repo-agents-readonly"
+                      class="s-banner readonly"
+                      data-testid="repo-agents-readonly"
+                    >
+                      {{ saveAgentsDeniedReason() }}
+                    </div>
+                  }
+                  @if (agentsError(); as aErr) {
+                    <div
+                      class="s-banner error"
+                      role="alert"
+                      data-testid="repo-agents-error"
+                    >
+                      <div>
+                        @if (agentsOrderedErrors().length > 1) {
+                          <span>{{ aErr }}</span>
+                          <ul class="repo-error-list">
+                            @for (item of agentsOrderedErrors(); track item) {
+                              <li>{{ item }}</li>
+                            }
+                          </ul>
+                        } @else {
+                          <span>{{ aErr }}</span>
+                        }
+                      </div>
+                      <button
+                        type="button"
+                        class="btn-text s-btn-sm"
+                        (click)="clearAgentsErrors()"
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  }
                   <div class="s-field">
                     <label class="s-label" for="rp-setup"
                       >Sandbox setup command</label
@@ -1057,15 +1522,29 @@ function normalizeUnfixableChecks(
                       data-testid="input-repo-setup-cmd"
                       placeholder="npm ci"
                       [value]="setupCommand()"
+                      [attr.aria-invalid]="
+                        agentsFieldErrors().setup ? 'true' : null
+                      "
+                      [attr.aria-describedby]="agentsSetupDescribedBy()"
                       [disabled]="
+                        agentsSaving() ||
                         configRepoOnly() ||
                         !access.can(
                           'PUT /api/repos/{owner}/{name}/setup-command',
                           repoSlug()
                         )
                       "
-                      (input)="setupCommand.set($any($event.target).value)"
+                      (input)="onAgentSetupInput($any($event.target).value)"
                     />
+                    @if (agentsFieldErrors().setup; as setupErr) {
+                      <span
+                        id="rp-setup-error"
+                        class="s-field-error"
+                        role="alert"
+                        data-testid="error-repo-setup-cmd"
+                        >{{ setupErr }}</span
+                      >
+                    }
                   </div>
                   <div class="s-field">
                     <label class="s-label" for="rp-prompt"
@@ -1077,15 +1556,29 @@ function normalizeUnfixableChecks(
                       rows="4"
                       data-testid="input-repo-prompt-ext"
                       [value]="promptExtension()"
+                      [attr.aria-invalid]="
+                        agentsFieldErrors().prompt ? 'true' : null
+                      "
+                      [attr.aria-describedby]="agentsPromptDescribedBy()"
                       [disabled]="
+                        agentsSaving() ||
                         configRepoOnly() ||
                         !access.can(
                           'PUT /api/repos/{owner}/{name}/prompt-extension',
                           repoSlug()
                         )
                       "
-                      (input)="promptExtension.set($any($event.target).value)"
+                      (input)="onAgentPromptInput($any($event.target).value)"
                     ></textarea>
+                    @if (agentsFieldErrors().prompt; as promptErr) {
+                      <span
+                        id="rp-prompt-error"
+                        class="s-field-error"
+                        role="alert"
+                        data-testid="error-repo-prompt-ext"
+                        >{{ promptErr }}</span
+                      >
+                    }
                   </div>
                   <div class="s-field">
                     <label class="s-label" for="rp-caps"
@@ -1097,26 +1590,45 @@ function normalizeUnfixableChecks(
                       type="text"
                       data-testid="input-repo-caps"
                       [value]="repoCaps()"
+                      [attr.aria-invalid]="
+                        agentsFieldErrors().caps ? 'true' : null
+                      "
+                      [attr.aria-describedby]="agentsCapsDescribedBy()"
                       [disabled]="
+                        agentsSaving() ||
                         configRepoOnly() ||
                         !access.can(
                           'PUT /api/repos/{owner}/{name}/capabilities',
                           repoSlug()
                         )
                       "
-                      (input)="repoCaps.set($any($event.target).value)"
+                      (input)="onAgentCapsInput($any($event.target).value)"
                     />
+                    <span id="rp-caps-helper" class="s-hint">
+                      Comma-separated task default capability IDs or grant refs
+                      (leave empty for none).
+                    </span>
+                    @if (agentsFieldErrors().caps; as capsErr) {
+                      <span
+                        id="rp-caps-error"
+                        class="s-field-error"
+                        role="alert"
+                        data-testid="error-repo-caps"
+                        >{{ capsErr }}</span
+                      >
+                    }
                   </div>
                   <div class="s-inline">
                     <button
                       type="button"
                       class="btn-primary s-btn-sm"
                       data-testid="save-repo-agents-btn"
-                      [disabled]="!canSaveRepoAgents()"
+                      [disabled]="!canSaveRepoAgents() || agentsSaving()"
+                      [attr.aria-describedby]="agentsActionDescribedBy()"
                       [gTip]="saveAgentsDeniedReason()"
                       (click)="saveAgentTabSettings()"
                     >
-                      Save agent settings
+                      {{ agentsSaving() ? "Saving…" : "Save agent settings" }}
                     </button>
                   </div>
                 </div>
@@ -2397,6 +2909,7 @@ function normalizeUnfixableChecks(
 })
 export class RepoDetailPageComponent implements OnInit, OnDestroy {
   private readonly doc = inject(DOCUMENT);
+  private readonly injector = inject(Injector);
   private readonly api = inject(GrainApi);
   protected readonly access = inject(AccessService);
   private readonly snackbar = inject(SnackbarService);
@@ -2445,6 +2958,117 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   protected readonly selectedWorkflowPath = signal(".grain/workflows/ci.yml");
   protected readonly workflowYaml = signal("");
   protected readonly newWorkflowPath = signal("");
+
+  protected readonly configCiCatalog = signal<CapabilityOption[]>([]);
+  protected readonly configTaskCatalog = signal<CapabilityOption[]>([]);
+  protected readonly ciCapsData = signal<CiCapabilitiesData | null>(null);
+  protected readonly ciCapsLoading = signal(false);
+  protected readonly ciCapsSaving = signal(false);
+  protected readonly ciCapsLoadError = signal<string | null>(null);
+  protected readonly ciCapsError = signal<string | null>(null);
+  private ciCapsLoadSeq = 0;
+  private ciCapsMutationSeq = 0;
+
+  protected readonly ciCapabilities = computed(
+    () => this.ciCapsData()?.ciCapabilities ?? [],
+  );
+  protected readonly availableCICapabilities = computed(
+    () => this.ciCapsData()?.availableCICapabilities ?? [],
+  );
+  protected readonly ciCatalog = computed(() =>
+    this.configCiCatalog().length > 0
+      ? this.configCiCatalog()
+      : this.configTaskCatalog(),
+  );
+  protected readonly ciCapOptions = computed<CapabilityOption[]>(() => {
+    const avail = this.availableCICapabilities();
+    const held = this.ciCapabilities();
+    const catalog = this.ciCatalog();
+    const byId = new Map<string, CapabilityOption>(
+      catalog.map((c) => [c.id, c]),
+    );
+    const out: CapabilityOption[] = [];
+    const seen = new Set<string>();
+    for (const id of avail) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const match = byId.get(id);
+      out.push(
+        match ?? {
+          id,
+          name: formatCiCapabilityLabel(id),
+          ready: true,
+        },
+      );
+    }
+    for (const id of held) {
+      if (seen.has(id) || id.startsWith("https://")) continue;
+      seen.add(id);
+      const match = byId.get(id);
+      out.push(
+        match ?? {
+          id,
+          name: id,
+          description: "No longer offered -- untick to remove it",
+          ready: true,
+        },
+      );
+    }
+    return out;
+  });
+  protected readonly visibleCiCapOptions = computed<CapabilityOption[]>(() => {
+    const held = new Set(this.ciCapabilities());
+    return this.ciCapOptions().filter(
+      (c) => (c.ready !== false || held.has(c.id)) && !isApiCapability(c.id),
+    );
+  });
+  protected readonly ciCapWarnings = computed<string[]>(() => {
+    const held = new Set(this.ciCapabilities());
+    if (held.size === 0) return [];
+    const out: string[] = [];
+    for (const opt of this.ciCapOptions()) {
+      if (!held.has(opt.id)) continue;
+      if (opt.ready === false) {
+        const needs = Array.isArray(opt.needs)
+          ? opt.needs
+          : opt.needs
+            ? [opt.needs]
+            : [];
+        const gap = needs.length
+          ? ` — needs ${needs.join(", ")}`
+          : " on this deployment";
+        out.push(
+          `${opt.name || opt.id}: Not ready${gap}. A CI job holding this cannot start until configured in Settings → Capabilities.`,
+        );
+      } else if (
+        opt.description === "No longer offered -- untick to remove it"
+      ) {
+        out.push(
+          `${opt.name || opt.id}: No longer offered — untick to remove.`,
+        );
+      }
+    }
+    return out;
+  });
+  protected readonly canWriteCiCaps = computed(() => {
+    const repo = this.repoSlug();
+    return (
+      !this.configRepoOnly() &&
+      !!repo &&
+      this.access.can("PUT /api/repos/{owner}/{name}/ci-capabilities", repo)
+    );
+  });
+  protected readonly ciCapsDeniedReason = computed(() =>
+    this.configActionDeniedReason(
+      "PUT /api/repos/{owner}/{name}/ci-capabilities",
+    ),
+  );
+  protected readonly ciCapsDescribedBy = computed(() => {
+    if (!this.ciCapsDeniedReason()) return null;
+    return this.configRepoOnly()
+      ? "repo-readonly-banner"
+      : "repo-ci-caps-readonly";
+  });
 
   protected readonly mergeOnGreen = signal(false);
   protected readonly requireUpToDate = signal(false);
@@ -2497,6 +3121,58 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   protected readonly setupCommand = signal("");
   protected readonly promptExtension = signal("");
   protected readonly repoCaps = signal("");
+  protected readonly agentsSaving = signal(false);
+  protected readonly agentsError = signal<string | null>(null);
+  protected readonly agentsOrderedErrors = signal<string[]>([]);
+  protected readonly agentsFieldErrors = signal<
+    Partial<Record<AgentFieldKey, string>>
+  >({});
+
+  protected readonly agentsActionDescribedBy = computed(() => {
+    if (this.configRepoOnly()) return "repo-readonly-banner";
+    if (!this.canSaveRepoAgents()) return "repo-agents-readonly";
+    return null;
+  });
+  protected readonly agentsSetupDescribedBy = computed(() => {
+    const repo = this.repoSlug();
+    const denied =
+      this.configRepoOnly() ||
+      (!!repo &&
+        !this.access.can("PUT /api/repos/{owner}/{name}/setup-command", repo));
+    const ids = [
+      denied ? this.agentsActionDescribedBy() : null,
+      this.agentsFieldErrors().setup ? "rp-setup-error" : null,
+    ].filter(Boolean);
+    return ids.length > 0 ? ids.join(" ") : null;
+  });
+  protected readonly agentsPromptDescribedBy = computed(() => {
+    const repo = this.repoSlug();
+    const denied =
+      this.configRepoOnly() ||
+      (!!repo &&
+        !this.access.can(
+          "PUT /api/repos/{owner}/{name}/prompt-extension",
+          repo,
+        ));
+    const ids = [
+      denied ? this.agentsActionDescribedBy() : null,
+      this.agentsFieldErrors().prompt ? "rp-prompt-error" : null,
+    ].filter(Boolean);
+    return ids.length > 0 ? ids.join(" ") : null;
+  });
+  protected readonly agentsCapsDescribedBy = computed(() => {
+    const repo = this.repoSlug();
+    const denied =
+      this.configRepoOnly() ||
+      (!!repo &&
+        !this.access.can("PUT /api/repos/{owner}/{name}/capabilities", repo));
+    const ids = [
+      denied ? this.agentsActionDescribedBy() : null,
+      this.agentsFieldErrors().caps ? "rp-caps-error" : null,
+      "rp-caps-helper",
+    ].filter(Boolean);
+    return ids.length > 0 ? ids.join(" ") : null;
+  });
 
   protected readonly branches = signal<BranchRow[]>([]);
   protected readonly branchesLoading = signal(false);
@@ -2768,6 +3444,12 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
       const cfg = await this.api.config();
       if (cfg) {
         this.access.setConfig(cfg);
+        this.configCiCatalog.set(
+          Array.isArray(cfg.ciCapabilities) ? cfg.ciCapabilities : [],
+        );
+        this.configTaskCatalog.set(
+          Array.isArray(cfg.capabilities) ? cfg.capabilities : [],
+        );
         const rec = cfg as Record<string, unknown>;
         this.configRepoOnly.set(
           Boolean(
@@ -2800,6 +3482,13 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     this.selectedWorkflowPath.set(".grain/workflows/ci.yml");
     this.workflowYaml.set("");
     this.newWorkflowPath.set("");
+    this.ciCapsLoadSeq++;
+    this.ciCapsMutationSeq++;
+    this.ciCapsData.set(null);
+    this.ciCapsLoading.set(false);
+    this.ciCapsSaving.set(false);
+    this.ciCapsLoadError.set(null);
+    this.ciCapsError.set(null);
     this.mergeOnGreen.set(false);
     this.requireUpToDate.set(false);
     this.bypassHumanGates.set(false);
@@ -2815,6 +3504,10 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     this.setupCommand.set("");
     this.promptExtension.set("");
     this.repoCaps.set("");
+    this.agentsSaving.set(false);
+    this.agentsError.set(null);
+    this.agentsOrderedErrors.set([]);
+    this.agentsFieldErrors.set({});
     this.branchesLoadSeq++;
     this.branches.set([]);
     this.branchesLoading.set(false);
@@ -3044,6 +3737,9 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
           .catch(() => undefined);
       }
     } else if (t === "ci") {
+      if (this.ciCapsData() === null && !this.ciCapsLoading()) {
+        void this.loadCiCapabilities();
+      }
       if (
         this.access.can("GET /api/repos/{owner}/{name}/workflows", targetRepo)
       ) {
@@ -4029,46 +4725,344 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     }
   }
 
+  protected async loadCiCapabilities(): Promise<void> {
+    const targetRepo = this.repoSlug();
+    const p = this.params();
+    if (
+      !targetRepo ||
+      !p.owner ||
+      !p.name ||
+      !this.access.can(
+        "GET /api/repos/{owner}/{name}/ci-capabilities",
+        targetRepo,
+      )
+    ) {
+      return;
+    }
+    const loadSeq = ++this.ciCapsLoadSeq;
+    const mutSeq = this.ciCapsMutationSeq;
+    this.ciCapsLoading.set(true);
+    this.ciCapsLoadError.set(null);
+    try {
+      const res = await this.api.get<Partial<CiCapabilitiesData>>(
+        "GET /api/repos/{owner}/{name}/ci-capabilities",
+        p,
+      );
+      if (
+        this.repoSlug() !== targetRepo ||
+        loadSeq !== this.ciCapsLoadSeq ||
+        mutSeq !== this.ciCapsMutationSeq
+      ) {
+        return;
+      }
+      this.ciCapsData.set(normalizeCiCapabilities(res));
+    } catch (err) {
+      if (
+        this.repoSlug() !== targetRepo ||
+        loadSeq !== this.ciCapsLoadSeq ||
+        mutSeq !== this.ciCapsMutationSeq
+      ) {
+        return;
+      }
+      this.ciCapsLoadError.set(errText(err));
+    } finally {
+      if (this.repoSlug() === targetRepo && loadSeq === this.ciCapsLoadSeq) {
+        this.ciCapsLoading.set(false);
+      }
+    }
+  }
+
+  protected async saveCiCapabilities(nextCaps: string[]): Promise<void> {
+    if (
+      !this.guardMutation(
+        "PUT /api/repos/{owner}/{name}/ci-capabilities",
+        true,
+      ) ||
+      this.ciCapsSaving() ||
+      this.ciCapsData() === null
+    ) {
+      return;
+    }
+    const cleaned: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of nextCaps) {
+      const id = typeof raw === "string" ? raw.trim() : "";
+      if (!id) continue;
+      if (isApiCapability(id)) {
+        this.ciCapsError.set("CI jobs cannot hold agent API grants.");
+        return;
+      }
+      if (!seen.has(id)) {
+        seen.add(id);
+        cleaned.push(id);
+      }
+    }
+    const targetRepo = this.repoSlug();
+    const p = this.params();
+    if (!targetRepo || !p.owner || !p.name) return;
+    const mutSeq = ++this.ciCapsMutationSeq;
+    this.ciCapsSaving.set(true);
+    this.ciCapsError.set(null);
+    try {
+      const res = await this.api.put<Partial<CiCapabilitiesData>>(
+        "PUT /api/repos/{owner}/{name}/ci-capabilities",
+        p,
+        { ciCapabilities: cleaned },
+      );
+      if (this.repoSlug() !== targetRepo || mutSeq !== this.ciCapsMutationSeq) {
+        return;
+      }
+      const prevAvail = this.availableCICapabilities();
+      const hasCaps = res && typeof res === "object" && "ciCapabilities" in res;
+      if (hasCaps) {
+        const normalized = normalizeCiCapabilities(res);
+        this.ciCapsData.set({
+          ciCapabilities: normalized.ciCapabilities,
+          availableCICapabilities: Array.isArray(res.availableCICapabilities)
+            ? normalized.availableCICapabilities
+            : prevAvail,
+        });
+      } else {
+        this.ciCapsData.set({
+          ciCapabilities: cleaned,
+          availableCICapabilities: prevAvail,
+        });
+      }
+      this.snackbar.show("CI capabilities updated");
+    } catch (err) {
+      if (this.repoSlug() !== targetRepo || mutSeq !== this.ciCapsMutationSeq) {
+        return;
+      }
+      this.ciCapsError.set(errText(err));
+    } finally {
+      if (this.repoSlug() === targetRepo && mutSeq === this.ciCapsMutationSeq) {
+        this.ciCapsSaving.set(false);
+      }
+    }
+  }
+
+  protected clearAgentsErrors(): void {
+    this.agentsError.set(null);
+    this.agentsOrderedErrors.set([]);
+    this.agentsFieldErrors.set({});
+  }
+
+  private clearAgentFieldError(field: AgentFieldKey): void {
+    const cur = this.agentsFieldErrors();
+    if (!cur[field]) {
+      if (Object.keys(cur).length === 0 && this.agentsError()) {
+        this.agentsError.set(null);
+        this.agentsOrderedErrors.set([]);
+      }
+      return;
+    }
+    const next = { ...cur };
+    delete next[field];
+    this.agentsFieldErrors.set(next);
+    const remaining: { label: string; msg: string }[] = [];
+    if (next.setup) {
+      remaining.push({ label: "Sandbox setup command", msg: next.setup });
+    }
+    if (next.prompt) {
+      remaining.push({ label: "Standing prompt extension", msg: next.prompt });
+    }
+    if (next.caps) {
+      remaining.push({ label: "Default capabilities", msg: next.caps });
+    }
+    if (remaining.length === 0) {
+      this.agentsError.set(null);
+      this.agentsOrderedErrors.set([]);
+    } else if (remaining.length === 1) {
+      const msg = `${remaining[0].label}: ${remaining[0].msg}`;
+      this.agentsOrderedErrors.set([msg]);
+      this.agentsError.set(msg);
+    } else {
+      const msgs = remaining.map((r) => `${r.label}: ${r.msg}`);
+      this.agentsOrderedErrors.set(msgs);
+      this.agentsError.set(
+        `Fix ${msgs.length} validation errors before saving:`,
+      );
+    }
+  }
+
+  protected onAgentSetupInput(val: string): void {
+    this.setupCommand.set(val);
+    this.clearAgentFieldError("setup");
+  }
+
+  protected onAgentPromptInput(val: string): void {
+    this.promptExtension.set(val);
+    this.clearAgentFieldError("prompt");
+  }
+
+  protected onAgentCapsInput(val: string): void {
+    this.repoCaps.set(val);
+    this.clearAgentFieldError("caps");
+  }
+
+  private focusAgentField(field: AgentFieldKey): void {
+    const id =
+      field === "setup"
+        ? "rp-setup"
+        : field === "prompt"
+          ? "rp-prompt"
+          : "rp-caps";
+    afterNextRender(
+      () => {
+        const el = this.doc.getElementById(id);
+        if (
+          (el instanceof HTMLInputElement ||
+            el instanceof HTMLTextAreaElement) &&
+          !el.disabled
+        ) {
+          el.focus();
+        }
+      },
+      { injector: this.injector },
+    );
+  }
+
   protected async saveAgentTabSettings(): Promise<void> {
+    if (this.agentsSaving()) return;
     if (this.configRepoOnly() || !this.canSaveRepoAgents()) return;
     const repo = this.repoSlug();
     const p = this.params();
     if (!repo || !p.owner || !p.name) return;
-    let savedAny = false;
-    try {
-      if (
-        this.access.can("PUT /api/repos/{owner}/{name}/setup-command", repo)
-      ) {
-        await this.api.put("PUT /api/repos/{owner}/{name}/setup-command", p, {
-          setupCommand: this.setupCommand(),
-        });
-        savedAny = true;
+
+    const canSetup = this.access.can(
+      "PUT /api/repos/{owner}/{name}/setup-command",
+      repo,
+    );
+    const canPrompt = this.access.can(
+      "PUT /api/repos/{owner}/{name}/prompt-extension",
+      repo,
+    );
+    const canCaps = this.access.can(
+      "PUT /api/repos/{owner}/{name}/capabilities",
+      repo,
+    );
+
+    const validation = validateAgentSettingsForm({
+      setupCommand: this.setupCommand(),
+      promptExtension: this.promptExtension(),
+      repoCaps: this.repoCaps(),
+      canSetup,
+      canPrompt,
+      canCaps,
+    });
+
+    if (!validation.valid) {
+      this.agentsFieldErrors.set(validation.fieldErrors);
+      const msgs = validation.orderedErrors.map(
+        (e) => `${e.label}: ${e.message}`,
+      );
+      this.agentsOrderedErrors.set(msgs);
+      this.agentsError.set(
+        msgs.length === 1
+          ? msgs[0]
+          : `Fix ${msgs.length} validation errors before saving:`,
+      );
+      const first = validation.orderedErrors[0];
+      if (first) {
+        this.focusAgentField(first.field);
       }
-      if (
-        this.access.can("PUT /api/repos/{owner}/{name}/prompt-extension", repo)
-      ) {
-        await this.api.put(
-          "PUT /api/repos/{owner}/{name}/prompt-extension",
-          p,
-          { promptExtension: this.promptExtension() },
+      return;
+    }
+
+    this.clearAgentsErrors();
+    this.agentsSaving.set(true);
+    const completed: string[] = [];
+    let focusOnFail: AgentFieldKey | null = null;
+
+    const reportSequentialError = (
+      field: AgentFieldKey,
+      stepLabel: string,
+      err: unknown,
+    ): void => {
+      if (this.repoSlug() !== repo) return;
+      const reason = errText(err);
+      const stepMsg = `${stepLabel} could not be saved: ${reason}`;
+      this.agentsFieldErrors.set({ [field]: stepMsg });
+      if (completed.length > 0) {
+        this.agentsOrderedErrors.set([
+          `Saved ${completed.join(", ")}.`,
+          stepMsg,
+        ]);
+        this.agentsError.set(
+          `Partially saved (${completed.join(", ")}), then stopped at ${stepLabel}:`,
         );
-        savedAny = true;
+      } else {
+        this.agentsOrderedErrors.set([stepMsg]);
+        this.agentsError.set(stepMsg);
       }
-      if (this.access.can("PUT /api/repos/{owner}/{name}/capabilities", repo)) {
-        const defaultCapabilities = this.repoCaps()
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        await this.api.put("PUT /api/repos/{owner}/{name}/capabilities", p, {
-          defaultCapabilities,
-        });
-        savedAny = true;
+      focusOnFail = field;
+    };
+
+    try {
+      if (canSetup) {
+        try {
+          await this.api.put("PUT /api/repos/{owner}/{name}/setup-command", p, {
+            setupCommand: validation.setupCommand,
+          });
+        } catch (err) {
+          reportSequentialError("setup", "Sandbox setup command", err);
+          return;
+        }
+        if (this.repoSlug() !== repo) return;
+        this.setupCommand.set(validation.setupCommand);
+        completed.push("Sandbox setup command");
       }
-      if (savedAny) {
+
+      if (canPrompt) {
+        try {
+          await this.api.put(
+            "PUT /api/repos/{owner}/{name}/prompt-extension",
+            p,
+            { promptExtension: validation.promptExtension },
+          );
+        } catch (err) {
+          reportSequentialError("prompt", "Standing prompt extension", err);
+          return;
+        }
+        if (this.repoSlug() !== repo) return;
+        this.promptExtension.set(validation.promptExtension);
+        completed.push("Standing prompt extension");
+      }
+
+      if (canCaps) {
+        let capsRes: { defaultCapabilities?: string[] } | undefined;
+        try {
+          capsRes = await this.api.put<{ defaultCapabilities?: string[] }>(
+            "PUT /api/repos/{owner}/{name}/capabilities",
+            p,
+            { defaultCapabilities: validation.defaultCapabilities },
+          );
+        } catch (err) {
+          reportSequentialError("caps", "Default capabilities", err);
+          return;
+        }
+        if (this.repoSlug() !== repo) return;
+        const savedCaps = Array.isArray(capsRes?.defaultCapabilities)
+          ? capsRes.defaultCapabilities
+          : validation.defaultCapabilities;
+        this.repoCaps.set(savedCaps.join(", "));
+        completed.push("Default capabilities");
+      }
+
+      if (completed.length > 0) {
         this.snackbar.show("Saved repository agent settings");
+      } else {
+        this.agentsError.set(
+          "No editable agent settings were available to save.",
+        );
       }
-    } catch (err) {
-      this.error.set(errText(err));
+    } finally {
+      if (this.repoSlug() === repo) {
+        this.agentsSaving.set(false);
+        if (focusOnFail) {
+          this.focusAgentField(focusOnFail);
+        }
+      }
     }
   }
 
