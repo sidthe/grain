@@ -36,6 +36,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"unicode"
 
 	releases "github.com/ai-on-gke/grain/docs/releases"
 )
@@ -215,6 +216,28 @@ func Compare(a, b string) int {
 		return -1
 	}
 	return strings.Compare(a, b)
+}
+
+// IsValidRepoName reports whether name is a valid repository name: non-empty,
+// free of whitespace, path traversal (".."), and NUL bytes ("\x00"), and not
+// starting with ".".
+func IsValidRepoName(name string) bool {
+	if name == "" {
+		return false
+	}
+	if strings.ContainsFunc(name, unicode.IsSpace) {
+		return false
+	}
+	if strings.Contains(name, "..") {
+		return false
+	}
+	if strings.Contains(name, "\x00") {
+		return false
+	}
+	if strings.HasPrefix(name, ".") {
+		return false
+	}
+	return true
 }
 
 func normalize(v string) string {
