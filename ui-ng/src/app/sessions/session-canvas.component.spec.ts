@@ -269,4 +269,570 @@ describe("SessionCanvasComponent", () => {
     expect(memWrap?.querySelector(".msg-body table")).not.toBeNull();
     f.destroy();
   });
+
+  it("confirms discarding unsaved Pin to Memory changes on Cancel, doc switch, close, and Escape", async () => {
+    const api = new FakeApi();
+    TestBed.configureTestingModule({
+      imports: [SessionCanvasComponent],
+      providers: [
+        provideRouter([{ path: "**", children: [] }]),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => NEVER } },
+      ],
+    });
+    const access = TestBed.inject(AccessService);
+    access.setConfig({
+      access: {
+        role: "dev",
+        roles: ["dev"],
+        full: false,
+        scopes: ["memory:read", "memory:write"],
+      },
+    });
+
+    const opener = document.createElement("button");
+    opener.textContent = "Open canvas";
+    document.body.appendChild(opener);
+    opener.focus();
+
+    const comments: Comment[] = [
+      {
+        id: 1,
+        author: "grain",
+        authorKind: "automation",
+        body: [
+          "```grain-doc",
+          "# Alpha Spec",
+          "",
+          "First doc body.",
+          "```",
+          "```grain-doc",
+          "# Beta Spec",
+          "",
+          "Second doc body.",
+          "```",
+        ].join("\n"),
+      },
+    ];
+
+    const f = TestBed.createComponent(SessionCanvasComponent);
+    document.body.appendChild(f.nativeElement);
+    let closeCount = 0;
+    const sub = f.componentInstance.closed.subscribe(() => {
+      closeCount += 1;
+    });
+    f.componentRef.setInput("sessionTaskId", "1");
+    f.componentRef.setInput("repo", "acme/web");
+    f.componentRef.setInput("comments", comments);
+    f.autoDetectChanges();
+    await f.whenStable();
+    f.detectChanges();
+
+    const el = f.nativeElement as HTMLElement;
+    const toggleBtn = el.querySelector(
+      '[data-testid="canvas-pin-memory-toggle"]',
+    ) as HTMLButtonElement;
+
+    // Opening and cancelling without edits closes immediately without confirmation.
+    toggleBtn.focus();
+    toggleBtn.click();
+    await f.whenStable();
+    expect(el.querySelector('[data-testid="pin-memory-name"]')).not.toBeNull();
+    toggleBtn.click();
+    await f.whenStable();
+    expect(el.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(el.querySelector('[data-testid="pin-memory-name"]')).toBeNull();
+    expect(document.activeElement).toBe(toggleBtn);
+
+    // Edit Pin form -> Cancel triggers confirm dialog and keeps aside inert.
+    toggleBtn.click();
+    await f.whenStable();
+    const nameInput = el.querySelector(
+      '[data-testid="pin-memory-name"]',
+    ) as HTMLInputElement;
+    nameInput.value = "edited-slug";
+    nameInput.dispatchEvent(new Event("input"));
+    await f.whenStable();
+    expect(el.querySelector('[data-testid="pin-dirty-pill"]')).not.toBeNull();
+
+    toggleBtn.focus();
+    toggleBtn.click();
+    await f.whenStable();
+    const dlg = el.querySelector(
+      '[data-testid="confirm-dialog"]',
+    ) as HTMLElement;
+    expect(dlg).not.toBeNull();
+    expect(dlg.closest("[inert]")).toBeNull();
+    expect(el.querySelector(".session-canvas")?.hasAttribute("inert")).toBe(
+      true,
+    );
+    expect(document.activeElement).toBe(
+      el.querySelector('[data-testid="confirm-cancel"]'),
+    );
+
+    // Tab wraps cleanly inside the confirmation dialog.
+    dlg.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey: true,
+        bubbles: true,
+      }),
+    );
+    expect(document.activeElement).toBe(
+      el.querySelector('[data-testid="confirm-accept"]'),
+    );
+
+    // Cancel keeps edited Pin draft intact.
+    (
+      el.querySelector('[data-testid="confirm-cancel"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    expect(el.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(
+      (el.querySelector('[data-testid="pin-memory-name"]') as HTMLInputElement)
+        .value,
+    ).toBe("edited-slug");
+
+    // Switching to another doc asks confirmation; cancelling stays on Beta, confirming switches to Alpha.
+    const alphaChip = Array.from(
+      el.querySelectorAll<HTMLButtonElement>("[data-doc-id]"),
+    ).find((b) => b.textContent?.includes("Alpha Spec"))!;
+    alphaChip.click();
+    await f.whenStable();
+    expect(el.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
+    (
+      el.querySelector('[data-testid="confirm-cancel"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    expect(
+      (el.querySelector('[data-testid="pin-memory-name"]') as HTMLInputElement)
+        .value,
+    ).toBe("edited-slug");
+
+    alphaChip.click();
+    await f.whenStable();
+    (
+      el.querySelector('[data-testid="confirm-accept"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    expect(el.querySelector('[data-testid="pin-memory-name"]')).toBeNull();
+    expect(el.querySelector(".canvas-card strong")?.textContent).toContain(
+      "Alpha Spec",
+    );
+
+    // Dirty Pin form + Close button asks confirmation; accepting emits closed and returns focus to opener.
+    (
+      el.querySelector(
+        '[data-testid="canvas-pin-memory-toggle"]',
+      ) as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    const summaryInput = el.querySelector(
+      '[data-testid="pin-memory-summary"]',
+    ) as HTMLInputElement;
+    summaryInput.value = "Changed summary";
+    summaryInput.dispatchEvent(new Event("input"));
+    await f.whenStable();
+
+    (
+      el.querySelector('[data-testid="canvas-close"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    expect(el.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
+    expect(closeCount).toBe(0);
+    (
+      el.querySelector('[data-testid="confirm-accept"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    expect(closeCount).toBe(1);
+    expect(document.activeElement).toBe(opener);
+
+    sub.unsubscribe();
+    f.destroy();
+    opener.remove();
+  });
+
+  it("confirms discarding Memory document edits on doc switch, Discard button, Save reset, and Escape", async () => {
+    const api = new FakeApi();
+    api.get = (route: string, params?: unknown) => {
+      if (route === "GET /api/tasks/{id}/tree") {
+        return Promise.resolve({ nodes: [] });
+      }
+      if (route === "GET /api/memory/documents") {
+        return Promise.resolve([
+          {
+            name: "architecture",
+            repo: "acme/web",
+            summary: "Core boundaries",
+            text: "Initial arch body",
+            length: 17,
+          },
+          {
+            name: "runbook",
+            repo: "acme/web",
+            summary: "On-call steps",
+            text: "Initial runbook body",
+            length: 20,
+          },
+        ]);
+      }
+      if (route === "GET /api/memory/documents/{name}") {
+        const name = (params as { name?: string })?.name;
+        return Promise.resolve(
+          name === "runbook"
+            ? {
+                name: "runbook",
+                repo: "acme/web",
+                summary: "On-call steps",
+                text: "Initial runbook body",
+                length: 20,
+              }
+            : {
+                name: "architecture",
+                repo: "acme/web",
+                summary: "Core boundaries",
+                text: "Initial arch body",
+                length: 17,
+              },
+        );
+      }
+      return Promise.resolve({ sessions: [] });
+    };
+
+    TestBed.configureTestingModule({
+      imports: [SessionCanvasComponent],
+      providers: [
+        provideRouter([{ path: "**", children: [] }]),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => NEVER } },
+      ],
+    });
+    const access = TestBed.inject(AccessService);
+    access.setConfig({
+      access: {
+        role: "dev",
+        roles: ["dev"],
+        full: false,
+        scopes: ["memory:read", "memory:write"],
+      },
+    });
+
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+
+    const f = TestBed.createComponent(SessionCanvasComponent);
+    document.body.appendChild(f.nativeElement);
+    let closeCount = 0;
+    const sub = f.componentInstance.closed.subscribe(() => {
+      closeCount += 1;
+    });
+    f.componentRef.setInput("sessionTaskId", "1");
+    f.componentRef.setInput("repo", "acme/web");
+    f.componentRef.setInput("comments", []);
+    f.autoDetectChanges();
+    await f.whenStable();
+
+    const el = f.nativeElement as HTMLElement;
+    (
+      el.querySelector('[data-testid="canvas-tab-memory"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+
+    const chips = Array.from(
+      el.querySelectorAll<HTMLButtonElement>("[data-doc-key]"),
+    );
+    chips[0].click();
+    await f.whenStable();
+
+    const textInput = () =>
+      el.querySelector(
+        '[data-testid="memory-text-input"]',
+      ) as HTMLTextAreaElement;
+    textInput().focus();
+    textInput().value = "Unsaved arch edits";
+    textInput().dispatchEvent(new Event("input"));
+    await f.whenStable();
+    expect(
+      el.querySelector('[data-testid="memory-dirty-pill"]'),
+    ).not.toBeNull();
+    expect(
+      el.querySelector('[data-testid="canvas-memory-discard"]'),
+    ).not.toBeNull();
+
+    // Switching Memory docs while dirty asks confirmation; Cancel keeps edits.
+    chips[1].click();
+    await f.whenStable();
+    expect(
+      el.querySelector('[data-testid="confirm-dialog"]')?.textContent,
+    ).toContain("architecture");
+    (
+      el.querySelector('[data-testid="confirm-cancel"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    expect(textInput().value).toBe("Unsaved arch edits");
+
+    // Discard button reverts edits after confirmation.
+    (
+      el.querySelector(
+        '[data-testid="canvas-memory-discard"]',
+      ) as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    (
+      el.querySelector('[data-testid="confirm-accept"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    expect(textInput().value).toBe("Initial arch body");
+    expect(el.querySelector('[data-testid="memory-dirty-pill"]')).toBeNull();
+
+    // Edit and Save clears dirty state so switching docs requires no confirmation.
+    textInput().value = "Saved arch body";
+    textInput().dispatchEvent(new Event("input"));
+    await f.whenStable();
+    (
+      el.querySelector(
+        '[data-testid="canvas-memory-save"]',
+      ) as HTMLButtonElement
+    ).click();
+    await vi.waitFor(() => {
+      f.detectChanges();
+      expect(
+        api.calls.filter((c) => c.route === "PUT /api/memory/documents"),
+      ).toHaveLength(1);
+      expect(el.querySelector('[data-testid="memory-dirty-pill"]')).toBeNull();
+    });
+    chips[1].click();
+    await f.whenStable();
+    expect(el.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(textInput().value).toBe("Initial runbook body");
+
+    // Edit runbook, switch to Docs tab (preserving dirty draft), press Escape -> confirms;
+    // Escape on confirmation dialog cancels only the dialog and returns focus to textarea.
+    textInput().value = "Dirty runbook body";
+    textInput().dispatchEvent(new Event("input"));
+    await f.whenStable();
+
+    (
+      el.querySelector('[data-testid="canvas-tab-docs"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    (
+      el.querySelector('[data-testid="canvas-tab-memory"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    expect(textInput().value).toBe("Dirty runbook body");
+
+    textInput().focus();
+    textInput().dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await f.whenStable();
+    const dlg = el.querySelector(
+      '[data-testid="confirm-dialog"]',
+    ) as HTMLElement;
+    expect(dlg).not.toBeNull();
+    expect(closeCount).toBe(0);
+
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await f.whenStable();
+    expect(el.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(closeCount).toBe(0);
+    expect(document.activeElement).toBe(textInput());
+    expect(textInput().value).toBe("Dirty runbook body");
+
+    // Pressing Escape again and accepting closes canvas and restores focus to opener.
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await f.whenStable();
+    (
+      el.querySelector('[data-testid="confirm-accept"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    expect(closeCount).toBe(1);
+    expect(document.activeElement).toBe(opener);
+
+    sub.unsubscribe();
+    f.destroy();
+    opener.remove();
+  });
+
+  it("handles Escape focus restoration, external modals, and Workstream launch guard", async () => {
+    const api = new FakeApi();
+    TestBed.configureTestingModule({
+      imports: [SessionCanvasComponent],
+      providers: [
+        provideRouter([{ path: "**", children: [] }]),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => NEVER } },
+      ],
+    });
+    const navSpy = vi
+      .spyOn(TestBed.inject(Router), "navigate")
+      .mockResolvedValue(true);
+    const access = TestBed.inject(AccessService);
+    access.setConfig({
+      access: {
+        role: "dev",
+        roles: ["dev"],
+        full: false,
+        scopes: ["memory:read", "memory:write", "tasks:write"],
+      },
+    });
+
+    const comments: Comment[] = [
+      {
+        id: 1,
+        author: "grain",
+        authorKind: "automation",
+        body: [
+          "```grain-doc",
+          "# Plan Spec",
+          "",
+          "Details",
+          "```",
+          "```grain-plan",
+          JSON.stringify({
+            title: "Guarded Stream",
+            tasks: [{ key: "a", title: "Step A" }],
+          }),
+          "```",
+        ].join("\n"),
+      },
+    ];
+
+    const opener = document.createElement("button");
+    document.body.appendChild(opener);
+    opener.focus();
+
+    const f = TestBed.createComponent(SessionCanvasComponent);
+    document.body.appendChild(f.nativeElement);
+    let closeCount = 0;
+    const sub = f.componentInstance.closed.subscribe(() => {
+      closeCount += 1;
+    });
+    f.componentRef.setInput("sessionTaskId", "1");
+    f.componentRef.setInput("repo", "acme/web");
+    f.componentRef.setInput("comments", comments);
+    f.autoDetectChanges();
+    await f.whenStable();
+
+    const el = f.nativeElement as HTMLElement;
+    const pinBtn = el.querySelector(
+      '[data-testid="canvas-pin-memory-toggle"]',
+    ) as HTMLButtonElement;
+
+    // External modal prevents canvas Escape from firing.
+    const extModal = document.createElement("div");
+    extModal.setAttribute("aria-modal", "true");
+    document.body.appendChild(extModal);
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await f.whenStable();
+    expect(closeCount).toBe(0);
+    extModal.remove();
+
+    // Clean Escape inside open Pin form closes only Pin form and returns focus to pin toggle button.
+    pinBtn.focus();
+    pinBtn.click();
+    await f.whenStable();
+    expect(document.activeElement).toBe(
+      el.querySelector('[data-testid="pin-memory-name"]'),
+    );
+    el.querySelector('[data-testid="pin-memory-name"]')!.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await f.whenStable();
+    expect(el.querySelector('[data-testid="pin-memory-name"]')).toBeNull();
+    expect(closeCount).toBe(0);
+    expect(document.activeElement).toBe(pinBtn);
+
+    // Dirty Pin form guards Workstream launch; cancelling sends zero POST /api/tasks.
+    pinBtn.click();
+    await f.whenStable();
+    const nameInput = el.querySelector(
+      '[data-testid="pin-memory-name"]',
+    ) as HTMLInputElement;
+    nameInput.value = "unsaved-pin";
+    nameInput.dispatchEvent(new Event("input"));
+    await f.whenStable();
+
+    (
+      el.querySelector('[data-testid="canvas-tab-plan"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    (
+      el.querySelector(
+        '[data-testid="canvas-launch-plan"]',
+      ) as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    expect(el.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
+    expect(api.calls.filter((c) => c.route === "POST /api/tasks")).toHaveLength(
+      0,
+    );
+    (
+      el.querySelector('[data-testid="confirm-cancel"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    expect(navSpy).not.toHaveBeenCalled();
+
+    // Confirming Workstream discard launches and navigates.
+    (
+      el.querySelector(
+        '[data-testid="canvas-launch-plan"]',
+      ) as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    (
+      el.querySelector('[data-testid="confirm-accept"]') as HTMLButtonElement
+    ).click();
+    await vi.waitFor(() =>
+      expect(navSpy).toHaveBeenCalledWith(["/workstreams", "task:101"]),
+    );
+
+    // Clean Escape closes canvas and returns focus to opener.
+    opener.focus();
+    (
+      el.querySelector('[data-testid="canvas-tab-docs"]') as HTMLButtonElement
+    ).focus();
+    el.querySelector('[data-testid="canvas-tab-docs"]')!.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Escape",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await f.whenStable();
+    expect(closeCount).toBe(1);
+    expect(document.activeElement).toBe(opener);
+
+    sub.unsubscribe();
+    f.destroy();
+    opener.remove();
+  });
 });

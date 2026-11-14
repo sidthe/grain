@@ -468,3 +468,185 @@ test(
     expect(await axe({ disableRules: ["color-contrast"] })).toEqual([]);
   },
 );
+
+test(
+  "Fleet confirms destructive sandbox, persistent lifecycle, and host token rotate actions",
+  { tag: ["@phone", "@dark"] },
+  async ({ page, axe }) => {
+    const writes = [];
+    await page.route(/\/api\/sandboxes(\?.*)?$/, async (route) => {
+      const res = await route.fetch();
+      const body = await res.json();
+      await route.fulfill({
+        response: res,
+        json: {
+          ...body,
+          sandboxes: [
+            {
+              sandbox: "42-1",
+              name: "42-1",
+              kind: "agent",
+              backend: "granule",
+              ready: true,
+              cpus: 2,
+              memoryMB: 4096,
+            },
+          ],
+        },
+      });
+    });
+    await page.route(/\/api\/persistent-sandboxes(\?.*)?$/, (route) =>
+      route.fulfill({
+        json: [
+          {
+            name: "staging-web",
+            repo: "acme/widgets",
+            ref: "main",
+            command: "npm run preview",
+            state: "running",
+            enabled: true,
+            restarts: 0,
+          },
+        ],
+      }),
+    );
+    await page.route("**/api/tasks/42/sandbox/recreate", (route) => {
+      writes.push(`POST ${new URL(route.request().url()).pathname}`);
+      return route.fulfill({ json: { sandbox: "42-1" } });
+    });
+    await page.route("**/api/persistent-sandboxes/staging-web/*", (route) => {
+      writes.push(`POST ${new URL(route.request().url()).pathname}`);
+      return route.fulfill({ json: { status: "ok" } });
+    });
+    await page.route("**/api/hostds/cloudtop-alice/rotate", (route) => {
+      writes.push(`POST ${new URL(route.request().url()).pathname}`);
+      return route.fulfill({
+        json: {
+          hostd: { name: "cloudtop-alice", state: "connected" },
+          token: "ghd_e2e_rotated_token",
+        },
+      });
+    });
+
+    const viewportWidth = page.viewportSize()?.width ?? 1440;
+    await page.goto("fleet");
+    await expect(page.getByTestId("sandbox-recreate-42")).toBeVisible();
+
+    const dialog = page.getByTestId("confirm-dialog");
+
+    // Task sandbox Recreate confirms, Cancel sends nothing, Accept posts.
+    await page.getByTestId("sandbox-recreate-42").click();
+    await expect(dialog).toContainText("Recreate sandbox for task #42?");
+    const dlgBox = await dialog.boundingBox();
+    expect(dlgBox).not.toBeNull();
+    expect(dlgBox.x).toBeGreaterThanOrEqual(0);
+    expect(dlgBox.x + dlgBox.width).toBeLessThanOrEqual(viewportWidth);
+    await expect(page.getByTestId("confirm-cancel")).toBeFocused();
+    await page.getByTestId("confirm-cancel").click();
+    await expect(dialog).toBeHidden();
+    expect(writes).toEqual([]);
+
+    await page.getByTestId("sandbox-recreate-42").click();
+    await page.getByTestId("confirm-accept").click();
+    await expect(
+      page.getByText("Recreated sandbox for task #42."),
+    ).toBeVisible();
+    expect(writes).toEqual(["POST /api/tasks/42/sandbox/recreate"]);
+
+    // Persistent sandbox Rebuild confirms, Cancel sends nothing, Accept posts.
+    await page.getByTestId("persistent-rebuild-staging-web").click();
+    await expect(dialog).toContainText(
+      "Rebuild persistent sandbox staging-web?",
+    );
+    await page.getByTestId("confirm-cancel").click();
+    await expect(dialog).toBeHidden();
+    expect(writes).toHaveLength(1);
+
+    await page.getByTestId("persistent-rebuild-staging-web").click();
+    await page.getByTestId("confirm-accept").click();
+    await expect(
+      page.getByText("Persistent sandbox staging-web: rebuild requested."),
+    ).toBeVisible();
+    expect(writes).toEqual([
+      "POST /api/tasks/42/sandbox/recreate",
+      "POST /api/persistent-sandboxes/staging-web/rebuild",
+    ]);
+
+    // Host Rotate token confirms, Cancel sends nothing, Accept posts and shows banner.
+    await page.goto("fleet?tab=hostds");
+    await expect(page.getByTestId("hostd-rotate-cloudtop-alice")).toBeVisible();
+    await page.getByTestId("hostd-rotate-cloudtop-alice").click();
+    await expect(dialog).toContainText("Rotate host cloudtop-alice's token?");
+    await page.getByTestId("confirm-cancel").click();
+    await expect(dialog).toBeHidden();
+    await expect(page.getByTestId("hostd-issued-token")).toHaveCount(0);
+    expect(writes).toHaveLength(2);
+
+    await page.getByTestId("hostd-rotate-cloudtop-alice").click();
+    await page.getByTestId("confirm-accept").click();
+    await expect(page.getByTestId("hostd-issued-token")).toContainText(
+      "ghd_e2e_rotated_token",
+    );
+    expect(writes).toEqual([
+      "POST /api/tasks/42/sandbox/recreate",
+      "POST /api/persistent-sandboxes/staging-web/rebuild",
+      "POST /api/hostds/cloudtop-alice/rotate",
+    ]);
+
+    expect(await axe({ disableRules: ["color-contrast"] })).toEqual([]);
+  },
+);
+
+test(
+  "Fleet 390px mobile bottom clearance keeps scrolled content above the floating New task button",
+  { tag: ["@phone", "@dark"] },
+  async ({ page, axe }) => {
+    for (const vp of [
+      { width: 390, height: 844 },
+      { width: 844, height: 390 },
+    ]) {
+      await page.setViewportSize(vp);
+      for (const tab of ["sandboxes", "hostds", "controls", "logs"]) {
+        await page.goto(tab === "sandboxes" ? "fleet" : `fleet?tab=${tab}`);
+        await expect(page.locator(`#fleet-panel-${tab}`)).toBeVisible();
+        await expect(page.getByTestId("phone-new-task")).toBeVisible();
+
+        const geom = await page.evaluate((panelId) => {
+          const scroll = document.querySelector(".ops-scroll");
+          const fabEl = document.querySelector(
+            '[data-testid="phone-new-task"]',
+          );
+          const panel = document.getElementById(panelId);
+          if (!scroll || !fabEl || !panel?.lastElementChild) return null;
+          scroll.scrollTop = scroll.scrollHeight;
+          const fabRect = fabEl.getBoundingClientRect();
+          const lastRect = panel.lastElementChild.getBoundingClientRect();
+          const sideways =
+            document.documentElement.scrollWidth -
+            document.documentElement.clientWidth;
+          return {
+            fabTop: fabRect.top,
+            lastBottom: lastRect.bottom,
+            paddingBottom: parseFloat(getComputedStyle(scroll).paddingBottom),
+            sideways,
+          };
+        }, `fleet-panel-${tab}`);
+
+        expect(geom, `${vp.width}x${vp.height} ${tab}`).not.toBeNull();
+        expect(
+          geom.sideways,
+          `${vp.width}x${vp.height} ${tab}`,
+        ).toBeLessThanOrEqual(0);
+        expect(
+          geom.paddingBottom,
+          `${vp.width}x${vp.height} ${tab}`,
+        ).toBeGreaterThanOrEqual(108);
+        expect(
+          geom.lastBottom,
+          `${vp.width}x${vp.height} ${tab}`,
+        ).toBeLessThanOrEqual(geom.fabTop);
+      }
+    }
+    expect(await axe({ disableRules: ["color-contrast"] })).toEqual([]);
+  },
+);

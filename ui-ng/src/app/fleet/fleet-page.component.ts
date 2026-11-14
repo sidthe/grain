@@ -17,6 +17,8 @@ import {
   ChangeDetectionStrategy,
   Component,
   DestroyRef,
+  NgZone,
+  type OnDestroy,
   type OnInit,
   ViewEncapsulation,
   computed,
@@ -37,6 +39,7 @@ import {
   ConfirmDialogComponent,
   type ConfirmRequest,
 } from "../shared/confirm-dialog.component";
+import { PHONE_QUERY } from "../shared/split";
 import { StatusIconComponent } from "../shared/status-icon.component";
 import { TipDirective } from "../shared/tip.directive";
 import {
@@ -86,6 +89,34 @@ const PERSISTENT_ACTIONS: readonly {
   { action: "rebuild", label: "Rebuild" },
   { action: "stop", label: "Stop" },
 ];
+
+const PERSISTENT_CONFIRM: Record<
+  Exclude<PersistentAction, "start">,
+  {
+    title: (name: string) => string;
+    message: string;
+    accept: string;
+  }
+> = {
+  restart: {
+    title: (name) => `Restart persistent sandbox ${name}?`,
+    message:
+      "Interrupts the running process inside this persistent sandbox and starts it again. Active connections are dropped while it restarts.",
+    accept: "Restart sandbox",
+  },
+  rebuild: {
+    title: (name) => `Rebuild persistent sandbox ${name}?`,
+    message:
+      "Throws away the current sandbox VM and builds a fresh one with a fresh repository clone. Any local state inside it is lost.",
+    accept: "Rebuild sandbox",
+  },
+  stop: {
+    title: (name) => `Stop persistent sandbox ${name}?`,
+    message:
+      "Stops the running staging environment and releases its sandbox until it is started again. Active connections to it are dropped.",
+    accept: "Stop sandbox",
+  },
+};
 
 /** Normalizes a persistent sandbox's reported state with the UI's idle/stopped fallback. */
 export function persistentSandboxState(
@@ -137,10 +168,12 @@ export function isPersistentActionAllowed(
   changeDetection: ChangeDetectionStrategy.OnPush,
   host: {
     "(document:click)": "onDocClick()",
+    "(window:resize)": "onResize()",
   },
   template: `
     <section
       class="view-panel is-active"
+      [class.is-mobile]="isMobile()"
       aria-labelledby="fleet-headline"
       [attr.inert]="confirmReq() ? '' : null"
       data-testid="fleet-page"
@@ -576,7 +609,11 @@ export function isPersistentActionAllowed(
                                   type="button"
                                   class="btn-text"
                                   [attr.data-testid]="'sandbox-recreate-' + tid"
-                                  (click)="recreateTaskSandbox(tid)"
+                                  [gTip]="
+                                    'Destroy and recreate live sandbox for task #' +
+                                    tid
+                                  "
+                                  (click)="confirmRecreateTaskSandbox(tid)"
                                 >
                                   Recreate
                                 </button>
@@ -922,7 +959,8 @@ sandbox={{ pr.sandbox }} pod={{ pr.pod }} exit={{ pr.exitCode }}
                                 type="button"
                                 class="btn-tonal"
                                 [attr.data-testid]="'hostd-rotate-' + h.name"
-                                (click)="rotateHostd(h.name)"
+                                [gTip]="'Rotate token for host ' + h.name"
+                                (click)="confirmRotateHostd(h.name)"
                               >
                                 Rotate token
                               </button>
@@ -1916,7 +1954,7 @@ sandbox={{ pr.sandbox }} pod={{ pr.pod }} exit={{ pr.exitCode }}
     }
   `,
 })
-export class FleetPageComponent implements OnInit {
+export class FleetPageComponent implements OnInit, OnDestroy {
   protected readonly api = inject(GrainApi);
   protected readonly access = inject(AccessService);
   protected readonly feed = inject(TaskFeedStore);
@@ -1926,6 +1964,12 @@ export class FleetPageComponent implements OnInit {
   private readonly router = inject(Router);
   private readonly doc = inject(DOCUMENT);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly zone = inject(NgZone);
+  private mql: MediaQueryList | null = null;
+  private readonly onMqlChange = (ev: MediaQueryListEvent): void => {
+    this.zone.run(() => this.isMobile.set(ev.matches));
+  };
+  protected readonly isMobile = signal(this.queryMobile());
 
   protected readonly Math = Math;
   protected readonly tabs = TABS;
@@ -2298,6 +2342,7 @@ export class FleetPageComponent implements OnInit {
   });
 
   ngOnInit(): void {
+    this.bindMobileQuery();
     // The tab follows ?tab= for as long as the page is open, not just on
     // the first render: each tab is a history entry (pickTab), so Back and
     // Forward move between tabs and have to be able to switch them.
@@ -2318,6 +2363,47 @@ export class FleetPageComponent implements OnInit {
         }
       });
     void this.bootstrap();
+  }
+
+  ngOnDestroy(): void {
+    if (this.mql) {
+      if (typeof this.mql.removeEventListener === "function") {
+        this.mql.removeEventListener("change", this.onMqlChange);
+      } else if (typeof this.mql.removeListener === "function") {
+        this.mql.removeListener(this.onMqlChange);
+      }
+      this.mql = null;
+    }
+  }
+
+  private queryMobile(): boolean {
+    const win = this.doc.defaultView;
+    if (!win) return false;
+    if (typeof win.matchMedia === "function") {
+      return Boolean(win.matchMedia(PHONE_QUERY)?.matches);
+    }
+    return win.innerWidth > 0 && win.innerWidth < 600;
+  }
+
+  private bindMobileQuery(): void {
+    const win = this.doc.defaultView;
+    if (win && typeof win.matchMedia === "function") {
+      this.mql = win.matchMedia(PHONE_QUERY) ?? null;
+      if (this.mql) {
+        this.isMobile.set(Boolean(this.mql.matches));
+        if (typeof this.mql.addEventListener === "function") {
+          this.mql.addEventListener("change", this.onMqlChange);
+        } else if (typeof this.mql.addListener === "function") {
+          this.mql.addListener(this.onMqlChange);
+        }
+        return;
+      }
+    }
+    this.isMobile.set(this.queryMobile());
+  }
+
+  protected onResize(): void {
+    this.isMobile.set(this.queryMobile());
   }
 
   private async bootstrap(): Promise<void> {
@@ -2572,7 +2658,22 @@ export class FleetPageComponent implements OnInit {
     }
   }
 
-  protected async recreateTaskSandbox(taskId: string): Promise<void> {
+  protected confirmRecreateTaskSandbox(taskId: string): void {
+    if (!this.canRecreateTaskSandbox()) return;
+    this.confirmReq.set({
+      title: `Recreate sandbox for task #${taskId}?`,
+      message:
+        "Destroys the live sandbox and builds a fresh one in its place. Any uncommitted work inside the old sandbox is lost.",
+      accept: "Recreate sandbox",
+      destructive: true,
+      run: async () => {
+        if (!this.canRecreateTaskSandbox()) return;
+        await this.executeRecreateTaskSandbox(taskId);
+      },
+    });
+  }
+
+  private async executeRecreateTaskSandbox(taskId: string): Promise<void> {
     if (!this.canRecreateTaskSandbox()) return;
     try {
       await this.api.post("POST /api/tasks/{id}/sandbox/recreate", {
@@ -2604,7 +2705,32 @@ export class FleetPageComponent implements OnInit {
     }
   }
 
-  protected async controlPersistent(
+  protected controlPersistent(
+    ps: PersistentSandboxStatus,
+    action: PersistentAction,
+  ): void {
+    if (!this.canRunPersistentAction(ps, action)) return;
+    if (action === "start") {
+      void this.executeControlPersistent(ps, action);
+      return;
+    }
+    const copy = PERSISTENT_CONFIRM[action];
+    this.confirmReq.set({
+      title: copy.title(ps.name),
+      message: copy.message,
+      accept: copy.accept,
+      destructive: true,
+      run: async () => {
+        const current = this.persistentSandboxes().find(
+          (s) => s.name === ps.name,
+        );
+        if (!current || !this.canRunPersistentAction(current, action)) return;
+        await this.executeControlPersistent(current, action);
+      },
+    });
+  }
+
+  private async executeControlPersistent(
     ps: PersistentSandboxStatus,
     action: PersistentAction,
   ): Promise<void> {
@@ -2666,7 +2792,22 @@ export class FleetPageComponent implements OnInit {
     }
   }
 
-  protected async rotateHostd(name: string): Promise<void> {
+  protected confirmRotateHostd(name: string): void {
+    if (!this.canAdminHostds()) return;
+    this.confirmReq.set({
+      title: `Rotate host ${name}'s token?`,
+      message:
+        "Its current token stops working at once, so the host is disconnected until the new token is installed on it.",
+      accept: "Rotate token",
+      destructive: true,
+      run: async () => {
+        if (!this.canAdminHostds()) return;
+        await this.executeRotateHostd(name);
+      },
+    });
+  }
+
+  private async executeRotateHostd(name: string): Promise<void> {
     if (!this.canAdminHostds()) return;
     try {
       const issued = await this.api.post<IssuedHostdToken>(
@@ -2705,6 +2846,7 @@ export class FleetPageComponent implements OnInit {
   }
 
   protected confirmRevokeHostd(name: string): void {
+    if (!this.canAdminHostds()) return;
     this.confirmReq.set({
       title: `Revoke host ${name}?`,
       message:
@@ -2712,6 +2854,7 @@ export class FleetPageComponent implements OnInit {
       accept: "Revoke host",
       destructive: true,
       run: async () => {
+        if (!this.canAdminHostds()) return;
         await this.api.post("POST /api/hostds/{name}/revoke", { name }, {});
         this.snackbar.show(`Revoked host ${name}.`);
         await this.loadHostds();
@@ -2720,12 +2863,14 @@ export class FleetPageComponent implements OnInit {
   }
 
   protected confirmDeleteHostd(name: string): void {
+    if (!this.canAdminHostds()) return;
     this.confirmReq.set({
       title: `Delete revoked host ${name}?`,
       message: `Removes ${name} from the hostd registry and clears any host-scoped quota pauses.`,
       accept: "Delete host",
       destructive: true,
       run: async () => {
+        if (!this.canAdminHostds()) return;
         await this.api.delete("DELETE /api/hostds/{name}", { name });
         this.snackbar.show(`Deleted host ${name}.`);
         await this.loadHostds();
@@ -3035,6 +3180,7 @@ export class FleetPageComponent implements OnInit {
   }
 
   protected confirmFlushPackageCache(): void {
+    if (!this.canWriteCaches()) return;
     this.confirmReq.set({
       title: "Flush package proxy cache?",
       message:
@@ -3042,6 +3188,7 @@ export class FleetPageComponent implements OnInit {
       accept: "Flush cache",
       destructive: true,
       run: async () => {
+        if (!this.canWriteCaches()) return;
         const res = await this.api.post<{
           entries: number;
           bytes: number;
@@ -3056,6 +3203,7 @@ export class FleetPageComponent implements OnInit {
   }
 
   protected confirmFlushActionsCache(): void {
+    if (!this.canWriteCaches()) return;
     this.confirmReq.set({
       title: "Flush GitHub Actions cache?",
       message:
@@ -3063,6 +3211,7 @@ export class FleetPageComponent implements OnInit {
       accept: "Flush cache",
       destructive: true,
       run: async () => {
+        if (!this.canWriteCaches()) return;
         const res = await this.api.post<{
           entries: number;
           bytes: number;
@@ -3077,6 +3226,7 @@ export class FleetPageComponent implements OnInit {
   }
 
   protected confirmRestartDaemon(): void {
+    if (!this.canRestartDaemon()) return;
     this.confirmReq.set({
       title: "Restart grain daemon?",
       message:
@@ -3084,6 +3234,7 @@ export class FleetPageComponent implements OnInit {
       accept: "Restart daemon",
       destructive: true,
       run: async () => {
+        if (!this.canRestartDaemon()) return;
         this.watchRestarting.set(true);
         try {
           await this.api.post("POST /api/host/restart", undefined, {});

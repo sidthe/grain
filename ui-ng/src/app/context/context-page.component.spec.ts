@@ -13,12 +13,15 @@
 // limitations under the License.
 
 import { HttpHeaders, HttpResponse } from "@angular/common/http";
+import { Component } from "@angular/core";
 import { TestBed, type ComponentFixture } from "@angular/core/testing";
 import { Router, provideRouter } from "@angular/router";
+import { RouterTestingHarness } from "@angular/router/testing";
 import { NEVER } from "rxjs";
 import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import type { GrainConfig } from "../api/models";
+import { routes } from "../app.routes";
 import { AccessService } from "../services/access.service";
 import { ContextPageComponent } from "./context-page.component";
 import {
@@ -1148,5 +1151,409 @@ describe("ContextPageComponent", () => {
       "";
     expect(footerText).toContain("[truncated:");
     expect(footerText).not.toContain("acme/web");
+  });
+
+  it("prompts before switching document packs, starting a new pack, switching scopes, or switching tabs when dirty", async () => {
+    const api = new FakeContextApi();
+    api.documents.push({
+      repo: "",
+      name: "style-guide",
+      summary: "TypeScript and CSS formatting conventions.",
+      length: 64,
+      updatedAt: "2026-11-11T22:00:00Z",
+      updatedBy: "Alice Example",
+      updatedByKind: "human",
+    });
+    api.docBodies[":style-guide"] = "Keep CSS under 8 kB.";
+
+    const { fixture, root } = await setup(api);
+
+    // 1. Dirty Standing Instructions -> scope switch & tab switch prompt; Cancel preserves edits.
+    const memTextarea = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="memory-textarea"]',
+    )!;
+    const origMem = memTextarea.value;
+    memTextarea.value = `${origMem}\n- Unsaved global rule`;
+    memTextarea.dispatchEvent(new Event("input"));
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="memory-dirty-pill"]'),
+    ).not.toBeNull();
+
+    // Clicking the already-selected scope does NOT prompt.
+    root
+      .querySelector<HTMLElement>(
+        '[data-testid="scope-row-deployment"] button',
+      )!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+
+    // Clicking another scope prompts with destructive Cancel-focused dialog outside [inert].
+    root
+      .querySelector<HTMLElement>('[data-testid="scope-row-acme/api"] button')!
+      .click();
+    await settle(fixture);
+    const scopeDlg = root.querySelector('[data-testid="confirm-dialog"]')!;
+    expect(scopeDlg).not.toBeNull();
+    expect(scopeDlg.closest("[inert]")).toBeNull();
+    expect(scopeDlg.textContent).toContain("Discard unsaved changes?");
+    expect(scopeDlg.textContent).toContain("This deployment");
+    expect(document.activeElement).toBe(
+      scopeDlg.querySelector('[data-testid="confirm-cancel"]'),
+    );
+
+    // Cancel keeps original scope and unsaved instructions intact.
+    scopeDlg
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="memory-scope-title"]')?.textContent,
+    ).toContain("This deployment");
+    expect(
+      root.querySelector<HTMLTextAreaElement>(
+        '[data-testid="memory-textarea"]',
+      )!.value,
+    ).toContain("Unsaved global rule");
+
+    // Keyboard ArrowRight on tablist prompts before switching tabs; Escape restores tab & keeps edits.
+    const instTab = root.querySelector<HTMLButtonElement>(
+      '[data-testid="context-tab-instructions"]',
+    )!;
+    instTab.focus();
+    instTab.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+    );
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="memory-textarea"]'),
+    ).not.toBeNull();
+
+    // Accept discard on scope switch -> discards draft and switches to acme/api.
+    root
+      .querySelector<HTMLElement>('[data-testid="scope-row-acme/api"] button')!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="memory-scope-title"]')?.textContent,
+    ).toContain("acme/api");
+    expect(root.querySelector('[data-testid="memory-dirty-pill"]')).toBeNull();
+
+    // Returning to deployment shows original server text (discarded draft did not persist).
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-scope-deployment"]',
+      )!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(
+      root.querySelector<HTMLTextAreaElement>(
+        '[data-testid="memory-textarea"]',
+      )!.value,
+    ).toBe(origMem);
+
+    // 2. Documents tab: switching document, + New pack, scope, and tab while docDirty().
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-tab-documents"]',
+      )!
+      .click();
+    await settle(fixture);
+
+    root
+      .querySelector<HTMLElement>(
+        '[data-testid="doc-row-db-migrations"] button',
+      )!
+      .click();
+    await settle(fixture);
+    const docText = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="doc-text-input"]',
+    )!;
+    docText.value = `${docText.value}\n\nUnsaved migration note.`;
+    docText.dispatchEvent(new Event("input"));
+    await settle(fixture);
+
+    // Clicking the already-open document row is a no-op (no prompt, no data loss).
+    root
+      .querySelector<HTMLElement>(
+        '[data-testid="doc-row-db-migrations"] button',
+      )!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(
+      root.querySelector<HTMLTextAreaElement>('[data-testid="doc-text-input"]')!
+        .value,
+    ).toContain("Unsaved migration note.");
+
+    // Clicking another document prompts and Cancel aborts switching & skips API fetch.
+    const callsBefore = api.calls.length;
+    root
+      .querySelector<HTMLElement>('[data-testid="doc-row-style-guide"] button')!
+      .click();
+    await settle(fixture);
+    const docDlg = root.querySelector('[data-testid="confirm-dialog"]')!;
+    expect(docDlg.textContent).toContain("db-migrations");
+    docDlg
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    await settle(fixture);
+    expect(api.calls.length).toBe(callsBefore);
+    expect(
+      root.querySelector('[data-testid="doc-editor-title"]')?.textContent,
+    ).toContain("db-migrations");
+    expect(
+      root.querySelector<HTMLTextAreaElement>('[data-testid="doc-text-input"]')!
+        .value,
+    ).toContain("Unsaved migration note.");
+
+    // Clicking + New pack while dirty prompts; Cancel keeps edited doc.
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="doc-editor-title"]')?.textContent,
+    ).toContain("db-migrations");
+
+    // Accepting switch loads style-guide cleanly.
+    root
+      .querySelector<HTMLElement>('[data-testid="doc-row-style-guide"] button')!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="doc-editor-title"]')?.textContent,
+    ).toContain("style-guide");
+    expect(root.querySelector('[data-testid="doc-dirty-pill"]')).toBeNull();
+
+    // + New pack when clean opens immediately without prompt; empty new pack switches away without prompt.
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="doc-editor-title"]')?.textContent,
+    ).toContain("New Memory Document");
+
+    // Type into new pack -> switching tab prompts; Cancel keeps new pack draft; Discard switches tab.
+    const newName = root.querySelector<HTMLInputElement>(
+      '[data-testid="doc-name-input"]',
+    )!;
+    newName.value = "new-runbook";
+    newName.dispatchEvent(new Event("input"));
+    await settle(fixture);
+
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-tab-instructions"]',
+      )!
+      .click();
+    await settle(fixture);
+    const tabDlg = root.querySelector('[data-testid="confirm-dialog"]')!;
+    expect(tabDlg.textContent).toContain("new-runbook");
+    tabDlg
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="doc-name-input"]')
+        ?.value,
+    ).toBe("new-runbook");
+
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-tab-instructions"]',
+      )!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="memory-textarea"]'),
+    ).not.toBeNull();
+  });
+
+  it("does not overwrite user edits when slow document detail fetch resolves", async () => {
+    const api = new FakeContextApi();
+    let resolveSlow!: (doc: MemoryDocument) => void;
+    const origGet = api.get;
+    api.get = (
+      route: string,
+      params?: Record<string, string>,
+      query?: string,
+    ) => {
+      if (route === "GET /api/memory/documents/{name}") {
+        api.calls.push({ method: "GET", route, params, query });
+        return new Promise<MemoryDocument>((resolve) => {
+          resolveSlow = resolve;
+        });
+      }
+      return origGet(route, params, query);
+    };
+
+    const { fixture, root } = await setup(api);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-tab-documents"]',
+      )!
+      .click();
+    await settle(fixture);
+
+    root
+      .querySelector<HTMLElement>(
+        '[data-testid="doc-row-db-migrations"] button',
+      )!
+      .click();
+    await settle(fixture);
+
+    const bodyInput = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="doc-text-input"]',
+    )!;
+    bodyInput.value = "User typed before slow GET returned";
+    bodyInput.dispatchEvent(new Event("input"));
+    await settle(fixture);
+
+    resolveSlow({
+      repo: "",
+      name: "db-migrations",
+      summary: "Zero-downtime PostgreSQL migration rules and lock timeouts.",
+      text: "Server body should not clobber active typing",
+      length: 44,
+    });
+    await settle(fixture);
+
+    expect(
+      root.querySelector<HTMLTextAreaElement>('[data-testid="doc-text-input"]')!
+        .value,
+    ).toBe("User typed before slow GET returned");
+  });
+
+  it("intercepts Angular Router deactivation via app.routes canDeactivate guard and guards window beforeunload", async () => {
+    @Component({
+      selector: "g-dummy-inbox",
+      template: `<p data-testid="dummy-inbox">Inbox</p>`,
+    })
+    class DummyInboxComponent {}
+
+    localStorage.clear();
+    const api = new FakeContextApi();
+    const contextRoute = routes.find((r) => r.path === "context")!;
+    TestBed.configureTestingModule({
+      providers: [
+        provideRouter([
+          {
+            path: "context",
+            component: ContextPageComponent,
+            canDeactivate: contextRoute.canDeactivate,
+          },
+          { path: "inbox", component: DummyInboxComponent },
+        ]),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => NEVER } },
+      ],
+    });
+    TestBed.inject(AccessService).setConfig(api.configBody);
+
+    const harness = await RouterTestingHarness.create("/context");
+    const router = TestBed.inject(Router);
+    await settle(harness.fixture);
+
+    const root = harness.routeNativeElement!;
+
+    // Clean beforeunload does NOT preventDefault.
+    const cleanUnload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(cleanUnload);
+    expect(cleanUnload.defaultPrevented).toBe(false);
+
+    // Dirty editor triggers beforeunload preventDefault and blocks Router navigation until confirmed.
+    const textarea = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="memory-textarea"]',
+    )!;
+    textarea.value = "Unsaved route-guard edit";
+    textarea.dispatchEvent(new Event("input"));
+    await settle(harness.fixture);
+
+    const dirtyUnload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(dirtyUnload);
+    expect(dirtyUnload.defaultPrevented).toBe(true);
+
+    // Editing back to original text clears dirty state -> beforeunload and navigation do not prompt.
+    textarea.value = api.memories[0].text;
+    textarea.dispatchEvent(new Event("input"));
+    await settle(harness.fixture);
+    const revertedUnload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(revertedUnload);
+    expect(revertedUnload.defaultPrevented).toBe(false);
+
+    // Re-dirty and attempt route navigation -> Cancel keeps user on /context with edits.
+    textarea.value = "Unsaved route-guard edit";
+    textarea.dispatchEvent(new Event("input"));
+    await settle(harness.fixture);
+
+    const flushPending = async () => {
+      await new Promise((r) => setTimeout(r, 15));
+      harness.detectChanges();
+      await new Promise((r) => setTimeout(r, 15));
+      harness.detectChanges();
+    };
+
+    const navCancelPromise = router.navigateByUrl("/inbox");
+    await flushPending();
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    const cancelledResult = await navCancelPromise;
+    await settle(harness.fixture);
+    expect(cancelledResult).toBe(false);
+    expect(router.url).toBe("/context");
+    expect(
+      root.querySelector<HTMLTextAreaElement>(
+        '[data-testid="memory-textarea"]',
+      )!.value,
+    ).toBe("Unsaved route-guard edit");
+
+    // Superseded navigation resolves the earlier navigation false while keeping dialog open for the latest.
+    const navSupersededPromise = router.navigateByUrl("/inbox");
+    await flushPending();
+    const navAcceptPromise = router.navigateByUrl("/inbox");
+    await flushPending();
+    expect(await navSupersededPromise).toBe(false);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    const acceptedResult = await navAcceptPromise;
+    await settle(harness.fixture);
+    expect(acceptedResult).toBe(true);
+    expect(router.url).toBe("/inbox");
+
+    const afterLeaveUnload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(afterLeaveUnload);
+    expect(afterLeaveUnload.defaultPrevented).toBe(false);
   });
 });

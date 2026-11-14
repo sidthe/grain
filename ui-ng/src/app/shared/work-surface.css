@@ -136,6 +136,14 @@ g-inbox-page .inspector-provenance .ci-chip {
   margin-left: 8px;
 }
 
+g-confirm-dialog .modal-dialog {
+  box-sizing: border-box;
+}
+
+g-confirm-dialog .modal-body {
+  overflow-wrap: anywhere;
+}
+
 g-confirm-dialog .scope-list {
   margin: 0 0 12px;
   padding-left: 20px;
