@@ -542,3 +542,43 @@ func TestTheAPIScopeSetSchemaMatchesTheModelAndTheTable(t *testing.T) {
 		}
 	}
 }
+
+func TestSanitizeOption(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty", in: "", want: ""},
+		{name: "spaces only", in: "   ", want: ""},
+		{name: "ascii whitespace only", in: " \t\n\r\v\f ", want: ""},
+		{name: "unicode whitespace only", in: "\u00a0\u2003\u3000", want: ""},
+		{name: "already sanitized", in: "option-1", want: "option-1"},
+		{name: "uppercase", in: "OPTION", want: "option"},
+		{name: "leading whitespace", in: "  \tValue", want: "value"},
+		{name: "trailing whitespace", in: "Value\n\r ", want: "value"},
+		{name: "surrounding whitespace and mixed case", in: "\t\n  FooBar \r\n", want: "foobar"},
+		{name: "internal whitespace preserved", in: "  Foo  Bar\tBaz  ", want: "foo  bar\tbaz"},
+		{name: "unicode whitespace and case", in: "\u00a0ÜBER_Opt\u3000", want: "über_opt"},
+		{name: "punctuation and digits", in: "  --Key=Val123!  ", want: "--key=val123!"},
+		{name: "huge whitespace only", in: strings.Repeat(" \t\n", 1<<18), want: ""},
+		{
+			name: "huge whitespace padding",
+			in:   strings.Repeat(" ", 1<<20) + "LargeOpt" + strings.Repeat("\t", 1<<20),
+			want: "largeopt",
+		},
+		{
+			name: "huge payload",
+			in:   strings.Repeat("A", 1<<20),
+			want: strings.Repeat("a", 1<<20),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := declschema.SanitizeOption(tc.in); got != tc.want {
+				t.Errorf("SanitizeOption(len=%d) = %q (len=%d), want %q (len=%d)", len(tc.in), got, len(got), tc.want, len(tc.want))
+			}
+		})
+	}
+}
