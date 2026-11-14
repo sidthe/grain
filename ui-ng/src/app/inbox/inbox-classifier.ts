@@ -913,3 +913,19 @@ export function matchesQuery(e: InboxEntry, q: string): boolean {
     .toLowerCase()
     .includes(needle);
 }
+
+/**
+ * Classifies an inbox item title as "Empty", "Urgent", "Question", or "Normal".
+ */
+export function classifyInboxItem(title: string): string {
+  if (title.trim() === "") {
+    return "Empty";
+  }
+  if (title.includes("URGENT") || title.includes("!")) {
+    return "Urgent";
+  }
+  if (title.endsWith("?")) {
+    return "Question";
+  }
+  return "Normal";
+}
