@@ -17,6 +17,7 @@ import type { Attempt, Task, TaskDetail } from "../api/models";
 import {
   type Agent,
   QUIET_MS,
+  checkAgentView,
   cpuLevel,
   cpuNote,
   cpuOf,
@@ -334,5 +335,39 @@ describe("agent-view CPU from run ids and host processes", () => {
       },
     });
     expect(idle.stuck).toBe(true);
+  });
+});
+
+describe("checkAgentView", () => {
+  it("returns Invalid when viewId is empty regardless of isActive", () => {
+    expect(checkAgentView("", true)).toBe("Invalid");
+    expect(checkAgentView("", false)).toBe("Invalid");
+  });
+
+  it("returns Inactive when isActive is false for non-empty viewIds", () => {
+    expect(checkAgentView("user-1", false)).toBe("Inactive");
+    expect(checkAgentView("admin-1", false)).toBe("Inactive");
+    expect(checkAgentView("admin-", false)).toBe("Inactive");
+    expect(checkAgentView(" ", false)).toBe("Inactive");
+  });
+
+  it("returns AdminActive when active and viewId starts with admin-", () => {
+    expect(checkAgentView("admin-1", true)).toBe("AdminActive");
+    expect(checkAgentView("admin-fleet", true)).toBe("AdminActive");
+    expect(checkAgentView("admin-", true)).toBe("AdminActive");
+    expect(checkAgentView(`admin-${"x".repeat(10000)}`, true)).toBe(
+      "AdminActive",
+    );
+  });
+
+  it("returns UserActive when active and viewId does not start with admin-", () => {
+    expect(checkAgentView("user-1", true)).toBe("UserActive");
+    expect(checkAgentView("overview", true)).toBe("UserActive");
+    expect(checkAgentView("admin", true)).toBe("UserActive");
+    expect(checkAgentView("Admin-1", true)).toBe("UserActive");
+    expect(checkAgentView("ADMIN-1", true)).toBe("UserActive");
+    expect(checkAgentView("user-admin-1", true)).toBe("UserActive");
+    expect(checkAgentView(" ", true)).toBe("UserActive");
+    expect(checkAgentView("u".repeat(10000), true)).toBe("UserActive");
   });
 });
