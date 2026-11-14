@@ -255,3 +255,57 @@ func TestBuildMetadataDoesNotOrder(t *testing.T) {
 		t.Errorf("Compare of two dev.114 builds = %d, want 0", got)
 	}
 }
+
+func TestIsValidRepoName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "empty", in: "", want: false},
+		{name: "space_only", in: " ", want: false},
+		{name: "tab_only", in: "\t", want: false},
+		{name: "newline_only", in: "\n", want: false},
+		{name: "space_middle", in: "owner/my repo", want: false},
+		{name: "leading_space", in: " grain", want: false},
+		{name: "trailing_space", in: "grain ", want: false},
+		{name: "tab_middle", in: "owner\trepo", want: false},
+		{name: "cr_middle", in: "owner\rrepo", want: false},
+		{name: "vtab_ff", in: "owner\vrepo\f", want: false},
+		{name: "unicode_nbsp", in: "owner\u00a0repo", want: false},
+		{name: "unicode_em_space", in: "owner\u2003repo", want: false},
+		{name: "unicode_ideographic_space", in: "owner\u3000repo", want: false},
+		{name: "dotdot_only", in: "..", want: false},
+		{name: "dotdot_prefix", in: "../grain", want: false},
+		{name: "dotdot_middle", in: "owner/../grain", want: false},
+		{name: "dotdot_suffix", in: "owner/..", want: false},
+		{name: "dotdot_inline", in: "foo..bar", want: false},
+		{name: "triple_dot", in: "...", want: false},
+		{name: "nul_only", in: "\x00", want: false},
+		{name: "nul_middle", in: "owner\x00grain", want: false},
+		{name: "nul_prefix", in: "\x00grain", want: false},
+		{name: "nul_suffix", in: "grain\x00", want: false},
+		{name: "nul_after_invalid_utf8", in: "\xff\x00", want: false},
+		{name: "single_dot", in: ".", want: false},
+		{name: "leading_dot_hidden", in: ".git", want: false},
+		{name: "leading_dot_path", in: ".hidden/repo", want: false},
+		{name: "leading_dot_char", in: ".a", want: false},
+		{name: "simple_name", in: "grain", want: true},
+		{name: "owner_repo", in: "ai-on-gke/grain", want: true},
+		{name: "single_char", in: "a", want: true},
+		{name: "embedded_dot", in: "owner/repo.git", want: true},
+		{name: "multiple_single_dots", in: "my_repo-1.2.3", want: true},
+		{name: "two_chars_with_dot", in: "a.b", want: true},
+		{name: "trailing_single_dot", in: "repo.", want: true},
+		{name: "huge_valid", in: strings.Repeat("a", 1<<20), want: true},
+		{name: "huge_trailing_space", in: strings.Repeat("a", 1<<20) + " ", want: false},
+		{name: "huge_trailing_dotdot", in: strings.Repeat("a", 1<<20) + "..", want: false},
+		{name: "huge_trailing_nul", in: strings.Repeat("a", 1<<20) + "\x00", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsValidRepoName(tc.in); got != tc.want {
+				t.Errorf("IsValidRepoName(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
