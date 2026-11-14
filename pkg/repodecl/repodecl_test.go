@@ -1061,3 +1061,41 @@ func TestDeclaredCapabilitiesRefuseRepoTargetAndRequestFieldShapes(t *testing.T)
 		}
 	}
 }
+
+func TestSanitizeAndParse(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{name: "trim and lowercase", in: "  Foo  ", want: "Parsed: foo"},
+		{name: "tabs and newlines", in: "\tBar-Baz\n", want: "Parsed: bar-baz"},
+		{name: "already clean", in: "already-clean", want: "Parsed: already-clean"},
+		{name: "internal spaces preserved", in: "  Two Words  ", want: "Parsed: two words"},
+		{name: "empty", in: "", wantErr: true},
+		{name: "spaces only", in: "   ", wantErr: true},
+		{name: "whitespace only", in: "\t\n\r \u00a0", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := repodecl.SanitizeAndParse(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("SanitizeAndParse(%q) = (%q, nil), want non-nil error", tc.in, got)
+				}
+				if got != "" {
+					t.Errorf("SanitizeAndParse(%q) string = %q on error, want empty string", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("SanitizeAndParse(%q) unexpected error: %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("SanitizeAndParse(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}

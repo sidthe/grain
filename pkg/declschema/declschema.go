@@ -1319,3 +1319,9 @@ func APIScopeSetSchema() Schema {
 		},
 	}
 }
+
+// SanitizeOption trims leading and trailing whitespace from opt and lowercases
+// the result.
+func SanitizeOption(opt string) string {
+	return strings.ToLower(strings.TrimSpace(opt))
+}
