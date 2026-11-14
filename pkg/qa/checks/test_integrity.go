@@ -490,8 +490,10 @@ func checkNewJSTestsHaveAssertions(filePath string, df DiffFile, headText string
 }
 
 func scanBalancedBraceBlock(lines []string, startIdx int) int {
-	depth := 0
-	opened := false
+	braceDepth := 0
+	parenDepth := 0
+	openedParen := false
+	openedBrace := false
 	inBlockComment := false
 	inTemplateLit := false
 	for i := startIdx; i < len(lines); i++ {
@@ -545,12 +547,20 @@ func scanBalancedBraceBlock(lines []string, startIdx int) int {
 				continue
 			}
 			switch ch {
+			case '(':
+				parenDepth++
+				openedParen = true
+			case ')':
+				parenDepth--
+				if openedParen && parenDepth <= 0 && braceDepth <= 0 {
+					return i
+				}
 			case '{':
-				depth++
-				opened = true
+				braceDepth++
+				openedBrace = true
 			case '}':
-				depth--
-				if opened && depth <= 0 {
+				braceDepth--
+				if !openedParen && openedBrace && braceDepth <= 0 {
 					return i
 				}
 			}

@@ -641,3 +641,45 @@ func TestRunnerRespectsDisabledNonFloorCheck(t *testing.T) {
 		}
 	}
 }
+
+func TestTestIntegrityGuardPlaywrightDestructuredAndTaggedFixtures(t *testing.T) {
+	specCode := `import { test, expect } from "@playwright/test";
+
+test("destructured fixture passes with expect in body", async ({ page, request }) => {
+  await page.goto("/next/context");
+  await expect(page.locator("h1")).toBeVisible();
+  expect(request).toBeTruthy();
+});
+
+test("tagged fixture passes with expect in body", { tag: "@smoke" }, async ({ page }: { page: unknown }) => {
+  await expect(page as never).toBeDefined();
+});
+
+test("destructured fixture with zero assertions still fails", async ({ page }) => {
+  await page.goto("/next/context");
+});
+`
+	var diffLines []string
+	diffLines = append(diffLines,
+		"diff --git a/ui-ng/e2e/context.spec.ts b/ui-ng/e2e/context.spec.ts",
+		"new file mode 100644",
+		"--- /dev/null",
+		"+++ b/ui-ng/e2e/context.spec.ts",
+		"@@ -0,0 +1,15 @@",
+	)
+	for _, ln := range strings.Split(strings.TrimSuffix(specCode, "\n"), "\n") {
+		diffLines = append(diffLines, "+"+ln)
+	}
+	diff := strings.Join(diffLines, "\n") + "\n"
+	ws := &InMemoryWorkspace{
+		Diff:      diff,
+		HeadFiles: map[string]string{"ui-ng/e2e/context.spec.ts": specCode},
+	}
+	findings, err := CheckTestIntegrity(context.Background(), ws, ParseUnifiedDiff(diff))
+	if err != nil {
+		t.Fatalf("CheckTestIntegrity: %v", err)
+	}
+	if len(findings) != 1 || !strings.Contains(findings[0].Summary, "zero assertions") {
+		t.Fatalf("expected exactly 1 finding on the assertion-free Playwright test, got %d: %+v", len(findings), findings)
+	}
+}

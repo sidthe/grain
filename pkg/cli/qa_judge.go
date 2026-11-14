@@ -145,7 +145,7 @@ func runBlindJudgeBatch(
 	}
 	var tasks []ui.Task
 	var rawTasks json.RawMessage
-	if err := c.DoJSON(ctx, http.MethodGet, "/api/tasks?fields=full&limit=200", nil, &rawTasks); err != nil {
+	if err := c.DoJSON(ctx, http.MethodGet, "/api/tasks?fields=full&limit=0", nil, &rawTasks); err != nil {
 		return err
 	}
 	if json.Unmarshal(rawTasks, &tasks) != nil {
@@ -173,6 +173,9 @@ func runBlindJudgeBatch(
 			ArmID        string `json:"armId"`
 		}
 		if err := c.DoJSON(ctx, http.MethodGet, "/api/tasks/"+url.PathEscape(t.ID)+"/qa", nil, &taskQA); err != nil {
+			continue
+		}
+		if strings.TrimSpace(taskQA.ExperimentID) != expID {
 			continue
 		}
 		arm := strings.TrimSpace(taskQA.ArmID)
