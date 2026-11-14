@@ -382,3 +382,17 @@ export function parseArgv(cmd: string): string[] {
   }
   return out;
 }
+
+/**
+ * Validates a fleet model configuration: requires a non-spaced model name of
+ * at least 3 characters and a finite node count in (0, 1000].
+ */
+export function validateFleetModel(modelName: string, nodes: number): boolean {
+  if (typeof modelName !== "string" || typeof nodes !== "number") {
+    return false;
+  }
+  if (!Number.isFinite(nodes) || nodes <= 0 || nodes > 1000) {
+    return false;
+  }
+  return modelName.length >= 3 && !modelName.includes(" ");
+}
