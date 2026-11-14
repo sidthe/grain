@@ -332,12 +332,17 @@ export class ProcessesStore {
   }
 
   canLaunchTemplate(t: Template, repo?: string): boolean {
-    const targetRepo = t.declaredIn?.repo || t.repo || repo || "";
+    const targetRepo = (t.declaredIn?.repo || t.repo || repo || "").trim();
     if (t.declaredIn?.repo) {
       return (
         this.access.can("POST /api/tasks/from-template", t.declaredIn.repo) ||
         this.access.can("POST /api/tasks", t.declaredIn.repo)
       );
+    }
+    if (t.system) {
+      return targetRepo
+        ? this.access.can("POST /api/tasks", targetRepo)
+        : this.access.canGlobalScope("tasks:write");
     }
     return this.access.can("POST /api/tasks", targetRepo || undefined);
   }
