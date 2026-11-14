@@ -13,12 +13,14 @@
 // limitations under the License.
 
 import { HttpHeaders, HttpResponse } from "@angular/common/http";
+import { Component } from "@angular/core";
 import { TestBed, type ComponentFixture } from "@angular/core/testing";
-import { provideRouter } from "@angular/router";
+import { Router, RouterOutlet, provideRouter } from "@angular/router";
 import { NEVER } from "rxjs";
 import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import type { GrainConfig } from "../api/models";
+import { routes } from "../app.routes";
 import { AccessService } from "../services/access.service";
 import { ContextPageComponent } from "./context-page.component";
 import {
@@ -1137,5 +1139,351 @@ describe("ContextPageComponent", () => {
     expect(
       root.querySelector('[data-testid="fs-grep-truncated"]')?.textContent,
     ).toContain("repos/acme/api: [truncated at match limit");
+  });
+
+  it("prompts before switching documents, starting a new pack, switching tabs, or switching scopes when dirty", async () => {
+    const api = new FakeContextApi();
+    api.documents.push({
+      repo: "",
+      name: "style-guide",
+      summary: "Angular and CSS conventions.",
+      length: 64,
+      updatedAt: "2026-11-12T10:00:00Z",
+      updatedBy: "Alice",
+      updatedByKind: "human",
+    });
+    api.docBodies[":style-guide"] = "## Style\n\nKeep styles under 8 kB.";
+    const { fixture, root } = await setup(api);
+
+    // 1. Dirty Standing Instructions intercepts tab switch (click & keyboard) and scope switch.
+    const memBox = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="memory-textarea"]',
+    )!;
+    memBox.value = "# Edited unsaved instructions";
+    memBox.dispatchEvent(new Event("input"));
+    await settle(fixture);
+
+    // Clicking another scope prompts; Cancel preserves edits and scope.
+    root
+      .querySelector<HTMLElement>('[data-testid="scope-row-acme/api"] button')!
+      .click();
+    await settle(fixture);
+    const scopeDialog = root.querySelector('[data-testid="confirm-dialog"]')!;
+    expect(scopeDialog).not.toBeNull();
+    expect(scopeDialog.textContent).toContain(
+      "You have unsaved changes here. Leave and discard them?",
+    );
+    expect(scopeDialog.closest("[inert]")).toBeNull();
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="memory-scope-title"]')?.textContent,
+    ).toContain("This deployment");
+    expect(
+      root.querySelector<HTMLTextAreaElement>('[data-testid="memory-textarea"]')
+        ?.value,
+    ).toBe("# Edited unsaved instructions");
+
+    // Keyboard tab switch (ArrowRight) while dirty prompts; Cancel keeps active tab.
+    const instTab = root.querySelector<HTMLButtonElement>(
+      '[data-testid="context-tab-instructions"]',
+    )!;
+    instTab.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+    );
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    await settle(fixture);
+    expect(instTab.getAttribute("aria-selected")).toBe("true");
+    expect(
+      root.querySelector<HTMLTextAreaElement>('[data-testid="memory-textarea"]')
+        ?.value,
+    ).toBe("# Edited unsaved instructions");
+
+    // Confirming discard switches to Documents tab and clears dirty standing instructions.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-tab-documents"]',
+      )!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      root
+        .querySelector('[data-testid="context-tab-documents"]')
+        ?.getAttribute("aria-selected"),
+    ).toBe("true");
+
+    // 2. Dirty document editor intercepts clicking another document, clicking already-open document does NOT prompt.
+    root
+      .querySelector<HTMLElement>(
+        '[data-testid="doc-row-db-migrations"] button',
+      )!
+      .click();
+    await settle(fixture);
+
+    const docBox = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="doc-text-input"]',
+    )!;
+    docBox.value = "## Migrations\n\nUnsaved migration note";
+    docBox.dispatchEvent(new Event("input"));
+    await settle(fixture);
+
+    // Re-clicking already-open document must NOT prompt or overwrite edits.
+    root
+      .querySelector<HTMLElement>(
+        '[data-testid="doc-row-db-migrations"] button',
+      )!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(
+      root.querySelector<HTMLTextAreaElement>('[data-testid="doc-text-input"]')
+        ?.value,
+    ).toBe("## Migrations\n\nUnsaved migration note");
+
+    // Clicking another document prompts; Cancel preserves db-migrations and skips GET for style-guide.
+    const callsBefore = api.calls.length;
+    root
+      .querySelector<HTMLElement>('[data-testid="doc-row-style-guide"] button')!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
+    expect(api.calls.length).toBe(callsBefore);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="doc-editor-title"]')?.textContent,
+    ).toContain("db-migrations");
+    expect(
+      root.querySelector<HTMLTextAreaElement>('[data-testid="doc-text-input"]')
+        ?.value,
+    ).toBe("## Migrations\n\nUnsaved migration note");
+
+    // Clicking + New pack while dirty prompts; Cancel keeps db-migrations, Accept starts new pack.
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="doc-editor-title"]')?.textContent,
+    ).toContain("db-migrations");
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="doc-editor-title"]')?.textContent,
+    ).toContain("New Memory Document");
+
+    // Typing in new pack form makes docDirty true; Add repository scope keeps input open on Cancel, switches on Accept.
+    const nameInput = root.querySelector<HTMLInputElement>(
+      '[data-testid="doc-name-input"]',
+    )!;
+    nameInput.value = "draft-pack";
+    nameInput.dispatchEvent(new Event("input"));
+    await settle(fixture);
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="context-add-repo-btn"]')!
+      .click();
+    await settle(fixture);
+    const repoInput = root.querySelector<HTMLInputElement>(
+      '[data-testid="context-add-repo-input"]',
+    )!;
+    repoInput.value = "acme/web";
+    repoInput.dispatchEvent(new Event("input"));
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-add-repo-confirm"]',
+      )!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="context-add-repo-input"]'),
+    ).not.toBeNull();
+    expect(
+      root.querySelector<HTMLInputElement>('[data-testid="doc-name-input"]')
+        ?.value,
+    ).toBe("draft-pack");
+
+    // Confirming scope switch clears dirty document draft and switches to acme/web.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-add-repo-confirm"]',
+      )!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="context-add-repo-input"]'),
+    ).toBeNull();
+    expect(
+      root.querySelector('[data-testid="doc-placeholder"]'),
+    ).not.toBeNull();
+
+    // Selecting clean doc then switching to style-guide without edits succeeds with no dialog.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-scope-deployment"]',
+      )!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLElement>('[data-testid="doc-row-style-guide"] button')!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="doc-editor-title"]')?.textContent,
+    ).toContain("style-guide");
+  });
+
+  it("intercepts Angular route deactivation via app.routes canDeactivate and browser beforeunload when dirty", async () => {
+    @Component({
+      selector: "g-test-inbox-stub",
+      template: `<p data-testid="inbox-stub">Inbox</p>`,
+    })
+    class InboxStubComponent {}
+
+    @Component({
+      selector: "g-test-host",
+      imports: [RouterOutlet],
+      template: `<router-outlet />`,
+    })
+    class HostComponent {}
+
+    const api = new FakeContextApi();
+    const contextRoute = routes.find((r) => r.path === "context");
+    expect(contextRoute?.canDeactivate?.length).toBeGreaterThan(0);
+
+    localStorage.clear();
+    TestBed.configureTestingModule({
+      imports: [HostComponent, ContextPageComponent, InboxStubComponent],
+      providers: [
+        provideRouter([
+          {
+            path: "context",
+            component: ContextPageComponent,
+            canDeactivate: contextRoute?.canDeactivate,
+          },
+          { path: "inbox", component: InboxStubComponent },
+        ]),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => NEVER } },
+      ],
+    });
+    TestBed.inject(AccessService).setConfig(api.configBody);
+    const router = TestBed.inject(Router);
+    const fixture = TestBed.createComponent(HostComponent);
+    fixture.autoDetectChanges();
+
+    await router.navigateByUrl("/context");
+    await settle(fixture);
+    const root = fixture.nativeElement as HTMLElement;
+
+    // Clean state: beforeunload does NOT block, route navigation succeeds immediately.
+    const cleanUnload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(cleanUnload);
+    expect(cleanUnload.defaultPrevented).toBe(false);
+
+    expect(await router.navigateByUrl("/inbox")).toBe(true);
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="inbox-stub"]')).not.toBeNull();
+
+    // Navigate back to /context and edit standing instructions.
+    await router.navigateByUrl("/context");
+    await settle(fixture);
+
+    const textarea = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="memory-textarea"]',
+    )!;
+    textarea.value = "# Unsaved departure edit";
+    textarea.dispatchEvent(new Event("input"));
+    await settle(fixture);
+
+    // Dirty state: beforeunload prevents unload.
+    const dirtyUnload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(dirtyUnload);
+    expect(dirtyUnload.defaultPrevented).toBe(true);
+
+    // Dirty state: route navigation opens ConfirmDialog; Cancel keeps user on /context.
+    const navCancelPromise = router.navigateByUrl("/inbox");
+    await new Promise((r) => setTimeout(r, 20));
+    fixture.detectChanges();
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    expect(await navCancelPromise).toBe(false);
+    await settle(fixture);
+    expect(router.url).toBe("/context");
+    expect(
+      root.querySelector<HTMLTextAreaElement>('[data-testid="memory-textarea"]')
+        ?.value,
+    ).toBe("# Unsaved departure edit");
+
+    // Retry navigation and accept discard -> navigates to /inbox and unregisters beforeunload.
+    const navAcceptPromise = router.navigateByUrl("/inbox");
+    await new Promise((r) => setTimeout(r, 20));
+    fixture.detectChanges();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    expect(await navAcceptPromise).toBe(true);
+    await settle(fixture);
+    expect(router.url).toBe("/inbox");
+    expect(root.querySelector('[data-testid="inbox-stub"]')).not.toBeNull();
+
+    const afterLeaveUnload = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(afterLeaveUnload);
+    expect(afterLeaveUnload.defaultPrevented).toBe(false);
+  });
+
+  it("resolves a pending canDeactivate confirmation cleanly as false if destroyed mid-prompt", async () => {
+    const { fixture, root } = await setup();
+    const textarea = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="memory-textarea"]',
+    )!;
+    textarea.value = "unsaved edit";
+    textarea.dispatchEvent(new Event("input"));
+    await settle(fixture);
+
+    const pending = fixture.componentInstance.canDeactivate();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
+
+    fixture.destroy();
+    expect(await pending).toBe(false);
   });
 });
