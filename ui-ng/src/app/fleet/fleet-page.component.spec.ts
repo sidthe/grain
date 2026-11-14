@@ -20,6 +20,7 @@ import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import type { GrainConfig } from "../api/models";
 import { AccessService } from "../services/access.service";
+import { PHONE_QUERY } from "../shared/split";
 import {
   FleetPageComponent,
   isPersistentActionAllowed,
@@ -434,7 +435,20 @@ async function settle(f: ComponentFixture<unknown>): Promise<void> {
 }
 
 describe("FleetPageComponent", () => {
+  const origMatchMedia = window.matchMedia;
+  const origInnerWidth = window.innerWidth;
+
   afterEach(() => {
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: origMatchMedia,
+    });
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: origInnerWidth,
+    });
     TestBed.resetTestingModule();
   });
 
@@ -513,6 +527,32 @@ describe("FleetPageComponent", () => {
       .click();
     await settle(fixture);
     expect(
+      root.querySelector('[data-testid="confirm-dialog"]')?.textContent,
+    ).toContain("Recreate sandbox for task #42?");
+    expect(
+      root.querySelector('[data-testid="confirm-dialog"]')?.closest("[inert]"),
+    ).toBeNull();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls.some(
+        (c) =>
+          c.method === "POST" &&
+          c.route === "POST /api/tasks/{id}/sandbox/recreate",
+      ),
+    ).toBe(false);
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sandbox-recreate-42"]')!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
       api.calls.some(
         (c) =>
           c.method === "POST" &&
@@ -538,11 +578,18 @@ describe("FleetPageComponent", () => {
       root.querySelector('[data-testid="probe-output"]')?.textContent,
     ).toContain("Linux granule 6.8.0");
 
-    // Persistent sandbox restart + ?format=text logs viewer.
+    // Persistent sandbox restart requires confirmation + ?format=text logs viewer.
     root
       .querySelector<HTMLButtonElement>(
         '[data-testid="persistent-restart-staging-web"]',
       )!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="confirm-dialog"]')?.textContent,
+    ).toContain("Restart persistent sandbox staging-web?");
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
       .click();
     await settle(fixture);
     expect(
@@ -671,11 +718,36 @@ describe("FleetPageComponent", () => {
         ?.textContent,
     ).toContain("alice@example.com");
 
-    // Rotate token shows one-time token banner.
+    // Rotate token requires ConfirmDialogComponent acceptance and shows one-time token banner.
     root
       .querySelector<HTMLButtonElement>(
         '[data-testid="hostd-rotate-workstation-1"]',
       )!
+      .click();
+    await settle(fixture);
+    const rotateDialog = root.querySelector('[data-testid="confirm-dialog"]')!;
+    expect(rotateDialog).not.toBeNull();
+    expect(rotateDialog.closest("[inert]")).toBeNull();
+    expect(rotateDialog.textContent).toContain(
+      "Rotate host workstation-1's token?",
+    );
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="hostd-issued-token"]')).toBeNull();
+    expect(
+      api.calls.some((c) => c.route === "POST /api/hostds/{name}/rotate"),
+    ).toBe(false);
+
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="hostd-rotate-workstation-1"]',
+      )!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
       .click();
     await settle(fixture);
     expect(
@@ -944,9 +1016,22 @@ describe("FleetPageComponent", () => {
       ),
     ).toHaveLength(0);
 
-    // Clicking valid Stop on sb-running disables all actions on sb-running while in flight,
-    // then updates button gating when refreshed state becomes stopped.
+    // Clicking valid Stop on sb-running opens confirm dialog, then disables all actions
+    // on sb-running while in flight, and updates button gating when refreshed state becomes stopped.
     btn("sb-running", "stop").click();
+    fixture.detectChanges();
+    expect(
+      root.querySelector('[data-testid="confirm-dialog"]')?.textContent,
+    ).toContain("Stop persistent sandbox sb-running?");
+    expect(
+      api.calls.filter(
+        (c) => c.route === "POST /api/persistent-sandboxes/{name}/{action}",
+      ),
+    ).toHaveLength(0);
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
     fixture.detectChanges();
     expect(disabledMap("sb-running")).toEqual({
       start: true,
@@ -1763,5 +1848,313 @@ describe("FleetPageComponent", () => {
     expect(
       root.querySelector('[data-testid="fleet-pending-row-hjr_leak"]'),
     ).toBeNull();
+  });
+
+  it("confirms destructive sandbox, persistent lifecycle, and hostd rotate actions via g-confirm-dialog and no-ops if permissions or state change before Accept", async () => {
+    const api = new FakeFleetApi();
+    api.persistentBody = [
+      {
+        name: "staging-running",
+        repo: "acme/web",
+        ref: "main",
+        command: "npm run preview",
+        state: "running",
+        enabled: true,
+        restarts: 0,
+      },
+      {
+        name: "staging-stopped",
+        repo: "acme/web",
+        ref: "main",
+        command: "npm run preview",
+        state: "stopped",
+        enabled: false,
+        restarts: 0,
+      },
+    ];
+    const { fixture, root } = await setup(api);
+    const access = TestBed.inject(AccessService);
+
+    // Non-destructive Start executes directly without opening confirm dialog.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="persistent-start-staging-stopped"]',
+      )!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(
+      api.calls.some(
+        (c) =>
+          c.route === "POST /api/persistent-sandboxes/{name}/{action}" &&
+          (c.params as { name: string; action: string }).name ===
+            "staging-stopped" &&
+          (c.params as { name: string; action: string }).action === "start",
+      ),
+    ).toBe(true);
+
+    // Rebuild, Restart, and Stop all open destructive confirm dialogs and honor Cancel vs Accept.
+    for (const [action, expectedTitle] of [
+      ["rebuild", "Rebuild persistent sandbox staging-running?"],
+      ["stop", "Stop persistent sandbox staging-running?"],
+      ["restart", "Restart persistent sandbox staging-running?"],
+    ] as const) {
+      const prevCalls = api.calls.length;
+      root
+        .querySelector<HTMLButtonElement>(
+          `[data-testid="persistent-${action}-staging-running"]`,
+        )!
+        .click();
+      await settle(fixture);
+      const dlg = root.querySelector('[data-testid="confirm-dialog"]')!;
+      expect(dlg).not.toBeNull();
+      expect(dlg.closest("[inert]")).toBeNull();
+      expect(dlg.textContent).toContain(expectedTitle);
+      expect(
+        dlg
+          .querySelector('[data-testid="confirm-accept"]')
+          ?.classList.contains("is-destructive"),
+      ).toBe(true);
+
+      dlg
+        .querySelector<HTMLButtonElement>('[data-testid="confirm-cancel"]')!
+        .click();
+      await settle(fixture);
+      expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+      expect(api.calls.slice(prevCalls)).toHaveLength(0);
+    }
+
+    // Accepting Rebuild sends POST /api/persistent-sandboxes/{name}/rebuild.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="persistent-rebuild-staging-running"]',
+      )!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls.some(
+        (c) =>
+          c.route === "POST /api/persistent-sandboxes/{name}/{action}" &&
+          (c.params as { name: string; action: string }).name ===
+            "staging-running" &&
+          (c.params as { name: string; action: string }).action === "rebuild",
+      ),
+    ).toBe(true);
+
+    // State transition before Accept (e.g. staging-running becomes stopped) blocks stale Stop.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="persistent-stop-staging-running"]',
+      )!
+      .click();
+    await settle(fixture);
+    api.persistentBody[0] = { ...api.persistentBody[0], state: "stopped" };
+    const cmp = fixture.componentInstance as unknown as {
+      loadPersistentSandboxes: () => Promise<void>;
+    };
+    await cmp.loadPersistentSandboxes();
+    fixture.detectChanges();
+    const callsBeforeStaleAccept = api.calls.length;
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls
+        .slice(callsBeforeStaleAccept)
+        .some(
+          (c) => c.route === "POST /api/persistent-sandboxes/{name}/{action}",
+        ),
+    ).toBe(false);
+
+    // Permission revocation while sandbox-recreate confirm dialog is open blocks POST.
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sandbox-recreate-42"]')!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
+    access.setConfig({
+      access: {
+        role: "viewer",
+        roles: ["viewer"],
+        full: false,
+        scopes: ["deployment:read", "capabilities:read", "capabilities:admin"],
+      },
+    });
+    fixture.detectChanges();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls.some(
+        (c) => c.route === "POST /api/tasks/{id}/sandbox/recreate",
+      ),
+    ).toBe(false);
+
+    // Permission revocation while hostd-rotate confirm dialog is open blocks POST.
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="fleet-tab-hostds"]')!
+      .click();
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="hostd-rotate-workstation-1"]',
+      )!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
+    access.setConfig({
+      access: {
+        role: "viewer",
+        roles: ["viewer"],
+        full: false,
+        scopes: ["capabilities:read"],
+      },
+    });
+    fixture.detectChanges();
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="confirm-accept"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      api.calls.some((c) => c.route === "POST /api/hostds/{name}/rotate"),
+    ).toBe(false);
+  });
+
+  it("applies is-mobile class below 600px, updates on media query change and resize, and cleans up listener", async () => {
+    let matches = false;
+    const listeners = new Set<(ev: MediaQueryListEvent) => void>();
+    const addEventListener = vi.fn(
+      (type: string, cb: (ev: MediaQueryListEvent) => void) => {
+        if (type === "change") listeners.add(cb);
+      },
+    );
+    const removeEventListener = vi.fn(
+      (type: string, cb: (ev: MediaQueryListEvent) => void) => {
+        if (type === "change") listeners.delete(cb);
+      },
+    );
+    const matchMediaSpy = vi.fn((query: string) => ({
+      matches: query === PHONE_QUERY ? matches : false,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener,
+      removeEventListener,
+      dispatchEvent: () => false,
+    }));
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: matchMediaSpy,
+    });
+
+    const { fixture, root } = await setup();
+    const pageEl = () =>
+      root.querySelector<HTMLElement>('[data-testid="fleet-page"]');
+
+    expect(matchMediaSpy).toHaveBeenCalledWith(PHONE_QUERY);
+    expect(pageEl()?.classList.contains("is-mobile")).toBe(false);
+    expect(addEventListener).toHaveBeenCalledWith(
+      "change",
+      expect.any(Function),
+    );
+
+    // Entering and exiting < 600px mobile viewport updates is-mobile.
+    for (const cb of listeners) {
+      cb({ matches: true, media: PHONE_QUERY } as MediaQueryListEvent);
+    }
+    fixture.detectChanges();
+    expect(pageEl()?.classList.contains("is-mobile")).toBe(true);
+
+    for (const cb of listeners) {
+      cb({ matches: false, media: PHONE_QUERY } as MediaQueryListEvent);
+    }
+    fixture.detectChanges();
+    expect(pageEl()?.classList.contains("is-mobile")).toBe(false);
+
+    // Window resize re-queries PHONE_QUERY.
+    matches = true;
+    window.dispatchEvent(new Event("resize"));
+    fixture.detectChanges();
+    expect(pageEl()?.classList.contains("is-mobile")).toBe(true);
+
+    fixture.destroy();
+    expect(removeEventListener).toHaveBeenCalledWith(
+      "change",
+      expect.any(Function),
+    );
+    expect(listeners.size).toBe(0);
+  });
+
+  it("falls back to innerWidth and legacy MediaQueryList addListener/removeListener when needed", async () => {
+    let legacyCb: ((ev: MediaQueryListEvent) => void) | null = null;
+    const addListener = vi.fn((cb: (ev: MediaQueryListEvent) => void) => {
+      legacyCb = cb;
+    });
+    const removeListener = vi.fn((cb: (ev: MediaQueryListEvent) => void) => {
+      if (legacyCb === cb) legacyCb = null;
+    });
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: () =>
+        ({
+          matches: false,
+          addListener,
+          removeListener,
+        }) as unknown as MediaQueryList,
+    });
+
+    const legacyMount = await setup();
+    expect(addListener).toHaveBeenCalledTimes(1);
+    expect(
+      legacyMount.root
+        .querySelector('[data-testid="fleet-page"]')
+        ?.classList.contains("is-mobile"),
+    ).toBe(false);
+    legacyCb!({ matches: true } as MediaQueryListEvent);
+    legacyMount.fixture.detectChanges();
+    expect(
+      legacyMount.root
+        .querySelector('[data-testid="fleet-page"]')
+        ?.classList.contains("is-mobile"),
+    ).toBe(true);
+    legacyMount.fixture.destroy();
+    expect(removeListener).toHaveBeenCalledTimes(1);
+    TestBed.resetTestingModule();
+
+    // Fallback to window.innerWidth < 600 (390px) when matchMedia is absent.
+    Reflect.deleteProperty(window, "matchMedia");
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: 390,
+    });
+    const fallbackMount = await setup();
+    expect(
+      fallbackMount.root
+        .querySelector('[data-testid="fleet-page"]')
+        ?.classList.contains("is-mobile"),
+    ).toBe(true);
+
+    Object.defineProperty(window, "innerWidth", {
+      configurable: true,
+      writable: true,
+      value: 1024,
+    });
+    window.dispatchEvent(new Event("resize"));
+    fallbackMount.fixture.detectChanges();
+    expect(
+      fallbackMount.root
+        .querySelector('[data-testid="fleet-page"]')
+        ?.classList.contains("is-mobile"),
+    ).toBe(false);
   });
 });
