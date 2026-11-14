@@ -34,6 +34,7 @@ import {
 } from "@angular/core";
 import { Router, RouterLink } from "@angular/router";
 import type { RouteKey } from "../api/generated-routes";
+import { ciRunQueryParams } from "../ci/ci.models";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
 import { TaskFeedStore } from "../services/task-feed.service";
@@ -863,9 +864,11 @@ type SuitesPaneView = "suites" | "runs";
                       <span>
                         Workflow run
                         @if (lwr.runId) {
-                          <a [routerLink]="['/ci', 'runs', lwr.runId]">{{
-                            lwr.runId
-                          }}</a>
+                          <a
+                            [routerLink]="['/ci', 'runs', lwr.runId]"
+                            [queryParams]="ciRunQueryParams(lwr.runId)"
+                            >{{ lwr.runId }}</a
+                          >
                         }
                         ({{ lwr.conclusion || "running" }})
                       </span>
@@ -3064,6 +3067,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly sDraftDesc = signal("");
   protected readonly sDraftTemplateId = signal("");
   protected readonly sDraftSuiteId = signal("");
+  protected readonly ciRunQueryParams = ciRunQueryParams;
   protected readonly sDraftRepo = signal("");
   protected readonly schedRepoOptions = computed<PillOption[]>(() => [
     { value: "", label: "Choose configured repository…" },
