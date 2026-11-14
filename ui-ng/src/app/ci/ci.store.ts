@@ -40,10 +40,22 @@ import {
   actionsRunRepo,
   faultSourceOf,
   isRunActive,
+  mergeRunArtifacts,
   providerOfRun,
 } from "./ci.models";
 
 const POLL_MS = 5000;
+
+export interface RunArtifactsState {
+  loading: boolean;
+  error: string | null;
+  enabled: boolean;
+  available: boolean;
+  artifacts: CIRunArtifact[];
+  total: number;
+  truncated: boolean;
+  nextCursor?: string;
+}
 
 @Injectable({ providedIn: "root" })
 export class CIStore {
@@ -71,9 +83,27 @@ export class CIStore {
   readonly detail = signal<CIRun | null>(null);
   readonly detailLoading = signal(false);
   readonly artifacts = signal<CIRunArtifact[]>([]);
+  readonly artifactsEnabled = signal(true);
   readonly artifactsAvailable = signal(false);
+  readonly artifactsLoading = signal(false);
+  readonly artifactsError = signal<string | null>(null);
+  readonly artifactsTotal = signal(0);
+  readonly artifactsTruncated = signal(false);
+  readonly artifactsNextCursor = signal("");
+  readonly faultRunArtifacts = signal<Record<string, RunArtifactsState>>({});
   readonly jobLogs = signal<Record<string, CIRunLogResponse>>({});
   readonly jobLogLoading = signal<string | null>(null);
+
+  readonly activeArtifactsState = computed<RunArtifactsState>(() => ({
+    loading: this.artifactsLoading(),
+    error: this.artifactsError(),
+    enabled: this.artifactsEnabled(),
+    available: this.artifactsAvailable(),
+    artifacts: this.artifacts(),
+    total: this.artifactsTotal(),
+    truncated: this.artifactsTruncated(),
+    nextCursor: this.artifactsNextCursor(),
+  }));
 
   readonly activeRun = computed(() => {
     const id = this.selectedId();
@@ -98,6 +128,8 @@ export class CIStore {
   private eventSub: Subscription | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private activeCount = 0;
+  private detailReqSeq = 0;
+  private readonly faultArtReqSeq = new Map<string, number>();
 
   start(): void {
     this.actionError.set(null);
@@ -123,6 +155,8 @@ export class CIStore {
     this.eventSub = null;
     if (this.pollTimer) clearInterval(this.pollTimer);
     this.pollTimer = null;
+    this.faultArtReqSeq.clear();
+    this.faultRunArtifacts.set({});
   }
 
   setQueryScope(repo: string, provider: CIProviderFilter): void {
@@ -318,55 +352,367 @@ export class CIStore {
     }
   }
 
+  private knownRunRepo(id: string): string | undefined {
+    const det = this.detail();
+    if (det?.id === id && det.repo) return det.repo;
+    const listed = this.runs().find((r) => r.id === id);
+    if (listed?.repo) return listed.repo;
+    for (const f of this.faults()) {
+      if (f.repo && f.runs?.some((r) => r.runId === id)) return f.repo;
+    }
+    const ghaRepo = actionsRunRepo(id);
+    return ghaRepo || undefined;
+  }
+
+  private fetchArtifactsResponse(
+    id: string,
+    cursor?: string,
+  ): Promise<CIRunArtifactsResponse> {
+    const query = cursor
+      ? new URLSearchParams({ cursor }).toString()
+      : undefined;
+    return this.api.get<CIRunArtifactsResponse>(
+      "GET /api/ci/runs/{id}/artifacts",
+      { id },
+      query,
+    );
+  }
+
+  private clearSelectedArtifacts(): void {
+    this.artifacts.set([]);
+    this.artifactsEnabled.set(true);
+    this.artifactsAvailable.set(false);
+    this.artifactsLoading.set(false);
+    this.artifactsError.set(null);
+    this.artifactsTotal.set(0);
+    this.artifactsTruncated.set(false);
+    this.artifactsNextCursor.set("");
+  }
+
+  private applyRunArtifacts(
+    id: string,
+    jobs: CIRun["jobs"],
+    res: CIRunArtifactsResponse | null,
+    err: unknown,
+    append = false,
+  ): void {
+    const base = append ? this.artifacts() : [];
+    const incoming = Array.isArray(res?.artifacts) ? res.artifacts : [];
+    const merged = mergeRunArtifacts(id, [...base, ...incoming], jobs);
+    if (res) {
+      this.artifactsEnabled.set(res.enabled !== false);
+      this.artifactsAvailable.set(!!res.available);
+      this.artifactsError.set(null);
+      this.artifacts.set(merged);
+      this.artifactsTotal.set(Math.max(res.total ?? 0, merged.length));
+      this.artifactsTruncated.set(!!res.truncated);
+      this.artifactsNextCursor.set(res.nextCursor ?? "");
+    } else if (err) {
+      this.artifactsEnabled.set(true);
+      this.artifactsAvailable.set(merged.length > 0);
+      this.artifactsError.set(errorText(err));
+      this.artifacts.set(merged);
+      this.artifactsTotal.set(merged.length);
+      this.artifactsTruncated.set(false);
+      this.artifactsNextCursor.set("");
+    } else {
+      this.artifactsEnabled.set(true);
+      this.artifactsAvailable.set(merged.length > 0);
+      this.artifactsError.set(null);
+      this.artifacts.set(merged);
+      this.artifactsTotal.set(merged.length);
+      this.artifactsTruncated.set(false);
+      this.artifactsNextCursor.set("");
+    }
+    if (this.faultRunArtifacts()[id]) {
+      const snap = this.activeArtifactsState();
+      this.faultRunArtifacts.update((prev) => ({
+        ...prev,
+        [id]: { ...snap, loading: false },
+      }));
+    }
+  }
+
   async selectRun(id: string | null): Promise<void> {
     if (this.selectedId() === id && this.detail()?.id === id) return;
     this.selectedId.set(id);
     this.jobLogs.set({});
+    this.clearSelectedArtifacts();
     if (!id) {
+      this.detailReqSeq++;
       this.detail.set(null);
-      this.artifacts.set([]);
+      this.detailLoading.set(false);
       return;
     }
     await this.loadRunDetail(id, true);
   }
 
   async loadRunDetail(id: string, showSpinner = true): Promise<void> {
-    if (!this.access.can("GET /api/ci/runs/{id}")) return;
-    if (showSpinner) this.detailLoading.set(true);
+    const knownRepo = this.knownRunRepo(id);
+    if (!this.access.can("GET /api/ci/runs/{id}", knownRepo)) return;
+    const canReadArts = this.access.can(
+      "GET /api/ci/runs/{id}/artifacts",
+      knownRepo,
+    );
+    const seq = ++this.detailReqSeq;
+    if (showSpinner) {
+      this.detailLoading.set(true);
+      if (canReadArts) this.artifactsLoading.set(true);
+    }
     try {
-      const [run, artRes] = await Promise.all([
-        this.api.get<CIRun>("GET /api/ci/runs/{id}", { id }),
-        this.access.can("GET /api/ci/runs/{id}/artifacts")
-          ? this.api
-              .get<CIRunArtifactsResponse>("GET /api/ci/runs/{id}/artifacts", {
-                id,
-              })
-              .catch(() => null)
-          : Promise.resolve(null),
-      ]);
-      if (this.activeCount === 0) return;
-      if (this.selectedId() === id) {
-        this.detail.set(run);
-        if (artRes) {
-          this.artifactsAvailable.set(!!artRes.available);
-          this.artifacts.set(
-            Array.isArray(artRes.artifacts) ? artRes.artifacts : [],
-          );
+      const runPromise = this.api
+        .get<CIRun>("GET /api/ci/runs/{id}", { id })
+        .then(
+          (run) => ({ run, err: null as unknown }),
+          (err) => ({ run: null as CIRun | null, err }),
+        );
+      const artPromise = canReadArts
+        ? this.fetchArtifactsResponse(id).then(
+            (res) => ({ res, err: null as unknown }),
+            (err) => ({ res: null as CIRunArtifactsResponse | null, err }),
+          )
+        : Promise.resolve({
+            res: null as CIRunArtifactsResponse | null,
+            err: null as unknown,
+          });
+      const [runOut, artOut] = await Promise.all([runPromise, artPromise]);
+      if (
+        this.activeCount === 0 ||
+        this.selectedId() !== id ||
+        this.detailReqSeq !== seq
+      ) {
+        return;
+      }
+      if (runOut.run) {
+        this.detail.set(runOut.run);
+        const allowArts = this.access.can(
+          "GET /api/ci/runs/{id}/artifacts",
+          runOut.run.repo,
+        );
+        if (allowArts) {
+          this.applyRunArtifacts(id, runOut.run.jobs, artOut.res, artOut.err);
         } else {
-          const fromJobs = (run.jobs ?? []).flatMap((j) => j.artifacts ?? []);
-          this.artifactsAvailable.set(fromJobs.length > 0);
-          this.artifacts.set(fromJobs);
+          this.applyRunArtifacts(id, runOut.run.jobs, null, null);
+        }
+      } else {
+        this.detail.set(null);
+        if (runOut.err) {
+          this.actionError.set(errorText(runOut.err));
+        }
+        if (canReadArts) {
+          this.applyRunArtifacts(id, undefined, artOut.res, artOut.err);
         }
       }
-    } catch (err) {
-      if (this.activeCount === 0) return;
-      if (this.selectedId() === id) {
-        this.actionError.set(errorText(err));
-      }
     } finally {
-      if (showSpinner && this.activeCount > 0) {
-        this.detailLoading.set(false);
+      if (
+        this.activeCount > 0 &&
+        this.selectedId() === id &&
+        this.detailReqSeq === seq
+      ) {
+        if (showSpinner) this.detailLoading.set(false);
+        this.artifactsLoading.set(false);
       }
+    }
+  }
+
+  async reloadRunArtifacts(id: string, repo?: string): Promise<void> {
+    const effectiveRepo = repo || this.knownRunRepo(id);
+    if (!this.access.can("GET /api/ci/runs/{id}/artifacts", effectiveRepo)) {
+      return;
+    }
+    const seq = ++this.detailReqSeq;
+    this.artifactsLoading.set(true);
+    this.artifactsError.set(null);
+    try {
+      const res = await this.fetchArtifactsResponse(id);
+      if (
+        this.activeCount === 0 ||
+        this.selectedId() !== id ||
+        this.detailReqSeq !== seq
+      ) {
+        return;
+      }
+      const det = this.detail();
+      this.applyRunArtifacts(
+        id,
+        det?.id === id ? det.jobs : undefined,
+        res,
+        null,
+      );
+    } catch (err) {
+      if (
+        this.activeCount === 0 ||
+        this.selectedId() !== id ||
+        this.detailReqSeq !== seq
+      ) {
+        return;
+      }
+      const det = this.detail();
+      this.applyRunArtifacts(
+        id,
+        det?.id === id ? det.jobs : undefined,
+        null,
+        err,
+      );
+    } finally {
+      if (
+        this.activeCount > 0 &&
+        this.selectedId() === id &&
+        this.detailReqSeq === seq
+      ) {
+        this.artifactsLoading.set(false);
+      }
+    }
+  }
+
+  async loadMoreRunArtifacts(id: string, repo?: string): Promise<void> {
+    const cursor = this.artifactsNextCursor();
+    const effectiveRepo = repo || this.knownRunRepo(id);
+    if (
+      !cursor ||
+      this.artifactsLoading() ||
+      !this.access.can("GET /api/ci/runs/{id}/artifacts", effectiveRepo)
+    ) {
+      return;
+    }
+    const seq = ++this.detailReqSeq;
+    this.artifactsLoading.set(true);
+    try {
+      const res = await this.fetchArtifactsResponse(id, cursor);
+      if (
+        this.activeCount === 0 ||
+        this.selectedId() !== id ||
+        this.detailReqSeq !== seq
+      ) {
+        return;
+      }
+      const det = this.detail();
+      this.applyRunArtifacts(
+        id,
+        det?.id === id ? det.jobs : undefined,
+        res,
+        null,
+        true,
+      );
+    } catch (err) {
+      if (
+        this.activeCount === 0 ||
+        this.selectedId() !== id ||
+        this.detailReqSeq !== seq
+      ) {
+        return;
+      }
+      this.artifactsError.set(errorText(err));
+    } finally {
+      if (
+        this.activeCount > 0 &&
+        this.selectedId() === id &&
+        this.detailReqSeq === seq
+      ) {
+        this.artifactsLoading.set(false);
+      }
+    }
+  }
+
+  async loadFaultRunArtifacts(
+    runId: string,
+    repo?: string,
+    force = false,
+    cursor?: string,
+  ): Promise<void> {
+    if (!runId) return;
+    const effectiveRepo = repo || this.knownRunRepo(runId);
+    if (!this.access.can("GET /api/ci/runs/{id}/artifacts", effectiveRepo)) {
+      this.faultRunArtifacts.update((prev) => ({
+        ...prev,
+        [runId]: {
+          loading: false,
+          error: this.access.deniedReason(
+            "GET /api/ci/runs/{id}/artifacts",
+            effectiveRepo,
+          ),
+          enabled: true,
+          available: false,
+          artifacts: [],
+          total: 0,
+          truncated: false,
+          nextCursor: "",
+        },
+      }));
+      return;
+    }
+    const existing = this.faultRunArtifacts()[runId];
+    if (
+      !force &&
+      !cursor &&
+      existing &&
+      (existing.loading || !existing.error)
+    ) {
+      return;
+    }
+    const seq = (this.faultArtReqSeq.get(runId) ?? 0) + 1;
+    this.faultArtReqSeq.set(runId, seq);
+    this.faultRunArtifacts.update((prev) => ({
+      ...prev,
+      [runId]: {
+        loading: true,
+        error: null,
+        enabled: existing?.enabled ?? true,
+        available: existing?.available ?? false,
+        artifacts: cursor ? (existing?.artifacts ?? []) : [],
+        total: existing?.total ?? 0,
+        truncated: existing?.truncated ?? false,
+        nextCursor: existing?.nextCursor ?? "",
+      },
+    }));
+    try {
+      const res = await this.fetchArtifactsResponse(runId, cursor);
+      if (this.activeCount === 0 || this.faultArtReqSeq.get(runId) !== seq) {
+        return;
+      }
+      const det = this.detail();
+      const knownRun =
+        det?.id === runId ? det : this.runs().find((r) => r.id === runId);
+      const base = cursor ? (existing?.artifacts ?? []) : [];
+      const incoming = Array.isArray(res?.artifacts) ? res.artifacts : [];
+      const merged = mergeRunArtifacts(
+        runId,
+        [...base, ...incoming],
+        knownRun?.jobs,
+      );
+      this.faultRunArtifacts.update((prev) => ({
+        ...prev,
+        [runId]: {
+          loading: false,
+          error: null,
+          enabled: res.enabled !== false,
+          available: !!res.available,
+          artifacts: merged,
+          total: Math.max(res.total ?? 0, merged.length),
+          truncated: !!res.truncated,
+          nextCursor: res.nextCursor ?? "",
+        },
+      }));
+      if (this.selectedId() === runId && !cursor) {
+        this.applyRunArtifacts(runId, knownRun?.jobs, res, null);
+      }
+    } catch (err) {
+      if (this.activeCount === 0 || this.faultArtReqSeq.get(runId) !== seq) {
+        return;
+      }
+      this.faultRunArtifacts.update((prev) => ({
+        ...prev,
+        [runId]: {
+          loading: false,
+          error: errorText(err),
+          enabled: existing?.enabled ?? true,
+          available: existing?.available ?? false,
+          artifacts: cursor ? (existing?.artifacts ?? []) : [],
+          total: existing?.total ?? 0,
+          truncated: existing?.truncated ?? false,
+          nextCursor: existing?.nextCursor ?? "",
+        },
+      }));
     }
   }
 

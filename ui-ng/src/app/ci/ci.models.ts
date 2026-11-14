@@ -589,6 +589,86 @@ export function faultRefCount(f: CIFault): number {
   return f.refCount ?? f.refs?.length ?? 0;
 }
 
+export function faultClusterKey(f: CIFault): string {
+  return `${faultSourceOf(f.source)}:${f.repo ?? ""}:${f.digest || faultTitle(f)}`;
+}
+
+export function mergeRunArtifacts(
+  runId: string,
+  apiArtifacts: readonly CIRunArtifact[],
+  jobs?: readonly CIJobRun[],
+): CIRunArtifact[] {
+  const out: CIRunArtifact[] = [];
+  const seen = new Set<string>();
+  const add = (art: CIRunArtifact, fallbackJob = ""): void => {
+    const job = (art.job || fallbackJob || "").trim();
+    const name = (art.name || "").trim();
+    if (!name) return;
+    const key = `${job}\0${name}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({
+      ...art,
+      run: art.run || runId,
+      job,
+      name,
+    });
+  };
+  for (const a of apiArtifacts) {
+    add(a);
+  }
+  for (const job of jobs ?? []) {
+    const jName = job.jobId || job.name || "";
+    for (const a of job.artifacts ?? []) {
+      add(a, jName);
+    }
+  }
+  return out;
+}
+
+export function canDownloadArtifact(
+  runId: string,
+  art: CIRunArtifact,
+  provider?: string,
+  hasReadScope = true,
+): boolean {
+  if (!hasReadScope || art.stored !== true) return false;
+  if (!(art.job ?? "").trim() || !(art.name ?? "").trim()) return false;
+  if (provider === "github" || isGitHubActionsRunId(art.run || runId)) {
+    return false;
+  }
+  return true;
+}
+
+export function pullRequestLink(ref: string | undefined): string | null {
+  const raw = (ref ?? "").trim();
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) return safeExternalUrl(raw);
+  const hash = raw.lastIndexOf("#");
+  if (hash <= 0) return null;
+  const repo = raw.slice(0, hash).trim();
+  const num = raw.slice(hash + 1).trim();
+  if (!/^\d+$/.test(num)) return null;
+  if (repo.toLowerCase() === "grain/config") return null;
+  const parts = repo.split("/").filter(Boolean);
+  if (parts.length === 2) {
+    return safeExternalUrl(
+      `https://github.com/${parts[0]}/${parts[1]}/pull/${num}`,
+    );
+  }
+  if (parts.length >= 3) {
+    return safeExternalUrl(`https://${parts.join("/")}/pull/${num}`);
+  }
+  return null;
+}
+
+export function formatArtifactTime(raw: string | undefined): string {
+  if (!raw) return "";
+  const ms = Date.parse(raw);
+  if (Number.isNaN(ms)) return "";
+  return `${new Date(ms).toISOString().replace("T", " ").slice(0, 16)} UTC`;
+}
+
 export function extractFailedTests(run: CIRun | null): string[] {
   if (!run?.jobs) return [];
   const found = new Set<string>();
