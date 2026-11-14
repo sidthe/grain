@@ -452,7 +452,7 @@ type ReachableReposPayload =
                         </span>
                         <span class="row-title">{{ sc.label }}</span>
                       </span>
-                      <span class="ctx-row-line2 muted tabular">
+                      <span class="ctx-row-line3 muted tabular">
                         <span>{{ utf8Len(sc.text) }} bytes</span>
                         <span>· {{ sc.documents.length }} packs</span>
                         @if (ageOf(sc.updatedAt); as age) {
@@ -850,7 +850,7 @@ type ReachableReposPayload =
                 </div>
               }
 
-              <div class="tel-legend tabular">
+              <div class="ctx-row-line3 muted tabular">
                 <span
                   class="ctx-counter"
                   [class.is-over]="memoryByteLen() > maxMemoryLen"
@@ -1074,16 +1074,13 @@ type ReachableReposPayload =
                         {{ summaryByteLen() }} / {{ maxSummaryLen }} bytes
                       </span>
                     </div>
-                    <p
-                      class="ctx-readonly-summary"
-                      data-testid="doc-summary-readonly"
-                    >
+                    <p class="ctx-ro" data-testid="doc-summary-readonly">
                       {{ docSummaryDraft() || "No summary recorded." }}
                     </p>
                   </div>
                 }
 
-                <div class="tel-legend tabular">
+                <div class="ctx-row-line3 muted tabular">
                   <span
                     class="ctx-counter"
                     [class.is-over]="docBodyByteLen() > maxDocLen"
