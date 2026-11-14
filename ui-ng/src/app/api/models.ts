@@ -54,6 +54,8 @@ export interface GrainConfig {
   version?: string | Record<string, unknown>;
   stateRepoSyncFailure?: unknown;
   capabilities?: CapabilityOption[];
+  ciCapabilities?: CapabilityOption[];
+  capabilityMethods?: number;
   defaultCapabilities?: string[];
   repoDefaultCapabilities?: Record<string, string[]>;
   agentBackends?: AgentBackendOption[];
@@ -583,7 +585,7 @@ export interface CapabilityOption {
   ready?: boolean;
   grantable?: boolean;
   default?: boolean;
-  needs?: string;
+  needs?: string[] | string;
 }
 
 export interface ConsoleSessionList {

@@ -19,13 +19,19 @@ import { provideRouter, withComponentInputBinding } from "@angular/router";
 import { RouterTestingHarness } from "@angular/router/testing";
 import { vi } from "vitest";
 import { GrainApi, type RouteParams } from "../api/grain-api.service";
-import type { GrainConfig } from "../api/models";
+import type {
+  CapabilityMethod,
+  CapabilityOption,
+  GrantCheck,
+  GrainConfig,
+} from "../api/models";
 import { RepoDetailPageComponent } from "./repo-detail-page.component";
 
 interface RepoCall {
   method: string;
   key: string;
   params?: RouteParams;
+  query?: Record<string, unknown>;
   body?: unknown;
 }
 
@@ -50,6 +56,28 @@ class FakeRepoApi {
     unfixableChecks: [],
     grainCICheckName: "grain CI",
   };
+  ciCapsBody: {
+    ciCapabilities: string[] | null;
+    availableCICapabilities: string[];
+  } = {
+    ciCapabilities: [],
+    availableCICapabilities: ["github-read"],
+  };
+  capabilityMethodsBody: CapabilityMethod[] = [
+    {
+      ref: "release#registry-push",
+      capability: "release",
+      method: "registry-push",
+      description: "Push release images",
+    },
+    {
+      ref: "repo#read",
+      capability: "repo",
+      method: "read",
+      description: "Read repository",
+    },
+  ];
+  grantCheckHandler: ((grants: unknown[]) => GrantCheck[]) | null = null;
   releaseEnabled = true;
   workOwnershipBody: {
     repo: string;
@@ -102,8 +130,12 @@ class FakeRepoApi {
 
   config = () => Promise.resolve(structuredClone(this.configBody));
 
-  get = (key: string, params?: RouteParams) => {
-    this.calls.push({ method: "GET", key, params });
+  get = (
+    key: string,
+    params?: RouteParams,
+    query?: Record<string, unknown>,
+  ) => {
+    this.calls.push({ method: "GET", key, params, query });
     if (this.refuseGet === key) {
       return new Promise((_, reject) =>
         setTimeout(() => reject(new Error(this.refuseGetMessage))),
@@ -140,6 +172,14 @@ class FakeRepoApi {
     }
     if (key === "GET /api/repos/{owner}/{name}/unfixable-checks") {
       return Promise.resolve(structuredClone(this.unfixableBody));
+    }
+    if (key === "GET /api/repos/{owner}/{name}/ci-capabilities") {
+      return Promise.resolve(structuredClone(this.ciCapsBody));
+    }
+    if (key === "GET /api/capability-methods") {
+      return Promise.resolve({
+        items: structuredClone(this.capabilityMethodsBody),
+      });
     }
     if (key === "GET /api/repos/{owner}/{name}/release") {
       return Promise.resolve({
@@ -188,6 +228,25 @@ class FakeRepoApi {
         unfixableChecks: clean.length > 0 ? clean : null,
       };
       return Promise.resolve(structuredClone(this.unfixableBody));
+    }
+    if (key === "PUT /api/repos/{owner}/{name}/ci-capabilities") {
+      const list = (body as { ciCapabilities?: string[] })?.ciCapabilities;
+      const clean = Array.isArray(list)
+        ? list.map((s) => s.trim()).filter(Boolean)
+        : [];
+      this.ciCapsBody = {
+        ...this.ciCapsBody,
+        ciCapabilities: clean.length > 0 ? clean : null,
+      };
+      return Promise.resolve(structuredClone(this.ciCapsBody));
+    }
+    if (key === "PUT /api/repos/{owner}/{name}/capabilities") {
+      const list = (body as { defaultCapabilities?: string[] })
+        ?.defaultCapabilities;
+      const clean = Array.isArray(list)
+        ? list.map((s) => s.trim()).filter(Boolean)
+        : [];
+      return Promise.resolve({ defaultCapabilities: clean });
     }
     if (key === "PUT /api/repos/{owner}/{name}/work-ownership") {
       const req = (body ?? {}) as {
@@ -244,6 +303,33 @@ class FakeRepoApi {
 
   post = (key: string, params?: RouteParams, body?: unknown) => {
     this.calls.push({ method: "POST", key, params, body });
+    if (key === "POST /api/capability-grants/check") {
+      const req = (body ?? {}) as { grants?: unknown[] };
+      const grants = req.grants ?? [];
+      if (this.grantCheckHandler) {
+        return Promise.resolve({ checks: this.grantCheckHandler(grants) });
+      }
+      const checks: GrantCheck[] = grants.map((raw) => {
+        const item = raw as {
+          grant?: string;
+          capability?: string;
+          with?: Record<string, unknown>;
+        };
+        if (item.grant) {
+          return { grant: item.grant, recorded: item.grant };
+        }
+        const ref = item.capability ?? "";
+        const canonical = ref.startsWith("https://")
+          ? ref
+          : `https://grain.dev/capabilities/${ref}`;
+        const withJson = item.with ? JSON.stringify(item.with) : "{}";
+        return {
+          grant: `${ref}=${withJson}`,
+          recorded: `${canonical}=${withJson}`,
+        };
+      });
+      return Promise.resolve({ checks });
+    }
     return Promise.resolve({ ok: true });
   };
 
@@ -1924,5 +2010,433 @@ describe("RepoDetailPageComponent (/next/repos/:owner/:name)", () => {
         '[data-testid="input-unfixable-check"]',
       )!.disabled,
     ).toBe(true);
+  });
+
+  it("manages CI capability grants, server methods, custom grants, errors, RBAC, and repo switches", async () => {
+    // 1. Happy path: config enrichment, retired/unready filtering, pill toggles, method & custom grants
+    const api = new FakeRepoApi();
+    const ciCatalog: CapabilityOption[] = [
+      {
+        id: "github-read",
+        name: "GitHub read",
+        description: "Read repository metadata and PR state",
+        ready: true,
+      },
+      {
+        id: "unready-cap",
+        name: "Unready CI cap",
+        description: "Needs org token",
+        ready: false,
+        needs: ["org-token"],
+      },
+    ];
+    api.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "grain/operator",
+        roles: ["grain/operator"],
+        full: true,
+        scopes: [],
+      },
+      ciCapabilities: ciCatalog,
+    };
+    api.ciCapsBody = {
+      ciCapabilities: [
+        "retired-cap",
+        "https://grain.dev/capabilities/release#registry-push={}",
+      ],
+      availableCICapabilities: ["github-read", "unready-cap", "custom-runner"],
+    };
+
+    const { harness, el } = await mountRepo("/repos/acme/platform/ci", api);
+    await waitForEl(harness, '[data-testid="card-repo-ci-capabilities"]');
+    await waitForEl(harness, '[data-testid="repo-ci-grants-cap-github-read"]');
+
+    // Offered ready pill + synthesized label + held retired pill render; unheld unready cap stays hidden
+    expect(
+      el.querySelector('[data-testid="repo-ci-grants-cap-github-read"]')
+        ?.textContent,
+    ).toContain("GitHub read");
+    expect(
+      el.querySelector('[data-testid="repo-ci-grants-cap-custom-runner"]'),
+    ).not.toBeNull();
+    expect(
+      el.querySelector('[data-testid="repo-ci-grants-cap-unready-cap"]'),
+    ).toBeNull();
+    const retiredPill = el.querySelector<HTMLButtonElement>(
+      '[data-testid="repo-ci-grants-cap-retired-cap"]',
+    )!;
+    expect(retiredPill).not.toBeNull();
+    expect(retiredPill.getAttribute("aria-pressed")).toBe("true");
+    expect(
+      el.querySelector('[data-testid="repo-ci-caps-warnings"]')?.textContent,
+    ).toContain("retired-cap");
+
+    // Toggle offered pill on -> emits PUT with cleaned capabilities
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="repo-ci-grants-cap-github-read"]',
+    )!.click();
+    await flushUi(harness);
+    const put1 = api.calls.find(
+      (c) =>
+        c.method === "PUT" &&
+        c.key === "PUT /api/repos/{owner}/{name}/ci-capabilities",
+    );
+    expect(put1?.body).toEqual({
+      ciCapabilities: [
+        "retired-cap",
+        "https://grain.dev/capabilities/release#registry-push={}",
+        "github-read",
+      ],
+    });
+
+    // Untick retired pill -> removes retired cap & clears retired warning
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="repo-ci-grants-cap-retired-cap"]',
+    )!.click();
+    await flushUi(harness);
+    expect(
+      el.querySelector('[data-testid="repo-ci-caps-warnings"]'),
+    ).toBeNull();
+
+    // Open "+ Add CI grant" builder -> must NOT show API scope mode, queries capability-methods with kind=ci
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="repo-ci-grants-add-open"]',
+    )!.click();
+    await flushUi(harness);
+    expect(
+      el.querySelector('[data-testid="repo-ci-grants-mode-api"]'),
+    ).toBeNull();
+    const methodGet = api.calls.find(
+      (c) => c.method === "GET" && c.key === "GET /api/capability-methods",
+    );
+    expect(methodGet?.query).toBe("kind=ci&repo=acme%2Fplatform");
+
+    // Attach default method (release#registry-push with JSON args) -> omits subject on /check
+    const argsInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="repo-ci-grants-method-args"]',
+    )!;
+    argsInput.value = '{"repository":"ghcr.io/acme/widgets"}';
+    argsInput.dispatchEvent(new Event("input", { bubbles: true }));
+    harness.detectChanges();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="repo-ci-grants-attach"]',
+    )!.click();
+    await flushUi(harness);
+    const checkCall = api.calls.find(
+      (c) => c.key === "POST /api/capability-grants/check",
+    );
+    expect((checkCall?.body as { subject?: unknown })?.subject).toBeUndefined();
+    expect(api.ciCapsBody.ciCapabilities).toContain(
+      'https://grain.dev/capabilities/release#registry-push={"repository":"ghcr.io/acme/widgets"}',
+    );
+
+    // Custom grant rejects api:* client-side without calling check or PUT
+    const countBeforeApiReject = api.calls.length;
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="repo-ci-grants-mode-raw"]',
+    )!.click();
+    harness.detectChanges();
+    const rawInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="repo-ci-grants-raw-input"]',
+    )!;
+    rawInput.value = "api:tasks-read";
+    rawInput.dispatchEvent(new Event("input", { bubbles: true }));
+    harness.detectChanges();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="repo-ci-grants-attach"]',
+    )!.click();
+    await flushUi(harness);
+    expect(
+      el.querySelector('[data-testid="repo-ci-grants-error"]')?.textContent,
+    ).toContain("API scope");
+    expect(api.calls.length).toBe(countBeforeApiReject);
+
+    // Remove held chip grant -> triggers PUT without removed entry
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="remove-grant-0"]',
+    )!.click();
+    await flushUi(harness);
+    expect(api.ciCapsBody.ciCapabilities).not.toContain(
+      "https://grain.dev/capabilities/release#registry-push={}",
+    );
+
+    // 2. Empty state when zero capabilities offered/held; refused PUT reverts and surfaces error
+    api.refusePut = "PUT /api/repos/{owner}/{name}/ci-capabilities";
+    api.refusePutMessage = "unknown capability";
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="repo-ci-grants-cap-github-read"]',
+    )!.click();
+    await new Promise((r) => setTimeout(r, 20));
+    await flushUi(harness);
+    expect(
+      el.querySelector('[data-testid="repo-ci-caps-error"]')?.textContent,
+    ).toContain("unknown capability");
+    expect(
+      el
+        .querySelector('[data-testid="repo-ci-grants-cap-github-read"]')
+        ?.getAttribute("aria-pressed"),
+    ).toBe("true");
+
+    // 3. Failed GET renders Retry without falsely showing empty state; Retry recovers
+    TestBed.resetTestingModule();
+    const failGetApi = new FakeRepoApi();
+    failGetApi.refuseGet = "GET /api/repos/{owner}/{name}/ci-capabilities";
+    failGetApi.refuseGetMessage = "ci capabilities service unavailable";
+    failGetApi.ciCapsBody = {
+      ciCapabilities: null,
+      availableCICapabilities: [],
+    };
+    const m2 = await mountRepo("/repos/acme/platform/ci", failGetApi);
+    await waitForEl(m2.harness, '[data-testid="repo-ci-caps-load-error"]');
+    expect(
+      m2.el.querySelector('[data-testid="repo-ci-caps-empty"]'),
+    ).toBeNull();
+    failGetApi.refuseGet = null;
+    m2.el
+      .querySelector<HTMLButtonElement>('[data-testid="repo-ci-caps-retry"]')!
+      .click();
+    await flushUi(m2.harness);
+    await waitForEl(m2.harness, '[data-testid="repo-ci-caps-empty"]');
+    expect(
+      m2.el.querySelector('[data-testid="repo-ci-caps-empty"]')?.textContent,
+    ).toContain("None offered -- grant access under Grants");
+
+    // 4. RBAC: capabilities:read denied skips GET; capabilities:admin denied disables writes
+    TestBed.resetTestingModule();
+    const readDeniedApi = new FakeRepoApi();
+    readDeniedApi.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "grain/viewer",
+        roles: ["grain/viewer"],
+        full: false,
+        scopes: ["repos:read"],
+      },
+    };
+    const m3 = await mountRepo("/repos/acme/platform/ci", readDeniedApi);
+    await waitForEl(m3.harness, '[data-testid="repo-ci-caps-denied"]');
+    expect(
+      readDeniedApi.calls.some(
+        (c) => c.key === "GET /api/repos/{owner}/{name}/ci-capabilities",
+      ),
+    ).toBe(false);
+
+    TestBed.resetTestingModule();
+    const roApi = new FakeRepoApi();
+    roApi.ciCapsBody = {
+      ciCapabilities: ["github-read"],
+      availableCICapabilities: ["github-read"],
+    };
+    roApi.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "grain/reader",
+        roles: ["grain/reader"],
+        full: false,
+        scopes: ["repos:read", "capabilities:read"],
+      },
+    };
+    const m4 = await mountRepo("/repos/acme/platform/ci", roApi);
+    await waitForEl(m4.harness, '[data-testid="repo-ci-caps-readonly"]');
+    const roPill = m4.el.querySelector<HTMLButtonElement>(
+      '[data-testid="repo-ci-grants-cap-github-read"]',
+    )!;
+    expect(roPill.disabled).toBe(true);
+    expect(roPill.getAttribute("aria-describedby")).toBe(
+      "repo-ci-caps-readonly",
+    );
+    expect(
+      m4.el.querySelector('[data-testid="repo-ci-grants-add-open"]'),
+    ).toBeNull();
+
+    // 5. configRepoOnly locks CI capabilities editor & host-prefixed navigation resets state
+    TestBed.resetTestingModule();
+    const hostApi = new FakeRepoApi();
+    hostApi.ciCapsBody = {
+      ciCapabilities: ["github-read"],
+      availableCICapabilities: ["github-read"],
+    };
+    hostApi.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "grain/host-scoped",
+        roles: ["grain/host-scoped"],
+        full: false,
+        scopes: ["repos:read", "capabilities:read", "capabilities:admin"],
+        repoLimits: {
+          "capabilities:admin": ["ghes.example.com/acme/allowed"],
+        },
+      },
+    };
+    const m5 = await mountRepo(
+      "/repos/ghes.example.com/acme/allowed/ci",
+      hostApi,
+    );
+    await waitForEl(
+      m5.harness,
+      '[data-testid="repo-ci-grants-cap-github-read"]',
+    );
+    expect(
+      m5.el.querySelector<HTMLButtonElement>(
+        '[data-testid="repo-ci-grants-cap-github-read"]',
+      )!.disabled,
+    ).toBe(false);
+
+    hostApi.ciCapsBody = {
+      ciCapabilities: [],
+      availableCICapabilities: [],
+    };
+    await m5.harness.navigateByUrl("/repos/ghes.example.com/acme/forbidden/ci");
+    await waitForEl(m5.harness, '[data-testid="repo-ci-caps-empty"]');
+    expect(
+      m5.el.querySelector('[data-testid="repo-ci-grants-cap-github-read"]'),
+    ).toBeNull();
+    expect(
+      m5.el.querySelector('[data-testid="repo-ci-caps-readonly"]'),
+    ).not.toBeNull();
+  });
+
+  it("validates agent settings explicitly and reports sequential save errors without silent failures", async () => {
+    const api = new FakeRepoApi();
+    const { harness, el } = await mountRepo("/repos/acme/platform/agents", api);
+    await waitForEl(harness, '[data-testid="card-repo-agents"]');
+
+    const setupInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="input-repo-setup-cmd"]',
+    )!;
+    const promptInput = el.querySelector<HTMLTextAreaElement>(
+      '[data-testid="input-repo-prompt-ext"]',
+    )!;
+    const capsInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="input-repo-caps"]',
+    )!;
+    const saveBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="save-repo-agents-btn"]',
+    )!;
+
+    // 1. Multi-field client validation: zero PUTs, ordered alert, aria-invalid, focus first invalid
+    setupInput.value = "npm ci\u0007";
+    setupInput.dispatchEvent(new Event("input", { bubbles: true }));
+    promptInput.value = "Always run unit tests";
+    promptInput.dispatchEvent(new Event("input", { bubbles: true }));
+    capsInput.value = "ci:read, , package-publish";
+    capsInput.dispatchEvent(new Event("input", { bubbles: true }));
+    harness.detectChanges();
+
+    saveBtn.click();
+    await flushUi(harness);
+
+    expect(api.calls.filter((c) => c.method !== "GET")).toEqual([]);
+    const banner = el.querySelector('[data-testid="repo-agents-error"]')!;
+    expect(banner).not.toBeNull();
+    const items = Array.from(
+      banner.querySelectorAll(".repo-error-list li"),
+    ).map((li) => li.textContent ?? "");
+    expect(items.length).toBe(2);
+    expect(items[0]).toContain("Sandbox setup command");
+    expect(items[1]).toContain("Default capabilities");
+    expect(setupInput.getAttribute("aria-invalid")).toBe("true");
+    expect(promptInput.getAttribute("aria-invalid")).toBeNull();
+    expect(capsInput.getAttribute("aria-invalid")).toBe("true");
+    expect(
+      el.querySelector('[data-testid="error-repo-setup-cmd"]'),
+    ).not.toBeNull();
+    expect(el.querySelector('[data-testid="error-repo-caps"]')).not.toBeNull();
+    expect(document.activeElement).toBe(setupInput);
+
+    // Fixing setup removes setup error while preserving caps error
+    setupInput.value = "npm ci";
+    setupInput.dispatchEvent(new Event("input", { bubbles: true }));
+    harness.detectChanges();
+    expect(setupInput.getAttribute("aria-invalid")).toBeNull();
+    expect(el.querySelector('[data-testid="error-repo-setup-cmd"]')).toBeNull();
+    expect(
+      el.querySelector('[data-testid="repo-agents-error"]')?.textContent,
+    ).toContain("Default capabilities");
+
+    // Verify additional invalid cap cases: unclosed JSON args, whitespace token, CI-only grain-ci
+    for (const bad of [
+      "release#registry-push={",
+      "release#registry-push=badjson",
+      "bad token",
+      "grain-ci",
+      "repo#read",
+      "release#registry-push",
+    ]) {
+      capsInput.value = bad;
+      capsInput.dispatchEvent(new Event("input", { bubbles: true }));
+      harness.detectChanges();
+      saveBtn.click();
+      await flushUi(harness);
+      expect(capsInput.getAttribute("aria-invalid")).toBe("true");
+      expect(
+        el.querySelector('[data-testid="error-repo-caps"]'),
+      ).not.toBeNull();
+    }
+    expect(api.calls.filter((c) => c.method !== "GET")).toEqual([]);
+
+    // 2. Step 1 failure halts sequence before prompt/capabilities PUTs
+    capsInput.value = 'ci:read, gcp#gcp-key={"permission_set":"viewer"}';
+    capsInput.dispatchEvent(new Event("input", { bubbles: true }));
+    harness.detectChanges();
+    api.refusePut = "PUT /api/repos/{owner}/{name}/setup-command";
+    api.refusePutMessage = "setup command disallowed";
+    saveBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    await flushUi(harness);
+    expect(
+      api.calls.filter((c) => c.method === "PUT").map((c) => c.key),
+    ).toEqual(["PUT /api/repos/{owner}/{name}/setup-command"]);
+    expect(setupInput.getAttribute("aria-invalid")).toBe("true");
+    expect(
+      el.querySelector('[data-testid="repo-agents-error"]')?.textContent,
+    ).toContain("setup command disallowed");
+    expect(document.activeElement).toBe(setupInput);
+
+    // 3. Step 3 failure after steps 1 & 2 succeed reports partial saves and exact failed step
+    api.calls = [];
+    api.refusePut = "PUT /api/repos/{owner}/{name}/capabilities";
+    api.refusePutMessage = "capability not permitted";
+    saveBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    await flushUi(harness);
+    expect(
+      api.calls.filter((c) => c.method === "PUT").map((c) => c.key),
+    ).toEqual([
+      "PUT /api/repos/{owner}/{name}/setup-command",
+      "PUT /api/repos/{owner}/{name}/prompt-extension",
+      "PUT /api/repos/{owner}/{name}/capabilities",
+    ]);
+    const partialBanner = el.querySelector(
+      '[data-testid="repo-agents-error"]',
+    )!;
+    const partialItems = Array.from(
+      partialBanner.querySelectorAll(".repo-error-list li"),
+    ).map((li) => li.textContent ?? "");
+    expect(partialItems.length).toBe(2);
+    expect(partialItems[0]).toContain("Sandbox setup command");
+    expect(partialItems[0]).toContain("Standing prompt extension");
+    expect(partialItems[1]).toContain("Default capabilities");
+    expect(partialItems[1]).toContain("capability not permitted");
+    expect(capsInput.getAttribute("aria-invalid")).toBe("true");
+    expect(document.activeElement).toBe(capsInput);
+
+    // 4. Full valid save succeeds cleanly and clears errors
+    api.calls = [];
+    api.refusePut = null;
+    saveBtn.click();
+    await flushUi(harness);
+    expect(el.querySelector('[data-testid="repo-agents-error"]')).toBeNull();
+    expect(capsInput.getAttribute("aria-invalid")).toBeNull();
+    const capPut = api.calls.find(
+      (c) => c.key === "PUT /api/repos/{owner}/{name}/capabilities",
+    );
+    expect(capPut?.body).toEqual({
+      defaultCapabilities: [
+        "ci:read",
+        'gcp#gcp-key={"permission_set":"viewer"}',
+      ],
+    });
   });
 });

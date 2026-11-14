@@ -17,10 +17,12 @@ import {
   Component,
   ViewEncapsulation,
   computed,
+  effect,
   inject,
   input,
   output,
   signal,
+  untracked,
 } from "@angular/core";
 import { GrainApi } from "../api/grain-api.service";
 import type {
@@ -57,13 +59,20 @@ export interface GrantAttachEvent {
   template: `
     <div class="grants-picker" [attr.data-testid]="testid() || 'grants-picker'">
       @if (toggleItems().length) {
-        <div class="grants-toggle-list" role="group" aria-label="Capabilities">
+        <div
+          class="grants-toggle-list"
+          role="group"
+          [attr.aria-label]="toggleAriaLabel()"
+          [attr.aria-describedby]="describedBy() || null"
+        >
           @for (c of toggleItems(); track c.id) {
             @let on = heldSet().has(c.id);
             <button
               type="button"
               class="grant-pill"
               [attr.aria-pressed]="on"
+              [attr.title]="capTip(c)"
+              [attr.aria-describedby]="describedBy() || null"
               [disabled]="disabled()"
               [attr.data-testid]="(testid() || 'gp') + '-cap-' + c.id"
               (click)="onToggle(c.id, !on)"
@@ -77,7 +86,9 @@ export interface GrantAttachEvent {
       @if (extraHeld().length) {
         <ul
           class="grants-held-list"
-          aria-label="Attached method and API grants"
+          [attr.aria-label]="
+            isCi() ? 'Attached CI grants' : 'Attached method and API grants'
+          "
         >
           @for (g of extraHeld(); track g) {
             <li
@@ -90,6 +101,7 @@ export interface GrantAttachEvent {
                   type="button"
                   class="grant-held-remove"
                   [attr.aria-label]="'Remove grant ' + g"
+                  [attr.aria-describedby]="describedBy() || null"
                   [attr.data-testid]="'remove-grant-' + $index"
                   (click)="onRemoveGrant(g)"
                 >
@@ -107,10 +119,13 @@ export interface GrantAttachEvent {
             <button
               type="button"
               class="btn-text"
+              [attr.aria-describedby]="describedBy() || null"
               [attr.data-testid]="(testid() || 'gp') + '-add-open'"
               (click)="openBuilder()"
             >
-              + Add API scope or method grant
+              {{
+                isCi() ? "+ Add CI grant" : "+ Add API scope or method grant"
+              }}
             </button>
           </div>
         } @else {
@@ -119,19 +134,21 @@ export interface GrantAttachEvent {
             [attr.data-testid]="(testid() || 'gp') + '-builder'"
           >
             <div class="grants-mode-tabs" role="group" aria-label="Grant kind">
+              @if (!isCi()) {
+                <button
+                  type="button"
+                  class="grant-pill"
+                  [attr.aria-pressed]="effectiveMode() === 'api'"
+                  [attr.data-testid]="(testid() || 'gp') + '-mode-api'"
+                  (click)="mode.set('api')"
+                >
+                  API scope
+                </button>
+              }
               <button
                 type="button"
                 class="grant-pill"
-                [attr.aria-pressed]="mode() === 'api'"
-                [attr.data-testid]="(testid() || 'gp') + '-mode-api'"
-                (click)="mode.set('api')"
-              >
-                API scope
-              </button>
-              <button
-                type="button"
-                class="grant-pill"
-                [attr.aria-pressed]="mode() === 'method'"
+                [attr.aria-pressed]="effectiveMode() === 'method'"
                 [attr.data-testid]="(testid() || 'gp') + '-mode-method'"
                 (click)="mode.set('method')"
               >
@@ -140,7 +157,7 @@ export interface GrantAttachEvent {
               <button
                 type="button"
                 class="grant-pill"
-                [attr.aria-pressed]="mode() === 'raw'"
+                [attr.aria-pressed]="effectiveMode() === 'raw'"
                 [attr.data-testid]="(testid() || 'gp') + '-mode-raw'"
                 (click)="mode.set('raw')"
               >
@@ -148,7 +165,7 @@ export interface GrantAttachEvent {
               </button>
             </div>
 
-            @switch (mode()) {
+            @switch (effectiveMode()) {
               @case ("api") {
                 <div class="grants-builder-row">
                   <g-pill-select
@@ -173,15 +190,22 @@ export interface GrantAttachEvent {
               }
               @case ("method") {
                 <div class="grants-builder-row">
-                  <g-pill-select
-                    [options]="methodOptions()"
-                    [value]="selectedMethod()"
-                    placeholder="Select capability method"
-                    ariaLabel="Capability method"
-                    align="left"
-                    [testid]="(testid() || 'gp') + '-method-ref'"
-                    (valueChange)="selectedMethod.set($event)"
-                  />
+                  @if (methodOptions().length > 0) {
+                    <g-pill-select
+                      [options]="methodOptions()"
+                      [value]="selectedMethod()"
+                      placeholder="Select capability method"
+                      ariaLabel="Capability method"
+                      align="left"
+                      [testid]="(testid() || 'gp') + '-method-ref'"
+                      (valueChange)="selectedMethod.set($event)"
+                    />
+                  } @else {
+                    <span class="s-hint">
+                      No capability methods available — use Custom grant or
+                      attach a capability server.
+                    </span>
+                  }
                   <input
                     type="text"
                     class="grants-builder-input"
@@ -198,7 +222,11 @@ export interface GrantAttachEvent {
                   <input
                     type="text"
                     class="grants-builder-input"
-                    placeholder="e.g. api:tasks-read or server#method"
+                    [placeholder]="
+                      isCi()
+                        ? 'e.g. repo-read:owner/name or server#method'
+                        : 'e.g. api:tasks-read or server#method'
+                    "
                     aria-label="Grant string"
                     [attr.data-testid]="(testid() || 'gp') + '-raw-input'"
                     [value]="rawGrant()"
@@ -249,6 +277,9 @@ export class GrantsPickerComponent {
   readonly offered = input<readonly CapabilityOption[]>([]);
   readonly held = input<readonly string[]>([]);
   readonly repo = input<string | undefined>(undefined);
+  readonly runKind = input<"task" | "process" | "ci">("task");
+  readonly toggleAriaLabel = input<string>("Capabilities");
+  readonly describedBy = input<string | null>(null);
   readonly disabled = input<boolean>(false);
   readonly testid = input<string>("");
 
@@ -269,7 +300,40 @@ export class GrantsPickerComponent {
   protected readonly rawGrant = signal("");
   protected readonly checking = signal(false);
   protected readonly checkError = signal<string | null>(null);
-  private loadedCatalogue = false;
+  private loadedCatalogueKey: string | null = null;
+
+  protected readonly isCi = computed(() => this.runKind() === "ci");
+  protected readonly effectiveMode = computed<"api" | "method" | "raw">(() =>
+    this.isCi() && this.mode() === "api" ? "method" : this.mode(),
+  );
+  private readonly catalogueQueryKey = computed(() => {
+    const kind = this.runKind();
+    const repo = this.repo();
+    return repo
+      ? `kind=${kind}&repo=${encodeURIComponent(repo)}`
+      : `kind=${kind}`;
+  });
+
+  constructor() {
+    let prevKey: string | null = null;
+    effect(() => {
+      const key = this.catalogueQueryKey();
+      if (prevKey !== null && prevKey !== key) {
+        untracked(() => {
+          this.loadedCatalogueKey = null;
+          this.methods.set([]);
+          this.selectedMethod.set("");
+          this.methodArgsJson.set("");
+          this.rawGrant.set("");
+          this.checkError.set(null);
+          if (this.builderOpen()) {
+            void this.loadCatalogue();
+          }
+        });
+      }
+      prevKey = key;
+    });
+  }
 
   protected readonly heldSet = computed(() => new Set(this.held()));
 
@@ -314,11 +378,29 @@ export class GrantsPickerComponent {
   );
 
   protected canReadCatalogue(): boolean {
+    if (this.isCi()) {
+      return (
+        this.access.can("GET /api/capability-methods", this.repo()) ||
+        this.access.can("POST /api/capability-grants/check", this.repo())
+      );
+    }
     return (
       this.access.can("GET /api/capability-methods", this.repo()) ||
       this.access.can("GET /api/api-scope-sets", this.repo()) ||
       this.access.can("POST /api/capability-grants/check", this.repo())
     );
+  }
+
+  protected capTip(c: CapabilityOption): string {
+    if (c.ready === false) {
+      const needs = Array.isArray(c.needs) ? c.needs : c.needs ? [c.needs] : [];
+      const gap = needs.length
+        ? ` — needs ${needs.join(", ")}`
+        : " on this deployment";
+      const base = c.description ? `${c.description} ` : "";
+      return `${base}Not ready${gap}.`;
+    }
+    return c.description || c.id;
   }
 
   protected shortGrant(g: string): string {
@@ -359,14 +441,20 @@ export class GrantsPickerComponent {
   protected async openBuilder(): Promise<void> {
     this.builderOpen.set(true);
     this.checkError.set(null);
-    if (this.loadedCatalogue) return;
-    this.loadedCatalogue = true;
+    if (this.isCi() && this.mode() === "api") {
+      this.mode.set("method");
+    }
+    await this.loadCatalogue();
+  }
+
+  private async loadCatalogue(): Promise<void> {
+    const query = this.catalogueQueryKey();
+    if (this.loadedCatalogueKey === query) return;
+    this.loadedCatalogueKey = query;
     const repo = this.repo();
-    const query = repo
-      ? `kind=task&repo=${encodeURIComponent(repo)}`
-      : "kind=task";
+    const isCi = this.isCi();
     const [setsRes, methodsRes] = await Promise.allSettled([
-      this.access.can("GET /api/api-scope-sets", repo)
+      !isCi && this.access.can("GET /api/api-scope-sets", repo)
         ? this.api.get<APIScopeSetsResponse>("GET /api/api-scope-sets")
         : Promise.resolve({ sets: [] }),
       this.access.can("GET /api/capability-methods", repo)
@@ -377,6 +465,7 @@ export class GrantsPickerComponent {
           )
         : Promise.resolve({ items: [] }),
     ]);
+    if (this.catalogueQueryKey() !== query) return;
     if (setsRes.status === "fulfilled") {
       const sets = setsRes.value?.sets ?? [];
       this.scopeSets.set(sets);
@@ -393,11 +482,16 @@ export class GrantsPickerComponent {
         ? val
         : (val?.items ?? val?.methods ?? []);
       this.methods.set(list);
-      if (!this.selectedMethod() && list[0]) {
-        this.selectedMethod.set(list[0].ref);
+      const allowed = list.filter((m) => !m.policyRefusal);
+      if (
+        (!this.selectedMethod() ||
+          !allowed.some((m) => m.ref === this.selectedMethod())) &&
+        allowed[0]
+      ) {
+        this.selectedMethod.set(allowed[0].ref);
       }
     }
-    if (!this.selectedApiSet()) {
+    if (!isCi && !this.selectedApiSet()) {
       this.selectedApiSet.set(this.apiOptions()[0]?.value ?? "tasks-read");
     }
   }
@@ -405,7 +499,7 @@ export class GrantsPickerComponent {
   protected async attachFromBuilder(): Promise<void> {
     if (this.checking()) return;
     this.checkError.set(null);
-    const mode = this.mode();
+    const mode = this.effectiveMode();
     let reqItem: {
       capability?: string;
       with?: Record<string, unknown>;
@@ -462,7 +556,15 @@ export class GrantsPickerComponent {
     } else {
       const g = this.rawGrant().trim();
       if (!g) {
-        this.checkError.set("Enter a capability or API grant.");
+        this.checkError.set(
+          this.isCi()
+            ? "Enter a CI capability or method grant."
+            : "Enter a capability or API grant.",
+        );
+        return;
+      }
+      if (this.isCi() && isApiCapability(g)) {
+        this.checkError.set("CI jobs cannot hold agent API scope grants.");
         return;
       }
       reqItem = { grant: g };
@@ -477,7 +579,9 @@ export class GrantsPickerComponent {
           GrantCheck[] | { checks?: GrantCheck[] }
         >("POST /api/capability-grants/check", undefined, {
           grants: [reqItem],
-          ...(this.repo() ? { subject: { repo: this.repo() } } : {}),
+          ...(!this.isCi() && this.repo()
+            ? { subject: { repo: this.repo() } }
+            : {}),
         });
         const list = Array.isArray(res) ? res : (res?.checks ?? []);
         const check = list[0];
