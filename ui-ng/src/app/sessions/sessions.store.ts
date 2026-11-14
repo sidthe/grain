@@ -16,6 +16,7 @@ import { Injectable, NgZone, computed, inject, signal } from "@angular/core";
 import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import type {
+  AgentBackendOption,
   AgentModel,
   AgentModelsResponse,
   AttachmentUpload,
@@ -104,6 +105,8 @@ export class SessionsStore {
   readonly offered = signal<CapabilityOption[]>([]);
   readonly networkOptions = signal<string[]>(["open", "none"]);
   readonly models = signal<string[]>([]);
+  readonly agentBackends = signal<AgentBackendOption[] | null>(null);
+  readonly modelCatalogLoaded = signal(false);
   readonly agentModels = signal<AgentModel[]>([]);
   readonly agentModelsError = signal<string | null>(null);
   readonly defaultModel = signal<string>("");
@@ -241,8 +244,14 @@ export class SessionsStore {
   private async loadConfigModels(): Promise<void> {
     try {
       const cfg = (await this.api.config()) as GrainConfig | null;
-      if (cfg && !this.access.configLoaded()) {
-        this.access.setConfig(cfg);
+      if (cfg) {
+        this.modelCatalogLoaded.set(true);
+        if (!this.access.configLoaded()) {
+          this.access.setConfig(cfg);
+        }
+        this.agentBackends.set(
+          Array.isArray(cfg.agentBackends) ? cfg.agentBackends : null,
+        );
       }
       if (Array.isArray(cfg?.models)) this.models.set(cfg.models);
       if (typeof cfg?.defaultModel === "string") {

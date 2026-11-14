@@ -73,4 +73,31 @@ describe("DirectorContextService", () => {
     btn.remove();
     other.remove();
   });
+
+  it("captures activeElement when open() omits opener and skips restore on close(false)", async () => {
+    const svc = TestBed.inject(DirectorContextService);
+    const btn = document.createElement("button");
+    const inside = document.createElement("input");
+    document.body.append(btn, inside);
+    try {
+      btn.focus();
+      svc.open();
+      inside.focus();
+
+      svc.close(true);
+      expect(svc.isOpen()).toBe(false);
+      await Promise.resolve();
+      expect(document.activeElement).toBe(btn);
+
+      btn.focus();
+      svc.open();
+      inside.focus();
+      svc.close(false);
+      await Promise.resolve();
+      expect(document.activeElement).toBe(inside);
+    } finally {
+      btn.remove();
+      inside.remove();
+    }
+  });
 });
