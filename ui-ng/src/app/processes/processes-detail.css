@@ -4,9 +4,11 @@
   display: flex;
   flex-direction: column;
   gap: 16px;
+  box-sizing: border-box;
   min-height: 0;
   min-width: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 20px 24px 32px;
   background: var(--md-sys-color-surface);
 }
@@ -15,6 +17,8 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
+  max-width: 100%;
   padding-bottom: 16px;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
@@ -25,10 +29,21 @@
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.proc-insp-top .headline-cluster,
+.proc-insp-head .headline-actions {
+  flex-wrap: wrap;
+  max-width: 100%;
 }
 
 .proc-insp-title {
   margin: 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   font-family: var(--grain-font-display);
   font-size: 20px;
   line-height: 26px;
@@ -40,8 +55,18 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 14px;
+  min-width: 0;
+  max-width: 100%;
   font-size: 13px;
   color: var(--md-sys-color-on-surface-variant);
+}
+
+.proc-meta-row > *,
+.proc-insp-head .banner {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
 }
 
 .proc-card {
@@ -101,25 +126,30 @@
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
   font-size: 13px;
 }
 
 .comp-task {
   padding-top: 8px;
+  min-width: 0;
   border-top: 1px solid var(--md-sys-color-outline-variant);
 }
 
 .comp-task-title {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
+  min-width: 0;
   font-size: 13px;
   margin-bottom: 6px;
+  overflow-wrap: anywhere;
 }
 
 .comp-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
   gap: 6px 12px;
   margin: 0;
   font-size: 12px;
@@ -129,11 +159,13 @@
   display: flex;
   flex-direction: column;
   gap: 2px;
+  min-width: 0;
 }
 
 .comp-row dt {
   color: var(--md-sys-color-on-surface-variant);
   font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
 .comp-row dd {
@@ -142,6 +174,8 @@
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
   color: var(--md-sys-color-on-surface);
 }
 
@@ -165,19 +199,23 @@
 
 .proc-kv-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 6px 10px;
   padding: 8px 10px;
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-corner-small);
   font-size: 13px;
   min-width: 0;
+  max-width: 100%;
   overflow-wrap: anywhere;
 }
 
 .proc-kv-item > * {
   min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .decl-acc-item {
@@ -293,7 +331,7 @@
 
 .proc-field-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
   gap: 12px;
 }
 
@@ -321,7 +359,11 @@
 
 @media (max-width: 599.95px) {
   .proc-inspector {
-    padding: 14px 12px 24px;
+    padding: 14px 12px
+      calc(
+        max(108px, var(--grain-bottombar-height, 92px) + 16px) +
+          env(safe-area-inset-bottom, 0px)
+      );
   }
 
   .decl-acc-actions {
@@ -339,7 +381,20 @@
     border-radius: var(--md-sys-shape-corner-medium);
   }
 
+  .g-dialog .dialog-actions {
+    flex-wrap: wrap;
+  }
+
   .tmpl-field-editor-row {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (max-height: 480px) and (orientation: landscape) {
+  .proc-inspector {
+    padding-bottom: calc(
+      max(108px, var(--grain-bottombar-height, 92px) + 16px) +
+        env(safe-area-inset-bottom, 0px)
+    );
   }
 }
