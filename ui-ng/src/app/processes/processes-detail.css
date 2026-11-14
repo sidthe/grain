@@ -5,10 +5,24 @@
   flex-direction: column;
   gap: 16px;
   min-height: 0;
-  min-width: 0;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 20px 24px 32px;
   background: var(--md-sys-color-surface);
+}
+
+.proc-inspector,
+.proc-insp-head,
+.proc-insp-top,
+.proc-card,
+.proc-prompt-well,
+.comp-box,
+.proc-kv-item,
+.proc-decl-item,
+g-processes-page .banner {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .proc-insp-head {
@@ -35,6 +49,20 @@
   font-weight: 600;
 }
 
+.proc-insp-title,
+.proc-meta-row,
+.proc-decl-id,
+.proc-decl-details,
+.proc-decl-details code,
+.proc-kv-item > *,
+.comp-row,
+.comp-row dd,
+g-processes-page .banner {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
 .proc-meta-row {
   display: flex;
   flex-wrap: wrap;
@@ -52,9 +80,6 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  min-width: 0;
-  max-width: 100%;
-  box-sizing: border-box;
 }
 
 :root[data-theme="dark"] .proc-card {
@@ -114,14 +139,17 @@
 .comp-task-title {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 13px;
   margin-bottom: 6px;
 }
 
 .comp-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(220px, 100%), 1fr));
   gap: 6px 12px;
   margin: 0;
   font-size: 12px;
@@ -167,19 +195,21 @@
 
 .proc-kv-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  gap: 6px 10px;
   padding: 8px 10px;
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-corner-small);
   font-size: 13px;
 }
 
-g-processes-page .banner {
-  box-sizing: border-box;
-  max-width: 100%;
-  overflow-wrap: anywhere;
+.proc-kv-item .btn-text {
+  white-space: normal;
+  height: auto;
+  min-height: 32px;
+  text-align: left;
 }
 
 .proc-decl-item {
@@ -190,9 +220,6 @@ g-processes-page .banner {
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-corner-small);
   font-size: 13px;
-  min-width: 0;
-  max-width: 100%;
-  box-sizing: border-box;
 }
 
 .proc-decl-head {
@@ -218,15 +245,6 @@ g-processes-page .banner {
   flex-wrap: wrap;
   gap: 4px 8px;
   min-width: 0;
-}
-
-.proc-decl-id,
-.proc-decl-details,
-.proc-decl-details code {
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  min-width: 0;
-  max-width: 100%;
 }
 
 .proc-decl-details {
@@ -287,6 +305,10 @@ g-processes-page .banner {
   gap: 12px;
 }
 
+.proc-field-grid > * {
+  min-width: 0;
+}
+
 .proc-sched-dialog .filter-strip {
   flex-wrap: wrap;
   overflow-x: visible;
@@ -340,7 +362,12 @@ g-processes-page .banner {
 
 @media (max-width: 599.95px) {
   .proc-inspector {
-    padding: 14px 12px 24px;
+    --proc-clear: calc(
+      var(--grain-bottombar-height, 92px) + 16px +
+        env(safe-area-inset-bottom, 0px)
+    );
+    padding: 14px 12px var(--proc-clear);
+    scroll-padding-bottom: var(--proc-clear);
   }
 
   .proc-decl-actions {
@@ -360,6 +387,17 @@ g-processes-page .banner {
   }
 
   .tmpl-field-editor-row {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-height: 480px) and (orientation: landscape) {
+  .proc-inspector {
+    --proc-clear: calc(
+      var(--grain-bottombar-height, 52px) + 36px +
+        env(safe-area-inset-bottom, 0px)
+    );
+    padding-bottom: var(--proc-clear);
+    scroll-padding-bottom: var(--proc-clear);
   }
 }

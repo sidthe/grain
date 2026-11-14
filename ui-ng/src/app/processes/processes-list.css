@@ -4,16 +4,57 @@ g-processes-page {
   display: contents;
 }
 
+g-processes-page .view-panel,
+g-processes-page .stage-header,
+g-processes-page .headline-cluster,
+g-processes-page .headline-actions {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+g-processes-page .headline-cluster,
+g-processes-page .headline-actions,
+g-processes-page .g-dialog .dialog-actions {
+  flex-wrap: wrap;
+}
+
+g-processes-page .headline-actions > * {
+  max-width: 100%;
+}
+
+g-processes-page .g-dialog .pill-dropdown,
+g-processes-page .g-dialog .pill-trigger {
+  min-width: 0;
+  max-width: 100%;
+}
+
+g-processes-page .g-dialog .pill-trigger {
+  height: auto;
+  padding: 6px 12px;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.proc-split {
+  grid-template-rows: minmax(0, 1fr);
+}
+
 .proc-list {
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: 0 0 16px;
   overflow-y: auto;
+  overflow-x: hidden;
   flex: 1;
   min-height: 0;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .proc-li {
+  min-width: 0;
+  max-width: 100%;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
 
@@ -22,6 +63,9 @@ g-processes-page {
   flex-direction: column;
   gap: 6px;
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   padding: 12px 16px;
   border: 0;
   background: transparent;
@@ -48,12 +92,14 @@ g-processes-page {
 .proc-row-top {
   display: flex;
   align-items: center;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 6px 8px;
   min-width: 0;
+  max-width: 100%;
 }
 
 .proc-row-title {
-  flex: 1;
+  flex: 1 1 120px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -67,8 +113,16 @@ g-processes-page {
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 10px;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   font-size: 12px;
   color: var(--md-sys-color-on-surface-variant);
+}
+
+.proc-row-sub > span {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .proc-subbar {
@@ -76,6 +130,9 @@ g-processes-page {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
   padding: 10px 16px;
   background: var(--md-sys-color-surface-container-low);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
@@ -85,9 +142,21 @@ g-processes-page {
   display: none;
 }
 
+@media (min-width: 600px) and (max-width: 1079.95px) {
+  .proc-split {
+    grid-template-columns: minmax(min(260px, 44%), 44%) minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 599.95px) {
   .proc-split {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+  .proc-split .queue-pane {
+    border-right: 0;
+    min-width: 0;
+    max-width: 100%;
   }
   .proc-split.has-mobile-detail .queue-pane {
     display: none;
@@ -97,5 +166,47 @@ g-processes-page {
   }
   .proc-mobile-back {
     display: inline-flex;
+  }
+  .proc-subbar .segmented {
+    max-width: 100%;
+    flex-wrap: wrap;
+    border-radius: var(--md-sys-shape-corner-medium);
+  }
+  g-processes-page .g-dialog {
+    padding: 18px 16px;
+    max-height: calc(100dvh - 32px - env(safe-area-inset-bottom, 0px));
+  }
+  g-processes-page .g-dialog .filter-chip {
+    max-width: 100%;
+    white-space: normal;
+    height: auto;
+    min-height: 40px;
+    padding: 6px 12px;
+  }
+  /* Reserve clearance below the final list row for the fixed 56px .phone-fab
+     and bottom navigation bars so rows and controls remain clickable. */
+  .proc-list,
+  g-processes-page .queue-pane .empty-state {
+    --proc-clear: calc(
+      var(--grain-bottombar-height, 92px) + 16px +
+        env(safe-area-inset-bottom, 0px)
+    );
+    padding-bottom: var(--proc-clear);
+    scroll-padding-bottom: var(--proc-clear);
+  }
+}
+
+@media (max-height: 480px) and (orientation: landscape) {
+  g-processes-page .g-dialog {
+    max-height: calc(100dvh - 24px - env(safe-area-inset-bottom, 0px));
+  }
+  .proc-list,
+  g-processes-page .queue-pane .empty-state {
+    --proc-clear: calc(
+      var(--grain-bottombar-height, 52px) + 36px +
+        env(safe-area-inset-bottom, 0px)
+    );
+    padding-bottom: var(--proc-clear);
+    scroll-padding-bottom: var(--proc-clear);
   }
 }
