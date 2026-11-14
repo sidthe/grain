@@ -255,3 +255,52 @@ func TestBuildMetadataDoesNotOrder(t *testing.T) {
 		t.Errorf("Compare of two dev.114 builds = %d, want 0", got)
 	}
 }
+
+func TestIsValidRepoName(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{name: "valid simple", in: "grain", want: true},
+		{name: "valid owner slash repo", in: "ai-on-gke/grain", want: true},
+		{name: "valid with dot in middle", in: "owner/repo.git", want: true},
+		{name: "valid trailing dot", in: "repo.", want: true},
+		{name: "valid single char", in: "a", want: true},
+		{name: "valid underscores and digits", in: "my_org/repo_123", want: true},
+		{name: "valid dot in non-leading segment", in: "owner/.github", want: true},
+		{name: "empty", in: "", want: false},
+		{name: "single space", in: " ", want: false},
+		{name: "spaces only", in: "   ", want: false},
+		{name: "leading space", in: " repo", want: false},
+		{name: "trailing space", in: "repo ", want: false},
+		{name: "internal space", in: "owner/my repo", want: false},
+		{name: "tab", in: "owner\trepo", want: false},
+		{name: "newline", in: "owner\nrepo", want: false},
+		{name: "carriage return", in: "owner\rrepo", want: false},
+		{name: "vertical tab", in: "owner\vrepo", want: false},
+		{name: "form feed", in: "owner\frepo", want: false},
+		{name: "unicode nbsp", in: "owner\u00a0repo", want: false},
+		{name: "double dot only", in: "..", want: false},
+		{name: "leading traversal", in: "../repo", want: false},
+		{name: "trailing traversal", in: "repo/..", want: false},
+		{name: "middle traversal", in: "owner/../repo", want: false},
+		{name: "embedded double dot", in: "owner/repo..git", want: false},
+		{name: "nul byte only", in: "\x00", want: false},
+		{name: "leading nul byte", in: "\x00repo", want: false},
+		{name: "trailing nul byte", in: "repo\x00", want: false},
+		{name: "middle nul byte", in: "owner\x00/repo", want: false},
+		{name: "single dot only", in: ".", want: false},
+		{name: "leading dot", in: ".git", want: false},
+		{name: "leading dot slash", in: "./repo", want: false},
+		{name: "leading dot with owner slash repo", in: ".owner/repo", want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsValidRepoName(tc.in); got != tc.want {
+				t.Errorf("IsValidRepoName(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
