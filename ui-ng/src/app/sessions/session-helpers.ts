@@ -190,3 +190,18 @@ export function errorText(err: unknown): string {
   }
   return e?.message || "The request failed.";
 }
+
+// formatSessionDuration renders a millisecond duration for session displays:
+// sub-second in ms, under a minute in whole seconds, and minutes thereafter.
+export function formatSessionDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return "Invalid";
+  }
+  if (ms < 1000) {
+    return `${ms}ms`;
+  }
+  if (ms < 60000) {
+    return `${Math.floor(ms / 1000)}s`;
+  }
+  return `${Math.floor(ms / 60000)}m`;
+}
