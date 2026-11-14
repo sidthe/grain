@@ -16,6 +16,7 @@ import { DOCUMENT } from "@angular/common";
 import {
   ChangeDetectionStrategy,
   Component,
+  DestroyRef,
   ElementRef,
   HostListener,
   NgZone,
@@ -31,7 +32,13 @@ import {
   untracked,
   viewChild,
 } from "@angular/core";
-import { Router, RouterLink } from "@angular/router";
+import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
+import {
+  ActivatedRoute,
+  type ParamMap,
+  Router,
+  RouterLink,
+} from "@angular/router";
 import { routePath } from "../api/grain-api.service";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
@@ -47,6 +54,7 @@ import { SplitController } from "../shared/split-controller";
 import { StatusIconComponent } from "../shared/status-icon.component";
 import { TipDirective } from "../shared/tip.directive";
 import {
+  CI_PROVIDER_GITHUB_ACTIONS,
   type CIFault,
   type CIFilterId,
   type CIJobRun,
@@ -64,8 +72,12 @@ import {
   faultsForRun,
   formatBytes,
   formatDuration,
+  isGitHubActionsRun,
+  isGitHubActionsRunId,
   isRunActive,
+  parseProviderQueryParam,
   providerOfRun,
+  providerQueryParam,
   runBadge,
   runBranch,
   runBucket,
@@ -517,7 +529,13 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
           } @else if (store.loaded() && filteredRuns().length === 0) {
             <div class="empty-state" data-testid="ci-empty">
               <p>No CI runs match the current filters.</p>
-              @if (bucketFilter() !== "all" || repoFilter() || branchFilter()) {
+              @if (
+                bucketFilter() !== "all" ||
+                repoFilter() ||
+                branchFilter() ||
+                providerFilter() !== "all" ||
+                faultDigestFilter()
+              ) {
                 <button
                   type="button"
                   class="btn-tonal"
@@ -1425,7 +1443,9 @@ export class CIPageComponent implements OnInit, OnDestroy {
   protected readonly store = inject(CIStore);
   protected readonly access = inject(AccessService);
   protected readonly filter = inject(ViewFilter);
+  private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router);
+  private readonly destroyRef = inject(DestroyRef);
   private readonly snackbar = inject(SnackbarService);
   private readonly doc = inject(DOCUMENT);
   private readonly zone = inject(NgZone);
@@ -1638,6 +1658,11 @@ export class CIPageComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
+    this.applyQueryParams(this.route.snapshot.queryParamMap);
+    this.store.setQueryScope(this.repoFilter(), this.providerFilter());
+    this.route.queryParamMap
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe((params) => this.applyQueryParams(params));
     this.zone.runOutsideAngular(() => {
       this.doc.addEventListener("keydown", this.onCaptureKeydown, true);
     });
@@ -1697,23 +1722,94 @@ export class CIPageComponent implements OnInit, OnDestroy {
     this.openMenu.set(this.openMenu() === which ? null : which);
   }
 
+  private applyQueryParams(params: ParamMap): void {
+    const prov = parseProviderQueryParam(params.get("provider"));
+    if (this.providerFilter() !== prov) {
+      this.providerFilter.set(prov);
+    }
+    const repo = (params.get("repo") ?? "").trim();
+    if (this.repoFilter() !== repo) {
+      this.repoFilter.set(repo);
+    }
+    const branch = (params.get("branch") ?? "").trim();
+    if (this.branchFilter() !== branch) {
+      this.branchFilter.set(branch);
+    }
+    const rawBucket = (params.get("bucket") ?? "all").trim();
+    const bucket: CIFilterId =
+      rawBucket === "running" ||
+      rawBucket === "failed" ||
+      rawBucket === "errored" ||
+      rawBucket === "passed" ||
+      rawBucket === "cancelled"
+        ? rawBucket
+        : "all";
+    if (this.bucketFilter() !== bucket) {
+      this.bucketFilter.set(bucket);
+    }
+  }
+
+  private isGitHubActionsRunTarget(
+    runId: string,
+    forceGitHubActions = false,
+  ): boolean {
+    if (forceGitHubActions || isGitHubActionsRunId(runId)) return true;
+    const det = this.store.detail();
+    if (det?.id === runId && isGitHubActionsRun(det)) return true;
+    const listed = this.store.runs().find((r) => r.id === runId);
+    return isGitHubActionsRun(listed);
+  }
+
+  private filterQueryParams(): Record<string, string | null> {
+    return {
+      provider: providerQueryParam(this.providerFilter()),
+      repo: this.repoFilter().trim() || null,
+      branch: this.branchFilter().trim() || null,
+      bucket: this.bucketFilter() === "all" ? null : this.bucketFilter(),
+    };
+  }
+
+  private runNavigationQueryParams(
+    runId: string,
+    forceGitHubActions = false,
+  ): Record<string, string | null> {
+    const params = this.filterQueryParams();
+    if (this.isGitHubActionsRunTarget(runId, forceGitHubActions)) {
+      params["provider"] = CI_PROVIDER_GITHUB_ACTIONS;
+    }
+    return params;
+  }
+
+  private syncFilterUrl(): void {
+    void this.router.navigate([], {
+      relativeTo: this.route,
+      queryParams: this.filterQueryParams(),
+      queryParamsHandling: "merge",
+      replaceUrl: true,
+    });
+  }
+
   protected setBucketFilter(id: CIFilterId): void {
     this.bucketFilter.set(id);
+    this.syncFilterUrl();
   }
 
   protected setProviderFilter(id: CIProviderFilter): void {
     this.providerFilter.set(id);
+    this.syncFilterUrl();
   }
 
   protected pickRepo(repo: string): void {
     this.repoFilter.set(repo);
     this.branchFilter.set("");
     this.openMenu.set(null);
+    this.syncFilterUrl();
   }
 
   protected pickBranch(branch: string): void {
     this.branchFilter.set(branch);
     this.openMenu.set(null);
+    this.syncFilterUrl();
   }
 
   protected resetFilters(): void {
@@ -1723,6 +1819,7 @@ export class CIPageComponent implements OnInit, OnDestroy {
     this.providerFilter.set("all");
     this.faultDigestFilter.set("");
     this.filter.query.set("");
+    this.syncFilterUrl();
   }
 
   protected inspectFault(f: CIFault): void {
@@ -1733,23 +1830,36 @@ export class CIPageComponent implements OnInit, OnDestroy {
     }
     this.faultDigestFilter.set(f.digest || faultTitle(f));
     const firstRunId = f.runs?.[0]?.runId;
+    if (!firstRunId || !this.id() || this.id() === firstRunId) {
+      this.syncFilterUrl();
+    }
     if (firstRunId) {
-      this.openRun(firstRunId, true);
+      this.openRun(firstRunId, true, src === "github");
     }
   }
 
-  protected openRun(runId: string, fromUserClick = false): void {
+  protected openRun(
+    runId: string,
+    fromUserClick = false,
+    forceGitHubActions = false,
+  ): void {
     if (fromUserClick) this.mobileDetailOpen.set(true);
     void this.store.selectRun(runId);
     if (this.id() && this.id() !== runId) {
-      void this.router.navigate(["/ci", "runs", runId]);
+      void this.router.navigate(["/ci", "runs", runId], {
+        queryParams: this.runNavigationQueryParams(runId, forceGitHubActions),
+        queryParamsHandling: "merge",
+      });
     }
   }
 
   protected closeMobileDetail(): void {
     this.mobileDetailOpen.set(false);
     if (this.id()) {
-      void this.router.navigate(["/ci"]);
+      void this.router.navigate(["/ci"], {
+        queryParams: this.filterQueryParams(),
+        queryParamsHandling: "merge",
+      });
     }
   }
 
@@ -1930,7 +2040,9 @@ export class CIPageComponent implements OnInit, OnDestroy {
         recheck: this.draftRecheck() || undefined,
       });
       this.runDialogOpen.set(false);
-      if (created?.id) this.openRun(created.id);
+      if (created?.id) {
+        this.openRun(created.id, false, isGitHubActionsRun(created));
+      }
       this.snackbar.show(`Started CI run ${created?.id ?? ""}`.trim());
     } catch (err) {
       this.store.actionError.set(errorText(err));
@@ -1964,7 +2076,13 @@ export class CIPageComponent implements OnInit, OnDestroy {
       );
       // Follow to the run it started: on /ci/runs/<id> the route's id
       // would otherwise pull the inspector back to the run just retried.
-      if (created?.id) this.openRun(created.id);
+      if (created?.id) {
+        this.openRun(
+          created.id,
+          false,
+          isGitHubActionsRun(created) || isGitHubActionsRun(run),
+        );
+      }
       this.snackbar.show(
         failedOnly
           ? `Re-running failed jobs (${created?.id ?? "started"})`

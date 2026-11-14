@@ -154,6 +154,8 @@ class FakeApi {
       ],
     },
   ];
+  ciRepoProvider?: string;
+  ghaCiRuns?: typeof FakeApi.prototype.ciRuns;
   tree = {
     origin: "task:7",
     rootTask: "7",
@@ -200,7 +202,18 @@ class FakeApi {
       });
     }
     if (route === "GET /api/ci/runs") {
-      return Promise.resolve({ enabled: true, runs: this.ciRuns });
+      if (query?.includes("provider=github-actions") && this.ghaCiRuns) {
+        return Promise.resolve({
+          enabled: true,
+          runs: this.ghaCiRuns,
+          repoProvider: "github-actions",
+        });
+      }
+      return Promise.resolve({
+        enabled: true,
+        runs: this.ciRuns,
+        repoProvider: this.ciRepoProvider,
+      });
     }
     if (route === "GET /api/ci/runs/{id}") {
       return Promise.resolve(this.ciRuns[0]);
@@ -1215,5 +1228,79 @@ describe("duration", () => {
     expect(q(f, '[data-testid="force-merge-dialog"]')).toBeNull();
     expect(section.hasAttribute("inert")).toBe(false);
     expect(document.activeElement).toBe(openBtn);
+  });
+
+  it("includes provider=github-actions on GET /api/ci/runs and CI run links for GitHub Actions tasks", async () => {
+    const api = new FakeApi();
+    api.detail = {
+      ...api.detail,
+      ci: {
+        ...api.detail.ci,
+        runId: "gha:acme:web:42",
+        conclusion: "failure",
+      },
+    } as TaskDetail;
+    api.ghaCiRuns = [
+      {
+        id: "gha:acme:web:42",
+        provider: "github-actions",
+        workflow: "CI",
+        commit: "abc123456789",
+        status: "completed",
+        conclusion: "failure",
+        jobs: [],
+      } as unknown as FakeApi["ciRuns"][number],
+    ];
+    const f = await render(api, "changes");
+
+    const list = api.calls.filter((c) => c.route === "GET /api/ci/runs");
+    expect(list.some((c) => c.query?.includes("provider=github-actions"))).toBe(
+      true,
+    );
+    const link = q<HTMLAnchorElement>(
+      f,
+      '[data-testid="ci-run-link-gha:acme:web:42"]',
+    )!;
+    expect(link).not.toBeNull();
+    expect(decodeURIComponent(link.getAttribute("href")!)).toBe(
+      "/ci/runs/gha:acme:web:42?provider=github-actions",
+    );
+  });
+
+  it("follows up with provider=github-actions when GET /api/ci/runs reports repoProvider=github-actions", async () => {
+    const api = new FakeApi();
+    api.detail = {
+      ...api.detail,
+      ci: undefined,
+    } as TaskDetail;
+    api.ciRuns = [];
+    api.ciRepoProvider = "github-actions";
+    api.ghaCiRuns = [
+      {
+        id: "gha:acme:web:77",
+        provider: "github-actions",
+        workflow: "Checks",
+        commit: "def987654321",
+        status: "completed",
+        conclusion: "success",
+        jobs: [],
+      } as unknown as FakeApi["ciRuns"][number],
+    ];
+    const f = await render(api, "changes");
+
+    const queries = api.calls
+      .filter((c) => c.route === "GET /api/ci/runs")
+      .map((c) => c.query ?? "");
+    expect(queries).toContain("repo=acme%2Fweb&ref=grain%2Ftask-7&limit=10");
+    expect(queries).toContain(
+      "repo=acme%2Fweb&ref=grain%2Ftask-7&limit=10&provider=github-actions",
+    );
+    const link = q<HTMLAnchorElement>(
+      f,
+      '[data-testid="ci-run-link-gha:acme:web:77"]',
+    )!;
+    expect(decodeURIComponent(link.getAttribute("href")!)).toBe(
+      "/ci/runs/gha:acme:web:77?provider=github-actions",
+    );
   });
 });

@@ -33,6 +33,8 @@ import {
   viewChild,
 } from "@angular/core";
 import { Router, RouterLink } from "@angular/router";
+import type { RouteKey } from "../api/generated-routes";
+import { ciRunQueryParams } from "../ci/ci.models";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
 import { TaskFeedStore } from "../services/task-feed.service";
@@ -221,10 +223,7 @@ type SuitesPaneView = "suites" | "runs";
                 }
               }
               @case ("suites") {
-                @if (
-                  store.suites().length > 0 &&
-                  access.can("POST /api/suite-runs")
-                ) {
+                @if (store.suites().length > 0 && canOpenRunSuiteDialog()) {
                   <button
                     type="button"
                     class="btn-tonal"
@@ -234,7 +233,7 @@ type SuitesPaneView = "suites" | "runs";
                     Run suite
                   </button>
                 }
-                @if (access.can("POST /api/suites")) {
+                @if (access.canGlobalScope("suites:write")) {
                   <button
                     type="button"
                     class="btn-primary"
@@ -734,14 +733,13 @@ type SuitesPaneView = "suites" | "runs";
                         type="button"
                         class="btn-primary"
                         data-testid="sched-run-now-btn"
-                        [disabled]="
-                          !access.can('POST /api/schedules/{id}/run', s.repo)
-                        "
+                        [disabled]="!access.canGlobalScope('schedules:write')"
                         [gTip]="
-                          access.deniedReason(
+                          globalScopeDeniedReason(
                             'POST /api/schedules/{id}/run',
-                            s.repo
-                          ) || 'Fire this schedule immediately.'
+                            'schedules:write',
+                            'Fire this schedule immediately.'
+                          )
                         "
                         (click)="runScheduleNow(s)"
                       >
@@ -753,14 +751,17 @@ type SuitesPaneView = "suites" | "runs";
                         data-testid="sched-toggle-enabled-btn"
                         [disabled]="
                           !!s.declaredIn ||
-                          !access.can('PATCH /api/schedules/{id}', s.repo)
+                          !access.canGlobalScope('schedules:write')
                         "
                         [gTip]="
                           s.declaredIn
                             ? 'Declared in ' +
                               s.declaredIn.path +
                               ' — edit in repository.'
-                            : ''
+                            : globalScopeDeniedReason(
+                                'PATCH /api/schedules/{id}',
+                                'schedules:write'
+                              )
                         "
                         (click)="toggleScheduleEnabled(s)"
                       >
@@ -771,8 +772,12 @@ type SuitesPaneView = "suites" | "runs";
                           type="button"
                           class="btn-tonal"
                           data-testid="sched-edit-btn"
-                          [disabled]="
-                            !access.can('PATCH /api/schedules/{id}', s.repo)
+                          [disabled]="!access.canGlobalScope('schedules:write')"
+                          [gTip]="
+                            globalScopeDeniedReason(
+                              'PATCH /api/schedules/{id}',
+                              'schedules:write'
+                            )
                           "
                           (click)="openScheduleDialog(s)"
                         >
@@ -784,8 +789,12 @@ type SuitesPaneView = "suites" | "runs";
                           type="button"
                           class="btn-text danger"
                           data-testid="sched-delete-btn"
-                          [disabled]="
-                            !access.can('DELETE /api/schedules/{id}', s.repo)
+                          [disabled]="!access.canGlobalScope('schedules:write')"
+                          [gTip]="
+                            globalScopeDeniedReason(
+                              'DELETE /api/schedules/{id}',
+                              'schedules:write'
+                            )
                           "
                           (click)="confirmDeleteSchedule(s)"
                         >
@@ -855,9 +864,11 @@ type SuitesPaneView = "suites" | "runs";
                       <span>
                         Workflow run
                         @if (lwr.runId) {
-                          <a [routerLink]="['/ci', 'runs', lwr.runId]">{{
-                            lwr.runId
-                          }}</a>
+                          <a
+                            [routerLink]="['/ci', 'runs', lwr.runId]"
+                            [queryParams]="ciRunQueryParams(lwr.runId)"
+                            >{{ lwr.runId }}</a
+                          >
                         }
                         ({{ lwr.conclusion || "running" }})
                       </span>
@@ -941,6 +952,7 @@ type SuitesPaneView = "suites" | "runs";
                         class="btn-primary"
                         data-testid="tmpl-launch-btn"
                         [disabled]="!store.canLaunchTemplate(t)"
+                        [gTip]="launchTemplateDeniedReason(t)"
                         (click)="openLaunchTemplateDialog(t)"
                       >
                         Launch task
@@ -950,7 +962,13 @@ type SuitesPaneView = "suites" | "runs";
                           type="button"
                           class="btn-tonal"
                           data-testid="tmpl-edit-btn"
-                          [disabled]="!access.can('PATCH /api/templates/{id}')"
+                          [disabled]="!access.canGlobalScope('templates:write')"
+                          [gTip]="
+                            globalScopeDeniedReason(
+                              'PATCH /api/templates/{id}',
+                              'templates:write'
+                            )
+                          "
                           (click)="openTemplateDialog(t)"
                         >
                           Edit
@@ -959,7 +977,13 @@ type SuitesPaneView = "suites" | "runs";
                           type="button"
                           class="btn-text danger"
                           data-testid="tmpl-delete-btn"
-                          [disabled]="!access.can('DELETE /api/templates/{id}')"
+                          [disabled]="!access.canGlobalScope('templates:write')"
+                          [gTip]="
+                            globalScopeDeniedReason(
+                              'DELETE /api/templates/{id}',
+                              'templates:write'
+                            )
+                          "
                           (click)="confirmDeleteTemplate(t)"
                         >
                           Delete
@@ -1097,9 +1121,8 @@ type SuitesPaneView = "suites" | "runs";
                           type="button"
                           class="btn-tonal danger"
                           data-testid="suite-run-cancel-btn"
-                          [disabled]="
-                            !access.can('POST /api/tasks/{id}/close', sr.repo)
-                          "
+                          [disabled]="!canCancelSuiteRun(sr)"
+                          [gTip]="cancelSuiteRunDeniedReason(sr)"
                           (click)="confirmCancelSuiteRun(sr)"
                         >
                           Cancel suite run
@@ -1213,7 +1236,8 @@ type SuitesPaneView = "suites" | "runs";
                         type="button"
                         class="btn-primary"
                         data-testid="suite-open-run-dialog-btn"
-                        [disabled]="!access.can('POST /api/suite-runs')"
+                        [disabled]="!canRunSuite(st)"
+                        [gTip]="runSuiteDeniedReason(st)"
                         (click)="openRunSuiteDialog(st)"
                       >
                         Run suite
@@ -1223,7 +1247,13 @@ type SuitesPaneView = "suites" | "runs";
                           type="button"
                           class="btn-tonal"
                           data-testid="suite-edit-btn"
-                          [disabled]="!access.can('PATCH /api/suites/{id}')"
+                          [disabled]="!access.canGlobalScope('suites:write')"
+                          [gTip]="
+                            globalScopeDeniedReason(
+                              'PATCH /api/suites/{id}',
+                              'suites:write'
+                            )
+                          "
                           (click)="openSuiteDialog(st)"
                         >
                           Edit
@@ -1232,7 +1262,13 @@ type SuitesPaneView = "suites" | "runs";
                           type="button"
                           class="btn-text danger"
                           data-testid="suite-delete-btn"
-                          [disabled]="!access.can('DELETE /api/suites/{id}')"
+                          [disabled]="!access.canGlobalScope('suites:write')"
+                          [gTip]="
+                            globalScopeDeniedReason(
+                              'DELETE /api/suites/{id}',
+                              'suites:write'
+                            )
+                          "
                           (click)="confirmDeleteSuite(st)"
                         >
                           Delete
@@ -1344,6 +1380,12 @@ type SuitesPaneView = "suites" | "runs";
                           data-testid="decl-toggle-switch"
                           [disabled]="
                             !access.can(
+                              'PUT /api/repos/{owner}/{name}/declarations',
+                              repo
+                            )
+                          "
+                          [gTip]="
+                            access.deniedReason(
                               'PUT /api/repos/{owner}/{name}/declarations',
                               repo
                             )
@@ -2353,6 +2395,8 @@ type SuitesPaneView = "suites" | "runs";
                     <button
                       type="button"
                       role="option"
+                      [disabled]="!store.canLaunchTemplate(t)"
+                      [gTip]="launchTemplateDeniedReason(t)"
                       [attr.aria-selected]="
                         launchSelectedTemplate()?.id === t.id
                       "
@@ -2609,6 +2653,7 @@ type SuitesPaneView = "suites" | "runs";
             class="btn-primary"
             data-testid="tmpl-save-btn"
             [disabled]="submitting() || !canSaveTemplate()"
+            [gTip]="templateSaveDeniedReason()"
             (click)="saveTemplateDialog()"
           >
             {{ submitting() ? "Saving…" : "Save template" }}
@@ -2769,6 +2814,7 @@ type SuitesPaneView = "suites" | "runs";
             class="btn-primary"
             data-testid="suite-save-btn"
             [disabled]="submitting() || !canSaveSuite()"
+            [gTip]="suiteSaveDeniedReason()"
             (click)="saveSuiteDialog()"
           >
             {{ submitting() ? "Saving…" : "Save suite" }}
@@ -2815,6 +2861,8 @@ type SuitesPaneView = "suites" | "runs";
                     <button
                       type="button"
                       role="option"
+                      [disabled]="!canRunSuite(st)"
+                      [gTip]="runSuiteDeniedReason(st)"
                       [attr.aria-selected]="runSuiteId() === st.id"
                       (click)="runSuiteId.set(st.id); openPicker.set(null)"
                     >
@@ -2859,6 +2907,7 @@ type SuitesPaneView = "suites" | "runs";
             class="btn-primary"
             data-testid="run-suite-submit"
             [disabled]="submitting() || !canSubmitRunSuite()"
+            [gTip]="runSuiteSubmitDeniedReason()"
             (click)="submitRunSuite()"
           >
             {{ submitting() ? "Starting…" : "Start suite run" }}
@@ -3018,6 +3067,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly sDraftDesc = signal("");
   protected readonly sDraftTemplateId = signal("");
   protected readonly sDraftSuiteId = signal("");
+  protected readonly ciRunQueryParams = ciRunQueryParams;
   protected readonly sDraftRepo = signal("");
   protected readonly schedRepoOptions = computed<PillOption[]>(() => [
     { value: "", label: "Choose configured repository…" },
@@ -3331,16 +3381,12 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
         } else if (launchParam === "1") {
           this.handledDeepLinkKey = key;
           if (this.canOpenLaunchTemplateDialog()) {
-            this.openLaunchTemplateDialog(
-              this.selectedTemplate() ?? this.store.templates()[0] ?? null,
-            );
+            this.openLaunchTemplateDialog(this.selectedTemplate() ?? null);
           }
         } else if (runParam === "1") {
           this.handledDeepLinkKey = key;
-          if (this.access.can("POST /api/suite-runs")) {
-            this.openRunSuiteDialog(
-              this.selectedSuite() ?? this.store.suites()[0] ?? null,
-            );
+          if (this.canOpenRunSuiteDialog()) {
+            this.openRunSuiteDialog(this.selectedSuite() ?? null);
           }
         }
       });
@@ -3529,12 +3575,103 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     return `Accepting this declaration requires global scope(s): ${missing.join(", ")}.`;
   }
 
-  protected canOpenLaunchTemplateDialog(): boolean {
-    if (this.access.can("POST /api/tasks")) return true;
+  protected globalScopeDeniedReason(
+    route: RouteKey,
+    scope: string,
+    defaultTip = "",
+  ): string {
+    if (this.access.canGlobalScope(scope)) return defaultTip;
     return (
-      this.store.templates().some((t) => !!t.declaredIn) &&
-      this.access.can("POST /api/tasks/from-template")
+      this.access.deniedReason(route) ||
+      `Requires global ${scope} permission (unrestricted repository scope).`
     );
+  }
+
+  protected suiteTargetRepos(st: Suite): string[] {
+    const templatesById = new Map(this.store.templates().map((t) => [t.id, t]));
+    const seen = new Set<string>();
+    const repos: string[] = [];
+    for (const item of st.items ?? []) {
+      const t = templatesById.get(item.templateId);
+      const repo = (t?.repo || t?.declaredIn?.repo || "").trim();
+      if (!repo) continue;
+      const key = repo.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      repos.push(repo);
+    }
+    return repos;
+  }
+
+  protected canRunSuite(st: Suite | null | undefined): boolean {
+    if (!st) return false;
+    const repos = this.suiteTargetRepos(st);
+    if (repos.length === 1) {
+      return this.access.can("POST /api/suite-runs", repos[0]);
+    }
+    return this.access.canGlobalScope("suites:write");
+  }
+
+  protected runSuiteDeniedReason(
+    st: Suite | null | undefined,
+    defaultTip = "",
+  ): string {
+    if (!st) return "";
+    const repos = this.suiteTargetRepos(st);
+    if (repos.length === 1) {
+      return (
+        this.access.deniedReason("POST /api/suite-runs", repos[0]) || defaultTip
+      );
+    }
+    return this.globalScopeDeniedReason(
+      "POST /api/suite-runs",
+      "suites:write",
+      defaultTip,
+    );
+  }
+
+  protected canOpenRunSuiteDialog(): boolean {
+    return this.store.suites().some((st) => this.canRunSuite(st));
+  }
+
+  protected canCancelSuiteRun(sr: SuiteRun): boolean {
+    const repo = (sr.repo || "").trim();
+    return repo
+      ? this.access.can("POST /api/tasks/{id}/close", repo)
+      : this.access.canGlobalScope("tasks:write");
+  }
+
+  protected cancelSuiteRunDeniedReason(sr: SuiteRun): string {
+    const repo = (sr.repo || "").trim();
+    return repo
+      ? this.access.deniedReason("POST /api/tasks/{id}/close", repo)
+      : this.globalScopeDeniedReason(
+          "POST /api/tasks/{id}/close",
+          "tasks:write",
+        );
+  }
+
+  protected launchTemplateDeniedReason(t: Template | null | undefined): string {
+    if (!t || this.store.canLaunchTemplate(t)) return "";
+    if (t.declaredIn?.repo) {
+      return (
+        this.access.deniedReason(
+          "POST /api/tasks/from-template",
+          t.declaredIn.repo,
+        ) || this.access.deniedReason("POST /api/tasks", t.declaredIn.repo)
+      );
+    }
+    if (t.system) {
+      return t.repo
+        ? this.access.deniedReason("POST /api/tasks", t.repo)
+        : this.globalScopeDeniedReason("POST /api/tasks", "tasks:write");
+    }
+    const repo = (t.repo || "").trim() || undefined;
+    return this.access.deniedReason("POST /api/tasks", repo);
+  }
+
+  protected canOpenLaunchTemplateDialog(): boolean {
+    return this.store.templates().some((t) => this.store.canLaunchTemplate(t));
   }
 
   protected canSubmitLaunchTemplate(): boolean {
@@ -3547,7 +3684,9 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       );
     }
     if (lt.system) {
-      return this.access.can("POST /api/tasks");
+      return lt.repo
+        ? this.access.can("POST /api/tasks", lt.repo)
+        : this.access.canGlobalScope("tasks:write");
     }
     const targetRepo = (lt.repo || this.launchRepo()).trim();
     if (!targetRepo) return false;
@@ -3752,6 +3891,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   protected async runScheduleNow(s: Schedule): Promise<void> {
+    if (!this.access.canGlobalScope("schedules:write")) return;
     try {
       const res = await this.store.runScheduleNow(s.id);
       if (res.taskId) {
@@ -3776,6 +3916,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   protected async toggleScheduleEnabled(s: Schedule): Promise<void> {
+    if (s.declaredIn || !this.access.canGlobalScope("schedules:write")) return;
     try {
       const updated = await this.store.updateSchedule(s.id, {
         enabled: !s.enabled,
@@ -3790,6 +3931,13 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   protected confirmDeleteSchedule(s: Schedule): void {
+    if (
+      s.declaredIn ||
+      s.system ||
+      !this.access.canGlobalScope("schedules:write")
+    ) {
+      return;
+    }
     this.confirming.set({
       title: "Delete schedule?",
       message: `Remove schedule "${s.title || s.id}" permanently?`,
@@ -3870,7 +4018,13 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       );
       this.sDraftOverlap.set(existing.overlap || "skip");
     } else {
-      this.sDraftRepo.set(this.store.knownRepos()[0] || "");
+      this.sDraftRepo.set(
+        this.store
+          .knownRepos()
+          .find((r) => this.access.can("POST /api/schedules", r)) ||
+          this.store.knownRepos()[0] ||
+          "",
+      );
     }
     this.schedDialogOpen.set(true);
   }
@@ -3880,22 +4034,26 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   protected canAccessScheduleSave(): boolean {
-    const editing = this.editingSchedule();
-    const route = editing ? "PATCH /api/schedules/{id}" : "POST /api/schedules";
-    if (editing?.system) {
-      return this.access.can(route, editing.repo || undefined);
+    if (this.editingSchedule()) {
+      return this.access.canGlobalScope("schedules:write");
     }
     const targetRepo = this.effectiveScheduleTargetRepo();
-    return this.access.can(route, targetRepo || undefined);
+    return targetRepo
+      ? this.access.can("POST /api/schedules", targetRepo)
+      : this.access.canGlobalScope("schedules:write");
   }
 
   protected scheduleSaveDeniedReason(): string {
-    const editing = this.editingSchedule();
-    const route = editing ? "PATCH /api/schedules/{id}" : "POST /api/schedules";
-    const targetRepo = editing?.system
-      ? editing.repo || undefined
-      : this.effectiveScheduleTargetRepo() || undefined;
-    return this.access.deniedReason(route, targetRepo);
+    if (this.editingSchedule()) {
+      return this.globalScopeDeniedReason(
+        "PATCH /api/schedules/{id}",
+        "schedules:write",
+      );
+    }
+    const targetRepo = this.effectiveScheduleTargetRepo();
+    return targetRepo
+      ? this.access.deniedReason("POST /api/schedules", targetRepo)
+      : this.globalScopeDeniedReason("POST /api/schedules", "schedules:write");
   }
 
   protected canSaveSchedule(): boolean {
@@ -4098,10 +4256,25 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
 
   protected openLaunchTemplateDialog(t: Template | null): void {
     this.openPicker.set(null);
-    const chosen = t ?? this.store.templates()[0] ?? null;
+    const chosen =
+      (t && this.store.canLaunchTemplate(t) ? t : null) ??
+      this.store
+        .templates()
+        .find((tmpl) => this.store.canLaunchTemplate(tmpl)) ??
+      t ??
+      this.store.templates()[0] ??
+      null;
     this.launchTemplateId.set(chosen?.id ?? "");
     this.initLaunchFields(chosen);
-    this.launchRepo.set(chosen?.repo || this.store.knownRepos()[0] || "");
+    this.launchRepo.set(
+      chosen?.repo ||
+        chosen?.declaredIn?.repo ||
+        this.store
+          .knownRepos()
+          .find((r) => this.access.can("POST /api/tasks", r)) ||
+        this.store.knownRepos()[0] ||
+        "",
+    );
     this.launchBase.set(chosen?.base || "main");
     this.launchApproved.set(this.store.approvedByDefault());
     this.launchDialogOpen.set(true);
@@ -4166,7 +4339,12 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       this.tDraftName.set("");
       this.tDraftTitle.set("");
       this.tDraftDesc.set("");
-      this.tDraftRepo.set("");
+      const defaultRepo = this.access.canGlobalScope("templates:write")
+        ? ""
+        : this.store
+            .knownRepos()
+            .find((r) => this.access.can("POST /api/templates", r)) || "";
+      this.tDraftRepo.set(defaultRepo);
       this.tDraftFields.set([]);
       this.tDraftParamsCsv.set("");
       this.tDraftAutoMerge.set(false);
@@ -4217,10 +4395,26 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
 
   protected canSaveTemplate(): boolean {
     if (!this.tDraftName().trim() || !this.tDraftTitle().trim()) return false;
-    const editing = this.editingTemplate();
-    const route = editing ? "PATCH /api/templates/{id}" : "POST /api/templates";
-    const targetRepo = this.tDraftRepo().trim() || editing?.repo || undefined;
-    return this.access.can(route, targetRepo);
+    if (this.editingTemplate()) {
+      return this.access.canGlobalScope("templates:write");
+    }
+    const targetRepo = this.tDraftRepo().trim();
+    return targetRepo
+      ? this.access.can("POST /api/templates", targetRepo)
+      : this.access.canGlobalScope("templates:write");
+  }
+
+  protected templateSaveDeniedReason(): string {
+    if (this.editingTemplate()) {
+      return this.globalScopeDeniedReason(
+        "PATCH /api/templates/{id}",
+        "templates:write",
+      );
+    }
+    const targetRepo = this.tDraftRepo().trim();
+    return targetRepo
+      ? this.access.deniedReason("POST /api/templates", targetRepo)
+      : this.globalScopeDeniedReason("POST /api/templates", "templates:write");
   }
 
   protected async saveTemplateDialog(): Promise<void> {
@@ -4266,6 +4460,13 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   protected confirmDeleteTemplate(t: Template): void {
+    if (
+      t.declaredIn ||
+      t.system ||
+      !this.access.canGlobalScope("templates:write")
+    ) {
+      return;
+    }
     this.confirming.set({
       title: "Delete template?",
       message: `Delete template "${t.name || t.id}"?`,
@@ -4319,16 +4520,14 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     if (!this.stDraftName().trim() || this.stDraftTemplateIds().length === 0) {
       return false;
     }
-    const editing = this.editingSuite();
-    const route = editing ? "PATCH /api/suites/{id}" : "POST /api/suites";
-    const boundRepos = this.stDraftTemplateIds()
-      .map((id) => this.store.templates().find((t) => t.id === id))
-      .map((t) => t?.repo || t?.declaredIn?.repo || "")
-      .filter(Boolean);
-    return this.access.can(
-      route,
-      boundRepos.length > 0 ? boundRepos : undefined,
-    );
+    return this.access.canGlobalScope("suites:write");
+  }
+
+  protected suiteSaveDeniedReason(): string {
+    const route: RouteKey = this.editingSuite()
+      ? "PATCH /api/suites/{id}"
+      : "POST /api/suites";
+    return this.globalScopeDeniedReason(route, "suites:write");
   }
 
   private buildSuiteCreatePayload(): CreateSuiteRequest {
@@ -4381,6 +4580,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   protected confirmDeleteSuite(st: Suite): void {
+    if (st.declaredIn || !this.access.canGlobalScope("suites:write")) return;
     this.confirming.set({
       title: "Delete suite?",
       message: `Delete suite "${st.name}"? Past suite runs keep their snapshots.`,
@@ -4396,21 +4596,47 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
 
   protected openRunSuiteDialog(st: Suite | null): void {
     this.openPicker.set(null);
-    const chosen = st ?? this.store.suites()[0] ?? null;
+    const chosen =
+      (st && this.canRunSuite(st) ? st : null) ??
+      this.store.suites().find((s) => this.canRunSuite(s)) ??
+      st ??
+      this.store.suites()[0] ??
+      null;
+    const repos = chosen ? this.suiteTargetRepos(chosen) : [];
+    const writableRepo = this.store
+      .knownRepos()
+      .find((r) => this.access.can("POST /api/suite-runs", r));
     this.runSuiteId.set(chosen?.id ?? "");
     this.runSuiteRepo.set(
-      chosen?.declaredIn?.repo || this.store.knownRepos()[0] || "",
+      (repos.length === 1 ? repos[0] : "") ||
+        chosen?.declaredIn?.repo ||
+        writableRepo ||
+        this.store.knownRepos()[0] ||
+        "",
     );
     this.runSuiteBase.set("main");
     this.runSuiteDialogOpen.set(true);
   }
 
   protected canSubmitRunSuite(): boolean {
+    const suiteId = this.runSuiteId();
     const repo = this.runSuiteRepo().trim();
-    if (!this.runSuiteId() || !repo || !this.runSuiteBase().trim()) {
+    if (!suiteId || !repo || !this.runSuiteBase().trim()) {
       return false;
     }
-    return this.access.can("POST /api/suite-runs", repo);
+    const chosen = this.store.suites().find((s) => s.id === suiteId);
+    return (
+      this.canRunSuite(chosen) && this.access.can("POST /api/suite-runs", repo)
+    );
+  }
+
+  protected runSuiteSubmitDeniedReason(): string {
+    const chosen = this.store.suites().find((s) => s.id === this.runSuiteId());
+    if (chosen && !this.canRunSuite(chosen)) {
+      return this.runSuiteDeniedReason(chosen);
+    }
+    const repo = this.runSuiteRepo().trim();
+    return repo ? this.access.deniedReason("POST /api/suite-runs", repo) : "";
   }
 
   protected async submitRunSuite(): Promise<void> {
@@ -4434,6 +4660,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   protected confirmCancelSuiteRun(sr: SuiteRun): void {
+    if (!this.canCancelSuiteRun(sr)) return;
     this.confirming.set({
       title: "Cancel active suite run?",
       message: `Stop and close all open pass tasks in suite run #${sr.id} (${sr.repo})?`,
@@ -4452,6 +4679,9 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     repo: string,
     enabled: boolean,
   ): Promise<void> {
+    if (!this.access.can("PUT /api/repos/{owner}/{name}/declarations", repo)) {
+      return;
+    }
     try {
       await this.store.setRepoDeclarationsEnabled(repo, enabled);
       this.snackbar.show(
