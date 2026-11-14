@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { DOCUMENT } from "@angular/common";
 import {
   ChangeDetectionStrategy,
   Component,
@@ -278,6 +279,56 @@ function normalizeWorkOwnership(
         : def !== "off",
     items,
   };
+}
+
+interface UnfixableChecksData {
+  unfixableChecks: string[];
+  grainCICheckName: string;
+}
+
+function sameCheckName(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+function validateUnfixableCheckName(
+  rawName: string,
+  grainCICheckName: string,
+): string | null {
+  const name = rawName.trim();
+  if (!name) return null;
+  if (sameCheckName(name, grainCICheckName)) {
+    return `${grainCICheckName} judges one exact commit on the branch, so its verdict is always that branch's own answer and declaring it here would change nothing. Grain would go on repairing it.`;
+  }
+  if (name.includes(",")) {
+    return `Check name "${name}" cannot contain "," — these are stored as a comma-separated list; add one check per entry.`;
+  }
+  return null;
+}
+
+function normalizeUnfixableChecks(
+  res:
+    Partial<UnfixableChecksData> | Record<string, unknown> | null | undefined,
+): UnfixableChecksData {
+  const rawList = Array.isArray(res?.["unfixableChecks"])
+    ? (res["unfixableChecks"] as unknown[])
+    : [];
+  const seen = new Set<string>();
+  const unfixableChecks: string[] = [];
+  for (const entry of rawList) {
+    if (typeof entry !== "string") continue;
+    const clean = entry.trim();
+    if (!clean) continue;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    unfixableChecks.push(clean);
+  }
+  const rawCiName = res?.["grainCICheckName"];
+  const grainCICheckName =
+    typeof rawCiName === "string" && rawCiName.trim()
+      ? rawCiName.trim()
+      : "grain CI";
+  return { unfixableChecks, grainCICheckName };
 }
 
 @Component({
@@ -784,6 +835,210 @@ function normalizeWorkOwnership(
                     ></button>
                   </div>
                 </div>
+
+                <div
+                  class="s-card unfixable-card"
+                  data-testid="card-repo-unfixable-checks"
+                  [attr.aria-busy]="
+                    unfixableLoading() || unfixableSaving() ? 'true' : null
+                  "
+                >
+                  <div class="s-card-head">
+                    <div>
+                      <h2 class="s-card-title">
+                        Checks no commit here can clear
+                      </h2>
+                      <p class="s-card-desc">
+                        Checks on {{ repoSlug() }} that will never pass for a
+                        pull request grain&#39;s agents author, whatever is
+                        pushed to the branch — a CLA bot asserting who signed an
+                        agreement is the case this exists for.
+                        <strong>This does not exempt them.</strong> A pull
+                        request with one of these red is still not merged, and a
+                        person clears it or nothing merges; what grain stops
+                        spending is the base merge and the repair run it would
+                        have made trying to reach a green that is not reachable,
+                        saying so on the row and in one comment instead. Not for
+                        a job that is merely flaky: a real regression in a check
+                        named here still holds the queue, which is exactly why
+                        naming one is safe.
+                      </p>
+                    </div>
+                  </div>
+
+                  @if (
+                    !access.can(
+                      "GET /api/repos/{owner}/{name}/unfixable-checks",
+                      repoSlug()
+                    )
+                  ) {
+                    <div
+                      class="s-banner readonly"
+                      data-testid="repo-unfixable-denied"
+                    >
+                      {{
+                        access.deniedReason(
+                          "GET /api/repos/{owner}/{name}/unfixable-checks",
+                          repoSlug()
+                        )
+                      }}
+                    </div>
+                  } @else if (
+                    unfixableLoadError() && unfixableData() === null
+                  ) {
+                    <div
+                      class="s-banner error"
+                      role="alert"
+                      data-testid="repo-unfixable-load-error"
+                    >
+                      <span>{{ unfixableLoadError() }}</span>
+                      <button
+                        type="button"
+                        class="btn-text s-btn-sm"
+                        (click)="loadUnfixableChecks()"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  } @else if (unfixableData() === null) {
+                    <p class="repo-note" data-testid="repo-unfixable-loading">
+                      Loading unfixable checks…
+                    </p>
+                  } @else {
+                    @if (
+                      !configRepoOnly() &&
+                      !access.can(
+                        "PUT /api/repos/{owner}/{name}/unfixable-checks",
+                        repoSlug()
+                      )
+                    ) {
+                      <div
+                        id="repo-unfixable-readonly"
+                        class="s-banner readonly"
+                        data-testid="repo-unfixable-readonly"
+                      >
+                        {{ unfixableDeniedReason() }}
+                      </div>
+                    }
+
+                    @if (unfixableChecks().length === 0) {
+                      <p class="repo-note" data-testid="repo-unfixable-empty">
+                        grain treats every check {{ repoSlug() }} reports as one
+                        a commit could turn green.
+                      </p>
+                    } @else {
+                      <ul
+                        class="unfixable-list"
+                        aria-label="Checks declared unfixable"
+                        data-testid="unfixable-checks-list"
+                      >
+                        @for (check of unfixableChecks(); track check) {
+                          <li
+                            class="unfixable-chip"
+                            [class.has-remove]="canWriteUnfixableChecks()"
+                            [attr.data-testid]="'unfixable-chip-' + check"
+                          >
+                            <span class="unfixable-chip-label tabular">{{
+                              check
+                            }}</span>
+                            @if (canWriteUnfixableChecks()) {
+                              <button
+                                type="button"
+                                class="unfixable-chip-remove"
+                                [attr.aria-label]="
+                                  'Stop declaring ' + check + ' unfixable'
+                                "
+                                [attr.title]="
+                                  'Stop declaring ' + check + ' unfixable'
+                                "
+                                [attr.data-testid]="'remove-unfixable-' + check"
+                                [disabled]="unfixableSaving()"
+                                (click)="removeUnfixableCheck(check)"
+                              >
+                                ×
+                              </button>
+                            }
+                          </li>
+                        }
+                      </ul>
+                    }
+
+                    @if (unfixableError(); as uErr) {
+                      <div
+                        id="unfixable-check-error"
+                        class="s-banner error"
+                        role="alert"
+                        data-testid="repo-unfixable-error"
+                      >
+                        <span>{{ uErr }}</span>
+                        <button
+                          type="button"
+                          class="btn-text s-btn-sm"
+                          (click)="unfixableError.set(null)"
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    }
+
+                    <form
+                      class="unfixable-form"
+                      (submit)="addUnfixableCheck($event)"
+                    >
+                      <div class="s-field">
+                        <label class="s-label" for="unfixable-check-input">
+                          Check that cannot pass
+                        </label>
+                        <div class="unfixable-form-row">
+                          <input
+                            id="unfixable-check-input"
+                            name="unfixableCheck"
+                            class="s-input tabular unfixable-input"
+                            type="text"
+                            autocomplete="off"
+                            placeholder="cla/google"
+                            data-testid="input-unfixable-check"
+                            [value]="unfixableDraft()"
+                            [disabled]="
+                              !canWriteUnfixableChecks() || unfixableSaving()
+                            "
+                            [gTip]="unfixableDeniedReason()"
+                            [attr.aria-invalid]="
+                              unfixableError() ? 'true' : null
+                            "
+                            [attr.aria-describedby]="
+                              unfixableInputDescribedBy()
+                            "
+                            (input)="
+                              onUnfixableDraftInput($any($event.target).value)
+                            "
+                          />
+                          <button
+                            type="submit"
+                            class="btn-primary s-btn-sm"
+                            data-testid="add-unfixable-check-btn"
+                            [disabled]="
+                              !canWriteUnfixableChecks() ||
+                              unfixableSaving() ||
+                              !unfixableDraft().trim()
+                            "
+                            [gTip]="unfixableDeniedReason()"
+                            [attr.aria-describedby]="unfixableDescribedBy()"
+                          >
+                            Add
+                          </button>
+                        </div>
+                        <span id="unfixable-check-helper" class="s-hint">
+                          The check&#39;s exact name, as the pull request
+                          reports it — matched without case, never by part of a
+                          name. {{ grainCICheckName() }} cannot be named here:
+                          it judges this exact commit, so its verdict is always
+                          the branch&#39;s own.
+                        </span>
+                      </div>
+                    </form>
+                  }
+                </div>
               }
 
               @case ("agents") {
@@ -870,7 +1125,59 @@ function normalizeWorkOwnership(
               @case ("branches") {
                 <div class="s-card" data-testid="card-repo-branches">
                   <h2 class="s-card-title">Repository branches</h2>
-                  @if (branches().length > 0) {
+                  @if (
+                    !access.can(
+                      "GET /api/repos/{owner}/{name}/branches",
+                      repoSlug()
+                    )
+                  ) {
+                    <div
+                      class="s-banner readonly"
+                      data-testid="repo-branches-denied"
+                    >
+                      {{
+                        access.deniedReason(
+                          "GET /api/repos/{owner}/{name}/branches",
+                          repoSlug()
+                        )
+                      }}
+                    </div>
+                  } @else if (branchesError() && !branchesLoaded()) {
+                    <div
+                      class="s-banner error"
+                      role="alert"
+                      data-testid="repo-branches-error"
+                    >
+                      <span>{{ branchesError() }}</span>
+                      <button
+                        type="button"
+                        class="btn-text s-btn-sm"
+                        (click)="loadBranches()"
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  } @else if (branchesLoading() && !branchesLoaded()) {
+                    <p class="repo-note" data-testid="repo-branches-loading">
+                      Loading branches…
+                    </p>
+                  } @else if (branches().length > 0) {
+                    @if (branchesError(); as brErr) {
+                      <div
+                        class="s-banner error"
+                        role="alert"
+                        data-testid="repo-branches-error"
+                      >
+                        <span>{{ brErr }}</span>
+                        <button
+                          type="button"
+                          class="btn-text s-btn-sm"
+                          (click)="loadBranches()"
+                        >
+                          Retry
+                        </button>
+                      </div>
+                    }
                     <div class="s-table-wrap">
                       <table class="s-table" aria-label="Repository branches">
                         <thead>
@@ -890,6 +1197,13 @@ function normalizeWorkOwnership(
                           }
                         </tbody>
                       </table>
+                    </div>
+                  } @else {
+                    <div
+                      class="repo-empty-box"
+                      data-testid="repo-branches-empty"
+                    >
+                      No Grain-managed branches yet
                     </div>
                   }
                   <div class="s-grid">
@@ -2082,6 +2396,7 @@ function normalizeWorkOwnership(
   `,
 })
 export class RepoDetailPageComponent implements OnInit, OnDestroy {
+  private readonly doc = inject(DOCUMENT);
   private readonly api = inject(GrainApi);
   protected readonly access = inject(AccessService);
   private readonly snackbar = inject(SnackbarService);
@@ -2136,11 +2451,58 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
   protected readonly bypassHumanGates = signal(false);
   protected readonly confirmReq = signal<ConfirmRequest | null>(null);
 
+  protected readonly unfixableData = signal<UnfixableChecksData | null>(null);
+  protected readonly unfixableLoading = signal(false);
+  protected readonly unfixableSaving = signal(false);
+  protected readonly unfixableLoadError = signal<string | null>(null);
+  protected readonly unfixableError = signal<string | null>(null);
+  protected readonly unfixableDraft = signal("");
+  private unfixableLoadSeq = 0;
+  private unfixableMutationSeq = 0;
+
+  protected readonly unfixableChecks = computed(
+    () => this.unfixableData()?.unfixableChecks ?? [],
+  );
+  protected readonly grainCICheckName = computed(
+    () => this.unfixableData()?.grainCICheckName ?? "grain CI",
+  );
+  protected readonly canWriteUnfixableChecks = computed(() => {
+    const repo = this.repoSlug();
+    return (
+      !this.configRepoOnly() &&
+      !!repo &&
+      this.access.can("PUT /api/repos/{owner}/{name}/unfixable-checks", repo)
+    );
+  });
+  protected readonly unfixableDeniedReason = computed(() =>
+    this.configActionDeniedReason(
+      "PUT /api/repos/{owner}/{name}/unfixable-checks",
+    ),
+  );
+  protected readonly unfixableDescribedBy = computed(() => {
+    if (!this.unfixableDeniedReason()) return null;
+    return this.configRepoOnly()
+      ? "repo-readonly-banner"
+      : "repo-unfixable-readonly";
+  });
+  protected readonly unfixableInputDescribedBy = computed(() => {
+    const ids = [
+      this.unfixableDescribedBy(),
+      this.unfixableError() ? "unfixable-check-error" : null,
+      "unfixable-check-helper",
+    ].filter(Boolean);
+    return ids.length > 0 ? ids.join(" ") : null;
+  });
+
   protected readonly setupCommand = signal("");
   protected readonly promptExtension = signal("");
   protected readonly repoCaps = signal("");
 
   protected readonly branches = signal<BranchRow[]>([]);
+  protected readonly branchesLoading = signal(false);
+  protected readonly branchesLoaded = signal(false);
+  protected readonly branchesError = signal<string | null>(null);
+  private branchesLoadSeq = 0;
   protected readonly newBranchName = signal("");
   protected readonly newBranchFrom = signal("main");
 
@@ -2442,10 +2804,22 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     this.requireUpToDate.set(false);
     this.bypassHumanGates.set(false);
     this.confirmReq.set(null);
+    this.unfixableLoadSeq++;
+    this.unfixableMutationSeq++;
+    this.unfixableData.set(null);
+    this.unfixableLoading.set(false);
+    this.unfixableSaving.set(false);
+    this.unfixableLoadError.set(null);
+    this.unfixableError.set(null);
+    this.unfixableDraft.set("");
     this.setupCommand.set("");
     this.promptExtension.set("");
     this.repoCaps.set("");
+    this.branchesLoadSeq++;
     this.branches.set([]);
+    this.branchesLoading.set(false);
+    this.branchesLoaded.set(false);
+    this.branchesError.set(null);
     this.newBranchName.set("");
     this.releaseEnabled.set(false);
     this.baseBranchJobsText.set("");
@@ -2700,6 +3074,10 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
           })
           .catch(() => undefined);
       }
+    } else if (t === "merge-queue") {
+      if (this.unfixableData() === null && !this.unfixableLoading()) {
+        await this.loadUnfixableChecks();
+      }
     } else if (t === "agents") {
       if (
         this.access.can(
@@ -2721,20 +3099,7 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
           .catch(() => undefined);
       }
     } else if (t === "branches") {
-      if (
-        this.access.can("GET /api/repos/{owner}/{name}/branches", targetRepo)
-      ) {
-        void this.api
-          .get<BranchRow[] | { branches?: BranchRow[] }>(
-            "GET /api/repos/{owner}/{name}/branches",
-            p,
-          )
-          .then((b) => {
-            if (this.repoSlug() !== targetRepo) return;
-            this.branches.set(Array.isArray(b) ? b : (b?.branches ?? []));
-          })
-          .catch(() => undefined);
-      }
+      await this.loadBranches();
     } else if (t === "releases") {
       await this.loadReleasesTab();
     } else if (t === "declarations") {
@@ -3479,6 +3844,191 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     }
   }
 
+  protected async loadUnfixableChecks(): Promise<void> {
+    const targetRepo = this.repoSlug();
+    const p = this.params();
+    if (
+      !targetRepo ||
+      !p.owner ||
+      !p.name ||
+      !this.access.can(
+        "GET /api/repos/{owner}/{name}/unfixable-checks",
+        targetRepo,
+      )
+    ) {
+      return;
+    }
+    const loadSeq = ++this.unfixableLoadSeq;
+    const mutSeq = this.unfixableMutationSeq;
+    this.unfixableLoading.set(true);
+    this.unfixableLoadError.set(null);
+    try {
+      const res = await this.api.get<Record<string, unknown>>(
+        "GET /api/repos/{owner}/{name}/unfixable-checks",
+        p,
+      );
+      if (
+        this.repoSlug() !== targetRepo ||
+        loadSeq !== this.unfixableLoadSeq ||
+        mutSeq !== this.unfixableMutationSeq
+      ) {
+        return;
+      }
+      this.unfixableData.set(normalizeUnfixableChecks(res));
+    } catch (err) {
+      if (
+        this.repoSlug() !== targetRepo ||
+        loadSeq !== this.unfixableLoadSeq ||
+        mutSeq !== this.unfixableMutationSeq
+      ) {
+        return;
+      }
+      this.unfixableLoadError.set(errText(err));
+    } finally {
+      if (this.repoSlug() === targetRepo && loadSeq === this.unfixableLoadSeq) {
+        this.unfixableLoading.set(false);
+      }
+    }
+  }
+
+  protected onUnfixableDraftInput(val: string): void {
+    this.unfixableDraft.set(val);
+    if (this.unfixableError()) {
+      this.unfixableError.set(null);
+    }
+  }
+
+  protected async addUnfixableCheck(event?: Event): Promise<void> {
+    event?.preventDefault();
+    if (
+      !this.guardMutation(
+        "PUT /api/repos/{owner}/{name}/unfixable-checks",
+        true,
+      ) ||
+      this.unfixableSaving() ||
+      this.unfixableData() === null
+    ) {
+      return;
+    }
+    const name = this.unfixableDraft().trim();
+    if (!name) return;
+    const err = validateUnfixableCheckName(name, this.grainCICheckName());
+    if (err) {
+      this.unfixableError.set(err);
+      return;
+    }
+    const existing = this.unfixableChecks();
+    if (existing.some((c) => sameCheckName(c, name))) {
+      this.unfixableError.set(
+        `${this.repoSlug()} already declares ${name} unfixable — check names are matched without case.`,
+      );
+      return;
+    }
+    const ok = await this.saveUnfixableChecks([...existing, name]);
+    if (ok) {
+      this.unfixableDraft.set("");
+    }
+  }
+
+  protected async removeUnfixableCheck(check: string): Promise<void> {
+    if (
+      !this.guardMutation(
+        "PUT /api/repos/{owner}/{name}/unfixable-checks",
+        true,
+      ) ||
+      this.unfixableSaving() ||
+      this.unfixableData() === null
+    ) {
+      return;
+    }
+    const next = this.unfixableChecks().filter(
+      (other) => !sameCheckName(other, check),
+    );
+    const ok = await this.saveUnfixableChecks(next);
+    if (ok) {
+      queueMicrotask(() => {
+        const input = this.doc.getElementById("unfixable-check-input");
+        if (input instanceof HTMLInputElement && !input.disabled) {
+          input.focus();
+        }
+      });
+    }
+  }
+
+  protected async saveUnfixableChecks(checks: string[]): Promise<boolean> {
+    if (
+      !this.guardMutation(
+        "PUT /api/repos/{owner}/{name}/unfixable-checks",
+        true,
+      ) ||
+      this.unfixableSaving()
+    ) {
+      return false;
+    }
+    const grainCI = this.grainCICheckName();
+    const cleaned: string[] = [];
+    const seen = new Set<string>();
+    for (const raw of checks) {
+      const name = typeof raw === "string" ? raw.trim() : "";
+      if (!name) continue;
+      const err = validateUnfixableCheckName(name, grainCI);
+      if (err) {
+        this.unfixableError.set(err);
+        return false;
+      }
+      const key = name.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        cleaned.push(name);
+      }
+    }
+    const targetRepo = this.repoSlug();
+    const p = this.params();
+    if (!targetRepo || !p.owner || !p.name) return false;
+    const mutSeq = ++this.unfixableMutationSeq;
+    this.unfixableSaving.set(true);
+    this.unfixableError.set(null);
+    try {
+      const res = await this.api.put<Record<string, unknown>>(
+        "PUT /api/repos/{owner}/{name}/unfixable-checks",
+        p,
+        { unfixableChecks: cleaned },
+      );
+      if (
+        this.repoSlug() !== targetRepo ||
+        mutSeq !== this.unfixableMutationSeq
+      ) {
+        return false;
+      }
+      const hasChecks =
+        res && typeof res === "object" && "unfixableChecks" in res;
+      const prevCi = this.grainCICheckName();
+      this.unfixableData.set(
+        hasChecks
+          ? normalizeUnfixableChecks(res)
+          : { unfixableChecks: cleaned, grainCICheckName: prevCi },
+      );
+      this.snackbar.show("Unfixable checks updated");
+      return true;
+    } catch (err) {
+      if (
+        this.repoSlug() !== targetRepo ||
+        mutSeq !== this.unfixableMutationSeq
+      ) {
+        return false;
+      }
+      this.unfixableError.set(errText(err));
+      return false;
+    } finally {
+      if (
+        this.repoSlug() === targetRepo &&
+        mutSeq === this.unfixableMutationSeq
+      ) {
+        this.unfixableSaving.set(false);
+      }
+    }
+  }
+
   protected async saveAgentTabSettings(): Promise<void> {
     if (this.configRepoOnly() || !this.canSaveRepoAgents()) return;
     const repo = this.repoSlug();
@@ -3522,6 +4072,49 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
     }
   }
 
+  protected async loadBranches(): Promise<void> {
+    const targetRepo = this.repoSlug();
+    const p = this.params();
+    if (
+      !targetRepo ||
+      !p.owner ||
+      !p.name ||
+      !this.access.can("GET /api/repos/{owner}/{name}/branches", targetRepo)
+    ) {
+      return;
+    }
+    const loadSeq = ++this.branchesLoadSeq;
+    this.branchesLoading.set(true);
+    this.branchesError.set(null);
+    try {
+      const b = await this.api.get<BranchRow[] | { branches?: BranchRow[] }>(
+        "GET /api/repos/{owner}/{name}/branches",
+        p,
+      );
+      if (this.repoSlug() !== targetRepo || loadSeq !== this.branchesLoadSeq) {
+        return;
+      }
+      const raw = Array.isArray(b) ? b : (b?.branches ?? []);
+      const seen = new Set<string>();
+      const deduped = raw.filter((row) => {
+        if (!row?.name || seen.has(row.name)) return false;
+        seen.add(row.name);
+        return true;
+      });
+      this.branches.set(deduped);
+      this.branchesLoaded.set(true);
+    } catch (err) {
+      if (this.repoSlug() !== targetRepo || loadSeq !== this.branchesLoadSeq) {
+        return;
+      }
+      this.branchesError.set(errText(err));
+    } finally {
+      if (this.repoSlug() === targetRepo && loadSeq === this.branchesLoadSeq) {
+        this.branchesLoading.set(false);
+      }
+    }
+  }
+
   protected async createBranch(): Promise<void> {
     if (!this.guardMutation("POST /api/repos/{owner}/{name}/branches")) {
       return;
@@ -3535,7 +4128,7 @@ export class RepoDetailPageComponent implements OnInit, OnDestroy {
         { name, from: this.newBranchFrom().trim() || "main" },
       );
       this.newBranchName.set("");
-      await this.loadTabData();
+      await this.loadBranches();
       this.snackbar.show(`Created branch ${name}`);
     } catch (err) {
       this.error.set(errText(err));
