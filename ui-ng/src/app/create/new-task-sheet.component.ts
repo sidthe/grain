@@ -1924,8 +1924,8 @@ export class NewTaskSheetComponent {
         { body: directorMessage(d), attachments: d.attachments },
       );
       this.svc.clearSaved();
-      await this.router.navigate(["/sessions", DIRECTOR_ID]);
       this.svc.close(false);
+      await this.router.navigate(["/sessions", DIRECTOR_ID]);
       this.snackbar.show("Sent to the Director");
     } catch (err) {
       this.error.set({
