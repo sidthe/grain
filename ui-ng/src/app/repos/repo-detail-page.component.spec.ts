@@ -68,6 +68,18 @@ class FakeRepoApi {
       },
     ],
   };
+  branchesBody: { name: string; sha?: string; head?: string }[] = [
+    { name: "main", sha: "1234567890abcdef" },
+  ];
+  unfixableBody: {
+    repo: string;
+    unfixableChecks: string[] | null;
+    grainCICheckName: string;
+  } = {
+    repo: "acme/platform",
+    unfixableChecks: null,
+    grainCICheckName: "grain CI",
+  };
   releaseEnabledValue?: boolean;
 
   configBody: GrainConfig & Record<string, unknown> = {
@@ -110,7 +122,10 @@ class FakeRepoApi {
       ]);
     }
     if (key === "GET /api/repos/{owner}/{name}/branches") {
-      return Promise.resolve([{ name: "main", sha: "1234567890abcdef" }]);
+      return Promise.resolve(structuredClone(this.branchesBody));
+    }
+    if (key === "GET /api/repos/{owner}/{name}/unfixable-checks") {
+      return Promise.resolve(structuredClone(this.unfixableBody));
     }
     if (key === "GET /api/repos/{owner}/{name}/release") {
       return Promise.resolve({
@@ -193,6 +208,17 @@ class FakeRepoApi {
               : this.workOwnershipBody.defaultRuns;
       }
       return Promise.resolve(structuredClone(this.workOwnershipBody));
+    }
+    if (key === "PUT /api/repos/{owner}/{name}/unfixable-checks") {
+      const req = (body ?? {}) as { unfixableChecks?: string[] };
+      const list = Array.isArray(req.unfixableChecks)
+        ? req.unfixableChecks
+        : [];
+      this.unfixableBody = {
+        ...this.unfixableBody,
+        unfixableChecks: list.length ? [...list] : null,
+      };
+      return Promise.resolve(structuredClone(this.unfixableBody));
     }
     if (key === "PUT /api/repos/{owner}/{name}/release") {
       const req = (body ?? {}) as { enabled?: boolean };
@@ -1374,5 +1400,420 @@ describe("RepoDetailPageComponent (/next/repos/:owner/:name)", () => {
     expect(
       el.querySelector('[data-testid="work-ownership-item-release"]'),
     ).not.toBeNull();
+  });
+
+  it("loads, adds, validates, and removes unfixable checks on the Merge Queue tab", async () => {
+    const api = new FakeRepoApi();
+    const { el, harness } = await mountRepo(
+      "/repos/acme/platform/merge-queue",
+      api,
+    );
+
+    const card = el.querySelector(
+      '[data-testid="card-repo-unfixable-checks"]',
+    )!;
+    expect(card.textContent).toContain("Checks no commit here can clear");
+    expect(card.textContent).toContain("This does not exempt them.");
+    expect(
+      card.querySelector('[data-testid="unfixable-checks-empty"]')?.textContent,
+    ).toContain(
+      "grain treats every check acme/platform reports as one a commit could turn green.",
+    );
+
+    const input = () =>
+      el.querySelector<HTMLInputElement>(
+        '[data-testid="input-unfixable-check"]',
+      )!;
+    const addBtn = () =>
+      el.querySelector<HTMLButtonElement>(
+        '[data-testid="add-unfixable-check-btn"]',
+      )!;
+    const form = () =>
+      el.querySelector<HTMLFormElement>(".repo-unfixable-form")!;
+
+    expect(addBtn().disabled).toBe(true);
+
+    // Client-side validation rejects grain CI, commas, and case-insensitive duplicates without PUT.
+    const setDraft = (val: string) => {
+      input().value = val;
+      input().dispatchEvent(new Event("input"));
+      harness.detectChanges();
+    };
+
+    setDraft("   ");
+    expect(addBtn().disabled).toBe(true);
+
+    setDraft("grain ci");
+    expect(addBtn().disabled).toBe(false);
+    form().dispatchEvent(new Event("submit"));
+    await new Promise((r) => setTimeout(r, 15));
+    harness.detectChanges();
+    expect(
+      el.querySelector('[data-testid="unfixable-checks-warning"]')?.textContent,
+    ).toContain("grain CI judges one exact commit on the branch");
+    expect(
+      api.calls.some(
+        (c) =>
+          c.method === "PUT" &&
+          c.key === "PUT /api/repos/{owner}/{name}/unfixable-checks",
+      ),
+    ).toBe(false);
+
+    // Typing clears the warning; comma is refused inline.
+    setDraft("a,b");
+    expect(
+      el.querySelector('[data-testid="unfixable-checks-warning"]'),
+    ).toBeNull();
+    form().dispatchEvent(new Event("submit"));
+    await new Promise((r) => setTimeout(r, 15));
+    harness.detectChanges();
+    expect(
+      el.querySelector('[data-testid="unfixable-checks-warning"]')?.textContent,
+    ).toContain("comma-separated list");
+
+    // Valid add saves via PUT and clears input.
+    setDraft("  cla/google  ");
+    addBtn().click();
+    await new Promise((r) => setTimeout(r, 20));
+    harness.detectChanges();
+    expect(
+      api.calls.some(
+        (c) =>
+          c.method === "PUT" &&
+          c.key === "PUT /api/repos/{owner}/{name}/unfixable-checks" &&
+          JSON.stringify(c.body) ===
+            JSON.stringify({ unfixableChecks: ["cla/google"] }),
+      ),
+    ).toBe(true);
+    expect(input().value).toBe("");
+    expect(
+      el.querySelector('[data-testid="unfixable-check-chip-0"]')?.textContent,
+    ).toContain("cla/google");
+    expect(
+      el.querySelector('[data-testid="unfixable-checks-empty"]'),
+    ).toBeNull();
+
+    // Case-insensitive duplicate uses typed spelling and sends no PUT.
+    const putsBeforeDup = api.calls.filter(
+      (c) => c.key === "PUT /api/repos/{owner}/{name}/unfixable-checks",
+    ).length;
+    setDraft("CLA/Google");
+    form().dispatchEvent(new Event("submit"));
+    await new Promise((r) => setTimeout(r, 15));
+    harness.detectChanges();
+    expect(
+      el.querySelector('[data-testid="unfixable-checks-warning"]')?.textContent,
+    ).toContain("acme/platform already declares CLA/Google unfixable");
+    expect(
+      api.calls.filter(
+        (c) => c.key === "PUT /api/repos/{owner}/{name}/unfixable-checks",
+      ).length,
+    ).toBe(putsBeforeDup);
+
+    // Add second check and remove first, preserving half-typed draft.
+    setDraft("license/cla");
+    addBtn().click();
+    await new Promise((r) => setTimeout(r, 20));
+    harness.detectChanges();
+
+    setDraft("pending-draft");
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="remove-unfixable-check-0"]',
+    )!.click();
+    await new Promise((r) => setTimeout(r, 20));
+    harness.detectChanges();
+
+    expect(input().value).toBe("pending-draft");
+    expect(
+      [...el.querySelectorAll('[data-testid^="unfixable-check-chip-"]')].map(
+        (n) => n.textContent,
+      ),
+    ).toHaveLength(1);
+    expect(
+      el.querySelector('[data-testid="unfixable-check-chip-0"]')?.textContent,
+    ).toContain("license/cla");
+  });
+
+  it("handles unfixable-checks GET error with retry, preserves state on PUT failure, and isolates repo switches", async () => {
+    const api = new FakeRepoApi();
+    api.refuseGet = "GET /api/repos/{owner}/{name}/unfixable-checks";
+    const { el, harness } = await mountRepo(
+      "/repos/acme/platform/merge-queue",
+      api,
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    harness.detectChanges();
+
+    expect(
+      el.querySelector('[data-testid="unfixable-checks-error-banner"]')
+        ?.textContent,
+    ).toContain("declarations fetch refused");
+    expect(
+      el.querySelector('[data-testid="input-unfixable-check"]'),
+    ).toBeNull();
+
+    api.refuseGet = null;
+    api.unfixableBody = {
+      repo: "acme/platform",
+      unfixableChecks: ["cla/google"],
+      grainCICheckName: "grain CI",
+    };
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="retry-unfixable-checks-btn"]',
+    )!.click();
+    await new Promise((r) => setTimeout(r, 20));
+    harness.detectChanges();
+
+    expect(
+      el.querySelector('[data-testid="unfixable-check-chip-0"]')?.textContent,
+    ).toContain("cla/google");
+
+    // Failed PUT preserves server list and draft, shows banner, and auto-clears on retry.
+    api.refusePut = "PUT /api/repos/{owner}/{name}/unfixable-checks";
+    const input = el.querySelector<HTMLInputElement>(
+      '[data-testid="input-unfixable-check"]',
+    )!;
+    input.value = "lint/bot";
+    input.dispatchEvent(new Event("input"));
+    harness.detectChanges();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="add-unfixable-check-btn"]',
+    )!.click();
+    await new Promise((r) => setTimeout(r, 20));
+    harness.detectChanges();
+
+    expect(
+      el.querySelector('[data-testid="repo-error-banner"]')?.textContent,
+    ).toContain("ciMode");
+    expect(input.value).toBe("lint/bot");
+    expect(
+      el.querySelectorAll('[data-testid^="unfixable-check-chip-"]').length,
+    ).toBe(1);
+
+    api.refusePut = null;
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="add-unfixable-check-btn"]',
+    )!.click();
+    await new Promise((r) => setTimeout(r, 20));
+    harness.detectChanges();
+    expect(el.querySelector('[data-testid="repo-error-banner"]')).toBeNull();
+    expect(input.value).toBe("");
+    expect(
+      el.querySelectorAll('[data-testid^="unfixable-check-chip-"]').length,
+    ).toBe(2);
+
+    // Delayed GET from prior repository does not overwrite switched repository.
+    let resolveSlowGet!: (v: unknown) => void;
+    const origGet = api.get;
+    api.get = (key: string, params?: RouteParams) => {
+      if (
+        key === "GET /api/repos/{owner}/{name}/unfixable-checks" &&
+        params?.["name"] === "platform"
+      ) {
+        api.calls.push({ method: "GET", key, params });
+        return new Promise((r) => {
+          resolveSlowGet = r;
+        });
+      }
+      return origGet(key, params);
+    };
+    const comp = harness.routeDebugElement?.componentInstance as unknown as {
+      loadUnfixableChecks: (force?: boolean) => Promise<void>;
+    };
+    const staleLoad = comp.loadUnfixableChecks(true);
+
+    api.unfixableBody = {
+      repo: "acme/other",
+      unfixableChecks: null,
+      grainCICheckName: "grain CI",
+    };
+    await harness.navigateByUrl("/repos/acme/other/merge-queue");
+    await new Promise((r) => setTimeout(r, 20));
+    harness.detectChanges();
+
+    resolveSlowGet({
+      repo: "acme/platform",
+      unfixableChecks: ["stale/check"],
+      grainCICheckName: "grain CI",
+    });
+    await staleLoad;
+    harness.detectChanges();
+
+    expect(
+      el.querySelector('[data-testid="unfixable-checks-empty"]')?.textContent,
+    ).toContain("acme/other");
+    expect(
+      el.querySelector('[data-testid="unfixable-check-chip-0"]'),
+    ).toBeNull();
+  });
+
+  it("gates unfixable checks with repo-scoped access.can and configRepoOnly", async () => {
+    const noReadApi = new FakeRepoApi();
+    noReadApi.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "other-reader",
+        roles: ["other-reader"],
+        full: false,
+        scopes: ["repos:read", "repos:write"],
+        repoLimits: {
+          "repos:read": ["acme/other"],
+          "repos:write": ["acme/other"],
+        },
+      },
+    };
+    const { el: deniedEl } = await mountRepo(
+      "/repos/acme/platform/merge-queue",
+      noReadApi,
+    );
+    expect(
+      deniedEl.querySelector('[data-testid="unfixable-checks-read-denied"]')
+        ?.textContent,
+    ).toContain("repos:read");
+    expect(
+      noReadApi.calls.some(
+        (c) => c.key === "GET /api/repos/{owner}/{name}/unfixable-checks",
+      ),
+    ).toBe(false);
+
+    TestBed.resetTestingModule();
+    const readOnlyApi = new FakeRepoApi();
+    readOnlyApi.unfixableBody = {
+      repo: "acme/platform",
+      unfixableChecks: ["cla/google"],
+      grainCICheckName: "grain CI",
+    };
+    readOnlyApi.configBody = {
+      version: "v3.6.0",
+      access: {
+        role: "repo-reader",
+        roles: ["repo-reader"],
+        full: false,
+        scopes: ["repos:read", "repos:write"],
+        repoLimits: {
+          "repos:read": ["acme/platform"],
+          "repos:write": ["acme/other"],
+        },
+      },
+    };
+    const { el: roEl } = await mountRepo(
+      "/repos/acme/platform/merge-queue",
+      readOnlyApi,
+    );
+    const roInput = roEl.querySelector<HTMLInputElement>(
+      '[data-testid="input-unfixable-check"]',
+    )!;
+    const roAdd = roEl.querySelector<HTMLButtonElement>(
+      '[data-testid="add-unfixable-check-btn"]',
+    )!;
+    expect(roInput.disabled).toBe(true);
+    expect(roAdd.disabled).toBe(true);
+    expect(roInput.getAttribute("aria-describedby")).toContain(
+      "repo-unfixable-checks-denied-reason",
+    );
+    expect(
+      roEl.querySelector('[data-testid="unfixable-checks-write-denied"]')
+        ?.textContent,
+    ).toContain("repos:write");
+    expect(
+      roEl.querySelector('[data-testid="remove-unfixable-check-0"]'),
+    ).toBeNull();
+
+    TestBed.resetTestingModule();
+    const cfgRoApi = new FakeRepoApi();
+    cfgRoApi.unfixableBody = {
+      repo: "acme/platform",
+      unfixableChecks: ["cla/google"],
+      grainCICheckName: "grain CI",
+    };
+    cfgRoApi.configBody = {
+      version: "v3.6.0",
+      configRepoOnly: true,
+      access: {
+        role: "grain/operator",
+        roles: ["grain/operator"],
+        full: true,
+        scopes: [],
+      },
+    };
+    const { el: cfgEl } = await mountRepo(
+      "/repos/acme/platform/merge-queue",
+      cfgRoApi,
+    );
+    const cfgInput = cfgEl.querySelector<HTMLInputElement>(
+      '[data-testid="input-unfixable-check"]',
+    )!;
+    expect(cfgInput.disabled).toBe(true);
+    expect(cfgInput.getAttribute("aria-describedby")).toContain(
+      "repo-config-readonly-banner",
+    );
+    expect(
+      cfgEl.querySelector('[data-testid="remove-unfixable-check-0"]'),
+    ).toBeNull();
+  });
+
+  it("displays an honest empty state, loading/error/retry states, and branch creation on the Branches tab", async () => {
+    const api = new FakeRepoApi();
+    api.branchesBody = [];
+    const { el, harness } = await mountRepo(
+      "/repos/acme/platform/branches",
+      api,
+    );
+
+    expect(
+      el.querySelector('[data-testid="branches-empty"]')?.textContent,
+    ).toContain("No Grain-managed branches yet");
+    expect(el.querySelector('[data-testid="branch-row-main"]')).toBeNull();
+
+    // Creating a branch refreshes the list and replaces the empty state.
+    api.post = (key: string, params?: RouteParams, body?: unknown) => {
+      api.calls.push({ method: "POST", key, params, body });
+      if (key === "POST /api/repos/{owner}/{name}/branches") {
+        api.branchesBody = [{ name: "release/v1.2", sha: "abcdef1234567890" }];
+      }
+      return Promise.resolve({ ok: true });
+    };
+    const nameInput = el.querySelector<HTMLInputElement>(
+      '[data-testid="input-new-branch-name"]',
+    )!;
+    nameInput.value = "release/v1.2";
+    nameInput.dispatchEvent(new Event("input"));
+    harness.detectChanges();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="create-branch-btn"]',
+    )!.click();
+    await new Promise((r) => setTimeout(r, 20));
+    harness.detectChanges();
+
+    expect(el.querySelector('[data-testid="branches-empty"]')).toBeNull();
+    expect(
+      el.querySelector('[data-testid="branch-row-release/v1.2"]')?.textContent,
+    ).toContain("abcdef1234");
+
+    // GET failure shows error banner with Retry rather than claiming empty.
+    TestBed.resetTestingModule();
+    const errApi = new FakeRepoApi();
+    errApi.refuseGet = "GET /api/repos/{owner}/{name}/branches";
+    errApi.branchesBody = [];
+    const { el: errEl, harness: errHarness } = await mountRepo(
+      "/repos/acme/platform/branches",
+      errApi,
+    );
+    await new Promise((r) => setTimeout(r, 20));
+    errHarness.detectChanges();
+    expect(
+      errEl.querySelector('[data-testid="branches-error-banner"]')?.textContent,
+    ).toContain("declarations fetch refused");
+    expect(errEl.querySelector('[data-testid="branches-empty"]')).toBeNull();
+
+    errApi.refuseGet = null;
+    errEl
+      .querySelector<HTMLButtonElement>('[data-testid="retry-branches-btn"]')!
+      .click();
+    await new Promise((r) => setTimeout(r, 20));
+    errHarness.detectChanges();
+    expect(
+      errEl.querySelector('[data-testid="branches-empty"]')?.textContent,
+    ).toContain("No Grain-managed branches yet");
   });
 });
