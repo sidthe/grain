@@ -369,6 +369,8 @@ export interface CIRunsResponse {
   runs: CIRun[];
   matched?: number;
   faults?: { kind?: string; summary?: string; detail?: string }[];
+  repoProvider?: string;
+  actionsNote?: string;
 }
 
 export interface CompareResponse {

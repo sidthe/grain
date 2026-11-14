@@ -39,6 +39,11 @@ import type {
 } from "../api/models";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
+import {
+  CI_PROVIDER_GITHUB_ACTIONS,
+  ciRunQueryParams,
+  isGitHubActionsRunId,
+} from "../ci/ci.models";
 import { errorText } from "../sessions/session-helpers";
 import { parseUnifiedDiff } from "../shared/diff-parse";
 import { DiffViewerComponent } from "../shared/diff-viewer.component";
@@ -296,6 +301,7 @@ import { TaskStore } from "./task.store";
               @if (obsCi.runId) {
                 <a
                   [routerLink]="['/ci/runs', obsCi.runId]"
+                  [queryParams]="ciLinkParams(obsCi.runId)"
                   data-testid="ci-run-link"
                   >Open run #{{ obsCi.runId }}</a
                 >
@@ -326,6 +332,7 @@ import { TaskStore } from "./task.store";
                 }
                 <a
                   [routerLink]="['/ci/runs', run.id]"
+                  [queryParams]="ciLinkParams(run)"
                   [attr.data-testid]="'ci-run-link-' + run.id"
                   >View run #{{ run.id }}</a
                 >
@@ -481,6 +488,7 @@ export class TaskChangesTabComponent {
   protected readonly diffError = signal<string | null>(null);
 
   protected readonly ciRuns = signal<CIRun[]>([]);
+  protected readonly ciRepoProvider = signal("");
   protected readonly runDetails = signal<Record<string, CIRun | undefined>>({});
   protected readonly expandedRunId = signal<string | null>(null);
   protected readonly openStepLogs = signal<ReadonlySet<string>>(new Set());
@@ -592,11 +600,19 @@ export class TaskChangesTabComponent {
         this.fullDiffLoaded.set(false);
         this.diffError.set(null);
         this.ciRuns.set([]);
+        this.ciRepoProvider.set("");
         this.expandedRunId.set(null);
         this.ciError.set(null);
         void this.loadInitial(id);
       });
     });
+  }
+
+  protected ciLinkParams(
+    runOrId:
+      { id?: string; provider?: string; source?: string } | string | undefined,
+  ): { provider: string } | null {
+    return ciRunQueryParams(runOrId, this.ciRepoProvider());
   }
 
   protected can(route: Parameters<AccessService["can"]>[0]): boolean {
@@ -645,16 +661,54 @@ export class TaskChangesTabComponent {
         const t = this.task();
         // GET /api/ci/runs has no task filter (pkg/ui/ci.go ciRunFilterFrom):
         // scope by repo + ref, and fall back to the task's own run id.
-        const res: CIRunsResponse | CIRun[] =
+        const baseQs =
           t.repo && t.branch
-            ? await this.api.get<CIRunsResponse | CIRun[]>(
-                "GET /api/ci/runs",
-                undefined,
-                `repo=${encodeURIComponent(t.repo)}&ref=${encodeURIComponent(t.branch)}&limit=10`,
-              )
-            : [];
+            ? `repo=${encodeURIComponent(t.repo)}&ref=${encodeURIComponent(t.branch)}&limit=10`
+            : "";
+        const wantsGhaDirect = isGitHubActionsRunId(t.ci?.runId);
+        const res: CIRunsResponse | CIRun[] = baseQs
+          ? await this.api.get<CIRunsResponse | CIRun[]>(
+              "GET /api/ci/runs",
+              undefined,
+              wantsGhaDirect
+                ? `${baseQs}&provider=${CI_PROVIDER_GITHUB_ACTIONS}`
+                : baseQs,
+            )
+          : [];
         if (this.task().id !== id) return;
-        const runs = Array.isArray(res) ? res : (res?.runs ?? []);
+        const repoProv = !Array.isArray(res) ? (res?.repoProvider ?? "") : "";
+        if (
+          wantsGhaDirect ||
+          repoProv.toLowerCase() === CI_PROVIDER_GITHUB_ACTIONS
+        ) {
+          this.ciRepoProvider.set(CI_PROVIDER_GITHUB_ACTIONS);
+        }
+        let runs = Array.isArray(res) ? res : (res?.runs ?? []);
+        if (
+          baseQs &&
+          !wantsGhaDirect &&
+          repoProv.toLowerCase() === CI_PROVIDER_GITHUB_ACTIONS
+        ) {
+          try {
+            const ghaRes = await this.api.get<CIRunsResponse | CIRun[]>(
+              "GET /api/ci/runs",
+              undefined,
+              `${baseQs}&provider=${CI_PROVIDER_GITHUB_ACTIONS}`,
+            );
+            if (this.task().id !== id) return;
+            const ghaRuns = Array.isArray(ghaRes)
+              ? ghaRes
+              : (ghaRes?.runs ?? []);
+            if (ghaRuns.length > 0) {
+              const byId = new Map<string, CIRun>();
+              for (const r of runs) byId.set(r.id, r);
+              for (const r of ghaRuns) byId.set(r.id, r);
+              runs = [...byId.values()];
+            }
+          } catch {
+            // Keep initial response if follow-up Actions fetch fails.
+          }
+        }
         this.ciRuns.set(runs);
         const autoRunId = this.task().ci?.runId || runs[0]?.id;
         if (autoRunId) {

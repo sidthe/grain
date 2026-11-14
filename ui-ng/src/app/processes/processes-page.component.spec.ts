@@ -1520,6 +1520,28 @@ describe("ProcessesPageComponent (D-9)", () => {
     expect((tzPatch.body as Record<string, unknown>)["timeZone"]).toBe("");
   });
 
+  it("appends provider=github-actions to schedule workflow run links when runId has gha: prefix", async () => {
+    api.schedules[0] = {
+      ...api.schedules[0],
+      lastWorkflowRun: {
+        runId: "gha:acme:widgets:88",
+        conclusion: "failure",
+        at: "2026-11-12T09:00:00Z",
+      },
+    };
+    const harness = await RouterTestingHarness.create("/processes");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    const ghaLink = [...root.querySelectorAll<HTMLAnchorElement>("a")].find(
+      (a) => a.textContent?.includes("gha:acme:widgets:88"),
+    );
+    expect(ghaLink).toBeDefined();
+    expect(decodeURIComponent(ghaLink!.getAttribute("href")!)).toBe(
+      "/ci/runs/gha:acme:widgets:88?provider=github-actions",
+    );
+  });
+
   it("validateScheduleDraft enforces boundary rules for all target and cadence kinds", () => {
     const baseDraft: ScheduleDraftSnapshot = {
       system: false,
