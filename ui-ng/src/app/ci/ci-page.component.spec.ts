@@ -1498,4 +1498,170 @@ describe("CIPageComponent (D-26)", () => {
       root.querySelector('[data-testid="ci-artifacts-denied"]'),
     ).not.toBeNull();
   });
+
+  it("hides all mutable CI, cache, and quarantine action buttons before config loads and for grain/viewer", async () => {
+    let resolveConfig!: (cfg: GrainConfig) => void;
+    api.config = () =>
+      new Promise<GrainConfig>((resolve) => {
+        resolveConfig = resolve;
+      });
+
+    const harness = await RouterTestingHarness.create("/ci");
+    harness.detectChanges();
+    await new Promise((r) => setTimeout(r, 15));
+    harness.detectChanges();
+    const root = harness.routeNativeElement!;
+
+    // Fail-closed before GET /api/config returns.
+    expect(root.querySelector('[data-testid="ci-open-run-dialog"]')).toBeNull();
+    expect(root.querySelector('[data-testid="ci-caches-menu-btn"]')).toBeNull();
+
+    resolveConfig({
+      access: {
+        role: "grain/viewer",
+        roles: ["grain/viewer"],
+        full: false,
+        scopes: ["ci:read", "tasks:read", "repos:read"],
+        repoLimits: {},
+      },
+      targetRepos: ["acme/widgets", "acme/infra"],
+    });
+    await flush(harness);
+
+    // Top-level mutating controls remain hidden for viewer.
+    expect(root.querySelector('[data-testid="ci-open-run-dialog"]')).toBeNull();
+    expect(root.querySelector('[data-testid="ci-caches-menu-btn"]')).toBeNull();
+
+    // Errored run (auto-selected): Re-run all, Re-run failed, Quarantine test must be hidden.
+    expect(root.querySelector('[data-testid="ci-rerun-btn"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-rerun-failed-btn"]'),
+    ).toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-open-quarantine-btn"]'),
+    ).toBeNull();
+
+    // Failed run: Re-run all, Re-run failed, Quarantine test must be hidden.
+    root
+      .querySelector<HTMLElement>('[data-testid="ci-run-row-run-failed-2"]')!
+      .click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="ci-rerun-btn"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-rerun-failed-btn"]'),
+    ).toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-open-quarantine-btn"]'),
+    ).toBeNull();
+
+    // Active running run: Cancel run, Re-run all, Quarantine test must be hidden.
+    root
+      .querySelector<HTMLElement>('[data-testid="ci-run-row-run-running-3"]')!
+      .click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="ci-cancel-run-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="ci-rerun-btn"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-open-quarantine-btn"]'),
+    ).toBeNull();
+  });
+
+  it("enforces repo-scoped ci:write visibility per selected run and hides quarantine without tests:write", async () => {
+    api.configBody = {
+      access: {
+        role: "grain/repo-ci",
+        roles: ["grain/repo-ci"],
+        full: false,
+        scopes: ["ci:read", "ci:write"],
+        repoLimits: {
+          "ci:write": ["acme/infra"],
+        },
+      },
+      targetRepos: ["acme/widgets", "acme/infra"],
+    };
+
+    const harness = await RouterTestingHarness.create("/ci/runs/run-running-3");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    // Authorized on acme/infra: Cancel run and Re-run all appear; caches/quarantine stay hidden.
+    expect(
+      root.querySelector('[data-testid="ci-open-run-dialog"]'),
+    ).not.toBeNull();
+    expect(root.querySelector('[data-testid="ci-caches-menu-btn"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-cancel-run-btn"]'),
+    ).not.toBeNull();
+    expect(root.querySelector('[data-testid="ci-rerun-btn"]')).not.toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-open-quarantine-btn"]'),
+    ).toBeNull();
+
+    // Unauthorized on acme/widgets: Cancel run and Re-run buttons are completely hidden.
+    root
+      .querySelector<HTMLElement>('[data-testid="ci-run-row-run-failed-2"]')!
+      .click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="ci-cancel-run-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="ci-rerun-btn"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-rerun-failed-btn"]'),
+    ).toBeNull();
+    expect(
+      root.querySelector('[data-testid="ci-open-quarantine-btn"]'),
+    ).toBeNull();
+  });
+
+  it("aligns filter pop-menus within narrow 390px viewport bounds", async () => {
+    Object.defineProperty(window, "innerWidth", {
+      value: 390,
+      configurable: true,
+      writable: true,
+    });
+    const harness = await RouterTestingHarness.create("/ci");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    const branchPill = root.querySelector<HTMLButtonElement>(
+      '[data-testid="ci-branch-pill"]',
+    )!;
+    // Simulate Branch pill sitting toward the right half of a 390px row.
+    branchPill.getBoundingClientRect = () =>
+      ({
+        left: 204,
+        right: 300,
+        top: 212,
+        bottom: 246,
+        width: 96,
+        height: 34,
+        x: 204,
+        y: 212,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    branchPill.click();
+    await flush(harness);
+    const branchMenu = root.querySelector('[data-testid="ci-branch-menu"]')!;
+    expect(branchMenu.classList.contains("align-right")).toBe(true);
+
+    // Simulate Flush cache button wrapped to the left edge at narrow width.
+    const cacheBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="ci-caches-menu-btn"]',
+    )!;
+    cacheBtn.getBoundingClientRect = () =>
+      ({
+        left: 16,
+        right: 132,
+        top: 100,
+        bottom: 140,
+        width: 116,
+        height: 40,
+        x: 16,
+        y: 100,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    cacheBtn.click();
+    await flush(harness);
+    const cacheMenu = root.querySelector('[data-testid="ci-caches-menu"]')!;
+    expect(cacheMenu.classList.contains("align-right")).toBe(false);
+  });
 });
