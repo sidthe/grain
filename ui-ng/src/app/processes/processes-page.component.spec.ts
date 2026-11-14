@@ -898,6 +898,20 @@ describe("ProcessesPageComponent (D-9)", () => {
       '[data-testid="decl-accept-btn-repo:template:acme/widgets:release-notes"]',
     )!;
     expect(acceptBtn.disabled).toBe(true);
+    const inlineWarning = root.querySelector<HTMLElement>(
+      '[data-testid="decl-accept-warning-repo:template:acme/widgets:release-notes"]',
+    );
+    expect(inlineWarning).not.toBeNull();
+    expect(inlineWarning!.textContent).toContain("Insufficient scopes");
+    expect(inlineWarning!.textContent).toContain("repos:write");
+    expect(inlineWarning!.textContent).toContain("scoped to acme/widgets");
+    expect(acceptBtn.getAttribute("aria-describedby")).toBe(inlineWarning!.id);
+
+    acceptBtn.click();
+    await flush(harness);
+    expect(
+      api.calls.some((c) => c.route === "POST /api/declarations/accept"),
+    ).toBe(false);
 
     // 2. Grant global repos:write and reload -> Accept declaration succeeds, plus edit & delete workflow override
     api.configBody = {
@@ -936,6 +950,11 @@ describe("ProcessesPageComponent (D-9)", () => {
     expect(
       api.calls.some((c) => c.route === "POST /api/declarations/accept"),
     ).toBe(true);
+    expect(
+      root2.querySelector(
+        '[data-testid="decl-accept-warning-repo:template:acme/widgets:release-notes"]',
+      ),
+    ).toBeNull();
 
     // Inspect existing workflow override and delete it via Delete override button
     root2
@@ -2175,5 +2194,168 @@ describe("ProcessesPageComponent (D-9)", () => {
         '[data-testid="run-suite-dialog"]',
       ),
     ).toBeNull();
+  });
+
+  it("shows inline missing-global-scopes warnings, gates submission across missing/mixed/widened declarations, and prevents double-submit", async () => {
+    api.configBody = {
+      access: {
+        role: "grain/scoped-reviewer",
+        roles: ["grain/scoped-reviewer"],
+        full: false,
+        scopes: ["capabilities:read", "repos:write"],
+        repoLimits: {
+          "repos:write": ["acme/widgets"],
+        },
+      },
+      targetRepos: ["acme/widgets"],
+      approvedByDefault: true,
+    };
+    api.acceptances = [
+      {
+        id: "repo:suite:acme/widgets:nightly",
+        kind: "suite",
+        repo: "acme/widgets",
+        requested: [
+          'https://grain.dev/capabilities/gcp#gcp-key={"permission_set":"artifact-publisher"}',
+          "push:refs/tags/v*",
+        ],
+        requestedAt: "2026-11-12T00:00:00Z",
+        accepted: ["push:refs/tags/v*"],
+        acceptedBy: "alice@example.com",
+        acceptedAt: "2026-11-11T00:00:00Z",
+        awaiting: true,
+        unaccepted: [
+          'https://grain.dev/capabilities/gcp#gcp-key={"permission_set":"artifact-publisher"}',
+        ],
+        needsScopes: ["capabilities:admin", "repos:write"],
+      },
+      {
+        id: "ci:acme/widgets:lint",
+        kind: "ci-job",
+        repo: "acme/widgets",
+        requested: [
+          'https://grain.dev/capabilities/host-script#run={"script":"lint"}',
+        ],
+        requestedAt: "2026-11-12T00:00:00Z",
+        accepted: [
+          'https://grain.dev/capabilities/host-script#run={"script":"lint"}',
+        ],
+        acceptedBy: "bob@example.com",
+        acceptedAt: "2026-11-12T01:00:00Z",
+        awaiting: false,
+        needsScopes: ["capabilities:admin"],
+      },
+    ];
+
+    const harness = await RouterTestingHarness.create(
+      "/processes/declarations",
+    );
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    const awaitingItem = root.querySelector<HTMLElement>(
+      '[data-testid="decl-acc-item-repo:suite:acme/widgets:nightly"]',
+    )!;
+    expect(awaitingItem.textContent).toContain("Awaiting acceptance");
+    expect(awaitingItem.textContent).toContain("New since last accepted:");
+
+    const btn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="decl-accept-btn-repo:suite:acme/widgets:nightly"]',
+    )!;
+    expect(btn.disabled).toBe(true);
+
+    const warn = root.querySelector<HTMLElement>(
+      '[data-testid="decl-accept-warning-repo:suite:acme/widgets:nightly"]',
+    )!;
+    expect(warn).not.toBeNull();
+    expect(warn.textContent).toContain("Insufficient scopes");
+    expect(warn.textContent).toContain("grain/scoped-reviewer");
+    expect(warn.textContent).toContain("missing capabilities:admin");
+    expect(warn.textContent).toContain("repos:write (scoped to acme/widgets)");
+    expect(btn.getAttribute("aria-describedby")).toBe(warn.id);
+
+    // Already accepted item shows no accept button and no warning
+    expect(
+      root.querySelector(
+        '[data-testid="decl-accept-btn-ci:acme/widgets:lint"]',
+      ),
+    ).toBeNull();
+    expect(
+      root.querySelector(
+        '[data-testid="decl-accept-warning-ci:acme/widgets:lint"]',
+      ),
+    ).toBeNull();
+
+    // Double-submission guard when user has global scopes
+    api.configBody = {
+      access: {
+        role: "grain/operator",
+        roles: ["grain/operator"],
+        full: true,
+        scopes: [],
+      },
+      targetRepos: ["acme/widgets"],
+      approvedByDefault: true,
+    };
+    let resolvePost!: (val: DeclarationAcceptanceView) => void;
+    const basePost = api.post;
+    api.post = (
+      route: string,
+      params?: Record<string, unknown>,
+      body?: unknown,
+    ) => {
+      if (route === "POST /api/declarations/accept") {
+        api.calls.push({ method: "POST", route, params, body });
+        return new Promise<DeclarationAcceptanceView>((resolve) => {
+          resolvePost = resolve;
+        });
+      }
+      return basePost(route, params, body);
+    };
+
+    TestBed.resetTestingModule();
+    TestBed.configureTestingModule({
+      providers: [
+        provideRouter(
+          [{ path: "processes/:tab", component: ProcessesPageComponent }],
+          withComponentInputBinding(),
+        ),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => NEVER } },
+      ],
+    });
+    const harness2 = await RouterTestingHarness.create(
+      "/processes/declarations",
+    );
+    await flush(harness2);
+    const root2 = harness2.routeNativeElement!;
+
+    expect(
+      root2.querySelector(
+        '[data-testid="decl-accept-warning-repo:suite:acme/widgets:nightly"]',
+      ),
+    ).toBeNull();
+    const btn2 = root2.querySelector<HTMLButtonElement>(
+      '[data-testid="decl-accept-btn-repo:suite:acme/widgets:nightly"]',
+    )!;
+    expect(btn2.disabled).toBe(false);
+
+    btn2.click();
+    harness2.detectChanges();
+    expect(btn2.disabled).toBe(true);
+    expect(btn2.textContent?.trim()).toBe("Accepting…");
+    btn2.click();
+    harness2.detectChanges();
+    expect(
+      api.calls.filter((c) => c.route === "POST /api/declarations/accept")
+        .length,
+    ).toBe(1);
+
+    resolvePost({
+      ...api.acceptances[0],
+      awaiting: false,
+      unaccepted: [],
+    });
+    await flush(harness2);
   });
 });
