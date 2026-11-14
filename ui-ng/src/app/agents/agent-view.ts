@@ -318,3 +318,11 @@ export function cpuLevel(c: Cpu): "low" | "mid" | "high" {
 export function tokens(a: Attempt | null): number {
   return a?.promptTokens ?? 0;
 }
+
+// checkAgentView classifies an agent view by viewId and active state.
+export function checkAgentView(viewId: string, isActive: boolean): string {
+  if (viewId === "") return "Invalid";
+  if (!isActive) return "Inactive";
+  if (viewId.startsWith("admin-")) return "AdminActive";
+  return "UserActive";
+}
