@@ -1523,3 +1523,13 @@ func displayName(name, stem string) string {
 	}
 	return stem
 }
+
+// SanitizeAndParse sanitizes opt with declschema.SanitizeOption and returns
+// "Parsed: " prefixed to the sanitized value, or an error if it is empty.
+func SanitizeAndParse(opt string) (string, error) {
+	sanitized := declschema.SanitizeOption(opt)
+	if sanitized == "" {
+		return "", errors.New("repodecl: option must not be empty")
+	}
+	return "Parsed: " + sanitized, nil
+}

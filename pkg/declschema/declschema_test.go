@@ -542,3 +542,28 @@ func TestTheAPIScopeSetSchemaMatchesTheModelAndTheTable(t *testing.T) {
 		}
 	}
 }
+
+func TestSanitizeOption(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{name: "empty", in: "", want: ""},
+		{name: "spaces only", in: "   ", want: ""},
+		{name: "mixed whitespace only", in: "\t\n\r \u00a0", want: ""},
+		{name: "trim and lowercase", in: "  FooBar \t\n", want: "foobar"},
+		{name: "already clean", in: "alpha", want: "alpha"},
+		{name: "preserves internal whitespace", in: "  Hello   World  ", want: "hello   world"},
+		{name: "punctuation and digits", in: "  My-Option_1  ", want: "my-option_1"},
+		{name: "unicode lowercase", in: "  Ünicode  ", want: "ünicode"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := declschema.SanitizeOption(tc.in); got != tc.want {
+				t.Errorf("SanitizeOption(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
