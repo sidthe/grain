@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { DOCUMENT } from "@angular/common";
+import { DOCUMENT, NgTemplateOutlet } from "@angular/common";
 import {
   ChangeDetectionStrategy,
   Component,
@@ -63,13 +63,17 @@ import {
   type CIRunArtifact,
   type CIWorkflowOption,
   type QuarantineTestResponse,
+  actionsRunRepo,
+  canDownloadArtifact,
   cleanRef,
   extractFailedTests,
+  faultClusterKey,
   faultRefCount,
   faultRunCount,
   faultSourceOf,
   faultTitle,
   faultsForRun,
+  formatArtifactTime,
   formatBytes,
   formatDuration,
   isGitHubActionsRun,
@@ -78,6 +82,7 @@ import {
   parseProviderQueryParam,
   providerOfRun,
   providerQueryParam,
+  pullRequestLink,
   runBadge,
   runBranch,
   runBucket,
@@ -86,7 +91,7 @@ import {
   safeExternalUrl,
   stepBadge,
 } from "./ci.models";
-import { CIStore } from "./ci.store";
+import { CIStore, type RunArtifactsState } from "./ci.store";
 
 const FILTERS: readonly { id: CIFilterId; label: string; tip: string }[] = [
   { id: "all", label: "All", tip: "Every recorded CI run." },
@@ -118,6 +123,7 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
 @Component({
   selector: "g-ci-page",
   imports: [
+    NgTemplateOutlet,
     RouterLink,
     TipDirective,
     StatusIconComponent,
@@ -458,10 +464,20 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
           </p>
           @if (faultsExpanded() && sharedFaults().length > 0) {
             <div class="ci-faults-grid" data-testid="ci-faults-clusters">
-              @for (f of sharedFaults(); track $index) {
+              @for (f of sharedFaults(); track faultKeyOf(f) + ":" + $index) {
+                @let fKey = faultKeyOf(f);
                 <article class="ci-fault-card" data-testid="ci-fault-card">
                   <div class="ci-fault-card-top">
-                    <span class="ci-fault-summary">{{ faultLabel(f) }}</span>
+                    <div class="ci-fault-card-heading">
+                      <span
+                        class="ci-provider-tag"
+                        [attr.data-testid]="'ci-fault-source-' + faultSource(f)"
+                        >{{
+                          faultSource(f) === "github" ? "GitHub CI" : "Grain CI"
+                        }}</span
+                      >
+                      <span class="ci-fault-summary">{{ faultLabel(f) }}</span>
+                    </div>
                     <span class="status-pill blast tabular">
                       <g-status-icon tone="blast" kind="blast" />
                       {{ faultRuns(f) }}
@@ -473,17 +489,36 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
                       <span class="tabular">{{ f.repo }}</span>
                     }
                     @if (faultRefs(f) > 0) {
-                      <span class="tabular">{{ faultRefs(f) }} branches</span>
+                      <span class="tabular" [gTip]="(f.refs ?? []).join(', ')">
+                        {{ faultRefs(f) }}
+                        {{ faultRefs(f) === 1 ? "branch" : "branches" }}
+                      </span>
                     }
                     @if (f.ownerTaskId) {
-                      <a [routerLink]="['/task', f.ownerTaskId]"
-                        >Assigned fix #{{ f.ownerTaskId }}</a
-                      >
+                      <a
+                        [routerLink]="['/task', f.ownerTaskId]"
+                        data-testid="ci-fault-owner"
+                        >Assigned fix #{{ f.ownerTaskId }}
+                        @if (f.ownerRef) {
+                          ({{ cleanRefOf(f.ownerRef) }})
+                        }
+                      </a>
                     }
                     @for (fix of f.fixes ?? []; track fix.pullRequest) {
+                      @let extPr = prLinkOf(fix.pullRequest);
                       @if (fix.task) {
-                        <a [routerLink]="['/task', fix.task]"
+                        <a
+                          [routerLink]="['/task', fix.task]"
+                          [gTip]="fix.title || ''"
                           >Fix PR {{ fix.pullRequest }} (#{{ fix.task }})</a
+                        >
+                      } @else if (extPr) {
+                        <a
+                          [href]="extPr"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          [gTip]="fix.title || ''"
+                          >Fix PR {{ fix.pullRequest }} ↗</a
                         >
                       } @else {
                         <span class="tabular"
@@ -492,7 +527,52 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
                       }
                     }
                   </div>
-                  <div>
+                  @if ((f.paths ?? []).length > 0) {
+                    <div class="ci-fault-paths" data-testid="ci-fault-paths">
+                      <span class="muted">Common files:</span>
+                      <code class="ci-sha">{{
+                        (f.paths ?? []).join(", ")
+                      }}</code>
+                    </div>
+                  }
+                  @if ((f.runs ?? []).length > 0) {
+                    <ul class="ci-fault-runs" data-testid="ci-fault-runs">
+                      @for (
+                        fr of visibleFaultRuns(f);
+                        track fr.runId + ":" + $index
+                      ) {
+                        <ng-container
+                          *ngTemplateOutlet="
+                            faultRunRow;
+                            context: {
+                              f: f,
+                              fr: fr,
+                              panelKey: fKey + '::' + fr.runId,
+                              repo: f.repo || '',
+                              currentRunId: '',
+                              idPrefix: 'ci-fault',
+                              artPrefix: 'ci-fault-artifact',
+                            }
+                          "
+                        />
+                      }
+                    </ul>
+                    @if ((f.runs ?? []).length > 5) {
+                      <button
+                        type="button"
+                        class="btn-text ci-fault-more-btn"
+                        data-testid="ci-fault-toggle-all-runs"
+                        (click)="toggleAllFaultRuns(f)"
+                      >
+                        {{
+                          isAllFaultRunsShown(f)
+                            ? "Show fewer runs"
+                            : "Show all " + (f.runs ?? []).length + " runs"
+                        }}
+                      </button>
+                    }
+                  }
+                  <div class="ci-fault-actions">
                     <button
                       type="button"
                       class="btn-text"
@@ -576,7 +656,12 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
                     }}</span>
                   </div>
                   <div class="ci-run-sub">
-                    <span class="tabular">{{ r.repo }}</span>
+                    <code
+                      class="ci-row-id tabular"
+                      data-testid="ci-run-row-id"
+                      >{{ r.id }}</code
+                    >
+                    <span class="tabular">· {{ r.repo }}</span>
                     @if (branchOf(r); as br) {
                       <span class="tabular">· {{ br }}</span>
                     }
@@ -728,6 +813,23 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
                   [label]="actorLabel(run)"
                   [kind]="actorKind(run)"
                 />
+                <span class="ci-meta-runid tabular">
+                  Run
+                  <code class="ci-sha" data-testid="ci-detail-run-id">{{
+                    run.id
+                  }}</code>
+                  @if (!id()) {
+                    <a
+                      class="ci-detail-permalink"
+                      [routerLink]="['/ci', 'runs', run.id]"
+                      [queryParams]="runPermalinkQueryParams(run)"
+                      queryParamsHandling="merge"
+                      data-testid="ci-detail-permalink"
+                      [gTip]="'Direct link to run ' + run.id"
+                      >Permalink</a
+                    >
+                  }
+                </span>
                 <span class="tabular">{{ run.repo }}</span>
                 @if (branchOf(run); as br) {
                   <span class="tabular"
@@ -778,17 +880,70 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
                   @if (run.error) {
                     <span>{{ run.error }}</span>
                   }
-                  @for (f of runFaults; track $index) {
-                    <span>
-                      Seen across {{ faultRuns(f) }} runs /
-                      {{ faultRefs(f) }} branches: {{ faultLabel(f) }}
-                      @if (f.ownerTaskId) {
-                        —
-                        <a [routerLink]="['/task', f.ownerTaskId]"
-                          >assigned to #{{ f.ownerTaskId }}</a
+                  @for (f of runFaults; track faultKeyOf(f) + ":" + $index) {
+                    @let fKey = faultKeyOf(f);
+                    <div class="ci-callout-fault">
+                      <div class="ci-callout-fault-head">
+                        <span
+                          class="ci-provider-tag"
+                          [attr.data-testid]="
+                            'ci-callout-fault-source-' + faultSource(f)
+                          "
+                          >{{
+                            faultSource(f) === "github"
+                              ? "GitHub CI"
+                              : "Grain CI"
+                          }}</span
                         >
+                        <span>
+                          Seen across {{ faultRuns(f) }}
+                          {{ faultRuns(f) === 1 ? "run" : "runs" }} /
+                          {{ faultRefs(f) }}
+                          {{ faultRefs(f) === 1 ? "branch" : "branches" }}:
+                          {{ faultLabel(f) }}
+                          @if (f.ownerTaskId) {
+                            —
+                            <a [routerLink]="['/task', f.ownerTaskId]"
+                              >assigned to #{{ f.ownerTaskId }}</a
+                            >
+                          }
+                        </span>
+                      </div>
+                      @if ((f.paths ?? []).length > 0) {
+                        <span class="ci-fault-paths">
+                          Common files:
+                          <code class="ci-sha">{{
+                            (f.paths ?? []).join(", ")
+                          }}</code>
+                        </span>
                       }
-                    </span>
+                      @if ((f.runs ?? []).length > 0) {
+                        <ul
+                          class="ci-fault-runs"
+                          data-testid="ci-callout-fault-runs"
+                        >
+                          @for (
+                            fr of f.runs ?? [];
+                            track fr.runId + ":" + $index
+                          ) {
+                            <ng-container
+                              *ngTemplateOutlet="
+                                faultRunRow;
+                                context: {
+                                  f: f,
+                                  fr: fr,
+                                  panelKey: 'callout:' + fKey + '::' + fr.runId,
+                                  repo: f.repo || run.repo || '',
+                                  currentRunId: run.id,
+                                  idPrefix: 'ci-callout',
+                                  artPrefix: 'ci-callout-artifact',
+                                }
+                              "
+                            />
+                          }
+                        </ul>
+                      }
+                    </div>
                   }
                 </div>
               } @else if (badge.bucket === "failed") {
@@ -872,6 +1027,50 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
                     <div class="ci-steps-list">
                       @if (job.error) {
                         <p class="banner banner-error">{{ job.error }}</p>
+                      }
+                      @let jArts = jobArtifacts(run, job);
+                      @if (jArts.length > 0) {
+                        <div
+                          class="ci-job-artifacts"
+                          data-testid="ci-job-artifacts"
+                        >
+                          @for (art of jArts; track art.job + ":" + art.name) {
+                            <div class="ci-job-artifact-item">
+                              <span class="muted">Artifact</span>
+                              @if (
+                                canDownload(
+                                  run.id,
+                                  art,
+                                  providerOf(run),
+                                  run.repo
+                                )
+                              ) {
+                                <a
+                                  class="ci-inline-link"
+                                  [href]="artifactHref(art.run || run.id, art)"
+                                  download
+                                  data-testid="ci-job-artifact-download"
+                                  >{{ art.name }}</a
+                                >
+                              } @else {
+                                <strong>{{ art.name }}</strong>
+                              }
+                              @if (art.bytes || art.size; as sz) {
+                                <span class="tabular muted"
+                                  >({{ bytesOf(sz)
+                                  }}{{
+                                    art.stored === true ? ", .tar.gz" : ""
+                                  }})</span
+                                >
+                              } @else if (art.stored === true) {
+                                <span class="tabular muted">(.tar.gz)</span>
+                              }
+                              @if (art.note) {
+                                <span class="muted">— {{ art.note }}</span>
+                              }
+                            </div>
+                          }
+                        </div>
                       }
                       @if (providerOf(run) === "github") {
                         <div style="padding: 8px 14px">
@@ -1082,63 +1281,383 @@ const PROVIDERS: readonly { id: CIProviderFilter; label: string }[] = [
             <div class="ci-jobs-section" data-testid="ci-artifacts-section">
               <h3 class="section-title">
                 Artifacts
-                <span class="muted tabular"
-                  >({{ store.artifacts().length }})</span
-                >
-              </h3>
-              @if (store.artifacts().length === 0) {
-                <p class="muted">No stored artifacts for this run.</p>
-              } @else {
-                <ul class="ci-artifacts-list">
-                  @for (
-                    art of store.artifacts();
-                    track art.job + ":" + art.name
+                <span class="muted tabular">
+                  @if (
+                    store.artifactsTruncated() &&
+                    store.artifactsTotal() > store.artifacts().length
                   ) {
-                    <li class="ci-artifact-row" data-testid="ci-artifact-row">
-                      <div>
-                        <strong>{{ art.name }}</strong>
-                        <span class="muted"> · job {{ art.job }}</span>
-                        @if (art.bytes || art.size; as sz) {
-                          <span class="tabular muted">
-                            · {{ bytesOf(sz) }}</span
-                          >
-                        }
-                        @if (art.note) {
-                          <span class="muted"> — {{ art.note }}</span>
-                        }
-                      </div>
-                      @if (
-                        art.stored === true &&
-                        providerOf(run) !== "github" &&
-                        access.can(
-                          "GET /api/ci/runs/{id}/artifacts/{job}/{name}",
-                          run.repo
-                        )
-                      ) {
-                        <a
-                          class="btn-tonal"
-                          [href]="artifactHref(run.id, art)"
-                          download
-                          data-testid="ci-artifact-download"
-                          >Download .tar.gz</a
-                        >
-                      }
-                    </li>
+                    ({{ store.artifacts().length }} of
+                    {{ store.artifactsTotal() }})
+                  } @else {
+                    ({{ store.artifacts().length }})
                   }
-                </ul>
-              }
+                </span>
+              </h3>
+              <ng-container
+                *ngTemplateOutlet="
+                  artifactsList;
+                  context: {
+                    runId: run.id,
+                    repo: run.repo,
+                    provider: providerOf(run),
+                    extUrl: safeUrl(run.actions?.url || run.url),
+                    state: store.activeArtifactsState(),
+                    testIdPrefix: 'ci-artifact',
+                    compact: false,
+                    isSelectedRun: true,
+                  }
+                "
+              />
             </div>
           } @else {
-            <div class="empty-state">
-              <p>
-                Select a CI run on the left to inspect its jobs, logs, and
-                artifacts.
-              </p>
-            </div>
+            @if (store.selectedId(); as selId) {
+              <div class="ci-insp-head">
+                <div class="ci-insp-top">
+                  <div class="headline-cluster">
+                    <button
+                      type="button"
+                      class="btn-text ci-mobile-back"
+                      data-testid="ci-mobile-back"
+                      (click)="closeMobileDetail()"
+                    >
+                      ← All runs
+                    </button>
+                    <h2 class="ci-insp-title" data-testid="ci-detail-title">
+                      Run
+                      <code class="ci-sha" data-testid="ci-detail-run-id">{{
+                        selId
+                      }}</code>
+                    </h2>
+                  </div>
+                </div>
+                @if (store.detailLoading()) {
+                  <p class="muted" data-testid="ci-detail-loading">
+                    Loading run {{ selId }}…
+                  </p>
+                } @else {
+                  <p class="muted" data-testid="ci-detail-unavailable">
+                    Run details are not available for {{ selId }}.
+                  </p>
+                }
+              </div>
+              <div class="ci-jobs-section" data-testid="ci-artifacts-section">
+                <h3 class="section-title">
+                  Artifacts
+                  <span class="muted tabular"
+                    >({{ store.artifacts().length }})</span
+                  >
+                </h3>
+                <ng-container
+                  *ngTemplateOutlet="
+                    artifactsList;
+                    context: {
+                      runId: selId,
+                      repo: faultRunRepo(selId),
+                      provider: faultRunProvider(selId),
+                      extUrl: faultRunExtUrl(selId),
+                      state: store.activeArtifactsState(),
+                      testIdPrefix: 'ci-artifact',
+                      compact: false,
+                      isSelectedRun: true,
+                    }
+                  "
+                />
+              </div>
+            } @else {
+              <div class="empty-state">
+                <p>
+                  Select a CI run on the left to inspect its jobs, logs, and
+                  artifacts.
+                </p>
+              </div>
+            }
           }
         </section>
       </div>
     </section>
+
+    <ng-template
+      #faultRunRow
+      let-f="f"
+      let-fr="fr"
+      let-panelKey="panelKey"
+      let-repo="repo"
+      let-currentRunId="currentRunId"
+      let-idPrefix="idPrefix"
+      let-artPrefix="artPrefix"
+    >
+      @let artOpen = isFaultArtifactsOpen(panelKey);
+      @let artState = faultRunArtState(fr.runId);
+      <li
+        class="ci-fault-run-item"
+        [class.is-active]="
+          currentRunId
+            ? fr.runId === currentRunId
+            : store.selectedId() === fr.runId
+        "
+        [attr.data-testid]="
+          idPrefix + (currentRunId ? '-fault-run-' : '-run-') + fr.runId
+        "
+      >
+        <div class="ci-fault-run-row">
+          @if (currentRunId && fr.runId === currentRunId) {
+            <code
+              class="ci-sha ci-fault-run-id"
+              [attr.data-testid]="idPrefix + '-fault-run-id'"
+              >{{ fr.runId }}</code
+            >
+            <span class="ci-provider-tag">Current run</span>
+          } @else {
+            <button
+              type="button"
+              class="ci-fault-run-link"
+              [attr.data-testid]="idPrefix + '-open-run-' + fr.runId"
+              [gTip]="'Inspect CI run ' + fr.runId"
+              (click)="openFaultRun(f, fr.runId)"
+            >
+              <code
+                class="ci-sha ci-fault-run-id"
+                [attr.data-testid]="
+                  currentRunId ? idPrefix + '-fault-run-id' : 'ci-fault-run-id'
+                "
+                >{{ fr.runId }}</code
+              >
+            </button>
+          }
+          @if (cleanRefOf(fr.ref); as frBranch) {
+            <span class="ci-fault-run-branch tabular" [gTip]="frBranch">{{
+              frBranch
+            }}</span>
+          }
+          @if (fr.commit || fr.sha; as frSha) {
+            <code class="ci-sha">{{ frSha.slice(0, 7) }}</code>
+          }
+          @if (fr.taskId) {
+            <a
+              class="part-of-link"
+              [routerLink]="['/task', fr.taskId]"
+              [attr.data-testid]="idPrefix + '-run-task-' + fr.runId"
+              >#{{ fr.taskId }}</a
+            >
+          }
+          <button
+            type="button"
+            class="btn-text ci-fault-art-btn"
+            [attr.aria-expanded]="artOpen"
+            [attr.aria-controls]="
+              artOpen ? domId(idPrefix + '-art', panelKey) : null
+            "
+            [attr.data-testid]="idPrefix + '-artifacts-btn-' + fr.runId"
+            [gTip]="'Inspect artifacts for run ' + fr.runId"
+            (click)="toggleFaultRunArtifacts(panelKey, fr.runId, repo)"
+          >
+            {{
+              artOpen
+                ? "Hide artifacts"
+                : artState && !artState.loading && !artState.error
+                  ? "Artifacts (" + artState.artifacts.length + ")"
+                  : "Artifacts"
+            }}
+          </button>
+        </div>
+        @if (artOpen) {
+          <div
+            class="ci-fault-art-panel"
+            [id]="domId(idPrefix + '-art', panelKey)"
+            [attr.data-testid]="idPrefix + '-artifacts-' + fr.runId"
+          >
+            <ng-container
+              *ngTemplateOutlet="
+                artifactsList;
+                context: {
+                  runId: fr.runId,
+                  repo: repo,
+                  provider: faultRunProvider(fr.runId, f.source),
+                  extUrl: faultRunExtUrl(fr.runId),
+                  state: artState,
+                  testIdPrefix: artPrefix,
+                  compact: true,
+                  isSelectedRun: false,
+                }
+              "
+            />
+          </div>
+        }
+      </li>
+    </ng-template>
+
+    <ng-template
+      #artifactsList
+      let-runId="runId"
+      let-repo="repo"
+      let-provider="provider"
+      let-extUrl="extUrl"
+      let-state="state"
+      let-testIdPrefix="testIdPrefix"
+      let-compact="compact"
+      let-isSelectedRun="isSelectedRun"
+    >
+      @let canReadList =
+        access.can("GET /api/ci/runs/{id}/artifacts", repo || undefined);
+      @if (state?.error; as artErr) {
+        <p
+          class="banner banner-error ci-art-status"
+          role="alert"
+          [attr.data-testid]="testIdPrefix + '-error'"
+        >
+          <span>Could not load artifacts: {{ artErr }}</span>
+          @if (canReadList) {
+            <button
+              type="button"
+              class="btn-text"
+              [attr.data-testid]="testIdPrefix + '-retry'"
+              (click)="retryArtifacts(runId, repo, isSelectedRun)"
+            >
+              Retry
+            </button>
+          }
+        </p>
+      }
+      @if (state?.loading && !state?.artifacts?.length) {
+        <p class="muted" [attr.data-testid]="testIdPrefix + '-loading'">
+          Loading artifacts for {{ runId }}…
+        </p>
+      } @else if (!canReadList && !state?.artifacts?.length) {
+        <p class="muted" [attr.data-testid]="testIdPrefix + '-denied'">
+          {{
+            access.deniedReason(
+              "GET /api/ci/runs/{id}/artifacts",
+              repo || undefined
+            )
+          }}
+        </p>
+      } @else if (!state?.artifacts?.length) {
+        @if (state && state.enabled === false) {
+          <p class="muted" [attr.data-testid]="testIdPrefix + '-unavailable'">
+            Artifact collection is unavailable because CI is not enabled on this
+            deployment.
+          </p>
+        } @else if (state && !state.available) {
+          <p class="muted" [attr.data-testid]="testIdPrefix + '-unavailable'">
+            This deployment does not keep CI artifacts (no artifact store
+            configured).
+          </p>
+        } @else {
+          <p class="muted" [attr.data-testid]="testIdPrefix + '-empty'">
+            No stored artifacts for this run.
+          </p>
+        }
+      } @else {
+        <ul class="ci-artifacts-list" [class.is-compact]="compact">
+          @for (
+            art of state.artifacts;
+            track (art.run || "") +
+              ":" +
+              (art.job || "") +
+              ":" +
+              art.name +
+              ":" +
+              (art.url || "") +
+              ":" +
+              art.stored +
+              ":" +
+              $index
+          ) {
+            @let artRunId = art.run || runId;
+            <li
+              class="ci-artifact-row"
+              [attr.data-testid]="testIdPrefix + '-row'"
+            >
+              <div class="ci-artifact-info">
+                <strong>{{ art.name }}</strong>
+                @if (art.job) {
+                  <span class="muted"> · job {{ art.job }}</span>
+                }
+                @if (art.bytes || art.size; as sz) {
+                  <span class="tabular muted"> · {{ bytesOf(sz) }}</span>
+                }
+                @if (artifactTimeOf(art.collectedAt); as collected) {
+                  <span class="tabular muted"> · {{ collected }}</span>
+                }
+                @if (art.note) {
+                  <span class="ci-artifact-note muted"> — {{ art.note }}</span>
+                }
+              </div>
+              @if (canDownload(artRunId, art, provider, repo)) {
+                <a
+                  class="btn-tonal"
+                  [href]="artifactHref(artRunId, art)"
+                  download
+                  [attr.data-testid]="testIdPrefix + '-download'"
+                  >Download .tar.gz</a
+                >
+              } @else if (
+                (provider === "github" || isGhaId(artRunId)) && extUrl
+              ) {
+                <a
+                  class="btn-tonal"
+                  [href]="extUrl"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  [attr.data-testid]="testIdPrefix + '-external'"
+                  >Open on GitHub ↗</a
+                >
+              } @else if (
+                art.stored === true &&
+                provider !== "github" &&
+                !isGhaId(artRunId) &&
+                !access.can(
+                  "GET /api/ci/runs/{id}/artifacts/{job}/{name}",
+                  repo || undefined
+                )
+              ) {
+                <button
+                  type="button"
+                  class="btn-tonal"
+                  disabled
+                  [gTip]="
+                    access.deniedReason(
+                      'GET /api/ci/runs/{id}/artifacts/{job}/{name}',
+                      repo || undefined
+                    )
+                  "
+                  [attr.data-testid]="testIdPrefix + '-download-disabled'"
+                >
+                  Download .tar.gz
+                </button>
+              } @else if (art.stored === false) {
+                <span
+                  class="status-pill neutral"
+                  [attr.data-testid]="testIdPrefix + '-not-stored'"
+                  >Not stored</span
+                >
+              }
+            </li>
+          }
+        </ul>
+        @if (state.truncated && state.nextCursor) {
+          <div class="ci-art-more">
+            <button
+              type="button"
+              class="btn-text"
+              [disabled]="state.loading"
+              [attr.data-testid]="testIdPrefix + '-load-more'"
+              (click)="loadMoreArtifacts(runId, repo, isSelectedRun)"
+            >
+              {{
+                state.loading
+                  ? "Loading…"
+                  : "Load more (" +
+                    state.artifacts.length +
+                    " of " +
+                    state.total +
+                    ")"
+              }}
+            </button>
+          </div>
+        }
+      }
+    </ng-template>
 
     @if (runDialogOpen()) {
       <div
@@ -1475,6 +1994,9 @@ export class CIPageComponent implements OnInit, OnDestroy {
   );
   protected readonly faultsExpanded = signal(true);
   protected readonly mobileDetailOpen = signal(false);
+  protected readonly pinnedRunId = signal<string | null>(null);
+  protected readonly openFaultArtifacts = signal<Record<string, boolean>>({});
+  protected readonly expandedFaultRuns = signal<Record<string, boolean>>({});
 
   protected readonly expandedJobs = signal<Record<string, boolean>>({});
   protected readonly expandedSteps = signal<Record<string, boolean>>({});
@@ -1631,10 +2153,11 @@ export class CIPageComponent implements OnInit, OnDestroy {
           return;
         }
         const cur = this.store.selectedId();
+        const pinned = this.pinnedRunId();
         if (
           loaded &&
           runs.length > 0 &&
-          (!cur || !runs.some((r) => r.id === cur))
+          (!cur || (cur !== pinned && !runs.some((r) => r.id === cur)))
         ) {
           const isDesktop = (this.doc.defaultView?.innerWidth ?? 1280) >= 600;
           if (isDesktop) {
@@ -1790,16 +2313,19 @@ export class CIPageComponent implements OnInit, OnDestroy {
   }
 
   protected setBucketFilter(id: CIFilterId): void {
+    this.pinnedRunId.set(null);
     this.bucketFilter.set(id);
     this.syncFilterUrl();
   }
 
   protected setProviderFilter(id: CIProviderFilter): void {
+    this.pinnedRunId.set(null);
     this.providerFilter.set(id);
     this.syncFilterUrl();
   }
 
   protected pickRepo(repo: string): void {
+    this.pinnedRunId.set(null);
     this.repoFilter.set(repo);
     this.branchFilter.set("");
     this.openMenu.set(null);
@@ -1807,12 +2333,14 @@ export class CIPageComponent implements OnInit, OnDestroy {
   }
 
   protected pickBranch(branch: string): void {
+    this.pinnedRunId.set(null);
     this.branchFilter.set(branch);
     this.openMenu.set(null);
     this.syncFilterUrl();
   }
 
   protected resetFilters(): void {
+    this.pinnedRunId.set(null);
     this.bucketFilter.set("all");
     this.repoFilter.set("");
     this.branchFilter.set("");
@@ -1830,6 +2358,7 @@ export class CIPageComponent implements OnInit, OnDestroy {
     }
     this.faultDigestFilter.set(f.digest || faultTitle(f));
     const firstRunId = f.runs?.[0]?.runId;
+    this.pinnedRunId.set(firstRunId ?? null);
     if (!firstRunId || !this.id() || this.id() === firstRunId) {
       this.syncFilterUrl();
     }
@@ -1838,12 +2367,60 @@ export class CIPageComponent implements OnInit, OnDestroy {
     }
   }
 
+  protected openFaultRun(f: CIFault, runId: string): void {
+    const src = faultSourceOf(f.source);
+    const fr = (f.runs ?? []).find((r) => r.runId === runId);
+    const frBranch = cleanRef(fr?.ref);
+    const listedRun = this.store.runs().find((r) => r.id === runId);
+    let filtersChanged = false;
+
+    if (this.providerFilter() !== "all" && this.providerFilter() !== src) {
+      this.providerFilter.set("all");
+      filtersChanged = true;
+    }
+    if (this.repoFilter() && f.repo && this.repoFilter() !== f.repo) {
+      this.repoFilter.set(f.repo);
+      filtersChanged = true;
+    }
+    if (this.branchFilter() && frBranch && this.branchFilter() !== frBranch) {
+      this.branchFilter.set("");
+      filtersChanged = true;
+    }
+    if (this.bucketFilter() !== "all") {
+      const expectedBucket = listedRun
+        ? runBucket(listedRun, this.sharedFaults())
+        : "errored";
+      if (this.bucketFilter() !== expectedBucket) {
+        this.bucketFilter.set("all");
+        filtersChanged = true;
+      }
+    }
+    const fDigest = f.digest || faultTitle(f);
+    if (this.faultDigestFilter() && this.faultDigestFilter() !== fDigest) {
+      this.faultDigestFilter.set("");
+      filtersChanged = true;
+    }
+    if (this.filter.query().trim()) {
+      this.filter.query.set("");
+      filtersChanged = true;
+    }
+
+    this.pinnedRunId.set(runId);
+    if (filtersChanged && (!this.id() || this.id() === runId)) {
+      this.syncFilterUrl();
+    }
+    this.openRun(runId, true, src === "github");
+  }
+
   protected openRun(
     runId: string,
     fromUserClick = false,
     forceGitHubActions = false,
   ): void {
-    if (fromUserClick) this.mobileDetailOpen.set(true);
+    if (fromUserClick) {
+      this.pinnedRunId.set(runId);
+      this.mobileDetailOpen.set(true);
+    }
     void this.store.selectRun(runId);
     if (this.id() && this.id() !== runId) {
       void this.router.navigate(["/ci", "runs", runId], {
@@ -1854,6 +2431,7 @@ export class CIPageComponent implements OnInit, OnDestroy {
   }
 
   protected closeMobileDetail(): void {
+    this.pinnedRunId.set(null);
     this.mobileDetailOpen.set(false);
     if (this.id()) {
       void this.router.navigate(["/ci"], {
@@ -1890,6 +2468,164 @@ export class CIPageComponent implements OnInit, OnDestroy {
   protected faultLabel = faultTitle;
   protected faultRuns = faultRunCount;
   protected faultRefs = faultRefCount;
+  protected faultKeyOf = faultClusterKey;
+  protected faultSource = (f: CIFault) => faultSourceOf(f.source);
+  protected cleanRefOf = cleanRef;
+  protected prLinkOf = pullRequestLink;
+  protected artifactTimeOf = formatArtifactTime;
+  protected isGhaId = isGitHubActionsRunId;
+
+  protected domId(prefix: string, raw: string): string {
+    return `${prefix}-${raw.replace(/[^A-Za-z0-9_-]+/g, "-")}`;
+  }
+
+  protected runPermalinkQueryParams(run: CIRun): Record<string, string | null> {
+    return this.runNavigationQueryParams(run.id, isGitHubActionsRun(run));
+  }
+
+  protected isAllFaultRunsShown(f: CIFault): boolean {
+    return !!this.expandedFaultRuns()[faultClusterKey(f)];
+  }
+
+  protected toggleAllFaultRuns(f: CIFault): void {
+    const key = faultClusterKey(f);
+    this.expandedFaultRuns.update((m) => ({ ...m, [key]: !m[key] }));
+  }
+
+  protected visibleFaultRuns(f: CIFault) {
+    const all = f.runs ?? [];
+    if (all.length <= 5 || this.isAllFaultRunsShown(f)) return all;
+    return all.slice(0, 5);
+  }
+
+  protected isFaultArtifactsOpen(panelKey: string): boolean {
+    return !!this.openFaultArtifacts()[panelKey];
+  }
+
+  protected toggleFaultRunArtifacts(
+    panelKey: string,
+    runId: string,
+    repo?: string,
+  ): void {
+    const next = !this.isFaultArtifactsOpen(panelKey);
+    this.openFaultArtifacts.update((m) => ({ ...m, [panelKey]: next }));
+    if (next) {
+      void this.store.loadFaultRunArtifacts(runId, repo);
+    }
+  }
+
+  protected faultRunArtState(runId: string): RunArtifactsState | null {
+    const cached = this.store.faultRunArtifacts()[runId];
+    if (cached) return cached;
+    if (this.store.selectedId() === runId) {
+      return this.store.activeArtifactsState();
+    }
+    return null;
+  }
+
+  protected faultRunProvider(
+    runId: string,
+    faultSource?: string,
+  ): "grain" | "github" {
+    if (
+      isGitHubActionsRunId(runId) ||
+      faultSourceOf(faultSource) === "github"
+    ) {
+      return "github";
+    }
+    const det = this.store.detail();
+    if (det?.id === runId) return providerOfRun(det);
+    const listed = this.store.runs().find((r) => r.id === runId);
+    return listed ? providerOfRun(listed) : "grain";
+  }
+
+  protected faultRunExtUrl(runId: string): string | null {
+    const det = this.store.detail();
+    if (det?.id === runId) {
+      return safeExternalUrl(det.actions?.url || det.url);
+    }
+    const listed = this.store.runs().find((r) => r.id === runId);
+    return listed ? safeExternalUrl(listed.actions?.url || listed.url) : null;
+  }
+
+  protected faultRunRepo(runId: string): string {
+    const det = this.store.detail();
+    if (det?.id === runId && det.repo) return det.repo;
+    const listed = this.store.runs().find((r) => r.id === runId);
+    if (listed?.repo) return listed.repo;
+    for (const f of this.sharedFaults()) {
+      if (f.repo && f.runs?.some((r) => r.runId === runId)) return f.repo;
+    }
+    return actionsRunRepo(runId);
+  }
+
+  protected retryArtifacts(
+    runId: string,
+    repo?: string,
+    isSelectedRun = false,
+  ): void {
+    if (isSelectedRun) {
+      void this.store.reloadRunArtifacts(runId, repo);
+      return;
+    }
+    void this.store.loadFaultRunArtifacts(runId, repo, true);
+  }
+
+  protected loadMoreArtifacts(
+    runId: string,
+    repo?: string,
+    isSelectedRun = false,
+  ): void {
+    if (isSelectedRun) {
+      void this.store.loadMoreRunArtifacts(runId, repo);
+      return;
+    }
+    const cursor = this.store.faultRunArtifacts()[runId]?.nextCursor;
+    if (cursor) {
+      void this.store.loadFaultRunArtifacts(runId, repo, true, cursor);
+    }
+  }
+
+  protected canDownload(
+    runId: string,
+    art: CIRunArtifact,
+    provider: string,
+    repo?: string,
+  ): boolean {
+    const hasScope = this.access.can(
+      "GET /api/ci/runs/{id}/artifacts/{job}/{name}",
+      repo || undefined,
+    );
+    return canDownloadArtifact(runId, art, provider, hasScope);
+  }
+
+  protected jobArtifacts(run: CIRun, job: CIJobRun): CIRunArtifact[] {
+    const jId = (job.jobId || "").trim();
+    const jName = (job.name || "").trim();
+    const fromRun = job.artifacts ?? [];
+    const fromStore =
+      this.store.selectedId() === run.id
+        ? this.store
+            .artifacts()
+            .filter(
+              (a) =>
+                !!a.job &&
+                ((jId && a.job === jId) || (jName && a.job === jName)),
+            )
+        : [];
+    const out: CIRunArtifact[] = [];
+    const seen = new Set<string>();
+    for (const a of [...fromStore, ...fromRun]) {
+      const jobKey = (a.job || jId || jName).trim();
+      const name = (a.name || "").trim();
+      if (!name) continue;
+      const key = `${jobKey}\0${name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ ...a, run: a.run || run.id, job: jobKey, name });
+    }
+    return out;
+  }
 
   protected actorLabel(run: CIRun): string {
     const tid = runTaskId(run);
