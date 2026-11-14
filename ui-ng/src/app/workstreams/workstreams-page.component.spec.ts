@@ -736,6 +736,234 @@ describe("WorkstreamsPageComponent", () => {
     expect(backCard10.classList).not.toContain("is-selected");
     expect(backCard10.hasAttribute("aria-current")).toBe(false);
   });
+
+  it("stops Enter and Space keydown propagation on rows and cards so ancestor and document shortcuts do not double-fire", async () => {
+    api.open = [
+      t("10", { title: "Alpha stream", state: "running" }),
+      t("11", {
+        title: "Alpha child",
+        state: "queued",
+        origin: "task:10",
+        generatedFrom: "10",
+      }),
+      t("20", { title: "Beta stream", state: "running" }),
+      t("21", {
+        title: "Beta child",
+        state: "queued",
+        origin: "task:20",
+        generatedFrom: "20",
+      }),
+    ];
+
+    const { fixture, router } = await mount("/workstreams?selected=task:10");
+    const el = fixture.nativeElement as HTMLElement;
+    const navSpy = vi.spyOn(router, "navigate").mockResolvedValue(true);
+    const pageEl = el.querySelector<HTMLElement>('[data-testid="ws-page"]')!;
+    const pageSpy = vi.fn();
+    const docSpy = vi.fn();
+    pageEl.addEventListener("keydown", pageSpy);
+    document.addEventListener("keydown", docSpy);
+
+    try {
+      const dispatchConsumed = (item: HTMLElement, init: KeyboardEventInit) => {
+        const ev = new KeyboardEvent("keydown", init);
+        const stopSpy = vi.spyOn(ev, "stopPropagation");
+        item.dispatchEvent(ev);
+        if (init.cancelable) expect(ev.defaultPrevented).toBe(true);
+        expect(stopSpy).toHaveBeenCalledTimes(1);
+      };
+
+      const checkItem = (item: HTMLElement) => {
+        navSpy.mockClear();
+        pageSpy.mockClear();
+        docSpy.mockClear();
+
+        dispatchConsumed(item, {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        });
+        dispatchConsumed(item, {
+          key: " ",
+          bubbles: true,
+          cancelable: true,
+        });
+
+        // Non-cancelable Enter and Space also stop propagation and do not
+        // fall through to page-level Enter on previously selected task:10.
+        dispatchConsumed(item, {
+          key: "Enter",
+          bubbles: true,
+        });
+        dispatchConsumed(item, {
+          key: " ",
+          bubbles: true,
+        });
+
+        expect(navSpy).toHaveBeenCalledTimes(4);
+        for (const call of navSpy.mock.calls) {
+          expect(call[0]).toEqual(["/workstreams", "task:20"]);
+        }
+
+        // Held repeat events still consume the key without re-navigating.
+        dispatchConsumed(item, {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+          repeat: true,
+        });
+        dispatchConsumed(item, {
+          key: " ",
+          bubbles: true,
+          cancelable: true,
+          repeat: true,
+        });
+
+        expect(navSpy).toHaveBeenCalledTimes(4);
+        expect(pageSpy).not.toHaveBeenCalled();
+        expect(docSpy).not.toHaveBeenCalled();
+      };
+
+      checkItem(
+        el.querySelector<HTMLElement>('[data-testid="ws-row-task:20"]')!,
+      );
+
+      // Switch to Cards view and verify the same for focused cards.
+      el.querySelector<HTMLButtonElement>(
+        '[data-testid="ws-view-cards"]',
+      )!.click();
+      await fixture.whenStable();
+      fixture.detectChanges();
+      await router.navigateByUrl("/workstreams?view=cards&selected=task:10");
+      await fixture.whenStable();
+      fixture.detectChanges();
+
+      checkItem(
+        el.querySelector<HTMLElement>('[data-testid="ws-card-task:20"]')!,
+      );
+    } finally {
+      pageEl.removeEventListener("keydown", pageSpy);
+      document.removeEventListener("keydown", docSpy);
+    }
+  });
+
+  it("leaves nested controls alone and guards page-level Enter against buttons, typing targets, Shift+Enter, and modals", async () => {
+    api.open = [
+      t("10", { title: "Alpha stream", state: "running" }),
+      t("11", {
+        title: "Alpha child",
+        state: "queued",
+        origin: "task:10",
+        generatedFrom: "10",
+      }),
+    ];
+
+    const { fixture, router } = await mount("/workstreams?selected=task:10");
+    const el = fixture.nativeElement as HTMLElement;
+    const navSpy = vi.spyOn(router, "navigate").mockResolvedValue(true);
+    const row10 = el.querySelector<HTMLElement>(
+      '[data-testid="ws-row-task:10"]',
+    )!;
+
+    // Nested control inside a row/card keeps its own Enter/Space events.
+    const nestedBtn = document.createElement("button");
+    nestedBtn.type = "button";
+    row10.appendChild(nestedBtn);
+    try {
+      const nestedEnter = new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      });
+      nestedBtn.dispatchEvent(nestedEnter);
+      expect(nestedEnter.defaultPrevented).toBe(false);
+
+      const nestedSpace = new KeyboardEvent("keydown", {
+        key: " ",
+        bubbles: true,
+        cancelable: true,
+      });
+      nestedBtn.dispatchEvent(nestedSpace);
+      expect(nestedSpace.defaultPrevented).toBe(false);
+      expect(navSpy).not.toHaveBeenCalled();
+    } finally {
+      nestedBtn.remove();
+    }
+
+    // Enter on toolbar button, search input, or Shift+Enter does not trigger open.
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="ws-view-cards"]',
+    )!.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    el.querySelector<HTMLInputElement>(
+      '[data-testid="ws-search"]',
+    )!.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    document.body.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(navSpy).not.toHaveBeenCalled();
+
+    // Open modal blocks both pickKey and page-level Enter.
+    const modal = document.createElement("div");
+    modal.setAttribute("aria-modal", "true");
+    document.body.appendChild(modal);
+    try {
+      row10.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      row10.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: " ",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      document.body.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      expect(navSpy).not.toHaveBeenCalled();
+    } finally {
+      modal.remove();
+    }
+
+    // Page-level Enter on body opens the selected stream once.
+    const bodyEnter = new KeyboardEvent("keydown", {
+      key: "Enter",
+      bubbles: true,
+      cancelable: true,
+    });
+    document.body.dispatchEvent(bodyEnter);
+    expect(bodyEnter.defaultPrevented).toBe(true);
+    expect(navSpy).toHaveBeenCalledTimes(1);
+    expect(navSpy).toHaveBeenCalledWith(["/workstreams", "task:10"], {
+      queryParams: { node: null },
+      queryParamsHandling: "merge",
+    });
+  });
 });
 
 describe("Workstreams detail embedded task pane", () => {

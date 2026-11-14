@@ -502,6 +502,7 @@ export class DeferErrorDirective implements OnInit {
             [class.is-live]="directorLive()"
             data-testid="director-trigger"
             [attr.aria-expanded]="directorCtx.isOpen()"
+            aria-controls="director-drawer"
             aria-keyshortcuts="d Alt+D"
             gTip="Open Director drawer anywhere (d or Alt+D)."
             (click)="toggleDirector($event)"

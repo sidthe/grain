@@ -25,7 +25,8 @@ import {
 } from "@angular/core";
 import { takeUntilDestroyed } from "@angular/core/rxjs-interop";
 import { ActivatedRoute, Router, RouterLink } from "@angular/router";
-import { GrainApi } from "../api/grain-api.service";
+import type { RouteKey } from "../api/generated-routes";
+import { GrainApi, routeScope } from "../api/grain-api.service";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
 import { TaskFeedStore } from "../services/task-feed.service";
@@ -732,18 +733,12 @@ sandbox={{ pr.sandbox }} pod={{ pr.pod }} exit={{ pr.exitCode }}
                                 'persistent-logs-btn-' + ps.name
                               "
                               [disabled]="!canReadPersistentLogs(ps)"
-                              [gTip]="
-                                canReadPersistentLogs(ps)
-                                  ? 'View logs for ' + ps.name
-                                  : access.deniedReason(
-                                      'GET /api/persistent-sandboxes/{name}/logs',
-                                      ps.repo || undefined
-                                    )
-                              "
+                              [gTip]="persistentLogsTip(ps)"
                               (click)="togglePersistentLogs(ps)"
                             >
                               {{
-                                openPersistentLogName() === ps.name
+                                openPersistentLogName() === ps.name &&
+                                canReadPersistentLogs(ps)
                                   ? "Hide logs"
                                   : "Logs"
                               }}
@@ -767,7 +762,10 @@ sandbox={{ pr.sandbox }} pod={{ pr.pod }} exit={{ pr.exitCode }}
                           }
                         </div>
 
-                        @if (openPersistentLogName() === ps.name) {
+                        @if (
+                          openPersistentLogName() === ps.name &&
+                          canReadPersistentLogs(ps)
+                        ) {
                           <pre
                             class="dark-well"
                             tabindex="0"
@@ -1719,12 +1717,26 @@ export class FleetPageComponent implements OnInit {
     return "Run diagnostic probe (POST /api/sandbox-probe)";
   });
 
+  private persistentRepo(ps: PersistentSandboxStatus): string | undefined {
+    const clean = (ps.repo ?? "").trim();
+    return clean || undefined;
+  }
+
+  private canPersistentRoute(
+    route: RouteKey,
+    ps: PersistentSandboxStatus,
+  ): boolean {
+    const repo = this.persistentRepo(ps);
+    if (!repo) {
+      return this.access.canGlobalScope(routeScope(route));
+    }
+    return this.access.can(route, repo);
+  }
+
   protected canControlPersistent(ps: PersistentSandboxStatus): boolean {
-    const repo = ps.repo || undefined;
-    if (!repo && this.isScopeRepoLimited("deployment:restart")) return false;
-    return this.access.can(
+    return this.canPersistentRoute(
       "POST /api/persistent-sandboxes/{name}/{action}",
-      repo,
+      ps,
     );
   }
 
@@ -1753,7 +1765,7 @@ export class FleetPageComponent implements OnInit {
       return (
         this.access.deniedReason(
           "POST /api/persistent-sandboxes/{name}/{action}",
-          ps.repo || undefined,
+          this.persistentRepo(ps),
         ) || this.deniedScopeFallback("deployment:restart")
       );
     }
@@ -1767,9 +1779,21 @@ export class FleetPageComponent implements OnInit {
   }
 
   protected canReadPersistentLogs(ps: PersistentSandboxStatus): boolean {
-    const repo = ps.repo || undefined;
-    if (!repo && this.isScopeRepoLimited("deployment:read")) return false;
-    return this.access.can("GET /api/persistent-sandboxes/{name}/logs", repo);
+    return this.canPersistentRoute(
+      "GET /api/persistent-sandboxes/{name}/logs",
+      ps,
+    );
+  }
+
+  protected persistentLogsTip(ps: PersistentSandboxStatus): string {
+    if (this.canReadPersistentLogs(ps)) {
+      return `View logs for ${ps.name}`;
+    }
+    const route = "GET /api/persistent-sandboxes/{name}/logs" as const;
+    return (
+      this.access.deniedReason(route, this.persistentRepo(ps)) ||
+      this.deniedScopeFallback(routeScope(route) || "deployment:read")
+    );
   }
 
   protected readonly vcpuPct = computed<number>(() => {
@@ -2110,7 +2134,13 @@ export class FleetPageComponent implements OnInit {
   protected async togglePersistentLogs(
     ps: PersistentSandboxStatus,
   ): Promise<void> {
-    if (!this.canReadPersistentLogs(ps)) return;
+    if (!this.canReadPersistentLogs(ps)) {
+      if (this.openPersistentLogName() === ps.name) {
+        this.openPersistentLogName.set(null);
+        this.persistentLogsText.set("");
+      }
+      return;
+    }
     if (this.openPersistentLogName() === ps.name) {
       this.openPersistentLogName.set(null);
       return;
@@ -2123,8 +2153,20 @@ export class FleetPageComponent implements OnInit {
         { name: ps.name },
         "format=text",
       );
+      if (
+        this.openPersistentLogName() !== ps.name ||
+        !this.canReadPersistentLogs(ps)
+      ) {
+        return;
+      }
       this.persistentLogsText.set(txt ?? "");
     } catch (err) {
+      if (
+        this.openPersistentLogName() !== ps.name ||
+        !this.canReadPersistentLogs(ps)
+      ) {
+        return;
+      }
       this.persistentLogsText.set(errorText(err));
     }
   }

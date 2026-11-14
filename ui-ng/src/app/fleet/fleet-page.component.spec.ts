@@ -921,4 +921,164 @@ describe("FleetPageComponent", () => {
       stop: true,
     });
   });
+
+  it("enforces deployment:read scope context before fetching persistent sandbox logs and covers canReadPersistentLogs failures", async () => {
+    const base: Omit<PersistentSandboxStatus, "name" | "repo"> = {
+      ref: "main",
+      command: "npm run preview",
+      state: "running",
+      enabled: true,
+      restarts: 0,
+    };
+    const sbAllowed: PersistentSandboxStatus = {
+      ...base,
+      name: "sb-allowed",
+      repo: "acme/allowed",
+    };
+    const sbPadded: PersistentSandboxStatus = {
+      ...base,
+      name: "sb-padded",
+      repo: " acme/allowed ",
+    };
+    const sbOtherRepo: PersistentSandboxStatus = {
+      ...base,
+      name: "sb-other",
+      repo: "acme/other",
+    };
+    const sbEmptyRepo: PersistentSandboxStatus = {
+      ...base,
+      name: "sb-empty",
+      repo: "",
+    };
+    const sbBlankRepo: PersistentSandboxStatus = {
+      ...base,
+      name: "sb-blank",
+      repo: "   ",
+    };
+
+    const api = new FakeFleetApi();
+    api.configBody = {
+      version: "v3.5.0-test",
+      hostSandboxes: false,
+      access: {
+        role: "repo-reader",
+        roles: ["repo-reader"],
+        full: false,
+        scopes: ["sandboxes:read", "deployment:read"],
+        repoLimits: { "deployment:read": ["acme/allowed"] },
+      },
+    };
+    api.persistentBody = [
+      sbAllowed,
+      sbPadded,
+      sbOtherRepo,
+      sbEmptyRepo,
+      sbBlankRepo,
+    ];
+
+    const { fixture, root } = await setup(api);
+    const cmp = fixture.componentInstance as unknown as {
+      canReadPersistentLogs: (ps: PersistentSandboxStatus) => boolean;
+      persistentLogsTip: (ps: PersistentSandboxStatus) => string;
+      togglePersistentLogs: (ps: PersistentSandboxStatus) => Promise<void>;
+    };
+
+    const logsBtn = (name: string) =>
+      root.querySelector<HTMLButtonElement>(
+        `[data-testid="persistent-logs-btn-${name}"]`,
+      )!;
+    const logCalls = () =>
+      api.calls.filter(
+        (c) => c.route === "GET /api/persistent-sandboxes/{name}/logs",
+      );
+
+    expect(cmp.canReadPersistentLogs(sbAllowed)).toBe(true);
+    expect(cmp.canReadPersistentLogs(sbPadded)).toBe(true);
+    expect(cmp.canReadPersistentLogs(sbOtherRepo)).toBe(false);
+    expect(cmp.canReadPersistentLogs(sbEmptyRepo)).toBe(false);
+    expect(cmp.canReadPersistentLogs(sbBlankRepo)).toBe(false);
+
+    expect(logsBtn("sb-allowed").disabled).toBe(false);
+    expect(logsBtn("sb-padded").disabled).toBe(false);
+    expect(logsBtn("sb-other").disabled).toBe(true);
+    expect(logsBtn("sb-empty").disabled).toBe(true);
+    expect(logsBtn("sb-blank").disabled).toBe(true);
+
+    expect(cmp.persistentLogsTip(sbOtherRepo)).toContain("deployment:read");
+    expect(cmp.persistentLogsTip(sbEmptyRepo)).toContain("deployment:read");
+    expect(cmp.persistentLogsTip(sbBlankRepo)).toContain("deployment:read");
+
+    // Direct togglePersistentLogs calls must not fetch when canReadPersistentLogs fails.
+    await cmp.togglePersistentLogs(sbOtherRepo);
+    await cmp.togglePersistentLogs(sbEmptyRepo);
+    await cmp.togglePersistentLogs(sbBlankRepo);
+    await settle(fixture);
+    expect(logCalls()).toHaveLength(0);
+
+    // Permitted repository fetches ?format=text logs.
+    logsBtn("sb-allowed").click();
+    await settle(fixture);
+    expect(logCalls()).toHaveLength(1);
+    expect(logCalls()[0]).toEqual({
+      method: "GET_TEXT",
+      route: "GET /api/persistent-sandboxes/{name}/logs",
+      params: { name: "sb-allowed" },
+      query: "format=text",
+    });
+    expect(
+      root.querySelector('[data-testid="persistent-logs-sb-allowed"]')
+        ?.textContent,
+    ).toContain("[sb-allowed] listening on :4173");
+
+    // Revoking deployment:read hides open logs, disables button, and blocks further fetches.
+    const access = TestBed.inject(AccessService);
+    access.setConfig({
+      access: {
+        role: "sandbox-viewer",
+        roles: ["sandbox-viewer"],
+        full: false,
+        scopes: ["sandboxes:read"],
+      },
+    });
+    fixture.detectChanges();
+    await settle(fixture);
+    expect(cmp.canReadPersistentLogs(sbAllowed)).toBe(false);
+    expect(logsBtn("sb-allowed").disabled).toBe(true);
+    expect(cmp.persistentLogsTip(sbAllowed)).toContain("deployment:read");
+    expect(
+      root.querySelector('[data-testid="persistent-logs-sb-allowed"]'),
+    ).toBeNull();
+
+    await cmp.togglePersistentLogs(sbAllowed);
+    await settle(fixture);
+    expect(logCalls()).toHaveLength(1);
+
+    // In-flight revocation does not expose resolved log text.
+    access.setConfig(api.configBody);
+    fixture.detectChanges();
+    await settle(fixture);
+    let resolveDeferred!: (txt: string) => void;
+    api.getText = (route, params, query) => {
+      api.calls.push({ method: "GET_TEXT", route, params, query });
+      return new Promise<string>((resolve) => {
+        resolveDeferred = resolve;
+      });
+    };
+    const pending = cmp.togglePersistentLogs(sbAllowed);
+    access.setConfig({
+      access: {
+        role: "sandbox-viewer",
+        roles: ["sandbox-viewer"],
+        full: false,
+        scopes: ["sandboxes:read"],
+      },
+    });
+    resolveDeferred("secret log line");
+    await pending;
+    fixture.detectChanges();
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="persistent-logs-sb-allowed"]'),
+    ).toBeNull();
+  });
 });
