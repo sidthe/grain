@@ -1271,7 +1271,14 @@ export class ContextPageComponent implements OnInit, OnDestroy {
   protected readonly fsGrepTruncated = signal<boolean>(false);
   protected readonly fsGrepNotices = signal<string[]>([]);
   private fsGrepSeq = 0;
+  private docLoadSeq = 0;
   private hasLoadedMemory = false;
+  private pendingDiscardResolve: ((accepted: boolean) => void) | null = null;
+  private readonly onBeforeUnload = (ev: BeforeUnloadEvent): void => {
+    if (!this.hasUnsavedChanges()) return;
+    ev.preventDefault();
+    ev.returnValue = "";
+  };
 
   constructor() {
     afterNextRender(() => this.sp.attach());
@@ -1497,6 +1504,17 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     );
   });
 
+  protected readonly hasUnsavedChanges = computed<boolean>(() => {
+    if (this.docDirty()) return true;
+    const drafts = this.memoryDrafts();
+    const rows = this.scopes();
+    for (const key of Object.keys(drafts)) {
+      const saved = rows.find((s) => s.key === key)?.text ?? "";
+      if (drafts[key] !== saved) return true;
+    }
+    return false;
+  });
+
   protected readonly canSubmitDocument = computed<boolean>(() => {
     if (!this.canWriteDoc()) return false;
     const name = this.creatingDoc()
@@ -1545,6 +1563,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
   );
 
   ngOnInit(): void {
+    this.doc.defaultView?.addEventListener("beforeunload", this.onBeforeUnload);
     const qp = this.route.snapshot.queryParamMap;
     const t = qp.get("tab");
     if (t === "instructions" || t === "documents" || t === "namespace") {
@@ -1560,7 +1579,19 @@ export class ContextPageComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this.doc.defaultView?.removeEventListener(
+      "beforeunload",
+      this.onBeforeUnload,
+    );
+    if (this.pendingDiscardResolve) {
+      this.pendingDiscardResolve(false);
+      this.pendingDiscardResolve = null;
+    }
     this.sp.detach();
+  }
+
+  canDeactivate(): Promise<boolean> {
+    return this.confirmDiscardIfDirty();
   }
 
   private ensurePermittedRepoSelected(): void {
@@ -1723,15 +1754,22 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     }
   }
 
-  protected pickTab(t: ContextTab): void {
+  protected async pickTab(t: ContextTab): Promise<boolean> {
+    if (this.tab() === t) return false;
+    if (this.savingDoc() || this.savingMemory()) return false;
+    if (!(await this.confirmDiscardIfDirty())) return false;
     this.tab.set(t);
     this.syncUrl();
     if (t === "namespace" && this.fsEntries().length === 0) {
       void this.loadFsDir(this.fsDir());
     }
+    return true;
   }
 
-  protected onTabKeydown(ev: KeyboardEvent, current: ContextTab): void {
+  protected async onTabKeydown(
+    ev: KeyboardEvent,
+    current: ContextTab,
+  ): Promise<void> {
     const idx = this.tabs.findIndex((t) => t.id === current);
     if (idx < 0) return;
     let nextIdx = -1;
@@ -1740,11 +1778,12 @@ export class ContextPageComponent implements OnInit, OnDestroy {
       nextIdx = (idx - 1 + this.tabs.length) % this.tabs.length;
     } else if (ev.key === "Home") nextIdx = 0;
     else if (ev.key === "End") nextIdx = this.tabs.length - 1;
-    if (nextIdx < 0) return;
+    if (nextIdx < 0 || nextIdx === idx) return;
     ev.preventDefault();
     const nextTab = this.tabs[nextIdx].id;
-    this.pickTab(nextTab);
-    this.doc.getElementById(`context-tab-btn-${nextTab}`)?.focus();
+    if (await this.pickTab(nextTab)) {
+      this.doc.getElementById(`context-tab-btn-${nextTab}`)?.focus();
+    }
   }
 
   protected setEditorMode(m: string): void {
@@ -1753,10 +1792,18 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     }
   }
 
-  protected selectScope(repo: string): void {
+  protected async selectScope(repo: string): Promise<void> {
     const clean = repo.trim();
     if (!clean && !this.canReadDeploymentScope()) return;
+    const wasMenuOpen = this.repoMenuOpen();
     this.repoMenuOpen.set(false);
+    if (scopeKey(clean) === scopeKey(this.selectedRepo())) return;
+    if (this.savingDoc() || this.savingMemory()) return;
+    if (wasMenuOpen) {
+      this.repoTrigger()?.nativeElement.focus();
+    }
+    if (!(await this.confirmDiscardIfDirty())) return;
+    this.docLoadSeq++;
     if (
       clean &&
       !this.allKnownRepos().some((r) => scopeKey(r) === scopeKey(clean))
@@ -1764,9 +1811,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
       this.extraRepos.update((list) => [...list, clean]);
     }
     this.selectedRepo.set(clean);
-    this.creatingDoc.set(false);
-    this.selectedDocName.set("");
-    this.selectedDocRepo.set("");
+    this.clearDocumentEditor();
     this.syncUrl();
     if (!this.hasLoadedMemory && this.canReadMemory() && !this.loading()) {
       void this.refreshAll();
@@ -1777,7 +1822,7 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     const r = this.newRepoDraft().trim();
     this.addingRepo.set(false);
     this.newRepoDraft.set("");
-    if (r) this.selectScope(r);
+    if (r) void this.selectScope(r);
   }
 
   private syncUrl(): void {
@@ -1794,7 +1839,16 @@ export class ContextPageComponent implements OnInit, OnDestroy {
 
   protected onMemoryInput(val: string): void {
     const k = this.currentScopeRow().key;
-    this.memoryDrafts.update((prev) => ({ ...prev, [k]: val }));
+    const saved = this.currentScopeRow().text;
+    this.memoryDrafts.update((prev) => {
+      if (val === saved) {
+        if (!(k in prev)) return prev;
+        const next = { ...prev };
+        delete next[k];
+        return next;
+      }
+      return { ...prev, [k]: val };
+    });
   }
 
   protected revertMemory(): void {
@@ -1856,8 +1910,11 @@ export class ContextPageComponent implements OnInit, OnDestroy {
     }
   }
 
-  protected startNewDocument(): void {
-    if (!this.canCreateDoc()) return;
+  protected async startNewDocument(): Promise<void> {
+    if (!this.canCreateDoc() || this.savingDoc()) return;
+    if (this.creatingDoc() && !this.docDirty()) return;
+    if (!(await this.confirmDiscardIfDirty())) return;
+    this.docLoadSeq++;
     this.creatingDoc.set(true);
     this.selectedDocName.set("");
     this.selectedDocRepo.set(this.selectedRepo().trim());
@@ -1874,13 +1931,25 @@ export class ContextPageComponent implements OnInit, OnDestroy {
       this.snackbar.show(this.deniedReadReason(repo));
       return;
     }
+    if (this.savingDoc()) return;
+    if (
+      !this.creatingDoc() &&
+      this.selectedDocName() === doc.name &&
+      scopeKey(this.selectedDocRepo()) === scopeKey(repo)
+    ) {
+      return;
+    }
+    if (!(await this.confirmDiscardIfDirty())) return;
+    const reqSeq = ++this.docLoadSeq;
+    const initialSummary = doc.summary || "";
+    const initialText = doc.text || "";
     this.creatingDoc.set(false);
     this.selectedDocRepo.set(repo);
     this.selectedDocName.set(doc.name);
-    this.docSummaryDraft.set(doc.summary || "");
-    this.loadedDocSummary.set(doc.summary || "");
-    this.docTextDraft.set(doc.text || "");
-    this.loadedDocText.set(doc.text || "");
+    this.docSummaryDraft.set(initialSummary);
+    this.loadedDocSummary.set(initialSummary);
+    this.docTextDraft.set(initialText);
+    this.loadedDocText.set(initialText);
 
     const params = new URLSearchParams();
     if (repo) params.set("repo", repo);
@@ -1891,6 +1960,8 @@ export class ContextPageComponent implements OnInit, OnDestroy {
         params.toString() || undefined,
       );
       if (
+        reqSeq !== this.docLoadSeq ||
+        this.creatingDoc() ||
         this.selectedDocName() !== doc.name ||
         scopeKey(this.selectedDocRepo()) !== scopeKey(repo)
       ) {
@@ -1898,12 +1969,18 @@ export class ContextPageComponent implements OnInit, OnDestroy {
       }
       const sum = full?.summary ?? doc.summary ?? "";
       const txt = full?.text ?? "";
+      if (this.docSummaryDraft() === initialSummary) {
+        this.docSummaryDraft.set(sum);
+      }
+      if (this.docTextDraft() === initialText) {
+        this.docTextDraft.set(txt);
+      }
       this.loadedDocSummary.set(sum);
       this.loadedDocText.set(txt);
-      this.docSummaryDraft.set(sum);
-      this.docTextDraft.set(txt);
     } catch (err) {
-      this.snackbar.show(errorText(err));
+      if (reqSeq === this.docLoadSeq) {
+        this.snackbar.show(errorText(err));
+      }
     }
   }
 
@@ -1974,15 +2051,70 @@ export class ContextPageComponent implements OnInit, OnDestroy {
           summary: "",
           text: "",
         });
-        this.selectedDocName.set("");
-        this.selectedDocRepo.set("");
-        this.loadedDocSummary.set("");
-        this.loadedDocText.set("");
-        this.docSummaryDraft.set("");
-        this.docTextDraft.set("");
+        this.docLoadSeq++;
+        this.clearDocumentEditor();
         this.snackbar.show(`Deleted memory document "${name}".`);
         await this.refreshAll();
       },
+    });
+  }
+
+  private clearDocumentEditor(): void {
+    this.creatingDoc.set(false);
+    this.newDocNameDraft.set("");
+    this.selectedDocName.set("");
+    this.selectedDocRepo.set("");
+    this.loadedDocSummary.set("");
+    this.loadedDocText.set("");
+    this.docSummaryDraft.set("");
+    this.docTextDraft.set("");
+  }
+
+  private discardUnsavedChanges(): void {
+    this.docLoadSeq++;
+    this.memoryDrafts.set({});
+    this.clearDocumentEditor();
+  }
+
+  private unsavedChangesMessage(): string {
+    if (this.docDirty()) {
+      if (this.creatingDoc()) {
+        const draftName = this.newDocNameDraft().trim();
+        return draftName
+          ? `You have unsaved changes in new memory document "${draftName}". Leave and discard them?`
+          : "You have unsaved changes in your new memory document. Leave and discard them?";
+      }
+      return `You have unsaved changes in memory document "${this.selectedDocName()}". Leave and discard them?`;
+    }
+    if (this.memoryDirty()) {
+      return `You have unsaved changes in Standing Instructions for ${scopeLabel(this.selectedRepo())}. Leave and discard them?`;
+    }
+    return "You have unsaved changes in Standing Instructions. Leave and discard them?";
+  }
+
+  private confirmDiscardIfDirty(): Promise<boolean> {
+    if (!this.hasUnsavedChanges()) {
+      return Promise.resolve(true);
+    }
+    if (this.confirmReq() && !this.pendingDiscardResolve) {
+      return Promise.resolve(false);
+    }
+    if (this.pendingDiscardResolve) {
+      this.pendingDiscardResolve(false);
+      this.pendingDiscardResolve = null;
+    }
+    return new Promise<boolean>((resolve) => {
+      this.pendingDiscardResolve = resolve;
+      this.confirmReq.set({
+        title: "Discard unsaved changes?",
+        message: this.unsavedChangesMessage(),
+        accept: "Discard changes",
+        destructive: true,
+        run: () => {
+          this.discardUnsavedChanges();
+          return Promise.resolve();
+        },
+      });
     });
   }
 
@@ -2226,9 +2358,20 @@ export class ContextPageComponent implements OnInit, OnDestroy {
 
   protected async onConfirmDone(accepted: boolean): Promise<void> {
     const req = this.confirmReq();
+    const resolve = this.pendingDiscardResolve;
     this.confirmReq.set(null);
-    if (!accepted || !req) return;
-    await req.run();
+    this.pendingDiscardResolve = null;
+    if (!accepted || !req) {
+      resolve?.(false);
+      return;
+    }
+    try {
+      await req.run();
+      resolve?.(true);
+    } catch (err) {
+      this.snackbar.show(errorText(err));
+      resolve?.(false);
+    }
   }
 
   protected toggleRepoMenu(ev: Event): void {
@@ -2288,6 +2431,11 @@ export class ContextPageComponent implements OnInit, OnDestroy {
   }
 
   protected onEscape(ev: Event): void {
+    if (this.confirmReq()) {
+      ev.preventDefault();
+      void this.onConfirmDone(false);
+      return;
+    }
     if (this.repoMenuOpen()) {
       ev.preventDefault();
       this.repoMenuOpen.set(false);

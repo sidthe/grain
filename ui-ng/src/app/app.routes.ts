@@ -168,6 +168,10 @@ export const routes: Routes = [
   {
     path: "context",
     title: "Context · grain",
+    canDeactivate: [
+      (c: { canDeactivate?: () => boolean | Promise<boolean> }) =>
+        c?.canDeactivate?.() ?? true,
+    ],
     loadComponent: () =>
       import("./context/context-page.component").then(
         (m) => m.ContextPageComponent,
