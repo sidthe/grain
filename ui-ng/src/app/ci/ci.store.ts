@@ -40,11 +40,24 @@ import {
   GRAIN_PROVIDER,
   faultSourceOf,
   isRunActive,
+  mergeRunArtifacts,
   providerOfRun,
   repoFromActionsRunId,
 } from "./ci.models";
 
 const POLL_MS = 5000;
+
+export interface RunArtifactsState {
+  loading: boolean;
+  loaded: boolean;
+  enabled: boolean;
+  available: boolean;
+  artifacts: CIRunArtifact[];
+  total: number;
+  truncated: boolean;
+  nextCursor: string;
+  error: string | null;
+}
 
 @Injectable({ providedIn: "root" })
 export class CIStore {
@@ -72,7 +85,15 @@ export class CIStore {
   readonly detail = signal<CIRun | null>(null);
   readonly detailLoading = signal(false);
   readonly artifacts = signal<CIRunArtifact[]>([]);
+  readonly artifactsEnabled = signal(true);
   readonly artifactsAvailable = signal(false);
+  readonly artifactsLoaded = signal(false);
+  readonly artifactsLoading = signal(false);
+  readonly artifactsTotal = signal(0);
+  readonly artifactsTruncated = signal(false);
+  readonly artifactsNextCursor = signal("");
+  readonly artifactsError = signal<string | null>(null);
+  readonly runArtifactsById = signal<Record<string, RunArtifactsState>>({});
   readonly jobLogs = signal<Record<string, CIRunLogResponse>>({});
   readonly jobLogLoading = signal<string | null>(null);
 
@@ -101,6 +122,7 @@ export class CIStore {
   private activeCount = 0;
   private sessionGen = 0;
   private bootstrapping = false;
+  private inFlightDetailId: string | null = null;
 
   start(): void {
     this.actionError.set(null);
@@ -329,54 +351,248 @@ export class CIStore {
   }
 
   async selectRun(id: string | null): Promise<void> {
-    if (this.selectedId() === id && this.detail()?.id === id) return;
+    if (
+      this.selectedId() === id &&
+      (this.detail()?.id === id ||
+        (id !== null && this.inFlightDetailId === id))
+    ) {
+      return;
+    }
+    const switching = this.selectedId() !== id;
     this.selectedId.set(id);
     this.jobLogs.set({});
     if (!id) {
       this.detail.set(null);
-      this.artifacts.set([]);
+      this.resetSelectedArtifacts();
       return;
+    }
+    if (switching) {
+      this.resetSelectedArtifacts();
     }
     await this.loadRunDetail(id, true);
   }
 
+  private resetSelectedArtifacts(): void {
+    this.artifacts.set([]);
+    this.artifactsEnabled.set(true);
+    this.artifactsAvailable.set(false);
+    this.artifactsLoaded.set(false);
+    this.artifactsLoading.set(false);
+    this.artifactsTotal.set(0);
+    this.artifactsTruncated.set(false);
+    this.artifactsNextCursor.set("");
+    this.artifactsError.set(null);
+  }
+
+  private knownRepoForRun(id: string): string | undefined {
+    return (
+      this.runs().find((r) => r.id === id)?.repo ||
+      (this.detail()?.id === id ? this.detail()?.repo : undefined) ||
+      repoFromActionsRunId(id) ||
+      undefined
+    );
+  }
+
+  private applyRunArtifacts(
+    id: string,
+    state: RunArtifactsState,
+    syncSelected = true,
+  ): void {
+    this.runArtifactsById.update((prev) => ({ ...prev, [id]: state }));
+    if (syncSelected && this.selectedId() === id) {
+      this.artifactsEnabled.set(state.enabled);
+      this.artifactsAvailable.set(state.available);
+      this.artifacts.set(state.artifacts);
+      this.artifactsTotal.set(state.total);
+      this.artifactsTruncated.set(state.truncated);
+      this.artifactsNextCursor.set(state.nextCursor);
+      this.artifactsError.set(state.error);
+      this.artifactsLoaded.set(state.loaded);
+      this.artifactsLoading.set(state.loading);
+    }
+  }
+
   async loadRunDetail(id: string, showSpinner = true): Promise<void> {
-    if (!this.access.can("GET /api/ci/runs/{id}")) return;
-    if (showSpinner) this.detailLoading.set(true);
+    const knownRepo = this.knownRepoForRun(id);
+    if (!this.access.can("GET /api/ci/runs/{id}", knownRepo)) return;
+    this.inFlightDetailId = id;
+    if (showSpinner) {
+      this.detailLoading.set(true);
+      if (this.selectedId() === id) this.artifactsLoading.set(true);
+    }
     try {
-      const [run, artRes] = await Promise.all([
+      const canArtifacts = this.access.can(
+        "GET /api/ci/runs/{id}/artifacts",
+        knownRepo,
+      );
+      const [run, artOutcome] = await Promise.all([
         this.api.get<CIRun>("GET /api/ci/runs/{id}", { id }),
-        this.access.can("GET /api/ci/runs/{id}/artifacts")
+        canArtifacts
           ? this.api
               .get<CIRunArtifactsResponse>("GET /api/ci/runs/{id}/artifacts", {
                 id,
               })
-              .catch(() => null)
-          : Promise.resolve(null),
+              .then((res) => ({ res, error: null as string | null }))
+              .catch((err) => ({
+                res: null as CIRunArtifactsResponse | null,
+                error: errorText(err),
+              }))
+          : Promise.resolve({
+              res: null as CIRunArtifactsResponse | null,
+              error: null as string | null,
+            }),
       ]);
       if (this.activeCount === 0) return;
       if (this.selectedId() === id) {
         this.detail.set(run);
-        if (artRes) {
-          this.artifactsAvailable.set(!!artRes.available);
-          this.artifacts.set(
-            Array.isArray(artRes.artifacts) ? artRes.artifacts : [],
+        const permitted = this.access.can(
+          "GET /api/ci/runs/{id}/artifacts",
+          run.repo || knownRepo,
+        );
+        if (!permitted) {
+          this.applyRunArtifacts(id, {
+            loading: false,
+            loaded: true,
+            enabled: true,
+            available: false,
+            artifacts: [],
+            total: 0,
+            truncated: false,
+            nextCursor: "",
+            error: this.access.deniedReason(
+              "GET /api/ci/runs/{id}/artifacts",
+              run.repo || knownRepo,
+            ),
+          });
+        } else if (artOutcome.res) {
+          const merged = mergeRunArtifacts(
+            Array.isArray(artOutcome.res.artifacts)
+              ? artOutcome.res.artifacts
+              : [],
+            run.jobs,
+            run.id || id,
           );
+          const enabled = artOutcome.res.enabled !== false;
+          const available = !!artOutcome.res.available || merged.length > 0;
+          this.applyRunArtifacts(id, {
+            loading: false,
+            loaded: true,
+            enabled,
+            available,
+            artifacts: merged,
+            total: Math.max(artOutcome.res.total ?? 0, merged.length),
+            truncated: !!artOutcome.res.truncated,
+            nextCursor: artOutcome.res.nextCursor ?? "",
+            error: null,
+          });
         } else {
-          const fromJobs = (run.jobs ?? []).flatMap((j) => j.artifacts ?? []);
-          this.artifactsAvailable.set(fromJobs.length > 0);
-          this.artifacts.set(fromJobs);
+          const fromJobs = mergeRunArtifacts([], run.jobs, run.id || id);
+          this.applyRunArtifacts(id, {
+            loading: false,
+            loaded: true,
+            enabled: true,
+            available: fromJobs.length > 0,
+            artifacts: fromJobs,
+            total: fromJobs.length,
+            truncated: false,
+            nextCursor: "",
+            error: fromJobs.length > 0 ? null : artOutcome.error,
+          });
         }
       }
     } catch (err) {
       if (this.activeCount === 0) return;
       if (this.selectedId() === id) {
         this.actionError.set(errorText(err));
+        this.artifactsLoading.set(false);
       }
     } finally {
+      if (this.inFlightDetailId === id) {
+        this.inFlightDetailId = null;
+      }
       if (showSpinner && this.activeCount > 0) {
         this.detailLoading.set(false);
       }
+    }
+  }
+
+  async loadRunArtifacts(
+    runId: string,
+    repo?: string,
+    cursor = "",
+  ): Promise<void> {
+    const scopeRepo = repo || this.knownRepoForRun(runId);
+    if (!this.access.can("GET /api/ci/runs/{id}/artifacts", scopeRepo)) {
+      this.applyRunArtifacts(runId, {
+        loading: false,
+        loaded: true,
+        enabled: true,
+        available: false,
+        artifacts: [],
+        total: 0,
+        truncated: false,
+        nextCursor: "",
+        error: this.access.deniedReason(
+          "GET /api/ci/runs/{id}/artifacts",
+          scopeRepo,
+        ),
+      });
+      return;
+    }
+    const prev = this.runArtifactsById()[runId];
+    if (!cursor && prev?.loading) return;
+    this.applyRunArtifacts(runId, {
+      loading: true,
+      loaded: prev?.loaded ?? false,
+      enabled: prev?.enabled ?? true,
+      available: prev?.available ?? false,
+      artifacts: prev?.artifacts ?? [],
+      total: prev?.total ?? 0,
+      truncated: prev?.truncated ?? false,
+      nextCursor: prev?.nextCursor ?? "",
+      error: null,
+    });
+    try {
+      const q = cursor ? new URLSearchParams({ cursor }).toString() : undefined;
+      const res = await this.api.get<CIRunArtifactsResponse>(
+        "GET /api/ci/runs/{id}/artifacts",
+        { id: runId },
+        q,
+      );
+      if (this.activeCount === 0) return;
+      const runObj =
+        this.detail()?.id === runId
+          ? this.detail()
+          : (this.runs().find((r) => r.id === runId) ?? null);
+      const pageItems = Array.isArray(res?.artifacts) ? res.artifacts : [];
+      const baseItems = cursor
+        ? [...(prev?.artifacts ?? []), ...pageItems]
+        : pageItems;
+      const merged = mergeRunArtifacts(baseItems, runObj?.jobs, runId);
+      this.applyRunArtifacts(runId, {
+        loading: false,
+        loaded: true,
+        enabled: res?.enabled !== false,
+        available: !!res?.available || merged.length > 0,
+        artifacts: merged,
+        total: Math.max(res?.total ?? 0, merged.length),
+        truncated: !!res?.truncated,
+        nextCursor: res?.nextCursor ?? "",
+        error: null,
+      });
+    } catch (err) {
+      if (this.activeCount === 0) return;
+      this.applyRunArtifacts(runId, {
+        loading: false,
+        loaded: true,
+        enabled: prev?.enabled ?? true,
+        available: prev?.available ?? false,
+        artifacts: prev?.artifacts ?? [],
+        total: prev?.total ?? 0,
+        truncated: prev?.truncated ?? false,
+        nextCursor: prev?.nextCursor ?? "",
+        error: errorText(err),
+      });
     }
   }
 
