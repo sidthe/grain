@@ -194,3 +194,26 @@ func shellArg(s string) string {
 	}
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
+
+// ParseRefName validates a full git ref and returns its name without the
+// leading "refs/" prefix. It rejects empty inputs, refs not beginning with
+// "refs/", refs with an empty remainder after "refs/", NUL bytes, and "..".
+func ParseRefName(ref string) (string, error) {
+	if ref == "" {
+		return "", errors.New("gitrefs: empty ref")
+	}
+	if strings.IndexByte(ref, 0) >= 0 {
+		return "", errors.New("gitrefs: ref contains NUL byte")
+	}
+	if strings.Contains(ref, "..") {
+		return "", errors.New(`gitrefs: ref contains ".."`)
+	}
+	name, ok := strings.CutPrefix(ref, "refs/")
+	if !ok {
+		return "", errors.New(`gitrefs: ref must start with "refs/"`)
+	}
+	if name == "" {
+		return "", errors.New(`gitrefs: empty ref name after "refs/"`)
+	}
+	return name, nil
+}
