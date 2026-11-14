@@ -76,6 +76,13 @@ export interface FsGrepHit {
   text: string;
 }
 
+export interface FsGrepResult {
+  hits: FsGrepHit[];
+  truncated: boolean;
+  walkTruncated: boolean;
+  notices: string[];
+}
+
 export function utf8ByteLength(text: string | undefined | null): number {
   if (!text) return 0;
   return UTF8_ENCODER.encode(text).length;
@@ -236,11 +243,29 @@ export function buildMemoryScopes(
   });
 }
 
-export function parseGrepOutput(raw: string, basePath: string): FsGrepHit[] {
-  const lines = (raw || "").split("\n").filter((l) => l.trim().length > 0);
+/**
+ * Parses `/api/fs/...` grep text output into structured hits and captures any
+ * trailing `[truncated...]` footer lines emitted by `pkg/namespace`.
+ */
+export function parseGrepResult(raw: string, basePath: string): FsGrepResult {
+  const lines = (raw || "").split(/\r?\n/).filter((l) => l.trim().length > 0);
   const hits: FsGrepHit[] = [];
+  const notices: string[] = [];
+  const seenNotices = new Set<string>();
+  let walkTruncated = false;
+
   for (const row of lines) {
-    if (row.startsWith("[truncated")) continue;
+    const trimmed = row.trim();
+    if (trimmed.startsWith("[truncated")) {
+      if (/^\[truncated:\s*walked\b/i.test(trimmed)) {
+        walkTruncated = true;
+      }
+      if (!seenNotices.has(trimmed)) {
+        seenNotices.add(trimmed);
+        notices.push(trimmed);
+      }
+      continue;
+    }
     const m = /^([^:\n]+):(\d+):(.*)$/.exec(row);
     if (m) {
       const rel = m[1].trim();
@@ -261,7 +286,36 @@ export function parseGrepOutput(raw: string, basePath: string): FsGrepHit[] {
       }
     }
   }
-  return hits;
+  return {
+    hits,
+    truncated: notices.length > 0,
+    walkTruncated,
+    notices,
+  };
+}
+
+export function parseGrepOutput(raw: string, basePath: string): FsGrepHit[] {
+  return parseGrepResult(raw, basePath).hits;
+}
+
+/**
+ * Fallback `[truncated]` notice when response headers report truncation without
+ * a trailing `[truncated...]` line in the response body.
+ */
+export function buildGrepTruncationNotice(
+  walkTruncated: boolean,
+  matchCount?: number | null,
+): string {
+  if (walkTruncated) {
+    if (matchCount === 0) {
+      return "[truncated: walked entry limit reached with 0 matches in the searched portion; narrow the directory path to search the rest]";
+    }
+    return "[truncated: walked entry limit reached before searching the entire subtree; narrow the directory path to search the rest]";
+  }
+  if (matchCount !== null && matchCount !== undefined && matchCount > 0) {
+    return `[truncated at match limit (${matchCount} matches); narrow the directory path or refine your search]`;
+  }
+  return "[truncated: search results exceeded limit boundaries; narrow the directory path or refine your search]";
 }
 
 function escapeHtml(s: string): string {
