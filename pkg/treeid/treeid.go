@@ -60,6 +60,16 @@ type ID struct {
 // ErrTooLarge is returned when a canonical archive passes its limit.
 var ErrTooLarge = errors.New("treeid: canonical archive exceeds its size limit")
 
+// HashTree returns "empty" when data is nil or empty, or "tree-" followed by
+// the 64-character lowercase SHA-256 hex digest of data.
+func HashTree(data []byte) string {
+	if len(data) == 0 {
+		return "empty"
+	}
+	sum := sha256.Sum256(data)
+	return "tree-" + hex.EncodeToString(sum[:])
+}
+
 // Compute names treeish (a commit, a tree, or anything git resolves to
 // a tree) in the repository at dir. max bounds the canonical archive in
 // bytes, 0 meaning no bound; past it Compute answers ErrTooLarge.

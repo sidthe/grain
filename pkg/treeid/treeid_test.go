@@ -18,6 +18,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"os"
@@ -188,5 +190,114 @@ func TestAnOptionLikeTreeishIsRefused(t *testing.T) {
 	dir, _ := repo(t, "sha1")
 	if _, err := Compute(context.Background(), dir, "--output=/tmp/x", 0); err == nil {
 		t.Error("Compute(--output=...) = nil error")
+	}
+}
+
+func assertValidTreeHash(t *testing.T, got string) {
+	t.Helper()
+	if len(got) != 69 {
+		t.Fatalf("len(HashTree) = %d (%q), want 69", len(got), got)
+	}
+	digest, ok := strings.CutPrefix(got, "tree-")
+	if !ok {
+		t.Fatalf("HashTree = %q, want \"tree-\" prefix", got)
+	}
+	if len(digest) != 64 {
+		t.Fatalf("digest len = %d (%q), want 64", len(digest), digest)
+	}
+	for i := 0; i < len(digest); i++ {
+		c := digest[i]
+		isLowerHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+		if !isLowerHex {
+			t.Fatalf("digest[%d] = %q in %q, want lowercase hex", i, c, got)
+		}
+	}
+}
+
+func TestHashTreeEmptyInputs(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{name: "nil", data: nil},
+		{name: "empty literal", data: []byte{}},
+		{name: "zero-len preallocated", data: make([]byte, 0, 16)},
+		{name: "resliced empty", data: []byte("abc")[:0]},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HashTree(tc.data); got != "empty" {
+				t.Fatalf("HashTree(%s) = %q, want %q", tc.name, got, "empty")
+			}
+		})
+	}
+}
+
+func TestHashTreeKnownVectors(t *testing.T) {
+	cases := []struct {
+		name string
+		data []byte
+		want string
+	}{
+		{
+			name: "single zero byte",
+			data: []byte{0},
+			want: "tree-6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d",
+		},
+		{
+			name: "ascii hello",
+			data: []byte("hello"),
+			want: "tree-2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+		},
+		{
+			name: "binary bytes",
+			data: []byte{0x00, 0x01, 0x02, 0xff},
+			want: "tree-3d1f57c984978ef98a18378c8166c1cb8ede02c03eeb6aee7e2f121dfeee3e56",
+		},
+		{
+			name: "leading zero digest",
+			data: []byte("886"),
+			want: "tree-000f21ac06aceb9cdd0575e82d0d85fc39bed0a7a1d71970ba1641666a44f530",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := HashTree(tc.data)
+			assertValidTreeHash(t, got)
+			if got != tc.want {
+				t.Fatalf("HashTree(%q) = %q, want %q", tc.data, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHashTreeFormatAndBoundaries(t *testing.T) {
+	allBytes := make([]byte, 256)
+	for i := range allBytes {
+		allBytes[i] = byte(i)
+	}
+	snapshot := append([]byte(nil), allBytes...)
+	first := HashTree(allBytes)
+	assertValidTreeHash(t, first)
+	if !bytes.Equal(allBytes, snapshot) {
+		t.Fatal("HashTree mutated its input slice")
+	}
+	if second := HashTree(allBytes); second != first {
+		t.Fatalf("HashTree not deterministic: %q != %q", second, first)
+	}
+
+	mutated := append([]byte(nil), allBytes...)
+	mutated[len(mutated)-1] ^= 0x01
+	if changed := HashTree(mutated); changed == first {
+		t.Fatalf("HashTree did not change on single-bit flip: %q", changed)
+	}
+
+	large := bytes.Repeat([]byte{0xab}, 2<<20)
+	gotLarge := HashTree(large)
+	assertValidTreeHash(t, gotLarge)
+	sum := sha256.Sum256(large)
+	wantLarge := "tree-" + hex.EncodeToString(sum[:])
+	if gotLarge != wantLarge {
+		t.Fatalf("HashTree(2 MiB) = %q, want %q", gotLarge, wantLarge)
 	}
 }
