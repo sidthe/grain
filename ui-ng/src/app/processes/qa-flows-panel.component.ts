@@ -34,6 +34,7 @@ import {
   ConfirmDialogComponent,
   type ConfirmRequest,
 } from "../shared/confirm-dialog.component";
+import { QaV3StudioComponent } from "./qa-v3-studio.component";
 import { DiffViewerComponent } from "../shared/diff-viewer.component";
 import {
   type PillOption,
@@ -50,6 +51,7 @@ import {
 @Component({
   selector: "g-qa-flows-panel",
   imports: [
+    QaV3StudioComponent,
     DiffViewerComponent,
     PillSelectComponent,
     ConfirmDialogComponent,
@@ -174,231 +176,254 @@ import {
             </div>
 
             <div class="editor-scroll-area">
-              <div id="section-basics" class="editor-section">
-                <h3>Basics</h3>
-                <label for="qa-flow-key-input">Key</label>
-                <input
-                  id="qa-flow-key-input"
-                  type="text"
-                  class="s-mono"
-                  [value]="draftDeclaration().key"
-                  (input)="updateDraft('key', $event)"
-                  [disabled]="!isFork()"
-                />
-                <label for="qa-flow-ext-input">Extends</label>
-                <input
-                  id="qa-flow-ext-input"
-                  type="text"
-                  class="s-mono"
-                  [value]="draftDeclaration().extends || ''"
-                  (input)="updateDraft('extends', $event)"
-                  disabled
-                />
-                <label for="qa-flow-lbl-input">Label</label>
-                <input
-                  id="qa-flow-lbl-input"
-                  type="text"
-                  [value]="draftDeclaration().label"
-                  (input)="updateDraft('label', $event)"
-                />
-                <label for="qa-flow-sum-input">Summary</label>
-                <input
-                  id="qa-flow-sum-input"
-                  type="text"
-                  [value]="draftDeclaration().summary || ''"
-                  (input)="updateDraft('summary', $event)"
-                />
-              </div>
-
-              <div id="section-skill" class="editor-section">
-                <h3>Coding skill</h3>
-                <div class="skill-header">
-                  <g-pill-select
-                    ariaLabel="Coding skill mode"
-                    [options]="skillOptions"
-                    [value]="draftDeclaration().skill.mode"
-                    (valueChange)="updateSkillMode($event)"
+              @if (draftDeclaration().schema === "grain.dev/qa-flow/v3") {
+                <g-qa-v3-studio [decl]="draftDeclaration().declarationV3" />
+              } @else {
+                <div id="section-basics" class="editor-section">
+                  <h3>Basics</h3>
+                  <label for="qa-flow-key-input">Key</label>
+                  <input
+                    id="qa-flow-key-input"
+                    type="text"
+                    class="s-mono"
+                    [value]="draftDeclaration().key"
+                    (input)="updateDraft('key', $event)"
+                    [disabled]="!isFork()"
                   />
-                  <div class="byte-counter" [class.error]="skillByteOverflow()">
-                    <span class="s-num">{{ draftSkillBytes() }}</span>
-                    /
-                    <span class="s-num">{{
-                      draftDeclaration().skill.maxBytes
-                    }}</span>
-                    bytes
+                  <label for="qa-flow-ext-input">Extends</label>
+                  <input
+                    id="qa-flow-ext-input"
+                    type="text"
+                    class="s-mono"
+                    [value]="draftDeclaration().extends || ''"
+                    (input)="updateDraft('extends', $event)"
+                    disabled
+                  />
+                  <label for="qa-flow-lbl-input">Label</label>
+                  <input
+                    id="qa-flow-lbl-input"
+                    type="text"
+                    [value]="draftDeclaration().label"
+                    (input)="updateDraft('label', $event)"
+                  />
+                  <label for="qa-flow-sum-input">Summary</label>
+                  <input
+                    id="qa-flow-sum-input"
+                    type="text"
+                    [value]="draftDeclaration().summary || ''"
+                    (input)="updateDraft('summary', $event)"
+                  />
+                </div>
+
+                <div id="section-skill" class="editor-section">
+                  <h3>Coding skill</h3>
+                  <div class="skill-header">
+                    <g-pill-select
+                      ariaLabel="Coding skill mode"
+                      [options]="skillOptions"
+                      [value]="draftDeclaration().skill.mode"
+                      (valueChange)="updateSkillMode($event)"
+                    />
+                    <div
+                      class="byte-counter"
+                      [class.error]="skillByteOverflow()"
+                    >
+                      <span class="s-num">{{ draftSkillBytes() }}</span>
+                      /
+                      <span class="s-num">{{
+                        draftDeclaration().skill.maxBytes
+                      }}</span>
+                      bytes
+                    </div>
+                    <div class="compare-toggle">
+                      <button
+                        type="button"
+                        class="g-switch"
+                        role="switch"
+                        aria-label="Compare with parent"
+                        [attr.aria-checked]="showParentDiff()"
+                        (click)="toggleParentDiff()"
+                      ></button>
+                      <span>Compare with parent</span>
+                    </div>
                   </div>
+                  @if (showParentDiff()) {
+                    <g-diff-viewer [files]="diffFiles()" />
+                  } @else {
+                    <label for="qa-flow-skill-textarea"
+                      >Skill instructions</label
+                    >
+                    <textarea
+                      id="qa-flow-skill-textarea"
+                      class="s-mono"
+                      rows="8"
+                      [value]="draftDeclaration().skill.text"
+                      (input)="updateDraft('skill.text', $event)"
+                    ></textarea>
+                  }
+                </div>
+
+                <div id="section-checks" class="editor-section">
+                  <h3>Built-in checks</h3>
+                  @for (check of builtInCheckKeys; track check) {
+                    <div class="check-row">
+                      <div class="check-name s-mono">{{ check }}</div>
+                      @if (isFloorCheck(check)) {
+                        <button
+                          type="button"
+                          class="g-switch"
+                          role="switch"
+                          [attr.aria-label]="'Enable ' + check"
+                          aria-checked="true"
+                          disabled
+                          title="Floors are always on and blocking"
+                        ></button>
+                        <g-pill-select
+                          [ariaLabel]="check + ' severity'"
+                          [options]="floorOptions"
+                          value="blocking"
+                          [disabled]="true"
+                          title="Floors are always on and blocking"
+                        />
+                      } @else {
+                        <button
+                          type="button"
+                          class="g-switch"
+                          role="switch"
+                          [attr.aria-label]="'Enable ' + check"
+                          [attr.aria-checked]="draftChecks()[check].enabled"
+                          (click)="toggleCheckEnabled(check)"
+                        ></button>
+                        <g-pill-select
+                          [ariaLabel]="check + ' severity'"
+                          [options]="severityOptions"
+                          [value]="draftChecks()[check].severity || 'blocking'"
+                          (valueChange)="updateCheckSeverity(check, $event)"
+                          [disabled]="!draftChecks()[check].enabled"
+                        />
+                        @if (
+                          check === "golden:mutation-hardening" ||
+                          check === "golden:boundary-fuzz"
+                        ) {
+                          <div class="check-params">
+                            @if (check === "golden:mutation-hardening") {
+                              <label [attr.for]="check + '-mutants'"
+                                >mutants
+                                <input
+                                  [id]="check + '-mutants'"
+                                  type="number"
+                                  class="s-num"
+                                  [value]="
+                                    draftCheckParams()[check]['mutants'] ?? 25
+                                  "
+                                  (input)="
+                                    updateCheckParam(check, 'mutants', $event)
+                                  "
+                                  [disabled]="!draftChecks()[check].enabled"
+                              /></label>
+                            }
+                            <label [attr.for]="check + '-max-seconds'"
+                              >max-seconds
+                              <input
+                                [id]="check + '-max-seconds'"
+                                type="number"
+                                class="s-num"
+                                [value]="
+                                  draftCheckParams()[check]['max-seconds'] ??
+                                  (check === 'golden:mutation-hardening'
+                                    ? 60
+                                    : 15)
+                                "
+                                (input)="
+                                  updateCheckParam(check, 'max-seconds', $event)
+                                "
+                                [disabled]="!draftChecks()[check].enabled"
+                            /></label>
+                          </div>
+                        }
+                      }
+                    </div>
+                  }
+                </div>
+
+                <div id="section-verifier" class="editor-section">
+                  <h3>Verifier</h3>
                   <div class="compare-toggle">
                     <button
                       type="button"
                       class="g-switch"
                       role="switch"
-                      aria-label="Compare with parent"
-                      [attr.aria-checked]="showParentDiff()"
-                      (click)="toggleParentDiff()"
+                      aria-label="Enable semantic verifier"
+                      [attr.aria-checked]="draftDeclaration().verifier.enabled"
+                      (click)="toggleVerifierEnabled()"
                     ></button>
-                    <span>Compare with parent</span>
+                    <span>Enabled</span>
                   </div>
-                </div>
-                @if (showParentDiff()) {
-                  <g-diff-viewer [files]="diffFiles()" />
-                } @else {
-                  <label for="qa-flow-skill-textarea">Skill instructions</label>
-                  <textarea
-                    id="qa-flow-skill-textarea"
-                    class="s-mono"
-                    rows="8"
-                    [value]="draftDeclaration().skill.text"
-                    (input)="updateDraft('skill.text', $event)"
-                  ></textarea>
-                }
-              </div>
-
-              <div id="section-checks" class="editor-section">
-                <h3>Built-in checks</h3>
-                @for (check of builtInCheckKeys; track check) {
-                  <div class="check-row">
-                    <div class="check-name s-mono">{{ check }}</div>
-                    @if (isFloorCheck(check)) {
+                  <div
+                    class="tier-toggles"
+                    role="group"
+                    aria-label="Blast tiers"
+                  >
+                    @for (tier of verifierTiers; track tier) {
                       <button
                         type="button"
-                        class="g-switch"
-                        role="switch"
-                        [attr.aria-label]="'Enable ' + check"
-                        aria-checked="true"
-                        disabled
-                        title="Floors are always on and blocking"
-                      ></button>
-                      <g-pill-select
-                        [ariaLabel]="check + ' severity'"
-                        [options]="floorOptions"
-                        value="blocking"
-                        [disabled]="true"
-                        title="Floors are always on and blocking"
-                      />
-                    } @else {
-                      <button
-                        type="button"
-                        class="g-switch"
-                        role="switch"
-                        [attr.aria-label]="'Enable ' + check"
-                        [attr.aria-checked]="draftChecks()[check].enabled"
-                        (click)="toggleCheckEnabled(check)"
-                      ></button>
-                      <g-pill-select
-                        [ariaLabel]="check + ' severity'"
-                        [options]="severityOptions"
-                        [value]="draftChecks()[check].severity || 'blocking'"
-                        (valueChange)="updateCheckSeverity(check, $event)"
-                        [disabled]="!draftChecks()[check].enabled"
-                      />
-                      @if (
-                        check === "golden:mutation-hardening" ||
-                        check === "golden:boundary-fuzz"
-                      ) {
-                        <div class="check-params">
-                          @if (check === "golden:mutation-hardening") {
-                            <label [attr.for]="check + '-mutants'"
-                              >mutants
-                              <input
-                                [id]="check + '-mutants'"
-                                type="number"
-                                class="s-num"
-                                [value]="
-                                  draftCheckParams()[check]['mutants'] ?? 25
-                                "
-                                (input)="
-                                  updateCheckParam(check, 'mutants', $event)
-                                "
-                                [disabled]="!draftChecks()[check].enabled"
-                            /></label>
-                          }
-                          <label [attr.for]="check + '-max-seconds'"
-                            >max-seconds
-                            <input
-                              [id]="check + '-max-seconds'"
-                              type="number"
-                              class="s-num"
-                              [value]="
-                                draftCheckParams()[check]['max-seconds'] ??
-                                (check === 'golden:mutation-hardening'
-                                  ? 60
-                                  : 15)
-                              "
-                              (input)="
-                                updateCheckParam(check, 'max-seconds', $event)
-                              "
-                              [disabled]="!draftChecks()[check].enabled"
-                          /></label>
-                        </div>
-                      }
+                        [attr.aria-pressed]="
+                          draftDeclaration().verifier.tiers.includes(tier)
+                        "
+                        [disabled]="!draftDeclaration().verifier.enabled"
+                        (click)="toggleTier(tier)"
+                      >
+                        {{ tier }}
+                      </button>
                     }
                   </div>
-                }
-              </div>
-
-              <div id="section-verifier" class="editor-section">
-                <h3>Verifier</h3>
-                <div class="compare-toggle">
-                  <button
-                    type="button"
-                    class="g-switch"
-                    role="switch"
-                    aria-label="Enable semantic verifier"
-                    [attr.aria-checked]="draftDeclaration().verifier.enabled"
-                    (click)="toggleVerifierEnabled()"
-                  ></button>
-                  <span>Enabled</span>
+                  <label for="qa-chk-select">Checklist</label>
+                  <g-pill-select
+                    id="qa-chk-select"
+                    ariaLabel="Checklist"
+                    [options]="checklistOptions"
+                    [value]="draftDeclaration().verifier.checklist"
+                    [disabled]="!draftDeclaration().verifier.enabled"
+                    (valueChange)="updateVerifierChecklist($event)"
+                  />
+                  <label for="qa-ms-input">Max seconds</label>
+                  <input
+                    id="qa-ms-input"
+                    type="number"
+                    class="s-num"
+                    [value]="draftDeclaration().verifier.maxSeconds"
+                    [disabled]="!draftDeclaration().verifier.enabled"
+                    (input)="updateDraft('verifier.maxSeconds', $event)"
+                    [max]="600"
+                  />
+                  <label for="qa-mt-input">Max tokens</label>
+                  <input
+                    id="qa-mt-input"
+                    type="number"
+                    class="s-num"
+                    [value]="draftDeclaration().verifier.maxTokens"
+                    [disabled]="!draftDeclaration().verifier.enabled"
+                    (input)="updateDraft('verifier.maxTokens', $event)"
+                    [max]="200000"
+                  />
                 </div>
-                <div class="tier-toggles" role="group" aria-label="Blast tiers">
-                  @for (tier of verifierTiers; track tier) {
-                    <button
-                      type="button"
-                      [attr.aria-pressed]="
-                        draftDeclaration().verifier.tiers.includes(tier)
-                      "
-                      [disabled]="!draftDeclaration().verifier.enabled"
-                      (click)="toggleTier(tier)"
-                    >
-                      {{ tier }}
-                    </button>
-                  }
-                </div>
-                <label for="qa-chk-select">Checklist</label>
-                <g-pill-select
-                  id="qa-chk-select"
-                  ariaLabel="Checklist"
-                  [options]="checklistOptions"
-                  [value]="draftDeclaration().verifier.checklist"
-                  [disabled]="!draftDeclaration().verifier.enabled"
-                  (valueChange)="updateVerifierChecklist($event)"
-                />
-                <label for="qa-ms-input">Max seconds</label>
-                <input
-                  id="qa-ms-input"
-                  type="number"
-                  class="s-num"
-                  [value]="draftDeclaration().verifier.maxSeconds"
-                  [disabled]="!draftDeclaration().verifier.enabled"
-                  (input)="updateDraft('verifier.maxSeconds', $event)"
-                  [max]="600"
-                />
-                <label for="qa-mt-input">Max tokens</label>
-                <input
-                  id="qa-mt-input"
-                  type="number"
-                  class="s-num"
-                  [value]="draftDeclaration().verifier.maxTokens"
-                  [disabled]="!draftDeclaration().verifier.enabled"
-                  (input)="updateDraft('verifier.maxTokens', $event)"
-                  [max]="200000"
-                />
-              </div>
+              }
             </div>
           } @else {
             <div class="detail-header">
               <h2 data-testid="qa-flow-insp-title">
                 {{ detail.label || detail.key }}
                 <span class="s-mono">&#64;{{ detail.version }}</span>
+                @if (detail.schemaVer === "grain.dev/qa-flow/v3") {
+                  <span class="severity-pill">v3</span>
+                }
+                @if (detail.sourceKind === "adopt" && detail.sourceRepo) {
+                  <span class="s-mono severity-pill"
+                    >{{ detail.sourceRepo }}&#64;{{
+                      (detail.sourceCommit || "").slice(0, 7)
+                    }}</span
+                  >
+                }
               </h2>
               <div class="detail-actions">
                 <a
@@ -916,6 +941,14 @@ export class QaFlowsPanelComponent {
     };
 
     const draft = JSON.parse(JSON.stringify(base)) as FlowDeclarationV2;
+    if (
+      detail.schemaVer === "grain.dev/qa-flow/v3" ||
+      detail.declarationV3 ||
+      detail.key.startsWith("golden-v3")
+    ) {
+      draft.schema = "grain.dev/qa-flow/v3";
+      draft.declarationV3 = detail.declarationV3;
+    }
     if (this.isFork()) {
       draft.key = detail.key + "-fork";
     }

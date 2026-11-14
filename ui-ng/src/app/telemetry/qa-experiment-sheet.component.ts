@@ -119,6 +119,15 @@ interface FlowVersionDetailPayload {
                 (input)="onTextInput(name, $event)"
               />
             </div>
+            <div class="qa-exp-field" style="margin-top: 16px;">
+              <label for="f-exp-ref">Reference arm</label>
+              <g-pill-select
+                id="f-exp-ref"
+                [value]="referenceArmId()"
+                (valueChange)="referenceArmId.set($event)"
+                [options]="referenceArmOptions()"
+              />
+            </div>
             <div class="qa-exp-field">
               <label for="f-exp-hyp">Hypothesis</label>
               <textarea
@@ -406,6 +415,14 @@ interface FlowVersionDetailPayload {
   `,
 })
 export class QaExperimentSheetComponent implements OnInit {
+  referenceArmOptions = computed(() => {
+    const opts = [{ value: "control", label: "Canonical baseline (no QA)" }];
+    for (const v of this.flowOptions()) {
+      opts.push({ value: v.value, label: v.label });
+    }
+    return opts;
+  });
+
   readonly dismiss = output<void>();
   readonly done = output<string>();
 
@@ -415,6 +432,7 @@ export class QaExperimentSheetComponent implements OnInit {
   private readonly snackbar = inject(SnackbarService);
 
   readonly name = signal("");
+  referenceArmId = signal<string>("control");
   readonly hypothesis = signal("");
   readonly controlHash = signal("control");
   readonly treatmentHash = signal("golden-v2@1");
@@ -531,6 +549,15 @@ export class QaExperimentSheetComponent implements OnInit {
     if (!this.canSubmit()) return;
     this.saving.set(true);
     try {
+      const refVal = this.referenceArmId().trim();
+      const isControlRef = !refVal || refVal === "control";
+      const refOpt = this.referenceArmOptions().find((o) => o.value === refVal);
+      const refKey = isControlRef
+        ? "control"
+        : (refOpt?.label || refVal)
+            .split("@")[0]
+            .replace(/^builtin:/, "")
+            .trim() || "reference";
       const arms: Array<{
         id: string;
         label: string;
@@ -539,9 +566,11 @@ export class QaExperimentSheetComponent implements OnInit {
         baseBranch?: string;
       }> = [
         {
-          id: "control",
-          label: "Control",
-          flowHash: this.controlHash().trim() || "control",
+          id: refKey,
+          label: isControlRef ? "Control" : refOpt?.label || refKey,
+          flowHash: isControlRef
+            ? this.controlHash().trim() || "control"
+            : refVal,
           weight: 50,
           baseBranch: this.controlBaseBranch().trim() || undefined,
         },
@@ -566,9 +595,10 @@ export class QaExperimentSheetComponent implements OnInit {
       const res = (await this.api.post("POST /api/qa/experiments", undefined, {
         name: this.name().trim(),
         hypothesis: this.hypothesis().trim(),
+        referenceArmId: isControlRef ? undefined : refKey,
         arms,
         primaryMetric: this.primaryMetric(),
-        primaryContrast: this.primaryContrast().trim() || "treatment:control",
+        primaryContrast: this.primaryContrast().trim() || `treatment:${refKey}`,
         plan: {
           plannedOriginsPerArm: this.plannedOrigins(),
           maxDays: this.maxDays(),

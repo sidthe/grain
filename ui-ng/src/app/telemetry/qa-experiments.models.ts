@@ -56,6 +56,7 @@ export interface QAExperimentDetail {
   hypothesis: string;
   state: "draft" | "running" | "stopped" | "archived";
   arms: QAExperimentArm[];
+  referenceArmId?: string;
   scope: { repos: string[] };
   allocation: {
     mode: "hash" | "explicit";
@@ -134,6 +135,37 @@ export interface QAExperimentResults {
   state?: string;
   periodLabel?: string;
   scopeRepos?: string[];
+  referenceArmId?: string;
+  declarationDiff?: {
+    addedStages: string[];
+    removedStages: string[];
+    changedSkills: string[];
+    addedCustomChecks: string[];
+    removedCustomChecks: string[];
+    changedChecks: string[];
+    changedVerifier: boolean;
+    changedTriage: boolean;
+  };
+  stageFunnel?: Array<{
+    armId: string;
+    stage: string;
+    runs: number;
+    applicablePct: number;
+    findingsCount: number;
+    repairedInNextShaPct: number;
+    durationP50Ms: number;
+    durationP95Ms: number;
+    tokensMedian: number;
+    notHelpfulWilsonLB: number;
+  }>;
+  triageMetrics?: Array<{
+    armId: string;
+    mode: string;
+    autoMergeEligiblePct: number;
+    humanRoutedPct: number;
+    autoMergedEscapeRate: number;
+    humanRoutedTruePositiveRate: number;
+  }>;
   verdicts: QAExperimentVerdict[];
   forestRows: QAExperimentForestRow[];
   provisional: boolean;
