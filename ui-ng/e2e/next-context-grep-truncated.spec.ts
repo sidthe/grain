@@ -106,10 +106,10 @@ test(
         paneBox!.y + paneBox!.height + 1,
       );
 
-      // Verify CSS styling for .ctx-grep-truncated is scoped to g-context-page and leaves outside elements unstyled.
+      // Verify CSS styling for .ctx-trunc is scoped to g-context-page and leaves outside elements unstyled.
       const outsideStyled = await page.evaluate(() => {
         const probe = document.createElement("div");
-        probe.className = "ctx-grep-truncated";
+        probe.className = "ctx-trunc";
         document.body.appendChild(probe);
         const bg = getComputedStyle(probe).backgroundColor;
         probe.remove();

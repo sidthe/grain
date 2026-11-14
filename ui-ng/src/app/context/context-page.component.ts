@@ -711,12 +711,12 @@ type ReachableReposPayload =
                 </ul>
                 @if (fsGrepTruncated()) {
                   <div
-                    class="ctx-grep-truncated"
+                    class="banner ctx-trunc"
                     role="status"
                     aria-live="polite"
                     data-testid="fs-grep-truncated"
                   >
-                    <div class="ctx-grep-truncated-head">
+                    <div class="ctx-trunc-hd">
                       <g-status-icon tone="blast" kind="warning" />
                       <span>
                         {{
@@ -727,7 +727,7 @@ type ReachableReposPayload =
                       </span>
                     </div>
                     @for (notice of fsGrepNotices(); track $index) {
-                      <p class="ctx-grep-truncated-msg tabular">{{ notice }}</p>
+                      <p class="ctx-trunc-msg tabular">{{ notice }}</p>
                     }
                   </div>
                 }
