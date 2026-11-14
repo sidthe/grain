@@ -132,6 +132,10 @@ g-context-page {
   flex: 1;
 }
 
+.ctx-list:empty {
+  flex: 0;
+}
+
 .ctx-row {
   display: flex;
   flex-direction: column;
@@ -227,6 +231,7 @@ g-context-page {
 @media (max-width: 839.95px) {
   .ctx-split {
     grid-template-columns: minmax(0, 1fr);
+    grid-auto-rows: max-content;
     overflow-y: auto;
     overflow-x: hidden;
   }
@@ -235,6 +240,12 @@ g-context-page {
     border-bottom: 1px solid var(--md-sys-color-outline-variant);
     max-height: 40vh;
     overflow-y: auto;
+  }
+  .ctx-list {
+    flex: 0 1 auto;
+  }
+  .ctx-list:not(:empty) {
+    min-height: 88px;
   }
   .ctx-detail-pane {
     overflow-y: visible;
@@ -354,6 +365,36 @@ g-context-page {
 .ctx-fs-row.is-selected {
   background: var(--md-sys-color-secondary-container);
   color: var(--md-sys-color-on-secondary-container);
+}
+
+.ctx-fs-grep-footer {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 10px 16px;
+  border-top: 1px solid var(--md-sys-color-warning);
+  background: var(--md-sys-color-warning-container);
+  color: var(--md-sys-color-on-warning-container);
+  font-size: 12px;
+  line-height: 17px;
+}
+
+.ctx-fs-grep-footer g-status-icon {
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+
+.ctx-fs-grep-footer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ctx-fs-grep-footer-line {
+  margin: 0;
+  overflow-wrap: anywhere;
 }
 
 /* Syntax highlight tokens inside dark-well (#8e95a5 >= 5.5:1 on #13151a) */

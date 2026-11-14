@@ -17,6 +17,14 @@ import {
   extractGrainPlans,
   type GrainPlanBlock,
 } from "../director/director-draft";
+import {
+  type ModelAvailability,
+  type ModelBackendLike,
+  availabilityNote,
+  containsModel,
+  modelAvailability,
+  modelGroups,
+} from "../shared/model-catalog";
 import type { PillOption } from "../shared/pill-select.component";
 
 export interface DocArtifact {
@@ -172,18 +180,47 @@ export function wrapSandboxedHtml(
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>${themeStyle}body{margin:16px;}</style></head><body>${sanitized}</body></html>`;
 }
 
+export function sessionModelAvailability(
+  model: string | undefined,
+  configModels: readonly string[],
+  agentBackends: readonly ModelBackendLike[],
+  modelsLoaded: boolean,
+): ModelAvailability | "" {
+  const m = (model ?? "").trim();
+  if (!m || !modelsLoaded) return "";
+  if (agentBackends.length > 0) {
+    const avail = modelAvailability(m, modelGroups(agentBackends));
+    if (avail !== "unadvertised") return avail;
+  }
+  return containsModel(configModels, m) ? "enabled" : "unadvertised";
+}
+
+export function sessionModelNote(
+  model: string | undefined,
+  configModels: readonly string[],
+  agentBackends: readonly ModelBackendLike[],
+  modelsLoaded: boolean,
+): string {
+  const avail = sessionModelAvailability(
+    model,
+    configModels,
+    agentBackends,
+    modelsLoaded,
+  );
+  return avail ? availabilityNote(avail) : "";
+}
+
 export function buildAgentModelOptions(
   agentModels: AgentModel[],
   configModels: string[],
   defaultModel: string,
   currentModel?: string,
 ): PillOption[] {
+  const def = defaultModel.trim();
   const opts: PillOption[] = [
     {
       value: "",
-      label: defaultModel
-        ? `Deployment default (${defaultModel})`
-        : "Deployment default",
+      label: def ? `Deployment default (${def})` : "Deployment default",
     },
   ];
   const byId = new Map<string, AgentModel>();
@@ -206,8 +243,9 @@ export function buildAgentModelOptions(
       opts.push({ value: id, label: id });
     }
   }
-  if (currentModel && !seen.has(currentModel)) {
-    opts.push({ value: currentModel, label: currentModel });
+  const trimmedCurrent = currentModel?.trim();
+  if (trimmedCurrent && !seen.has(currentModel!)) {
+    opts.push({ value: currentModel!, label: trimmedCurrent });
   }
   return opts;
 }

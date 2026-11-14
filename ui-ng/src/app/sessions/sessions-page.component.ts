@@ -58,6 +58,7 @@ import {
 import {
   buildAgentModelOptions,
   extractSessionArtifacts,
+  sessionModelNote,
 } from "./session-artifacts";
 import {
   type CanvasTab,
@@ -217,16 +218,34 @@ export function clock(iso: string | undefined, now = new Date()): string {
                   st.label
                 }}<span class="sr-only">: {{ st.tip }}</span></span
               >
-              @if (canEditCaps() && modelOptions().length > 1) {
-                <g-pill-select
-                  [options]="modelOptions()"
-                  [value]="row.session.model || ''"
-                  ariaLabel="Session model"
-                  align="left"
-                  testid="chat-head-model"
-                  [disabled]="store.isBusy('settings')"
-                  (valueChange)="saveModel($event)"
-                />
+              @if (showHeadModel()) {
+                @if (canEditCaps() && modelOptions().length > 1) {
+                  <g-pill-select
+                    [options]="modelOptions()"
+                    [value]="selectedSessionModel()"
+                    ariaLabel="Session model"
+                    align="left"
+                    testid="chat-head-model"
+                    [disabled]="store.isBusy('settings')"
+                    (valueChange)="saveModel($event)"
+                  />
+                } @else {
+                  <span
+                    class="status-pill neutral"
+                    data-testid="chat-head-model-readonly"
+                    [gTip]="readonlyModelTip()"
+                    >{{ readonlyModelLabel() }}</span
+                  >
+                }
+                @if (modelNote(); as note) {
+                  <span
+                    class="status-pill quiet"
+                    role="status"
+                    data-testid="chat-head-model-unadvertised"
+                    [gTip]="note"
+                    >{{ note }}</span
+                  >
+                }
               }
               <button
                 type="button"
@@ -382,13 +401,23 @@ export function clock(iso: string | undefined, now = new Date()): string {
                     <span>Model</span>
                     <g-pill-select
                       [options]="modelOptions()"
-                      [value]="row.session.model || ''"
+                      [value]="selectedSessionModel()"
                       ariaLabel="Session model"
                       align="left"
                       testid="session-model"
                       [disabled]="store.isBusy('settings')"
                       (valueChange)="saveModel($event)"
                     />
+                    @if (modelNote(); as note) {
+                      <div>
+                        <span
+                          class="status-pill quiet"
+                          role="status"
+                          data-testid="session-model-unadvertised"
+                          >{{ note }}</span
+                        >
+                      </div>
+                    }
                   </div>
                   <div class="session-setting-field">
                     <span>Network access</span>
@@ -758,7 +787,7 @@ export function clock(iso: string | undefined, now = new Date()): string {
           <div class="field">
             <span>Model</span>
             <g-pill-select
-              [options]="modelOptions()"
+              [options]="newModelOptions()"
               [value]="newModel()"
               ariaLabel="New session model"
               align="left"
@@ -954,14 +983,53 @@ export class SessionsPageComponent implements OnInit, OnDestroy {
   protected readonly apiGrants = computed(() =>
     apiGrantCount(this.store.selected()?.session),
   );
+  protected readonly selectedSessionModel = computed(() => {
+    const raw = this.store.selected()?.session.model ?? "";
+    return raw.trim() ? raw : "";
+  });
   protected readonly modelOptions = computed<PillOption[]>(() =>
     buildAgentModelOptions(
       this.store.agentModels(),
       this.store.models(),
       this.store.defaultModel(),
-      this.store.selected()?.session.model,
+      this.selectedSessionModel(),
     ),
   );
+  protected readonly newModelOptions = computed<PillOption[]>(() =>
+    buildAgentModelOptions(
+      this.store.agentModels(),
+      this.store.models(),
+      this.store.defaultModel(),
+    ),
+  );
+  protected readonly effectiveModel = computed(
+    () =>
+      this.selectedSessionModel().trim() || this.store.defaultModel().trim(),
+  );
+  protected readonly modelNote = computed(() =>
+    sessionModelNote(
+      this.effectiveModel(),
+      this.store.models(),
+      this.store.agentBackends(),
+      this.store.configModelsLoaded(),
+    ),
+  );
+  protected readonly showHeadModel = computed(
+    () => this.modelOptions().length > 1 || !!this.effectiveModel(),
+  );
+  protected readonly readonlyModelLabel = computed(() => {
+    const val = this.selectedSessionModel();
+    const match = this.modelOptions().find((o) => o.value === val);
+    return match?.label || val.trim() || "Deployment default";
+  });
+  protected readonly readonlyModelTip = computed(() => {
+    const label = this.readonlyModelLabel();
+    const note = this.modelNote();
+    const prefix = this.canEditCaps()
+      ? "Session model"
+      : "Session model (read-only)";
+    return note ? `${prefix}: ${label} (${note})` : `${prefix}: ${label}`;
+  });
   protected readonly extractedArtifacts = computed(() =>
     extractSessionArtifacts(this.comments()),
   );
