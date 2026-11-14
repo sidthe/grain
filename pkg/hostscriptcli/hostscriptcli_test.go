@@ -165,3 +165,96 @@ func TestRunWithStdinAndApprovalHelp(t *testing.T) {
 		t.Errorf("approve: true help = %q, want approval note", helpOut)
 	}
 }
+
+func TestValidateScriptName(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		// Valid names across boundaries and allowed characters.
+		{name: "min length 3", input: "abc", wantErr: false},
+		{name: "max length 32", input: strings.Repeat("a", 32), wantErr: false},
+		{name: "length 31", input: strings.Repeat("Z", 31), wantErr: false},
+		{name: "uppercase and lowercase", input: "DeployScript", wantErr: false},
+		{name: "digits only", input: "0123456789", wantErr: false},
+		{name: "hyphens and underscores", input: "my-script_01", wantErr: false},
+		{name: "all hyphens min", input: "---", wantErr: false},
+		{name: "all underscores min", input: "___", wantErr: false},
+		{name: "leading hyphen and trailing underscore", input: "-a_", wantErr: false},
+		{name: "all allowed classes", input: "AbCdEf0123456789-_XyZ", wantErr: false},
+
+		// Rule 1: empty.
+		{name: "empty", input: "", wantErr: true},
+
+		// Rule 2: whitespace (ASCII and Unicode).
+		{name: "single space", input: " ", wantErr: true},
+		{name: "three spaces", input: "   ", wantErr: true},
+		{name: "embedded space", input: "foo bar", wantErr: true},
+		{name: "leading space", input: " foo", wantErr: true},
+		{name: "trailing space", input: "foo ", wantErr: true},
+		{name: "tab", input: "foo\tbar", wantErr: true},
+		{name: "newline", input: "foo\nbar", wantErr: true},
+		{name: "carriage return", input: "foo\rbar", wantErr: true},
+		{name: "vertical tab", input: "foo\vbar", wantErr: true},
+		{name: "form feed", input: "foo\fbar", wantErr: true},
+		{name: "unicode nbsp", input: "foo\u00a0bar", wantErr: true},
+		{name: "unicode em space", input: "foo\u2003bar", wantErr: true},
+		{name: "unicode nel", input: "foo\u0085bar", wantErr: true},
+
+		// Rule 3: slash or backslash.
+		{name: "forward slash", input: "foo/bar", wantErr: true},
+		{name: "leading slash", input: "/foobar", wantErr: true},
+		{name: "trailing slash", input: "foobar/", wantErr: true},
+		{name: "backslash", input: `foo\bar`, wantErr: true},
+		{name: "leading backslash", input: `\foobar`, wantErr: true},
+		{name: "trailing backslash", input: `foobar\`, wantErr: true},
+
+		// Rule 4: length bounds [3, 32].
+		{name: "length 1", input: "a", wantErr: true},
+		{name: "length 2", input: "ab", wantErr: true},
+		{name: "length 33", input: strings.Repeat("a", 33), wantErr: true},
+		{name: "length 64", input: strings.Repeat("a", 64), wantErr: true},
+		{name: "huge input", input: strings.Repeat("a", 1<<20), wantErr: true},
+
+		// Rule 5: non-allowed characters and non-ASCII.
+		{name: "dot", input: "foo.bar", wantErr: true},
+		{name: "colon", input: "foo:bar", wantErr: true},
+		{name: "plus", input: "foo+bar", wantErr: true},
+		{name: "at", input: "foo@bar", wantErr: true},
+		{name: "nul byte", input: "foo\x00bar", wantErr: true},
+		{name: "non-ascii letter", input: "aéb", wantErr: true},
+		{name: "non-ascii 32 runes", input: strings.Repeat("é", 32), wantErr: true},
+		{name: "unicode fullwidth digit", input: "ab１", wantErr: true},
+		{name: "unicode hyphen", input: "a\u2010b", wantErr: true},
+		{name: "invalid utf8", input: "a\xffb", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateScriptName(tc.input)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("ValidateScriptName(%q) error = %v, wantErr %v", tc.input, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateScriptNameAllBytes(t *testing.T) {
+	for b := 0; b <= 255; b++ {
+		c := byte(b)
+		wantValid := (c >= 'a' && c <= 'z') ||
+			(c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') ||
+			c == '-' ||
+			c == '_'
+		in := string([]byte{'a', c, 'b'})
+		err := ValidateScriptName(in)
+		if wantValid && err != nil {
+			t.Errorf("ValidateScriptName(%q) [byte 0x%02x] unexpected error: %v", in, c, err)
+		}
+		if !wantValid && err == nil {
+			t.Errorf("ValidateScriptName(%q) [byte 0x%02x] succeeded, want error", in, c)
+		}
+	}
+}
