@@ -7,6 +7,7 @@
 }
 
 .director-drawer {
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   width: clamp(380px, 32vw, 480px);
@@ -152,4 +153,14 @@
   .drawer-wide-btn {
     display: none;
   }
+}
+
+.director-drawer[hidden] {
+  display: none;
+}
+
+.director-drawer:focus-visible,
+.drawer-ctx-pill:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: -2px;
 }

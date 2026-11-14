@@ -291,6 +291,8 @@ class FakeProcessesApi {
     schedule: this.schedules[0],
   };
 
+  reachableRepos = ["acme/widgets"];
+
   calls: { method: string; route: string; params?: unknown; body?: unknown }[] =
     [];
 
@@ -338,7 +340,7 @@ class FakeProcessesApi {
   get = (route: string, params?: Record<string, unknown>) => {
     this.calls.push({ method: "GET", route, params });
     if (route === "GET /api/deployment/reachable-repos") {
-      return Promise.resolve(["acme/widgets"]);
+      return Promise.resolve([...this.reachableRepos]);
     }
     if (
       route === "GET /api/schedules/{id}/composition" ||
@@ -348,7 +350,10 @@ class FakeProcessesApi {
       return Promise.resolve(structuredClone(this.compositionSample));
     }
     if (route === "GET /api/suite-runs/{id}") {
-      return Promise.resolve(structuredClone(this.suiteRuns[0]));
+      const id = Number(params?.["id"]);
+      const found =
+        this.suiteRuns.find((r) => r.id === id) ?? this.suiteRuns[0];
+      return Promise.resolve(structuredClone(found));
     }
     if (route === "GET /api/repos/{owner}/{name}/declarations") {
       return Promise.resolve(structuredClone(this.repoDecl));
@@ -1491,5 +1496,684 @@ describe("ProcessesPageComponent (D-9)", () => {
     expect(runLink?.getAttribute("href")).toBe(
       "/ci/runs/gha:acme:widgets:9001?provider=github-actions",
     );
+  });
+
+  it("disables mutating buttons and blocks deep-link dialogs for grain/viewer across all tabs", async () => {
+    api.configBody = {
+      access: {
+        role: "grain/viewer",
+        roles: ["grain/viewer"],
+        full: false,
+        scopes: [
+          "schedules:read",
+          "templates:read",
+          "suites:read",
+          "tasks:read",
+          "repos:read",
+          "capabilities:read",
+        ],
+        repoLimits: {},
+      },
+      targetRepos: ["acme/widgets"],
+      approvedByDefault: false,
+    };
+    api.templates.push({
+      id: "tmpl-widgets",
+      name: "Widgets lint",
+      title: "Lint widgets",
+      description: "Run lint in acme/widgets",
+      repo: "acme/widgets",
+      autoMerge: false,
+      capabilities: [],
+      revision: "rev-w1",
+    });
+
+    // 1. Schedules tab + ?new=1 deep link blocked
+    const harness = await RouterTestingHarness.create(
+      "/processes/schedules?new=1",
+    );
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+    expect(root.querySelector('[data-testid="schedule-dialog"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="proc-new-schedule-btn"]'),
+    ).toBeNull();
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="sched-run-now-btn"]',
+      )!.disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="sched-toggle-enabled-btn"]',
+      )!.disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="sched-edit-btn"]')!
+        .disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="sched-delete-btn"]')!
+        .disabled,
+    ).toBe(true);
+
+    // 2. Templates tab + ?launch=1 deep link blocked
+    await harness.navigateByUrl("/processes/templates?launch=1");
+    await flush(harness);
+    expect(root.querySelector('[data-testid="launch-dialog"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="proc-launch-template-btn"]'),
+    ).toBeNull();
+    expect(
+      root.querySelector('[data-testid="proc-new-template-btn"]'),
+    ).toBeNull();
+    root
+      .querySelector<HTMLElement>('[data-testid="tmpl-row-tmpl-deploy-1"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="tmpl-launch-btn"]')!
+        .disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="tmpl-edit-btn"]')!
+        .disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="tmpl-delete-btn"]')!
+        .disabled,
+    ).toBe(true);
+
+    // 3. Suites + Suite runs tab + ?run=1 deep link blocked
+    await harness.navigateByUrl("/processes/suites?run=1");
+    await flush(harness);
+    expect(root.querySelector('[data-testid="run-suite-dialog"]')).toBeNull();
+    expect(root.querySelector('[data-testid="proc-run-suite-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="proc-new-suite-btn"]')).toBeNull();
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="suite-open-run-dialog-btn"]',
+      )!.disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="suite-edit-btn"]')!
+        .disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="suite-delete-btn"]')!
+        .disabled,
+    ).toBe(true);
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="suites-subview-runs"]')!
+      .click();
+    await flush(harness);
+    root.querySelector<HTMLElement>('[data-testid="suite-run-row-7"]')!.click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="suite-run-cancel-btn"]',
+      )!.disabled,
+    ).toBe(true);
+
+    // 4. Declarations tab
+    await harness.navigateByUrl("/processes/declarations");
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="decl-toggle-switch"]',
+      )!.disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector('[data-testid="decl-add-workflow-btn"]'),
+    ).toBeNull();
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="decl-accept-btn-repo:template:acme/widgets:release-notes"]',
+      )!.disabled,
+    ).toBe(true);
+  });
+
+  it("enforces canGlobalScope vs repo-scoped permissions for suite execution, suite edits, and suite-run cancellation", async () => {
+    api.configBody = {
+      access: {
+        role: "widgets-suite-runner",
+        roles: ["widgets-suite-runner"],
+        full: false,
+        scopes: [
+          "suites:read",
+          "suites:write",
+          "templates:read",
+          "tasks:read",
+          "tasks:write",
+        ],
+        repoLimits: {
+          "suites:write": ["acme/widgets"],
+          "tasks:write": ["acme/widgets"],
+        },
+      },
+      targetRepos: ["acme/gadgets", "acme/widgets"],
+      approvedByDefault: true,
+    };
+    api.reachableRepos = ["acme/gadgets", "acme/widgets"];
+    api.templates.push(
+      {
+        id: "tmpl-widgets",
+        name: "Widgets pass",
+        title: "Widgets pass",
+        description: "Runs in acme/widgets",
+        repo: "acme/widgets",
+        autoMerge: false,
+        capabilities: [],
+        revision: "rev-w",
+      },
+      {
+        id: "tmpl-gadgets",
+        name: "Gadgets pass",
+        title: "Gadgets pass",
+        description: "Runs in acme/gadgets",
+        repo: "acme/gadgets",
+        autoMerge: false,
+        capabilities: [],
+        revision: "rev-g",
+      },
+    );
+    api.suites.push(
+      {
+        id: "suite-widgets",
+        name: "Widgets single-repo",
+        items: [{ templateId: "tmpl-widgets", templateName: "Widgets pass" }],
+        mode: "count",
+        count: 1,
+        requireApproval: false,
+        autoMerge: false,
+        autoApproveProposals: false,
+        revision: "rev-sw",
+      },
+      {
+        id: "suite-gadgets",
+        name: "Gadgets single-repo",
+        items: [{ templateId: "tmpl-gadgets", templateName: "Gadgets pass" }],
+        mode: "count",
+        count: 1,
+        requireApproval: false,
+        autoMerge: false,
+        autoApproveProposals: false,
+        revision: "rev-sg",
+      },
+      {
+        id: "suite-multi",
+        name: "Cross-repo sweep",
+        items: [
+          { templateId: "tmpl-widgets", templateName: "Widgets pass" },
+          { templateId: "tmpl-gadgets", templateName: "Gadgets pass" },
+        ],
+        mode: "count",
+        count: 1,
+        requireApproval: false,
+        autoMerge: false,
+        autoApproveProposals: false,
+        revision: "rev-sm",
+      },
+    );
+    api.tasks.push({
+      id: "403",
+      title: "Gadgets task",
+      state: "running",
+      repo: "acme/gadgets",
+      suiteRun: true,
+    });
+    api.suiteRuns.push({
+      id: 18,
+      suiteId: "suite-multi",
+      suiteName: "Cross-repo sweep",
+      repo: "",
+      base: "main",
+      mode: "count",
+      count: 1,
+      requireApproval: false,
+      autoMerge: false,
+      status: "active",
+      pass: 1,
+      createdAt: "2026-11-12T01:00:00Z",
+      tasks: [
+        {
+          taskId: "401",
+          templateId: "tmpl-widgets",
+          pass: 1,
+          state: "running",
+          approved: true,
+          openedPullRequest: false,
+          proposed: false,
+        },
+        {
+          taskId: "403",
+          templateId: "tmpl-gadgets",
+          pass: 1,
+          state: "running",
+          approved: true,
+          openedPullRequest: false,
+          proposed: false,
+        },
+      ],
+    });
+
+    const harness = await RouterTestingHarness.create("/processes/suites");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    // Global suite creation is hidden without global suites:write, while header Run suite appears because suite-widgets is runnable
+    expect(root.querySelector('[data-testid="proc-new-suite-btn"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="proc-run-suite-btn"]'),
+    ).not.toBeNull();
+
+    // Unbound ("any") suite-1: Run suite, Edit, and Delete all disabled
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="suite-open-run-dialog-btn"]',
+      )!.disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="suite-edit-btn"]')!
+        .disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="suite-delete-btn"]')!
+        .disabled,
+    ).toBe(true);
+
+    // Multi-repo ("several") suite-multi: Run suite disabled
+    root
+      .querySelector<HTMLElement>('[data-testid="suite-row-suite-multi"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="suite-open-run-dialog-btn"]',
+      )!.disabled,
+    ).toBe(true);
+
+    // Unauthorized single-repo suite-gadgets: Run suite disabled
+    root
+      .querySelector<HTMLElement>('[data-testid="suite-row-suite-gadgets"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="suite-open-run-dialog-btn"]',
+      )!.disabled,
+    ).toBe(true);
+
+    // Authorized single-repo suite-widgets: Run suite enabled, Edit/Delete still disabled
+    root
+      .querySelector<HTMLElement>('[data-testid="suite-row-suite-widgets"]')!
+      .click();
+    await flush(harness);
+    const runBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="suite-open-run-dialog-btn"]',
+    )!;
+    expect(runBtn.disabled).toBe(false);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="suite-edit-btn"]')!
+        .disabled,
+    ).toBe(true);
+
+    // Opening Run suite prefills suite-widgets + acme/widgets, excludes unauthorized suites in picker, and validates target repo
+    runBtn.click();
+    await flush(harness);
+    const repoInput = root.querySelector<HTMLInputElement>(
+      '[data-testid="run-suite-repo-input"]',
+    )!;
+    expect(repoInput.value).toBe("acme/widgets");
+    const submitRunBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="run-suite-submit"]',
+    )!;
+    expect(submitRunBtn.disabled).toBe(false);
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="run-suite-picker"]')!
+      .click();
+    await flush(harness);
+    const pickerOpts = [
+      ...root.querySelectorAll('[role="listbox"] [role="option"]'),
+    ].map((el) => el.textContent?.trim());
+    expect(pickerOpts).toEqual(["Widgets single-repo"]);
+
+    repoInput.value = "acme/gadgets";
+    repoInput.dispatchEvent(new Event("input"));
+    await flush(harness);
+    expect(submitRunBtn.disabled).toBe(true);
+
+    repoInput.value = "acme/widgets";
+    repoInput.dispatchEvent(new Event("input"));
+    await flush(harness);
+    expect(submitRunBtn.disabled).toBe(false);
+    submitRunBtn.click();
+    await flush(harness);
+    expect(
+      api.calls.filter((c) => c.route === "POST /api/suite-runs").length,
+    ).toBe(1);
+
+    // Cancel suite run: authorized on #7 (acme/widgets), disabled on #8 (cross-repo acme/widgets + acme/gadgets)
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="suites-subview-runs"]')!
+      .click();
+    await flush(harness);
+    root.querySelector<HTMLElement>('[data-testid="suite-run-row-7"]')!.click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="suite-run-cancel-btn"]',
+      )!.disabled,
+    ).toBe(false);
+
+    root
+      .querySelector<HTMLElement>('[data-testid="suite-run-row-18"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="suite-run-cancel-btn"]',
+      )!.disabled,
+    ).toBe(true);
+  });
+
+  it("blocks ?run=1 deep link when repo-scoped suites:write only has cross-repo or unauthorized suites", async () => {
+    api.configBody = {
+      access: {
+        role: "widgets-suite-runner",
+        roles: ["widgets-suite-runner"],
+        full: false,
+        scopes: ["suites:read", "suites:write", "templates:read"],
+        repoLimits: { "suites:write": ["acme/widgets"] },
+      },
+      targetRepos: ["acme/widgets", "acme/gadgets"],
+      approvedByDefault: true,
+    };
+    api.templates.push({
+      id: "tmpl-gadgets",
+      name: "Gadgets pass",
+      title: "Gadgets pass",
+      description: "Runs in acme/gadgets",
+      repo: "acme/gadgets",
+      autoMerge: false,
+      capabilities: [],
+      revision: "rev-g",
+    });
+    api.suites.push({
+      id: "suite-gadgets",
+      name: "Gadgets single-repo",
+      items: [{ templateId: "tmpl-gadgets", templateName: "Gadgets pass" }],
+      mode: "count",
+      count: 1,
+      requireApproval: false,
+      autoMerge: false,
+      autoApproveProposals: false,
+      revision: "rev-sg",
+    });
+
+    const harness = await RouterTestingHarness.create(
+      "/processes/suites?run=1",
+    );
+    await flush(harness);
+    expect(
+      harness.routeNativeElement!.querySelector(
+        '[data-testid="run-suite-dialog"]',
+      ),
+    ).toBeNull();
+  });
+
+  it("enforces canGlobalScope vs repo-scoped permissions across schedules, templates, composition reads, and declarations", async () => {
+    api.configBody = {
+      access: {
+        role: "widgets-ops",
+        roles: ["widgets-ops"],
+        full: false,
+        scopes: [
+          "schedules:read",
+          "schedules:write",
+          "templates:read",
+          "templates:write",
+          "tasks:read",
+          "tasks:write",
+          "tasks:from-template",
+          "repos:read",
+          "repos:write",
+          "capabilities:read",
+        ],
+        repoLimits: {
+          "schedules:read": ["acme/widgets"],
+          "schedules:write": ["acme/widgets"],
+          "templates:read": ["acme/widgets"],
+          "templates:write": ["acme/widgets"],
+          "tasks:write": ["acme/widgets"],
+          "tasks:from-template": ["acme/widgets"],
+          "repos:write": ["acme/widgets"],
+        },
+      },
+      targetRepos: ["acme/widgets", "acme/gadgets"],
+      approvedByDefault: true,
+    };
+    api.reachableRepos = ["acme/widgets", "acme/gadgets"];
+    api.templates.push(
+      {
+        id: "tmpl-sys",
+        name: "System health check",
+        title: "System check",
+        description: "Controller-wide system template",
+        system: true,
+        autoMerge: false,
+        capabilities: [],
+      },
+      {
+        id: "tmpl-widgets",
+        name: "Widgets task",
+        title: "Widgets task",
+        description: "Scoped to acme/widgets",
+        repo: "acme/widgets",
+        autoMerge: false,
+        capabilities: [],
+        revision: "rev-tw",
+      },
+      {
+        id: "tmpl-gadgets",
+        name: "Gadgets task",
+        title: "Gadgets task",
+        description: "Scoped to acme/gadgets",
+        repo: "acme/gadgets",
+        autoMerge: false,
+        capabilities: [],
+        revision: "rev-tg",
+      },
+    );
+
+    // 1. Schedules: {id} mutations disabled and GET composition skipped when schedules:read is repo-scoped
+    const harness = await RouterTestingHarness.create("/processes/schedules");
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+    expect(
+      api.calls.some((c) => c.route === "GET /api/schedules/{id}/composition"),
+    ).toBe(false);
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="sched-run-now-btn"]',
+      )!.disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="sched-toggle-enabled-btn"]',
+      )!.disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="sched-edit-btn"]')!
+        .disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="sched-delete-btn"]')!
+        .disabled,
+    ).toBe(true);
+
+    // New schedule disables Save for unauthorized default/other repo and empty repo, enables Save for acme/widgets
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="proc-new-schedule-btn"]',
+      )!
+      .click();
+    await flush(harness);
+    const schedSave = root.querySelector<HTMLButtonElement>(
+      '[data-testid="sched-save-btn"]',
+    )!;
+    const schedRepo = root.querySelector<HTMLInputElement>(
+      '[data-testid="sched-repo-input"]',
+    )!;
+    // knownRepos() sorts alphabetically -> "acme/gadgets" is first and unauthorized
+    expect(schedRepo.value).toBe("acme/gadgets");
+    expect(schedSave.disabled).toBe(true);
+    schedRepo.value = "";
+    schedRepo.dispatchEvent(new Event("input"));
+    await flush(harness);
+    expect(schedSave.disabled).toBe(true);
+    schedRepo.value = "acme/widgets";
+    schedRepo.dispatchEvent(new Event("input"));
+    await flush(harness);
+    expect(schedSave.disabled).toBe(false);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-cancel-btn"]')!
+      .click();
+    await flush(harness);
+
+    // 2. Templates: system, unbound, and other-repo templates disabled; GET composition skipped
+    api.calls = [];
+    await harness.navigateByUrl("/processes/templates");
+    await flush(harness);
+    expect(
+      api.calls.some((c) => c.route === "GET /api/templates/{id}/composition"),
+    ).toBe(false);
+
+    for (const tid of ["tmpl-deploy-1", "tmpl-sys", "tmpl-gadgets"]) {
+      root
+        .querySelector<HTMLElement>(`[data-testid="tmpl-row-${tid}"]`)!
+        .click();
+      await flush(harness);
+      expect(
+        root.querySelector<HTMLButtonElement>(
+          '[data-testid="tmpl-launch-btn"]',
+        )!.disabled,
+      ).toBe(true);
+    }
+
+    root
+      .querySelector<HTMLElement>('[data-testid="tmpl-row-tmpl-widgets"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="tmpl-launch-btn"]')!
+        .disabled,
+    ).toBe(false);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="tmpl-edit-btn"]')!
+        .disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="tmpl-delete-btn"]')!
+        .disabled,
+    ).toBe(true);
+
+    // New template requires allowed repo (not blank, not acme/gadgets)
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="proc-new-template-btn"]',
+      )!
+      .click();
+    await flush(harness);
+    const tName = root.querySelector<HTMLInputElement>(
+      '[data-testid="tmpl-name-input"]',
+    )!;
+    const tTitle = root.querySelector<HTMLInputElement>(
+      '[data-testid="tmpl-title-input"]',
+    )!;
+    const tRepo = root.querySelector<HTMLInputElement>(
+      '[data-testid="tmpl-repo-input"]',
+    )!;
+    const tSave = root.querySelector<HTMLButtonElement>(
+      '[data-testid="tmpl-save-btn"]',
+    )!;
+    tName.value = "Scoped tmpl";
+    tName.dispatchEvent(new Event("input"));
+    tTitle.value = "Scoped tmpl";
+    tTitle.dispatchEvent(new Event("input"));
+    await flush(harness);
+    expect(tSave.disabled).toBe(true);
+    tRepo.value = "acme/gadgets";
+    tRepo.dispatchEvent(new Event("input"));
+    await flush(harness);
+    expect(tSave.disabled).toBe(true);
+    tRepo.value = "acme/widgets";
+    tRepo.dispatchEvent(new Event("input"));
+    await flush(harness);
+    expect(tSave.disabled).toBe(false);
+
+    // 3. Declarations: acme/widgets allowed, acme/gadgets disabled
+    await harness.navigateByUrl("/processes/declarations");
+    await flush(harness);
+    root
+      .querySelector<HTMLElement>('[data-testid="decl-repo-row-acme/widgets"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="decl-toggle-switch"]',
+      )!.disabled,
+    ).toBe(false);
+    root
+      .querySelector<HTMLElement>('[data-testid="decl-repo-row-acme/gadgets"]')!
+      .click();
+    await flush(harness);
+    expect(
+      root.querySelector<HTMLButtonElement>(
+        '[data-testid="decl-toggle-switch"]',
+      )!.disabled,
+    ).toBe(true);
+    expect(
+      root.querySelector('[data-testid="decl-add-workflow-btn"]'),
+    ).toBeNull();
+  });
+
+  it("awaits GET /api/config before evaluating ?run=1 deep-link permissions", async () => {
+    let resolveConfig!: (cfg: GrainConfig) => void;
+    api.config = () =>
+      new Promise<GrainConfig>((resolve) => {
+        resolveConfig = resolve;
+      });
+    const harness = await RouterTestingHarness.create(
+      "/processes/suites?run=1",
+    );
+    harness.detectChanges();
+    await new Promise((r) => setTimeout(r, 15));
+    harness.detectChanges();
+    expect(
+      harness.routeNativeElement!.querySelector(
+        '[data-testid="run-suite-dialog"]',
+      ),
+    ).toBeNull();
+
+    resolveConfig({
+      access: {
+        role: "grain/viewer",
+        roles: ["grain/viewer"],
+        full: false,
+        scopes: ["suites:read"],
+        repoLimits: {},
+      },
+      targetRepos: ["acme/widgets"],
+      approvedByDefault: false,
+    });
+    await flush(harness);
+    expect(
+      harness.routeNativeElement!.querySelector(
+        '[data-testid="run-suite-dialog"]',
+      ),
+    ).toBeNull();
   });
 });
