@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { HttpHeaders, HttpResponse } from "@angular/common/http";
 import { TestBed, type ComponentFixture } from "@angular/core/testing";
 import { provideRouter } from "@angular/router";
 import { NEVER } from "rxjs";
@@ -28,6 +29,7 @@ import {
   highlightSyntaxHtml,
   isMemoryRepoDirPrefix,
   parseGrepOutput,
+  parseGrepResponse,
   repoFromMemoryFsPath,
 } from "./context.models";
 
@@ -181,6 +183,11 @@ class FakeContextApi {
     return Promise.resolve({});
   };
 
+  grepHandler?: (
+    path: string,
+    query?: string,
+  ) => { body: string; headers?: Record<string, string> };
+
   getText = (
     route: string,
     params?: Record<string, string>,
@@ -189,11 +196,43 @@ class FakeContextApi {
     this.calls.push({ method: "GET_TEXT", route, params, query });
     const p = params?.["path"] ?? "";
     if (query?.includes("grep=")) {
+      if (this.grepHandler) {
+        return Promise.resolve(this.grepHandler(p, query).body);
+      }
       return Promise.resolve(
         'policy.json:2:  "strict": true,\n[truncated at match limit (50 matches); pass --max 100]\n',
       );
     }
     return Promise.resolve(this.fsFiles[p] ?? "");
+  };
+
+  getTextResponse = (
+    route: string,
+    params?: Record<string, string>,
+    query?: string,
+  ): Promise<HttpResponse<string>> => {
+    this.calls.push({ method: "GET_TEXT", route, params, query });
+    const p = params?.["path"] ?? "";
+    if (query?.includes("grep=")) {
+      const reply = this.grepHandler
+        ? this.grepHandler(p, query)
+        : {
+            body: 'policy.json:2:  "strict": true,\n[truncated at match limit (50 matches); pass --max 100]\n',
+            headers: { "X-Grain-Truncated": "true" },
+          };
+      return Promise.resolve(
+        new HttpResponse({
+          body: reply.body,
+          headers: new HttpHeaders(reply.headers ?? {}),
+        }),
+      );
+    }
+    return Promise.resolve(
+      new HttpResponse({
+        body: this.fsFiles[p] ?? "",
+        headers: new HttpHeaders(),
+      }),
+    );
   };
 
   put = (route: string, params?: unknown, body?: unknown) => {
@@ -880,5 +919,223 @@ describe("ContextPageComponent", () => {
       api.calls.some((c) => c.route === "GET /api/memory" && !c.query),
     ).toBe(false);
     expect(root.querySelector('[data-testid="fs-scheme-config"]')).toBeNull();
+  });
+
+  it("renders a component-scoped [truncated] grep footer notice from backend response flags and body lines", async () => {
+    const api = new FakeContextApi();
+    const { fixture, root } = await setup(api);
+
+    // 1. Unit checks on parseGrepResponse for header-only, match-limit, walk-limit, and clean results.
+    expect(parseGrepResponse("a.md:4:hello\n", "repos/acme/api")).toEqual({
+      hits: [{ file: "repos/acme/api/a.md", line: 4, text: "hello" }],
+      truncated: false,
+      walkTruncated: false,
+      notices: [],
+    });
+    expect(
+      parseGrepResponse("a.md:4:hello\n", "repos/acme/api", {
+        truncatedHeader: true,
+      }),
+    ).toEqual({
+      hits: [{ file: "repos/acme/api/a.md", line: 4, text: "hello" }],
+      truncated: true,
+      walkTruncated: false,
+      notices: [
+        "[truncated: search results exceeded the match limit; narrow the path or refine the pattern]",
+      ],
+    });
+    expect(
+      parseGrepResponse(
+        "[truncated: walked 2000 entries and stopped at repos/acme/z.md; it and everything after it were not searched, so finding no match here does not mean there is none: narrow the path or pass --glob]\n",
+        "",
+        { truncatedHeader: true, walkTruncatedHeader: true },
+      ),
+    ).toEqual({
+      hits: [],
+      truncated: true,
+      walkTruncated: true,
+      notices: [
+        "[truncated: walked 2000 entries and stopped at repos/acme/z.md; it and everything after it were not searched, so finding no match here does not mean there is none: narrow the path or pass --glob]",
+      ],
+    });
+
+    // Switch to Namespace tab.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-tab-namespace"]',
+      )!
+      .click();
+    await settle(fixture);
+
+    const runSearch = async (query: string) => {
+      const grepInput = root.querySelector<HTMLInputElement>(
+        '[data-testid="fs-grep-input"]',
+      )!;
+      grepInput.value = query;
+      grepInput.dispatchEvent(new Event("input"));
+      await settle(fixture);
+      root
+        .querySelector<HTMLButtonElement>('[data-testid="fs-grep-btn"]')!
+        .click();
+      await settle(fixture);
+    };
+
+    // 2. Non-truncated grep must NOT display the footer notice.
+    api.grepHandler = () => ({
+      body: "memory.md:3:Always run go test.\n",
+      headers: { "X-Grain-Matches": "1" },
+    });
+    await runSearch("go test");
+    expect(root.querySelector('[data-testid="fs-grep-truncated"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="fs-grep-count"]')?.textContent?.trim(),
+    ).toBe("1 match");
+
+    // 3. Match-limit truncated grep renders footer notice with backend flag & line, without adding footer as a hit.
+    api.grepHandler = () => ({
+      body: 'policy.json:2:  "strict": true,\n[truncated at match limit (100 matches); pass --max 200 (grain grep) to raise the limit]\n',
+      headers: {
+        "X-Grain-Truncated": "true",
+        "X-Grain-Matches": "100",
+      },
+    });
+    await runSearch("strict");
+    const matchNotice = root.querySelector(
+      '[data-testid="fs-grep-truncated"]',
+    )!;
+    expect(matchNotice).not.toBeNull();
+    expect(matchNotice.getAttribute("role")).toBe("status");
+    expect(matchNotice.textContent).toContain("Search results truncated");
+    expect(matchNotice.textContent).toContain(
+      "[truncated at match limit (100 matches); pass --max 200 (grain grep) to raise the limit]",
+    );
+    expect(
+      root.querySelectorAll('[data-testid="fs-grep-results"] li').length,
+    ).toBe(1);
+    expect(
+      root.querySelector('[data-testid="fs-grep-count"]')?.textContent,
+    ).toContain("1 match (truncated)");
+
+    // 4. Clearing search removes the footer notice as well as the results.
+    const clearBtn = Array.from(root.querySelectorAll("button")).find((b) =>
+      b.textContent?.includes("Clear search"),
+    )!;
+    clearBtn.click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="fs-grep-results"]')).toBeNull();
+    expect(root.querySelector('[data-testid="fs-grep-truncated"]')).toBeNull();
+
+    // 5. Walk-limit truncated search with 0 matches still displays the walk-truncation footer notice.
+    api.grepHandler = () => ({
+      body: "[truncated: walked 2000 entries and stopped at repos/acme/z.md; it and everything after it were not searched, so finding no match here does not mean there is none: narrow the path or pass --glob]\n",
+      headers: {
+        "X-Grain-Truncated": "true",
+        "X-Grain-Walk-Truncated": "true",
+        "X-Grain-Matches": "0",
+      },
+    });
+    await runSearch("missing-term");
+    const walkNotice = root.querySelector('[data-testid="fs-grep-truncated"]')!;
+    expect(walkNotice).not.toBeNull();
+    expect(walkNotice.textContent).toContain("Search walk truncated");
+    expect(walkNotice.textContent).toContain("walked 2000 entries");
+    expect(
+      root.querySelector('[data-testid="fs-grep-count"]')?.textContent,
+    ).toContain("0 matches (truncated)");
+
+    // 6. Header-only truncation flag (no [truncated...] footer line in body) still renders a clear notice.
+    api.grepHandler = () => ({
+      body: "memory.md:1:# Global Rules\n",
+      headers: { "X-Grain-Truncated": "true" },
+    });
+    await runSearch("Rules");
+    const hdrNotice = root.querySelector('[data-testid="fs-grep-truncated"]')!;
+    expect(hdrNotice).not.toBeNull();
+    expect(hdrNotice.textContent).toContain(
+      "[truncated: search results exceeded the match limit",
+    );
+
+    // 7. Navigating into a directory clears the truncated grep notice.
+    await runSearch("Rules");
+    expect(
+      root.querySelector('[data-testid="fs-grep-truncated"]'),
+    ).not.toBeNull();
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="fs-breadcrumbs"] button',
+      )!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="fs-grep-truncated"]')).toBeNull();
+  });
+
+  it("merges [truncated] grep notices across multiple repoLimits subtrees and falls back to getText", async () => {
+    const api = new FakeContextApi();
+    api.configBody = {
+      version: "v3.5.0-test",
+      targetRepos: ["acme/api", "acme/web"],
+      access: {
+        role: "multi-repo-reader",
+        roles: ["multi-repo-reader"],
+        full: false,
+        scopes: ["memory:read"],
+        repoLimits: {
+          "memory:read": ["acme/api", "acme/web"],
+        },
+      },
+    };
+    api.grepHandler = (p) => {
+      if (p === "repos/acme/api") {
+        return {
+          body: "MEMORY.md:1:api rule\n[truncated at match limit (100 matches); pass --max 200]\n",
+          headers: { "X-Grain-Truncated": "true" },
+        };
+      }
+      return {
+        body: "MEMORY.md:1:web rule\n",
+        headers: { "X-Grain-Matches": "1" },
+      };
+    };
+
+    const { fixture, root } = await setup(api);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-tab-namespace"]',
+      )!
+      .click();
+    await settle(fixture);
+
+    const grepInput = root.querySelector<HTMLInputElement>(
+      '[data-testid="fs-grep-input"]',
+    )!;
+    grepInput.value = "rule";
+    grepInput.dispatchEvent(new Event("input"));
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="fs-grep-btn"]')!
+      .click();
+    await settle(fixture);
+
+    const notice = root.querySelector('[data-testid="fs-grep-truncated"]')!;
+    expect(notice).not.toBeNull();
+    expect(notice.textContent).toContain("repos/acme/api");
+    expect(notice.textContent).toContain("[truncated at match limit");
+    expect(notice.textContent).not.toContain("repos/acme/web");
+    expect(
+      root.querySelectorAll('[data-testid="fs-grep-results"] li').length,
+    ).toBe(2);
+
+    // Also verify graceful fallback when an API test double only implements getText (no getTextResponse).
+    (api as { getTextResponse?: unknown }).getTextResponse = undefined;
+    grepInput.value = "fallback";
+    grepInput.dispatchEvent(new Event("input"));
+    await settle(fixture);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="fs-grep-btn"]')!
+      .click();
+    await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="fs-grep-truncated"]')?.textContent,
+    ).toContain("repos/acme/api: [truncated at match limit");
   });
 });
