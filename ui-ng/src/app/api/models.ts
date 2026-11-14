@@ -347,6 +347,7 @@ export interface CIRunJob {
 export interface CIRun {
   id: string;
   provider?: string;
+  source?: string;
   repo?: string;
   ref?: string;
   branch?: string;
@@ -366,6 +367,7 @@ export interface CIRun {
 
 export interface CIRunsResponse {
   enabled?: boolean;
+  repoProvider?: string;
   runs: CIRun[];
   matched?: number;
   faults?: { kind?: string; summary?: string; detail?: string }[];

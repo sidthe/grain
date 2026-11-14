@@ -52,6 +52,7 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
 }
 
 :root[data-theme="dark"] .proc-card {
@@ -171,6 +172,99 @@
   border: 1px solid var(--md-sys-color-outline-variant);
   border-radius: var(--md-sys-shape-corner-small);
   font-size: 13px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.proc-kv-item > * {
+  min-width: 0;
+}
+
+.decl-acc-item {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: var(--md-sys-shape-corner-small);
+  font-size: 13px;
+  min-width: 0;
+}
+
+.decl-acc-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px 12px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.decl-acc-info {
+  flex: 1 1 240px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.decl-acc-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  min-width: 0;
+}
+
+.decl-acc-id {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.decl-acc-meta {
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.decl-acc-code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.decl-acc-accepted {
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.decl-acc-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.decl-scope-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: var(--md-sys-shape-corner-small);
+  border: 1px solid var(--md-sys-color-warning);
+  background: var(--md-sys-color-warning-container);
+  color: var(--md-sys-color-on-warning-container);
+  font-size: 12.5px;
+  line-height: 18px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+}
+
+.decl-scope-warning .status-icon-host {
+  margin-top: 3px;
 }
 
 .g-dialog.is-drawer {
@@ -228,6 +322,15 @@
 @media (max-width: 599.95px) {
   .proc-inspector {
     padding: 14px 12px 24px;
+  }
+
+  .decl-acc-actions {
+    width: 100%;
+  }
+
+  .decl-acc-actions .btn-primary {
+    width: 100%;
+    justify-content: center;
   }
 
   .g-dialog .segmented {

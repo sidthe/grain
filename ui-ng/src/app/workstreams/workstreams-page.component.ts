@@ -12,10 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { DOCUMENT } from "@angular/common";
 import {
   ChangeDetectionStrategy,
   Component,
   ElementRef,
+  NgZone,
   type OnDestroy,
   type OnInit,
   ViewEncapsulation,
@@ -38,6 +40,7 @@ import {
   PillSelectComponent,
   type PillOption,
 } from "../shared/pill-select.component";
+import { PHONE_QUERY } from "../shared/split";
 import { TipDirective } from "../shared/tip.directive";
 import { WorkstreamDetailComponent } from "./workstream-detail.component";
 import { type LayoutMode, thumbLayout } from "./workstream-layout";
@@ -126,6 +129,7 @@ function saveView(v: WsView): void {
   styleUrls: ["./workstreams-page.css", "./workstreams-shared.css"],
   host: {
     "(document:keydown)": "onKey($event)",
+    "(window:resize)": "onResize()",
   },
   template: `
     @if (activeKey(); as k) {
@@ -150,11 +154,19 @@ function saveView(v: WsView): void {
           (selectStream)="openStream($event.key, $event.nodeId)"
         />
       } @else if (!store.loaded()) {
-        <section class="ws-page" data-testid="ws-loading">
+        <section
+          class="ws-page"
+          [class.is-mobile]="isMobile()"
+          data-testid="ws-loading"
+        >
           <p class="empty-state">Loading workstream {{ k }}…</p>
         </section>
       } @else {
-        <section class="ws-page" data-testid="ws-not-found">
+        <section
+          class="ws-page"
+          [class.is-mobile]="isMobile()"
+          data-testid="ws-not-found"
+        >
           <button
             type="button"
             class="btn-text"
@@ -167,7 +179,12 @@ function saveView(v: WsView): void {
         </section>
       }
     } @else {
-      <section class="ws-page" aria-labelledby="ws-title" data-testid="ws-page">
+      <section
+        class="ws-page"
+        [class.is-mobile]="isMobile()"
+        aria-labelledby="ws-title"
+        data-testid="ws-page"
+      >
         <div class="ws-vh">
           <h1 id="ws-title">Workstreams</h1>
           <span class="ws-sub">
@@ -696,6 +713,13 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
   private readonly keyboard = inject(KeyboardService);
   protected readonly viewFilter = inject(ViewFilter);
   private readonly host = inject(ElementRef) as ElementRef<HTMLElement>;
+  private readonly doc = inject(DOCUMENT);
+  private readonly zone = inject(NgZone);
+  private mql: MediaQueryList | null = null;
+  private readonly onMqlChange = (ev: MediaQueryListEvent): void => {
+    this.zone.run(() => this.isMobile.set(ev.matches));
+  };
+  protected readonly isMobile = signal(this.queryMobile());
 
   readonly key = input<string>();
   readonly ws = input<string>();
@@ -864,11 +888,50 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.store.start();
+    this.bindMobileQuery();
   }
 
   ngOnDestroy(): void {
     this.viewFilter.query.set("");
     this.store.stop();
+    if (this.mql) {
+      if (typeof this.mql.removeEventListener === "function") {
+        this.mql.removeEventListener("change", this.onMqlChange);
+      } else if (typeof this.mql.removeListener === "function") {
+        this.mql.removeListener(this.onMqlChange);
+      }
+      this.mql = null;
+    }
+  }
+
+  private queryMobile(): boolean {
+    const win = this.doc.defaultView;
+    if (!win) return false;
+    if (typeof win.matchMedia === "function") {
+      return Boolean(win.matchMedia(PHONE_QUERY)?.matches);
+    }
+    return win.innerWidth > 0 && win.innerWidth < 600;
+  }
+
+  private bindMobileQuery(): void {
+    const win = this.doc.defaultView;
+    if (win && typeof win.matchMedia === "function") {
+      this.mql = win.matchMedia(PHONE_QUERY) ?? null;
+      if (this.mql) {
+        this.isMobile.set(Boolean(this.mql.matches));
+        if (typeof this.mql.addEventListener === "function") {
+          this.mql.addEventListener("change", this.onMqlChange);
+        } else if (typeof this.mql.addListener === "function") {
+          this.mql.addListener(this.onMqlChange);
+        }
+        return;
+      }
+    }
+    this.isMobile.set(this.queryMobile());
+  }
+
+  protected onResize(): void {
+    this.isMobile.set(this.queryMobile());
   }
 
   protected onSearchInput(v: string): void {

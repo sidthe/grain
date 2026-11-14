@@ -16,6 +16,7 @@ import {
   HttpClient,
   HttpErrorResponse,
   HttpHeaders,
+  type HttpResponse,
 } from "@angular/common/http";
 import { Injectable, inject } from "@angular/core";
 import { firstValueFrom } from "rxjs";
@@ -104,6 +105,17 @@ export class GrainApi {
   ): Promise<string> {
     const url = routePath(key, params) + (query ? `?${query}` : "");
     return firstValueFrom(this.http.get(url, { responseType: "text" }));
+  }
+
+  getTextResponse(
+    key: RouteKey,
+    params?: RouteParams,
+    query?: string,
+  ): Promise<HttpResponse<string>> {
+    const url = routePath(key, params) + (query ? `?${query}` : "");
+    return firstValueFrom(
+      this.http.get(url, { responseType: "text", observe: "response" }),
+    );
   }
 
   // getIfChanged reads a URL with If-None-Match, the way the server's
