@@ -121,3 +121,75 @@ func TestThePlannerKeepsNoLedger(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateTemplate(t *testing.T) {
+	largeValid := strings.Repeat("x", 1<<20) + "{{group}}" + strings.Repeat("y", 1<<20)
+	deepNested := strings.Repeat("{{", 10000) + "inner" + strings.Repeat("}}", 10000)
+	largeUnmatchedOpen := strings.Repeat("x", 1<<20) + "{{a}} {{"
+	largeClosingBeforeOpen := strings.Repeat("x", 1<<20) + "}} {{a}}"
+
+	tests := []struct {
+		name        string
+		template    string
+		wantErrPart string
+	}{
+		{name: "minimal placeholder", template: "{{}}"},
+		{name: "single placeholder", template: "{{group}}"},
+		{name: "multiple placeholders", template: "Plan {{group}} on {{branch}} from {{from_sha}} to {{to_sha}}"},
+		{name: "multiline template", template: "title: \"{{group}}\"\nbody: |\n  Range {{from_sha}}..{{to_sha}}\n"},
+		{name: "nested delimiters", template: "{{ {{a}} }}"},
+		{name: "single braces around placeholder", template: "{ {{a}} }"},
+		{name: "single closing brace inside placeholder", template: "{{a}b}}"},
+		{name: "single opening brace inside placeholder", template: "{{a{b}}"},
+		{name: "trailing extra single closing brace", template: "{{}}}"},
+		{name: "extra single opening brace inside", template: "{{{}}"},
+		{name: "utf8 multi-byte text", template: "こんにちは {{名前}}!"},
+		{name: "large valid template", template: largeValid},
+		{name: "deeply nested balanced delimiters", template: deepNested},
+		{name: "empty", template: "", wantErrPart: "empty"},
+		{name: "whitespace only", template: "   \n\t", wantErrPart: "both '{{' and '}}'"},
+		{name: "plain text without delimiters", template: "hello world", wantErrPart: "both '{{' and '}}'"},
+		{name: "single braces only", template: "{hello}", wantErrPart: "both '{{' and '}}'"},
+		{name: "only opening delimiter", template: "{{hello", wantErrPart: "both '{{' and '}}'"},
+		{name: "only closing delimiter", template: "hello}}", wantErrPart: "both '{{' and '}}'"},
+		{name: "triple open without close", template: "{{{", wantErrPart: "both '{{' and '}}'"},
+		{name: "triple close without open", template: "}}}", wantErrPart: "both '{{' and '}}'"},
+		{name: "double open single close", template: "{{}", wantErrPart: "both '{{' and '}}'"},
+		{name: "single open double close", template: "{}}", wantErrPart: "both '{{' and '}}'"},
+		{name: "closing before opening", template: "}} {{", wantErrPart: "before matching"},
+		{name: "closing before valid placeholder", template: "}} {{a}}", wantErrPart: "before matching"},
+		{name: "closing between valid placeholders", template: "{{a}} }} {{b}}", wantErrPart: "before matching"},
+		{name: "trailing unmatched closing", template: "{{a}} }}", wantErrPart: "before matching"},
+		{name: "quadruple closing after open", template: "{{}}}}", wantErrPart: "before matching"},
+		{name: "trailing unmatched opening", template: "{{a}} {{", wantErrPart: "unmatched '{{'"},
+		{name: "unmatched nested opening", template: "{{ {{a}}", wantErrPart: "unmatched '{{'"},
+		{name: "quadruple open with single close", template: "{{{{}}", wantErrPart: "unmatched '{{'"},
+		{name: "large unmatched open", template: largeUnmatchedOpen, wantErrPart: "unmatched '{{'"},
+		{name: "large closing before open", template: largeClosingBeforeOpen, wantErrPart: "before matching"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := designdoc.ValidateTemplate(tc.template)
+			if tc.wantErrPart == "" {
+				if err != nil {
+					t.Fatalf("ValidateTemplate(%q) unexpected error: %v", preview(tc.template), err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ValidateTemplate(%q) = nil, want error containing %q", preview(tc.template), tc.wantErrPart)
+			}
+			if !strings.Contains(err.Error(), tc.wantErrPart) {
+				t.Fatalf("ValidateTemplate(%q) error = %q, want substring %q", preview(tc.template), err.Error(), tc.wantErrPart)
+			}
+		})
+	}
+}
+
+func preview(s string) string {
+	if len(s) > 80 {
+		return s[:40] + "..." + s[len(s)-20:]
+	}
+	return s
+}

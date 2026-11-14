@@ -171,3 +171,36 @@ func NextID(prefix string, used ...[]string) string {
 	}
 	return fmt.Sprintf("%s-%d", prefix, highest+1)
 }
+
+// ValidateTemplate checks that template is non-empty, contains both `{{` and
+// `}}`, never closes `}}` before a matching `{{`, and has no unmatched `{{`
+// or `}}` delimiters.
+func ValidateTemplate(template string) error {
+	if template == "" {
+		return errors.New("designdoc: template must not be empty")
+	}
+	if !strings.Contains(template, "{{") || !strings.Contains(template, "}}") {
+		return errors.New("designdoc: template must contain both '{{' and '}}'")
+	}
+	depth := 0
+	for i := 0; i < len(template); {
+		if strings.HasPrefix(template[i:], "{{") {
+			depth++
+			i += 2
+			continue
+		}
+		if strings.HasPrefix(template[i:], "}}") {
+			if depth == 0 {
+				return errors.New("designdoc: template contains '}}' before matching '{{'")
+			}
+			depth--
+			i += 2
+			continue
+		}
+		i++
+	}
+	if depth != 0 {
+		return errors.New("designdoc: template contains unmatched '{{'")
+	}
+	return nil
+}
