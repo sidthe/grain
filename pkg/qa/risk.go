@@ -343,3 +343,23 @@ func isDocOrTestFile(p string) bool {
 		strings.HasPrefix(lower, "docs/") ||
 		strings.HasPrefix(lower, "design/")
 }
+
+// MatchesAnyGlob reports whether any path in files matches any glob in patterns.
+func MatchesAnyGlob(patterns, files []string) bool {
+	for _, fp := range files {
+		for _, pat := range patterns {
+			if matchedGlob(pat, fp) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// BlastTierAtLeast reports whether tier is at least minTier in blast ordering (T0 < T1 < T2 < T3).
+func BlastTierAtLeast(tier, minTier BlastTier) bool {
+	if minTier == "" {
+		return true
+	}
+	return MaxBlastTier(tier, minTier) == tier
+}

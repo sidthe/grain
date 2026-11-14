@@ -176,9 +176,14 @@ func cmdQAFlow(ctx context.Context, c *ui.HTTPClient, out *printer, args []strin
 			return err
 		}
 		var key string
-		if d, ok := decl.(qa.FlowDeclarationV3); ok {
+		switch d := decl.(type) {
+		case *qa.FlowDeclarationV3:
 			key = d.Key
-		} else if d, ok := decl.(qa.FlowDeclarationV2); ok {
+		case qa.FlowDeclarationV3:
+			key = d.Key
+		case *qa.FlowDeclarationV2:
+			key = d.Key
+		case qa.FlowDeclarationV2:
 			key = d.Key
 		}
 		reqBody := map[string]any{

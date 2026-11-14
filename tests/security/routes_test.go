@@ -200,6 +200,8 @@ var routeAuthorization = map[string]authLevel{
 	"GET /api/qa/flow-versions":                                     trusted,
 	"GET /api/qa/flow-versions/{hash}":                              trusted,
 	"POST /api/qa/flow-versions":                                    trusted,
+	"POST /api/qa/flow-versions/adopt":                              trusted,
+	"POST /api/qa/probe":                                            trusted,
 	"GET /api/qa/experiments":                                       trusted,
 	"POST /api/qa/experiments":                                      trusted,
 	"GET /api/qa/experiments/{id}":                                  trusted,

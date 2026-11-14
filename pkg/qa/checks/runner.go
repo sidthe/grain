@@ -59,6 +59,7 @@ type RunOptions struct {
 // Report aggregates the full S3 check pass, blast-radius classification, and findings.
 type Report struct {
 	HeadSHA      string           `json:"headSha"`
+	ChangedFiles []string         `json:"changedFiles,omitempty"`
 	BlastTier    qa.BlastTier     `json:"blastTier"`
 	BlastScore   int              `json:"blastScore"`
 	BlastReasons []string         `json:"blastReasons,omitempty"`
@@ -289,40 +290,49 @@ func RunS3(ctx context.Context, ws WorkspaceReader, flow qa.FlowSpec, opts RunOp
 			if err != nil {
 				return "error", err
 			}
-			if len(findings) > 0 {
-				var ruleFindings []Finding
-				for _, f := range findings {
-					ruleFindings = append(ruleFindings, Finding{
-						RuleID:   f.RuleID,
-						Severity: f.Severity,
-						FilePath: f.FilePath,
-						Line:     f.Line,
-						Summary:  f.Summary,
-						Evidence: f.Evidence,
-					})
-				}
-				report.Results = append(report.Results, CheckResult{
-					CheckID:    c.ID,
-					Stage:      "S3",
-					Verdict:    "fail", // assuming fail for findings, you could differentiate based on severity
-					DurationMS: 0,
-					Findings:   ruleFindings,
+			var ruleFindings []Finding
+			for _, f := range findings {
+				ruleFindings = append(ruleFindings, Finding{
+					RuleID:   f.RuleID,
+					Stage:    "S3",
+					Severity: f.Severity,
+					FilePath: f.FilePath,
+					Line:     f.Line,
+					Summary:  f.Summary,
+					Evidence: f.Evidence,
 				})
-				report.Findings = append(report.Findings, ruleFindings...)
 			}
+			verdict := "pass"
+			if len(ruleFindings) > 0 {
+				if hasBlocking(ruleFindings) {
+					verdict = "fail"
+				} else {
+					verdict = "warn"
+				}
+			}
+			report.Results = append(report.Results, CheckResult{
+				CheckID:  c.ID,
+				Stage:    "S3",
+				Verdict:  verdict,
+				Findings: ruleFindings,
+			})
+			report.Findings = append(report.Findings, ruleFindings...)
 		}
 
+		allPaths := pd.AllPaths()
 		riskAssessment := qa.AssessDiffBlast(qa.DiffStats{
-			Files:                 pd.AllPaths(),
+			Files:                 allPaths,
 			NonTestAdded:          pd.NonTestAdded,
 			NonTestDeleted:        pd.NonTestDeleted,
 			SiblingCallerPackages: siblingPkgCount,
 			TestTampered:          testTampered,
 		}, flow.RiskOverrides, profiler)
-		
+
+		report.ChangedFiles = allPaths
 		report.BlastTier = riskAssessment.Tier
 		report.BlastScore = riskAssessment.Score
 		report.BlastReasons = riskAssessment.Reasons
+		report.TestTampered = riskAssessment.TestTampered
 		report.HazardSites = hazardSites
 		report.Passed = !hasBlocking(report.Findings)
 		if report.Passed {

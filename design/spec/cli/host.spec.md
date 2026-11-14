@@ -885,6 +885,8 @@ _No flags._
 - `qa flow validate <FILE> [-dry-run n]` validates a flow declaration locally.
 - `qa flow publish <FILE>` publishes a flow declaration.
 - `qa flow retire <KEY@N|HASH>` retires a flow version.
+- `qa flow adopt -repo <O/R> -path <PATH> -commit <SHA> [-dry-run]` adopts a flow declaration from a pinned repository commit.
+- `qa flow probe [-flow <REF>] -title <TITLE> [-body <BODY>] [-files <CSV>] [-non-test-added <N>]` simulates complexity, blast radius, stages and S5 triage.
 
 <!-- BEGIN GENERATED FLAGS: grain qa flow list -->
 | Flag | Type | Default | Env | Description |
@@ -918,6 +920,25 @@ _No flags._
 
 <!-- BEGIN GENERATED FLAGS: grain qa flow retire -->
 _No flags._
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa flow adopt -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-commit` | string |  |  | 40-char commit SHA to read from |
+| `-dry-run` | bool |  |  | Validate and simulate adoption without saving |
+| `-path` | string |  |  | Path to the flow declaration inside the repository |
+| `-repo` | string |  |  | GitHub repository (owner/name) |
+<!-- END GENERATED FLAGS -->
+
+<!-- BEGIN GENERATED FLAGS: grain qa flow probe -->
+| Flag | Type | Default | Env | Description |
+|---|---|---|---|---|
+| `-body` | string |  |  | Simulated pull request body description |
+| `-files` | string |  |  | Comma-separated list of simulated changed file paths |
+| `-flow` | string |  |  | Flow hash or key@version to probe (default golden-v3@1) |
+| `-non-test-added` | int |  |  | Simulated non-test lines added |
+| `-title` | string |  |  | Simulated pull request title |
 <!-- END GENERATED FLAGS -->
 
 - `qa exp list [-state string] [-limit n]` lists quality experiments.

@@ -25,6 +25,7 @@ import (
 
 	"github.com/ai-on-gke/grain/pkg/capability/protocol"
 	"github.com/ai-on-gke/grain/pkg/model"
+	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 	"github.com/ai-on-gke/grain/pkg/secrets"
 	"github.com/ai-on-gke/grain/pkg/ui"
 	"github.com/ai-on-gke/grain/pkg/upgrade"
@@ -373,9 +374,9 @@ func releaseSecret(t *testing.T, client *ui.Client, _ sender) string {
 	return ""
 }
 
-// adminClient is testClient's deployment with a fake pull-request
+// adopterClient is testClient's deployment with a fake pull-request
 // adopter, and adoptedFor who its newest filing was for.
-func adminClient(t *testing.T) *ui.Client {
+func adopterClient(t *testing.T) *ui.Client {
 	t.Helper()
 	client, _, _ := testClient(t)
 	client.Config.PullRequests = &fakeAdopter{}
@@ -410,18 +411,14 @@ func cancelledBy(t *testing.T, _ context.Context, client *ui.Client, _, _ string
 // inventory for tasks, the conversation, releases and the merge queue,
 // settings, sessions, and through the agent row the agent API.
 var attributedRoutes = map[string]attributedRoute{
-	"POST /api/qa/flow-versions/adopt": {
-		client:      adminClient,
-		body:        `{"repo":"acme/widgets","path":"qa.yaml","commit":"1234567890abcdef1234567890abcdef12345678"}`,
-	},
 	"POST /api/pull-requests/adopt": {
-		client:      adminClient,
+		client:      adopterClient,
 		body:        `{"pr":"acme/widgets#7"}`,
 		agentGrants: []string{"api:merge:write", "api:tasks:write"},
 		recorded:    adoptedFor,
 	},
 	"POST /api/pull-requests/review": {
-		client:      adminClient,
+		client:      adopterClient,
 		body:        `{"pr":"acme/widgets#7","design":true}`,
 		agentGrants: []string{"api:tasks:write", "api:repos:read"},
 		recorded:    adoptedFor,
@@ -818,6 +815,22 @@ var attributedRoutes = map[string]attributedRoute{
 		agentGrants: []string{"api:qa:admin"},
 		recorded:    lastConfigAudit,
 	},
+	"POST /api/qa/flow-versions/adopt": {
+		setup: func(t *testing.T, _ *ui.Client, _ sender) string {
+			t.Helper()
+			prev := resolve.GetRuntimeHooks()
+			t.Cleanup(func() { resolve.SetRuntimeHooks(prev) })
+			resolve.SetRuntimeHooks(&resolve.RuntimeHooks{
+				ReadRepoFileAtCommit: func(_ context.Context, _, _, _ string) ([]byte, error) {
+					return []byte("schema: grain.dev/qa-flow/v2\nkey: adopted-flow\nlabel: Adopted\nskill:\n  mode: replace\n  max-bytes: 1800\n  text: test\n"), nil
+				},
+			})
+			return ""
+		},
+		body:        `{"repo":"acme/widgets","path":".grain/qa/flow.yml","commit":"1234567890abcdef1234567890abcdef12345678"}`,
+		agentGrants: []string{"api:qa:admin"},
+		recorded:    lastConfigAudit,
+	},
 	"POST /api/qa/experiments": {
 		body:        `{"name":"Test Exp","arms":[{"id":"control","label":"Control","flowHash":"control","weight":50},{"id":"treatment","label":"Treatment","flowHash":"golden-v2@1","weight":50}],"plan":{"plannedOriginsPerArm":10,"maxDays":7}}`,
 		agentGrants: []string{"api:qa:admin"},
@@ -977,6 +990,7 @@ var neverAttributedRoutes = map[string]bool{
 	"POST /api/registry/heartbeat":                       true,
 	"POST /api/settings/plan":                            true,
 	"POST /api/repos/plan":                               true,
+	"POST /api/qa/probe":                                 true,
 	// Daemon-internal S3 check telemetry plumbing from `grain mcpserver`
 	// (refused to agent principals; writes machine check-run metrics, not
 	// an operator action).

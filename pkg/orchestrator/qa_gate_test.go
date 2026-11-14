@@ -595,9 +595,12 @@ func TestMaybeAutoDowngradeQARolloutTripsCircuitBreakerToZeroShadowMode(t *testi
 	}
 
 	// Seed 16 Treatment WorkOrigins and cast 14 Not-Helpful (-1) operator votes on a noisy rule
-	// (Wilson 95% LB > 0.35), verifying automatic downgrade to 0% shadow-only + config_audit trail.
+	// (Wilson 95% LB > 0.35). Under V2/V3, operator vote heuristics are notify-only until
+	// blind-escape mSPRT harm (alpha = 0.01) crosses its sequential boundary.
+	var treatTaskIDs []string
 	for i := 0; i < 16; i++ {
 		tk := filedTask(t, ctx, store, fmt.Sprintf("cb-%02d", i), repo)
+		treatTaskIDs = append(treatTaskIDs, tk.ID)
 		origin := fmt.Sprintf("ws:cb-%02d", i)
 		if err := store.UpdateTask(ctx, tk.ID, func(task *model.Task) error {
 			task.WorkOrigin = model.WorkOrigin(origin)
@@ -650,6 +653,47 @@ func TestMaybeAutoDowngradeQARolloutTripsCircuitBreakerToZeroShadowMode(t *testi
 	for _, f := range allFindings {
 		if err := store.VoteQAFinding(ctx, f.ID, -1, "operator@example.com", now.Add(-time.Minute)); err != nil {
 			t.Fatal(err)
+		}
+	}
+
+	// Notify-only votes alone must NOT auto-downgrade.
+	downgradedVotesOnly, _, err := orchestrator.MaybeAutoDowngradeQARollout(ctx, store, now)
+	if err != nil || downgradedVotesOnly {
+		t.Fatalf("votes-only heuristic must not auto-downgrade, got (%v, %v)", downgradedVotesOnly, err)
+	}
+
+	// Seed 16 Control WorkOrigins (0 blind escapes) and attach post-PR blind escapes to 14/16
+	// Treatment tasks so one-sided sequential mSPRT (alpha = 0.01) trips automatic downgrade.
+	for i := 0; i < 16; i++ {
+		ctrlTk := filedTask(t, ctx, store, fmt.Sprintf("cb-ctrl-%02d", i), repo)
+		ctrlOrigin := fmt.Sprintf("ws:cb-ctrl-%02d", i)
+		if err := store.UpdateTask(ctx, ctrlTk.ID, func(task *model.Task) error {
+			task.WorkOrigin = model.WorkOrigin(ctrlOrigin)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.EnsureQAAssignment(ctx, model.QAAssignment{
+			RootOrigin:         ctrlOrigin,
+			Epoch:              1,
+			RegimeID:           1,
+			Arm:                model.QAArmControl,
+			FlowID:             model.QAFlowDeterministicS3Only,
+			RolloutPctAtAssign: 50,
+			AssignedAt:         now.Add(-10 * time.Minute),
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if i < 14 {
+			if err := store.UpdateTask(ctx, treatTaskIDs[i], func(task *model.Task) error {
+				task.Links = append(task.Links, model.Link{
+					Kind:   model.LinkDraftReview,
+					Target: fmt.Sprintf("blind-rev-%02d", i),
+				})
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 

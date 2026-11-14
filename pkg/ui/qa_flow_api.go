@@ -64,24 +64,56 @@ func (s *Server) lookupFlowBundle(ctx context.Context, ref string) (qa.FlowVersi
 		}
 		return qa.FlowVersionBundle{}, nil, "", nil, false, err
 	}
+	return s.hydrateStoredFlowBundle(ctx, fv)
+}
+
+func (s *Server) hydrateStoredFlowBundle(ctx context.Context, fv model.QAFlowVersion) (qa.FlowVersionBundle, *time.Time, string, *time.Time, bool, error) {
+	created := fv.CreatedAt
+	if strings.TrimSpace(fv.SourceYAML) != "" {
+		resolvedBundle, rErr := qa.ResolveAnyFlowDeclaration([]byte(fv.SourceYAML), fv.Version, func(p string) (qa.FlowVersionBundle, bool) {
+			if p == fv.Hash || p == fmt.Sprintf("%s@%d", fv.Key, fv.Version) {
+				return qa.FlowVersionBundle{}, false
+			}
+			b, _, _, _, ok, _ := s.lookupFlowBundle(ctx, p)
+			return b, ok
+		})
+		if rErr == nil {
+			resolvedBundle.Hash = fv.Hash
+			resolvedBundle.Key = fv.Key
+			resolvedBundle.Version = fv.Version
+			if fv.ParentHash != "" {
+				resolvedBundle.ParentHash = fv.ParentHash
+			}
+			if fv.Label != "" {
+				resolvedBundle.Label = fv.Label
+			}
+			if fv.Summary != "" {
+				resolvedBundle.Summary = fv.Summary
+			}
+			resolvedBundle.BuiltIn = false
+			resolvedBundle.QAEngineRev = fv.QAEngineRev
+			resolvedBundle.SourceYAML = fv.SourceYAML
+			resolvedBundle.SpecJSON = fv.SpecJSON
+			if fv.SchemaVer != "" {
+				resolvedBundle.SchemaVer = fv.SchemaVer
+			}
+			return resolvedBundle, &created, fv.CreatedBy, fv.RetiredAt, true, nil
+		}
+	}
 	var sp qa.FlowSpec
 	_ = json.Unmarshal([]byte(fv.SpecJSON), &sp)
 	var declV2 qa.FlowDeclarationV2
-	var declV3 qa.FlowDeclarationV3
+	var declV3 *qa.FlowDeclarationV3
 	if fv.SourceYAML != "" {
-		if fv.SchemaVer == "grain.dev/qa-flow/v3" {
-			if parsed, pErr := qa.ParseFlowDeclaration([]byte(fv.SourceYAML)); pErr == nil {
-				if d, ok := parsed.(qa.FlowDeclarationV3); ok {
-					declV3 = d
-				}
-			}
-		} else {
-			if parsed, pErr := qa.ParseFlowDeclarationV2([]byte(fv.SourceYAML)); pErr == nil {
-				declV2 = parsed
+		if parsed, pErr := qa.ParseFlowDeclaration([]byte(fv.SourceYAML)); pErr == nil {
+			switch d := parsed.(type) {
+			case *qa.FlowDeclarationV3:
+				declV3 = d
+			case *qa.FlowDeclarationV2:
+				declV2 = *d
 			}
 		}
 	}
-	created := fv.CreatedAt
 	return qa.FlowVersionBundle{
 		Hash:          fv.Hash,
 		Key:           fv.Key,
@@ -93,7 +125,7 @@ func (s *Server) lookupFlowBundle(ctx context.Context, ref string) (qa.FlowVersi
 		QAEngineRev:   fv.QAEngineRev,
 		SourceYAML:    fv.SourceYAML,
 		Declaration:   declV2,
-		DeclarationV3: &declV3,
+		DeclarationV3: declV3,
 		SpecJSON:      fv.SpecJSON,
 		Resolved:      sp,
 		SchemaVer:     fv.SchemaVer,
@@ -109,7 +141,7 @@ func formatFlowBundleMap(b qa.FlowVersionBundle, createdAt *time.Time, createdBy
 	if retiredAt != nil {
 		retiredStr = retiredAt.UTC().Format(time.RFC3339)
 	}
-	return map[string]any{
+	m := map[string]any{
 		"hash":        b.Hash,
 		"key":         b.Key,
 		"version":     b.Version,
@@ -119,6 +151,7 @@ func formatFlowBundleMap(b qa.FlowVersionBundle, createdAt *time.Time, createdBy
 		"sourceYaml":  b.SourceYAML,
 		"builtIn":     b.BuiltIn,
 		"qaEngineRev": b.QAEngineRev,
+		"schemaVer":   b.SchemaVer,
 		"createdBy":   createdBy,
 		"createdAt":   createdStr,
 		"retiredAt":   retiredStr,
@@ -126,6 +159,10 @@ func formatFlowBundleMap(b qa.FlowVersionBundle, createdAt *time.Time, createdBy
 		"resolved":    b.Resolved,
 		"spec":        b.Resolved,
 	}
+	if b.DeclarationV3 != nil {
+		m["declarationV3"] = b.DeclarationV3
+	}
+	return m
 }
 
 func (s *Server) handleGetQAFlowVersions(w http.ResponseWriter, r *http.Request) {
@@ -153,30 +190,21 @@ func (s *Server) handleGetQAFlowVersions(w http.ResponseWriter, r *http.Request)
 		out = append(out, formatFlowBundleMap(v, nil, "system", nil))
 	}
 	for _, fv := range dbVersions {
-		var sp qa.FlowSpec
-		_ = json.Unmarshal([]byte(fv.SpecJSON), &sp)
-		var decl qa.FlowDeclarationV2
-		if fv.SourceYAML != "" {
-			if parsed, pErr := qa.ParseFlowDeclarationV2([]byte(fv.SourceYAML)); pErr == nil {
-				decl = parsed
-			}
+		b, created, createdBy, retiredAt, _, _ := s.hydrateStoredFlowBundle(ctx, fv)
+		item := formatFlowBundleMap(b, created, createdBy, retiredAt)
+		if fv.SourceKind != "" {
+			item["sourceKind"] = fv.SourceKind
 		}
-		created := fv.CreatedAt
-		b := qa.FlowVersionBundle{
-			Hash:        fv.Hash,
-			Key:         fv.Key,
-			Version:     fv.Version,
-			ParentHash:  fv.ParentHash,
-			Label:       fv.Label,
-			Summary:     fv.Summary,
-			BuiltIn:     false,
-			QAEngineRev: fv.QAEngineRev,
-			SourceYAML:  fv.SourceYAML,
-			Declaration: decl,
-			SpecJSON:    fv.SpecJSON,
-			Resolved:    sp,
+		if fv.SourceRepo != "" {
+			item["sourceRepo"] = fv.SourceRepo
 		}
-		out = append(out, formatFlowBundleMap(b, &created, fv.CreatedBy, fv.RetiredAt))
+		if fv.SourcePath != "" {
+			item["sourcePath"] = fv.SourcePath
+		}
+		if fv.SourceCommit != "" {
+			item["sourceCommit"] = fv.SourceCommit
+		}
+		out = append(out, item)
 		if len(out) >= limit {
 			break
 		}

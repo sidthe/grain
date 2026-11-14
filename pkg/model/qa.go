@@ -651,7 +651,8 @@ func (s *Store) ListAllQACheckRuns(ctx context.Context) ([]QACheckRun, error) {
 	rows, err := s.db.QueryContext(ctx,
 		"SELECT `id`, `task_id`, `run_id`, `commit_sha`, `stage`, `check_id`, `arm`, `shadow`, `verdict`, "+
 			"`duration_ms`, `tokens_in`, `tokens_out`, `alloc_bytes`, `detail_json`, "+
-			"`experiment_id`, `arm_id`, `flow_hash`, `qa_engine_rev`, `model`, `base_sha`, `created_at` "+
+			"`experiment_id`, `arm_id`, `flow_hash`, `qa_engine_rev`, `model`, `base_sha`, "+
+			"`blast_tier`, `blast_score`, `complexity_tier`, `triage_decision`, `repaired_in_next_sha`, `created_at` "+
 			"FROM `task_qa_check_run` ORDER BY `id` ASC",
 	)
 	if err != nil {
@@ -665,7 +666,8 @@ func (s *Store) ListAllQACheckRuns(ctx context.Context) ([]QACheckRun, error) {
 		if err := rows.Scan(
 			&r.ID, &r.TaskID, &r.RunID, &r.CommitSHA, &r.Stage, &r.CheckID, &r.Arm, &shadowInt, &r.Verdict,
 			&r.DurationMS, &r.TokensIn, &r.TokensOut, &r.AllocBytes, &r.DetailJSON,
-			&r.ExperimentID, &r.ArmID, &r.FlowHash, &r.QAEngineRev, &r.Model, &r.BaseSHA, &r.CreatedAt,
+			&r.ExperimentID, &r.ArmID, &r.FlowHash, &r.QAEngineRev, &r.Model, &r.BaseSHA,
+			&r.BlastTier, &r.BlastScore, &r.ComplexityTier, &r.TriageDecision, &r.RepairedInNextSha, &r.CreatedAt,
 		); err != nil {
 			return nil, err
 		}

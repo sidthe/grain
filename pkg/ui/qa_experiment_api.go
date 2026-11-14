@@ -186,6 +186,7 @@ type qaExperimentDetailView struct {
 	Hypothesis      string                            `json:"hypothesis"`
 	State           string                            `json:"state"`
 	Arms            []model.QAExperimentArm           `json:"arms"`
+	ReferenceArmID  string                            `json:"referenceArmId,omitempty"`
 	Scope           model.QAExperimentScope           `json:"scope"`
 	Allocation      qaExperimentAllocationView        `json:"allocation"`
 	AllocationKeys  []string                          `json:"allocationKeys,omitempty"`
@@ -456,13 +457,14 @@ func (s *Server) buildExperimentDetailView(ctx context.Context, exp model.QAExpe
 	}
 
 	out := qaExperimentDetailView{
-		ID:         exp.ID,
-		Revision:   exp.Revision,
-		Name:       exp.Name,
-		Hypothesis: exp.Hypothesis,
-		State:      exp.State,
-		Arms:       exp.Arms,
-		Scope:      exp.Scope,
+		ID:             exp.ID,
+		Revision:       exp.Revision,
+		Name:           exp.Name,
+		Hypothesis:     exp.Hypothesis,
+		State:          exp.State,
+		Arms:           exp.Arms,
+		ReferenceArmID: exp.ReferenceArmID,
+		Scope:          exp.Scope,
 		Allocation: qaExperimentAllocationView{
 			Mode:     exp.Allocation.Mode,
 			Design:   exp.Allocation.Design,
@@ -611,7 +613,7 @@ func (s *Server) handlePostQAExperiment(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, errors.New("experiment name is required"))
 		return
 	}
-	arms, _, err := s.validateExperimentArms(r.Context(), req.Arms, req.ReferenceArmID, req.Plan.MDEAck)
+	arms, refArmID, err := s.validateExperimentArms(r.Context(), req.Arms, req.ReferenceArmID, req.Plan.MDEAck)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -672,9 +674,13 @@ func (s *Server) handlePostQAExperiment(w http.ResponseWriter, r *http.Request) 
 	}
 	primaryContrast := strings.TrimSpace(req.PrimaryContrast)
 	if primaryContrast == "" {
+		baseRef := refArmID
+		if baseRef == "" {
+			baseRef = model.QAArmControl
+		}
 		for _, a := range arms {
-			if a.ID != model.QAArmControl {
-				primaryContrast = a.ID + ":control"
+			if a.ID != baseRef {
+				primaryContrast = a.ID + ":" + baseRef
 				break
 			}
 		}
@@ -693,6 +699,7 @@ func (s *Server) handlePostQAExperiment(w http.ResponseWriter, r *http.Request) 
 		Hypothesis:      strings.TrimSpace(req.Hypothesis),
 		State:           model.QAExpStateDraft,
 		Arms:            arms,
+		ReferenceArmID:  refArmID,
 		Scope:           req.Scope,
 		Allocation:      req.Allocation,
 		Salt:            salt,
@@ -836,17 +843,19 @@ func (s *Server) handlePostQAExperimentTransition(w http.ResponseWriter, r *http
 	}
 
 	var validatedArms []model.QAExperimentArm
+	var validatedRefArmID string
 	if action == "edit" && len(req.Arms) > 0 {
 		mdeAck := false
 		if req.Plan != nil {
 			mdeAck = req.Plan.MDEAck
 		}
-		arms, _, vErr := s.validateExperimentArms(r.Context(), req.Arms, req.ReferenceArmID, mdeAck)
+		arms, refID, vErr := s.validateExperimentArms(r.Context(), req.Arms, req.ReferenceArmID, mdeAck)
 		if vErr != nil {
 			writeError(w, http.StatusBadRequest, vErr)
 			return
 		}
 		validatedArms = arms
+		validatedRefArmID = refID
 	}
 
 	updated, err := s.tasks.Store.UpdateQAExperiment(r.Context(), id, expectedRev, func(exp *model.QAExperiment) error {
@@ -864,7 +873,10 @@ func (s *Server) handlePostQAExperimentTransition(w http.ResponseWriter, r *http
 			}
 			if len(validatedArms) > 0 {
 				exp.Arms = validatedArms
+				exp.ReferenceArmID = validatedRefArmID
 				regenAlloc = true
+			} else if strings.TrimSpace(req.ReferenceArmID) != "" {
+				exp.ReferenceArmID = strings.TrimSpace(req.ReferenceArmID)
 			}
 			if req.Scope != nil {
 				exp.Scope = *req.Scope
@@ -1986,25 +1998,62 @@ func (s *Server) handleGetQAExperimentResults(w http.ResponseWriter, r *http.Req
 	_ = metrics.MinTreatmentSampleForAutoDowngrade
 
 	var declarationDiff any
+	armFlowSpec := map[string]qa.FlowSpec{}
+	for _, a := range exp.Arms {
+		if a.FlowHash != "" && !strings.EqualFold(a.FlowHash, "control") {
+			if b, _, _, _, ok, _ := s.lookupFlowBundle(ctx, a.FlowHash); ok {
+				armFlowSpec[a.ID] = b.Resolved
+			}
+		}
+	}
 	if treatArmID != "" {
 		var refHash, candHash string
 		for _, a := range exp.Arms {
-			if a.ID == refArmID { refHash = a.FlowHash }
-			if a.ID == treatArmID { candHash = a.FlowHash }
+			if a.ID == refArmID {
+				refHash = a.FlowHash
+			}
+			if a.ID == treatArmID {
+				candHash = a.FlowHash
+			}
 		}
-		if refHash != "" && candHash != "" {
-			rB, _, _, _, _, _ := s.lookupFlowBundle(ctx, refHash)
-			cB, _, _, _, _, _ := s.lookupFlowBundle(ctx, candHash)
-			if rB.SchemaVer == "grain.dev/qa-flow/v3" && cB.SchemaVer == "grain.dev/qa-flow/v3" {
-				diff := qa.ComputeDeclarationDiff(&rB, &cB)
+		if candHash != "" && !strings.EqualFold(candHash, "control") {
+			cB, _, _, _, cOK, _ := s.lookupFlowBundle(ctx, candHash)
+			if cOK {
+				var rPtr *qa.FlowVersionBundle
+				if refHash != "" && !strings.EqualFold(refHash, "control") {
+					if rB, _, _, _, rOK, _ := s.lookupFlowBundle(ctx, refHash); rOK {
+						rPtr = &rB
+					}
+				}
+				diff := qa.ComputeDeclarationDiff(rPtr, &cB)
 				declarationDiff = &diff
 			}
 		}
 	}
 
-	stageFunnel := map[string]any{}
-	var triageObs []expstats.TriageObservation
-	triageMetrics := expstats.ComputeTriageSummary(triageObs)
+	escapedOrigins := map[string]bool{}
+	for root, ag := range aggs {
+		if ag.escapes > 0 {
+			escapedOrigins[root] = true
+		}
+	}
+	if imported != nil {
+		for _, o := range imported.Outcomes {
+			root := strings.TrimSpace(o.RootOrigin)
+			if root == "" && o.TaskID != "" {
+				root = enrolledTaskIDs[o.TaskID]
+			}
+			if root == "" {
+				continue
+			}
+			if (o.HiddenPassed != nil && !*o.HiddenPassed) || (o.SeverityWeightedSum != nil && *o.SeverityWeightedSum > 0) {
+				escapedOrigins[root] = true
+			}
+		}
+	}
+
+	stageFunnel := computeExperimentStageFunnel(exp, enrolledTaskIDs, armByOrigin, allCheckRuns, allFindings)
+	triageMetrics := computeExperimentTriageMetrics(exp, armFlowSpec, enrolledTaskIDs, armByOrigin, escapedOrigins, allCheckRuns)
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"experimentId":    exp.ID,
@@ -2089,4 +2138,265 @@ func meanAndCI(vals []float64) (mean, lo, hi float64) {
 	}
 	se := math.Sqrt(sq/float64(n-1)) / math.Sqrt(float64(n))
 	return mean, mean - 1.96*se, mean + 1.96*se
+}
+
+func computeExperimentStageFunnel(
+	exp model.QAExperiment,
+	enrolledTaskIDs map[string]string,
+	armByOrigin map[string]string,
+	allCheckRuns []model.QACheckRun,
+	allFindings []model.QAFinding,
+) []map[string]any {
+	out := []map[string]any{}
+	armTasks := map[string]map[string]bool{}
+	for _, a := range exp.Arms {
+		armTasks[a.ID] = map[string]bool{}
+	}
+	for taskID, root := range enrolledTaskIDs {
+		arm := armByOrigin[root]
+		if arm != "" {
+			if armTasks[arm] == nil {
+				armTasks[arm] = map[string]bool{}
+			}
+			armTasks[arm][taskID] = true
+		}
+	}
+
+	type stageKey struct {
+		armID string
+		stage string
+	}
+	type stageAcc struct {
+		tasks        map[string]bool
+		durations    []int64
+		tokens       []int64
+		failedRuns   int
+		repairedRuns int
+		findings     int
+		helpful      int
+		notHelpful   int
+	}
+	accs := map[stageKey]*stageAcc{}
+	getAcc := func(armID, stage string) *stageAcc {
+		k := stageKey{armID: armID, stage: stage}
+		if a := accs[k]; a != nil {
+			return a
+		}
+		a := &stageAcc{tasks: map[string]bool{}}
+		accs[k] = a
+		return a
+	}
+
+	for _, r := range allCheckRuns {
+		root := enrolledTaskIDs[r.TaskID]
+		if r.ExperimentID != exp.ID && root == "" {
+			continue
+		}
+		armID := strings.TrimSpace(r.ArmID)
+		if armID == "" && root != "" {
+			armID = armByOrigin[root]
+		}
+		if armID == "" || r.Shadow {
+			continue
+		}
+		stg := strings.TrimSpace(r.Stage)
+		if stg == "" {
+			stg = "S3"
+		}
+		acc := getAcc(armID, stg)
+		acc.tasks[r.TaskID] = true
+		if r.DurationMS > 0 {
+			acc.durations = append(acc.durations, r.DurationMS)
+		}
+		tok := r.TokensIn + r.TokensOut
+		if tok > 0 {
+			acc.tokens = append(acc.tokens, tok)
+		}
+		if r.Verdict == "fail" || r.Verdict == "warn" {
+			acc.failedRuns++
+			if r.RepairedInNextSha > 0 {
+				acc.repairedRuns++
+			}
+		}
+	}
+
+	for _, f := range allFindings {
+		root := enrolledTaskIDs[f.TaskID]
+		if root == "" {
+			continue
+		}
+		armID := armByOrigin[root]
+		if armID == "" {
+			continue
+		}
+		stg := strings.TrimSpace(f.Stage)
+		if stg == "" {
+			stg = "S3"
+		}
+		acc := accs[stageKey{armID: armID, stage: stg}]
+		if acc == nil {
+			continue
+		}
+		acc.findings++
+		if f.HumanVote > 0 {
+			acc.helpful++
+		} else if f.HumanVote < 0 {
+			acc.notHelpful++
+		}
+	}
+
+	stageOrder := func(stg string) int {
+		switch stg {
+		case "S0":
+			return 0
+		case "S1":
+			return 1
+		case "S2":
+			return 2
+		case "S3":
+			return 3
+		case "S4":
+			return 5
+		case "S5":
+			return 6
+		default:
+			return 4
+		}
+	}
+
+	keys := make([]stageKey, 0, len(accs))
+	for k := range accs {
+		keys = append(keys, k)
+	}
+	slices.SortFunc(keys, func(a, b stageKey) int {
+		if a.armID != b.armID {
+			return strings.Compare(a.armID, b.armID)
+		}
+		oa, ob := stageOrder(a.stage), stageOrder(b.stage)
+		if oa != ob {
+			return oa - ob
+		}
+		return strings.Compare(a.stage, b.stage)
+	})
+
+	for _, k := range keys {
+		acc := accs[k]
+		runs := len(acc.tasks)
+		denomTasks := max(1, len(armTasks[k.armID]))
+		appPct := math.Round(float64(runs)*1000.0/float64(denomTasks)) / 10.0
+		var repairedPct float64
+		if acc.failedRuns > 0 {
+			repairedPct = math.Round(float64(acc.repairedRuns)*1000.0/float64(acc.failedRuns)) / 10.0
+		}
+		p50Ms, p95Ms := percentileInt64(acc.durations, 0.50), percentileInt64(acc.durations, 0.95)
+		medTok := percentileInt64(acc.tokens, 0.50)
+		var wilsonLB float64
+		votes := acc.helpful + acc.notHelpful
+		if votes > 0 {
+			p := float64(acc.notHelpful) / float64(votes)
+			z := 1.96
+			n := float64(votes)
+			wilsonLB = math.Max(0, (p+z*z/(2*n)-z*math.Sqrt((p*(1-p)+z*z/(4*n))/n))/(1+z*z/n))
+			wilsonLB = math.Round(wilsonLB*1000) / 1000
+		}
+		out = append(out, map[string]any{
+			"armId":               k.armID,
+			"stage":               k.stage,
+			"runs":                runs,
+			"applicablePct":       appPct,
+			"findingsCount":       acc.findings,
+			"repairedInNextShaPct": repairedPct,
+			"durationP50Ms":       p50Ms,
+			"durationP95Ms":       p95Ms,
+			"tokensMedian":        medTok,
+			"notHelpfulWilsonLB":  wilsonLB,
+		})
+	}
+	return out
+}
+
+func computeExperimentTriageMetrics(
+	exp model.QAExperiment,
+	armFlowSpec map[string]qa.FlowSpec,
+	enrolledTaskIDs map[string]string,
+	armByOrigin map[string]string,
+	escapedOrigins map[string]bool,
+	allCheckRuns []model.QACheckRun,
+) []map[string]any {
+	out := []map[string]any{}
+	obsByArm := map[string][]expstats.TriageObservation{}
+	seen := map[string]bool{}
+	for _, r := range allCheckRuns {
+		if r.Stage != "S5" {
+			continue
+		}
+		root := enrolledTaskIDs[r.TaskID]
+		if r.ExperimentID != exp.ID && root == "" {
+			continue
+		}
+		armID := strings.TrimSpace(r.ArmID)
+		if armID == "" && root != "" {
+			armID = armByOrigin[root]
+		}
+		if armID == "" {
+			continue
+		}
+		originKey := root
+		if originKey == "" {
+			originKey = r.TaskID
+		}
+		dedup := armID + "|" + originKey
+		if seen[dedup] {
+			continue
+		}
+		seen[dedup] = true
+		escaped := escapedOrigins[root]
+		obsByArm[armID] = append(obsByArm[armID], expstats.TriageObservation{
+			RootOrigin:                originKey,
+			Decision:                  r.TriageDecision,
+			Escaped:                   escaped,
+			HadHumanFindingOrBoundary: escaped || r.BlastTier == "T3",
+		})
+	}
+
+	for _, a := range exp.Arms {
+		spec, hasSpec := armFlowSpec[a.ID]
+		mode := ""
+		if hasSpec {
+			mode = spec.S5MergeTriage.Mode
+		}
+		obs := obsByArm[a.ID]
+		if len(obs) == 0 && (mode == "" || mode == "off") {
+			continue
+		}
+		if mode == "" {
+			mode = "shadow"
+		}
+		sum := expstats.ComputeTriageSummary(obs)
+		out = append(out, map[string]any{
+			"armId":                       a.ID,
+			"mode":                        mode,
+			"autoMergeEligiblePct":        math.Round(sum.AutoMergeEligiblePct*1000) / 10,
+			"humanRoutedPct":              math.Round(sum.HumanRoutedPct*1000) / 10,
+			"autoMergedEscapeRate":        math.Round(sum.AutoMergedEscapeRate*1000) / 10,
+			"humanRoutedTruePositiveRate": math.Round(sum.HumanRoutedTruePositiveRate*1000) / 10,
+		})
+	}
+	return out
+}
+
+func percentileInt64(vals []int64, q float64) int64 {
+	if len(vals) == 0 {
+		return 0
+	}
+	cp := slices.Clone(vals)
+	slices.Sort(cp)
+	idx := int(math.Ceil(q*float64(len(cp)))) - 1
+	if idx < 0 {
+		idx = 0
+	}
+	if idx >= len(cp) {
+		idx = len(cp) - 1
+	}
+	return cp[idx]
 }

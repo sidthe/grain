@@ -392,7 +392,6 @@ func salvageQAStageIfPresent(
 		}
 	}
 	clearTaskQAHold(ctx, store, task.ID)
-	EvaluateAndApplyQATriage(ctx, store, client, task, assign, headSHA, nil, s3Passed)
 	return false, nil
 }
 
@@ -548,7 +547,11 @@ func persistS3ReportToStore(
 	}, nil)
 
 	detailMap := map[string]any{
-		"blastTier": rep.BlastTier,
+		"blastTier":    rep.BlastTier,
+		"blastScore":   rep.BlastScore,
+		"blastReasons": rep.BlastReasons,
+		"changedFiles": rep.ChangedFiles,
+		"testTampered": rep.TestTampered,
 	}
 	if strings.TrimSpace(callerNotes) != "" {
 		detailMap["callerNotes"] = strings.TrimSpace(callerNotes)
@@ -619,30 +622,23 @@ func persistS3ReportToStore(
 
 	if assign != nil && assign.Spec != nil && len(assign.Spec.CustomStages) > 0 {
 		for _, stg := range assign.Spec.CustomStages {
-			tierMatch := true
-			if stg.MinTier != "" {
-				if comp.Tier == qa.ComplexityLow && stg.MinTier != "low" {
-					tierMatch = false
-				} else if comp.Tier == qa.ComplexityMedium && stg.MinTier == "high" {
-					tierMatch = false
-				}
-			}
-			pathMatch := true
-			if len(stg.WhenPaths) > 0 {
-				pathMatch = false
-				for _, p := range stg.WhenPaths {
-					for f := range rep.HazardSites {
-						if strings.Contains(f, p) || strings.HasPrefix(f, p) {
-							pathMatch = true
-							break
+			tierMatch := qa.BlastTierAtLeast(rep.BlastTier, qa.BlastTier(stg.MinTier))
+			pathMatch := len(stg.WhenPaths) == 0 || qa.MatchesAnyGlob(stg.WhenPaths, rep.ChangedFiles)
+			if tierMatch && pathMatch {
+				stageVerdict := "pass"
+				if len(stg.CheckIDs) > 0 {
+					for _, cr := range rep.Results {
+						if slices.Contains(stg.CheckIDs, cr.CheckID) {
+							if cr.Verdict == "fail" {
+								stageVerdict = "fail"
+								break
+							}
+							if cr.Verdict == "warn" && stageVerdict == "pass" {
+								stageVerdict = "warn"
+							}
 						}
 					}
-					if pathMatch {
-						break
-					}
 				}
-			}
-			if tierMatch && pathMatch {
 				_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
 					TaskID:         task.ID,
 					RunID:          runID,
@@ -651,7 +647,7 @@ func persistS3ReportToStore(
 					CheckID:        stg.ID,
 					Arm:            armCol,
 					Shadow:         shadow,
-					Verdict:        "pass",
+					Verdict:        stageVerdict,
 					ExperimentID:   expID,
 					ArmID:          armID,
 					FlowHash:       flowHash,
@@ -1420,6 +1416,34 @@ func PromoteStrandedQAStagesForExperiment(ctx context.Context, store *model.Stor
 	}
 }
 
+// MaybeRunPostPRQATriage evaluates S5 human-review vs auto-merge triage on a newly opened or
+// updated pull request when S5 has not yet run for the PR's current head commit.
+func MaybeRunPostPRQATriage(ctx context.Context, store *model.Store, client github.Client, task model.Task) {
+	if store == nil || client == nil || task.Target == nil {
+		return
+	}
+	assign, qaCfg, err := resolve.ActiveQAResolutionForTask(ctx, store, task.ID)
+	if err != nil || !qaCfg.Enabled || assign == nil || assign.Spec == nil {
+		return
+	}
+	if assign.Spec.S5MergeTriage.Mode == "" || assign.Spec.S5MergeTriage.Mode == "off" {
+		return
+	}
+	fresh, err := store.GetTask(ctx, task.ID)
+	if err == nil && fresh != nil {
+		task = *fresh
+	}
+	head, err := client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, task.BranchName())
+	if err != nil || head == nil || head.SHA == "" {
+		return
+	}
+	s3Passed, s3Ran, _, _ := loadRecordedS3Outcome(ctx, store, task.ID, head.SHA)
+	if !s3Ran {
+		s3Passed = true
+	}
+	EvaluateAndApplyQATriage(ctx, store, client, task, assign, head.SHA, nil, s3Passed)
+}
+
 func EvaluateAndApplyQATriage(
 	ctx context.Context,
 	store *model.Store,
@@ -1430,17 +1454,92 @@ func EvaluateAndApplyQATriage(
 	prFiles []string,
 	s3Passed bool,
 ) {
-	if assign == nil || assign.Spec == nil || assign.Spec.S5MergeTriage.Mode == "" || assign.Spec.S5MergeTriage.Mode == "off" {
+	if store == nil || assign == nil || assign.Spec == nil || assign.Spec.S5MergeTriage.Mode == "" || assign.Spec.S5MergeTriage.Mode == "off" {
 		return
+	}
+	fresh, err := store.GetTask(ctx, task.ID)
+	if err == nil && fresh != nil {
+		task = *fresh
+	}
+
+	// Idempotent per (taskID, headSHA): skip if S5 already evaluated this commit.
+	var s3BlastTier qa.BlastTier
+	var s3BlastScore int
+	var s3Reasons []string
+	var s3Files []string
+	var s3Tampered bool
+	if runs, rErr := store.ListQACheckRunsForTask(ctx, task.ID); rErr == nil {
+		for _, r := range runs {
+			if r.Stage == "S5" && r.CommitSHA == headSHA && headSHA != "" {
+				return
+			}
+			if r.Stage == "S3" && (headSHA == "" || r.CommitSHA == headSHA) && !r.Shadow {
+				if r.BlastTier != "" {
+					s3BlastTier = qa.MaxBlastTier(s3BlastTier, qa.BlastTier(r.BlastTier))
+				}
+				if r.BlastScore > s3BlastScore {
+					s3BlastScore = r.BlastScore
+				}
+				var dm struct {
+					BlastReasons []string `json:"blastReasons"`
+					ChangedFiles []string `json:"changedFiles"`
+					TestTampered bool     `json:"testTampered"`
+				}
+				if json.Unmarshal([]byte(r.DetailJSON), &dm) == nil {
+					if len(s3Reasons) == 0 && len(dm.BlastReasons) > 0 {
+						s3Reasons = dm.BlastReasons
+					}
+					if len(s3Files) == 0 && len(dm.ChangedFiles) > 0 {
+						s3Files = dm.ChangedFiles
+					}
+					if dm.TestTampered {
+						s3Tampered = true
+					}
+				}
+			}
+		}
+	}
+
+	if len(prFiles) == 0 && client != nil && task.Target != nil {
+		for _, l := range task.Links {
+			if l.Kind == model.LinkFixes {
+				if prNum, ok := parsePRNumberFromLink(l.Target); ok && prNum > 0 {
+					if f, lErr := client.ListPullRequestFiles(task.Target.StoredOwner(), task.Target.Name, prNum); lErr == nil {
+						prFiles = f
+					}
+					break
+				}
+			}
+		}
+	}
+	if len(prFiles) == 0 && len(s3Files) > 0 {
+		prFiles = s3Files
+	}
+
+	risk := qa.AssessDiffBlast(qa.DiffStats{
+		Files:        prFiles,
+		TestTampered: s3Tampered,
+	}, assign.Spec.RiskOverrides, nil)
+	if s3BlastTier != "" {
+		risk.Tier = qa.MaxBlastTier(risk.Tier, s3BlastTier)
+	}
+	if s3BlastScore > risk.Score {
+		risk.Score = s3BlastScore
+	}
+	if len(risk.Reasons) == 0 && len(s3Reasons) > 0 {
+		risk.Reasons = s3Reasons
+	}
+	if len(risk.Reasons) == 0 {
+		risk.Reasons = []string{fmt.Sprintf("blast tier %s", risk.Tier)}
 	}
 
 	comp := qa.AssessTaskComplexity(qa.ComplexityInput{
 		Title:       task.Title,
 		Body:        task.Body,
 		ReadsCount:  len(task.Reads),
-		WritesCount: len(task.Writes),
+		WritesCount: max(len(task.Writes), len(prFiles)),
 	}, nil)
-	
+
 	var autoTiers, humTiers []qa.BlastTier
 	for _, s := range assign.Spec.S5MergeTriage.AutoMergeTiers {
 		autoTiers = append(autoTiers, qa.BlastTier(s))
@@ -1453,7 +1552,8 @@ func EvaluateAndApplyQATriage(
 		Mode:                       assign.Spec.S5MergeTriage.Mode,
 		AutoMergeTiers:             autoTiers,
 		RequireHumanTiers:          humTiers,
-		TrustBoundaryRequiresHuman: len(trustboundary.Classify(prFiles)) > 0,
+		Assessment:                 risk,
+		TrustBoundaryRequiresHuman: risk.TrustBoundaryHit || len(trustboundary.Classify(prFiles)) > 0,
 		FilesTruncated:             len(prFiles) >= github.PullRequestFilesCap,
 		HasUnresolvedFindings:      !s3Passed || hasTaskLink(task, model.LinkQAHold) || hasTaskLink(task, model.LinkReviewFindings),
 		OperatorAutoMergeEnabled:   task.AutoMerge,
@@ -1463,19 +1563,18 @@ func EvaluateAndApplyQATriage(
 
 	cr := model.QACheckRun{
 		TaskID:         task.ID,
-		RunID:          fmt.Sprintf("%s-qa-s5-%s", task.ID, headSHA[:8]),
+		RunID:          fmt.Sprintf("%s-qa-s5-%s", task.ID, shortSHA(headSHA)),
 		CommitSHA:      headSHA,
 		Stage:          "S5",
 		CheckID:        "qa:merge-triage",
 		Arm:            model.QAArmTreatment,
-		Shadow:         assign.Shadow,
+		Shadow:         assign.Shadow || verdict.Mode == string(qa.TriageShadow),
 		Verdict:        "pass",
 		ExperimentID:   assign.ExperimentID,
 		ArmID:          assign.ArmID,
 		FlowHash:       assign.FlowHash,
 		QAEngineRev:    assign.QAEngineRev,
 		Model:          task.Model,
-		BaseSHA:        "",
 		BlastTier:      string(verdict.Tier),
 		BlastScore:     verdict.BlastScore,
 		ComplexityTier: string(comp.Tier),
@@ -1487,23 +1586,151 @@ func EvaluateAndApplyQATriage(
 	_, _ = store.RecordQACheckRun(ctx, cr, nil)
 
 	if !assign.Shadow && verdict.Enforced {
-		if verdict.Decision == "require_human" {
+		if verdict.Decision == qa.TriageRequireHuman && verdict.SetTriageHold {
+			reasonSummary := strings.Join(verdict.Reasons, ", ")
 			_ = store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
 				model.AddHumanReviewReason(t, model.HumanReviewReason{
 					Source:   model.HumanReviewQATriage,
 					Category: model.HumanReviewRisk,
-					Reason:   fmt.Sprintf("[%s · %d/100] %s", verdict.Tier, verdict.BlastScore, strings.Join(verdict.Reasons, ", ")),
+					Reason:   fmt.Sprintf("[%s · %d/100] %s", verdict.Tier, verdict.BlastScore, reasonSummary),
 				})
 				return nil
 			})
-			notePrefix := fmt.Sprintf("QA Triage (S5) held %s for human review", headSHA[:8])
+			notePrefix := fmt.Sprintf("QA Triage (S5) held %s for human review", shortSHA(headSHA))
 			if !hasTaskLink(task, model.LinkQATriageHold) {
-				_ = noteOnTask(ctx, store, task.ID, notePrefix+": "+strings.Join(verdict.Reasons, ", "), time.Now().UTC())
+				_ = noteOnTask(ctx, store, task.ID, notePrefix+": "+reasonSummary, time.Now().UTC())
 			}
-		} else if verdict.Decision == "auto_merge" {
+		} else if verdict.Decision == qa.TriageAutoMerge && hasTaskLink(task, model.LinkQATriageHold) {
 			_ = store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
-				t.Links = withoutTaskLinkKinds(t.Links, model.LinkQATriageHold)
+				t.Links = slices.DeleteFunc(t.Links, func(l model.Link) bool {
+					if l.Kind == model.LinkQATriageHold {
+						return true
+					}
+					if l.Kind == model.LinkHumanReviewHold {
+						if r, ok := model.ParseHumanReviewReason(l.Target); ok && r.Source == model.HumanReviewQATriage {
+							return true
+						}
+					}
+					return false
+				})
 				return nil
+			})
+		}
+	}
+
+	if assign.ExperimentID != "" {
+		maybeEvaluateExperimentTriageHarmBreaker(ctx, store, assign.ExperimentID)
+	}
+}
+
+func parsePRNumberFromLink(target string) (int, bool) {
+	idx := strings.LastIndex(target, "#")
+	if idx < 0 || idx+1 >= len(target) {
+		return 0, false
+	}
+	n := 0
+	for _, ch := range target[idx+1:] {
+		if ch < '0' || ch > '9' {
+			return 0, false
+		}
+		n = n*10 + int(ch-'0')
+	}
+	return n, n > 0
+}
+
+func maybeEvaluateExperimentTriageHarmBreaker(ctx context.Context, store *model.Store, expID string) {
+	exp, err := store.GetQAExperiment(ctx, expID)
+	if err != nil || exp.State != model.QAExpStateRunning || len(exp.Arms) < 2 {
+		return
+	}
+	refArmID := exp.ReferenceArmID
+	if refArmID == "" {
+		refArmID = exp.Arms[0].ID
+	}
+	enrollments, err := store.ListQAEnrollments(ctx, expID)
+	if err != nil || len(enrollments) == 0 {
+		return
+	}
+	armByOrigin := make(map[string]string, len(enrollments))
+	for _, e := range enrollments {
+		if e.ArmID != "" && e.ArmID != "excluded" {
+			armByOrigin[e.RootOrigin] = e.ArmID
+		}
+	}
+	tasks, err := store.ListTasks(ctx)
+	if err != nil {
+		return
+	}
+	escapedOrigin := map[string]bool{}
+	originByTask := map[string]string{}
+	for _, t := range tasks {
+		root := model.ResolveQARootOrigin(t.WorkOrigin, t.ID)
+		if armByOrigin[root] == "" {
+			continue
+		}
+		originByTask[t.ID] = root
+		for _, l := range t.Links {
+			if l.Kind == model.LinkReviewFindings {
+				if rec, ok := model.ParseReviewFindingsRecord(l.Target); ok && rec.Gate != model.GateQA && strings.TrimSpace(rec.Summary) != "" {
+					escapedOrigin[root] = true
+				}
+			}
+		}
+	}
+	runs, err := store.ListAllQACheckRuns(ctx)
+	if err != nil {
+		return
+	}
+	obsByArm := map[string][]expstats.TriageObservation{}
+	seenOriginArm := map[string]bool{}
+	for _, r := range runs {
+		if r.ExperimentID != expID || r.Stage != "S5" {
+			continue
+		}
+		root := originByTask[r.TaskID]
+		if root == "" {
+			continue
+		}
+		key := r.ArmID + "|" + root
+		if seenOriginArm[key] {
+			continue
+		}
+		seenOriginArm[key] = true
+		obsByArm[r.ArmID] = append(obsByArm[r.ArmID], expstats.TriageObservation{
+			RootOrigin: root,
+			Decision:   r.TriageDecision,
+			Escaped:    escapedOrigin[root],
+		})
+	}
+	refObs := obsByArm[refArmID]
+	for i := range exp.Arms {
+		candArm := exp.Arms[i]
+		if candArm.ID == refArmID || candArm.Halted {
+			continue
+		}
+		v := expstats.EvaluateTriageHarmBreaker(refObs, obsByArm[candArm.ID], 0.01, 15)
+		if v.Tripped {
+			now := time.Now().UTC()
+			haltReason := fmt.Sprintf("S5 auto-merged escape mSPRT breaker tripped (delta=+%.1f%%, p=%.4f)", v.DeltaEscapeRate*100, v.PValue)
+			_, _ = store.UpdateQAExperiment(ctx, expID, exp.Revision, func(e *model.QAExperiment) error {
+				for j := range e.Arms {
+					if e.Arms[j].ID == candArm.ID {
+						e.Arms[j].Halted = true
+						e.Arms[j].HaltReason = haltReason
+						e.Arms[j].HaltedAt = now.Format(time.RFC3339)
+					}
+				}
+				return nil
+			})
+			_, _ = store.RecordConfigAudit(ctx, model.ConfigAuditEntry{
+				At: now,
+				By: model.Principal{
+					Kind:   model.PrincipalAutomation,
+					ID:     "qa-s5-triage-breaker",
+					Source: model.SourceInternal,
+				},
+				Surface: "qa-experiment:" + expID,
+				Summary: fmt.Sprintf("halted arm %s: %s", candArm.ID, haltReason),
 			})
 		}
 	}

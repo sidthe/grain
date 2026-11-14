@@ -86,8 +86,6 @@ const APIToolPrefix = "api_"
 // that changes something has one; a read with none is described from
 // its handler name, method and path.
 var routeDocs = map[string]string{
-	"POST /api/qa/flow-versions/adopt":                                     "Adopt a flow version manually.",
-	"POST /api/qa/probe":                                                   "Simulate and probe QA rules.",
 	"PUT /api/settings":                                                    "Change deployment settings: only the fields given are changed, the rest keep their values.",
 	"PUT /api/usage/settings":                                              "Replace the token usage settings: the concurrency mode (advisory, auto or off), the automatic cap's floor, per-run usage retention and the connection budgets.",
 	"POST /api/settings":                                                   "Change deployment settings, as PUT /api/settings does: only the fields given are changed.",
@@ -104,6 +102,8 @@ var routeDocs = map[string]string{
 	"GET /api/qa/flow-versions":                                            "List built-in and published v2 quality flow versions.",
 	"GET /api/qa/flow-versions/{hash}":                                     "Read one quality flow version's declaration, resolved check rules and parent lineage.",
 	"POST /api/qa/flow-versions":                                           "Publish, retire or dry-run a v2 quality flow version.",
+	"POST /api/qa/flow-versions/adopt":                                     "Adopt a committed repo quality flow declaration at a pinned 40-char git SHA into the deployment registry.",
+	"POST /api/qa/probe":                                                   "Simulate pre-dispatch complexity, diff blast radius, stages fired and S5 merge triage for a hypothetical change without storing.",
 	"GET /api/qa/experiments":                                              "List quality experiments and synthesized legacy rollout epochs.",
 	"POST /api/qa/experiments":                                             "Create a pre-registered draft quality experiment.",
 	"GET /api/qa/experiments/{id}":                                         "Read one quality experiment's definition, power preview and audit trail.",
@@ -377,6 +377,8 @@ var routeBodies = map[string]any{
 	"POST /api/settings/plan":       UpdateSettingsRequest{},
 	"PUT /api/settings/cli-run":     updateCLIRunSettingsRequest{},
 	"POST /api/qa/flow-versions":               postFlowVersionReq{},
+	"POST /api/qa/flow-versions/adopt":         postQAFlowVersionAdoptReq{},
+	"POST /api/qa/probe":                       postQAProbeReq{},
 	"POST /api/qa/experiments":                 postQAExperimentReq{},
 	"POST /api/qa/experiments/{id}/transition": postQAExperimentTransitionReq{},
 	"POST /api/qa/experiments/{id}/readout":    postQAExperimentReadoutReq{},
@@ -695,6 +697,9 @@ var routeQueries = map[string]map[string]string{
 	},
 	"POST /api/qa/flow-versions": {
 		"dryRun": "Set 1 to validate and dry-run against recent merged PRs without storing.",
+	},
+	"POST /api/qa/flow-versions/adopt": {
+		"dryRun": "Set 1 to validate and dry-run the committed flow declaration without storing.",
 	},
 	"GET /api/qa/experiments": {
 		"state": "Only experiments in this state (draft, running, stopped, archived).",

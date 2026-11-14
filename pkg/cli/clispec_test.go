@@ -72,7 +72,7 @@ var hostSpecSubcommands = map[string][]string{
 	"init": {"workstation"},
 	"pr":   {"adopt", "review", "status", "submit"},
 	"qa": {"status", "enable", "disable",
-		"flow list", "flow show", "flow fork", "flow validate", "flow publish", "flow retire",
+		"flow list", "flow show", "flow fork", "flow validate", "flow publish", "flow retire", "flow adopt", "flow probe",
 		"exp list", "exp show", "exp create", "exp edit", "exp start", "exp halt-arm", "exp resume-enrollment", "exp stop", "exp archive", "exp results", "exp keys",
 		"judge run", "judge label"},
 	"hub": {"status", "list", "directory", "route", "show", "create", "register", "unregister",

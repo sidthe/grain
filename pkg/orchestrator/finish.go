@@ -974,6 +974,7 @@ func salvagePushedBranch(ctx context.Context, store *model.Store, client github.
 		}
 		return true, err
 	}
+	MaybeRunPostPRQATriage(ctx, store, client, task)
 	if assign, qaCfg, aErr := resolve.ActiveQAResolutionForTask(ctx, store, task.ID); aErr == nil && qaCfg.Enabled && assign != nil && assign.ArmID == model.QAArmControl && (assign.Shadow || qaCfg.ShadowOnControlEnabled()) {
 		maybeRunControlShadowS3(store, client, task, assign)
 	}

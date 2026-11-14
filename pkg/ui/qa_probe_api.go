@@ -15,41 +15,59 @@
 package ui
 
 import (
-	"encoding/json"
+	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/ai-on-gke/grain/pkg/qa"
+	"github.com/ai-on-gke/grain/pkg/trustboundary"
 )
 
 type postQAProbeReq struct {
 	FlowHash       string   `json:"flowHash"`
+	FlowYAML       string   `json:"flowYaml"`
 	Title          string   `json:"title"`
 	Body           string   `json:"body"`
 	Files          []string `json:"files"`
 	NonTestAdded   int      `json:"nonTestAdded"`
+	NonTestDeleted int      `json:"nonTestDeleted"`
 	SiblingCallers int      `json:"siblingCallers"`
+	TestTampered   bool     `json:"testTampered"`
 }
 
 func (s *Server) handlePostQAProbe(w http.ResponseWriter, r *http.Request) {
 	var req postQAProbeReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, err)
+	if !readJSON(w, r, &req) {
 		return
 	}
 
-	flowHash := req.FlowHash
-	if flowHash == "" {
-		flowHash = "golden-v3@1"
-	}
-
-	flowBundle, err := qa.ResolveAnyFlowDeclaration([]byte(flowHash), 0, func(p string) (qa.FlowVersionBundle, bool) {
-		b, _, _, _, ok, _ := s.lookupFlowBundle(r.Context(), p)
-		return b, ok
-	})
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
+	var flowBundle qa.FlowVersionBundle
+	if strings.TrimSpace(req.FlowYAML) != "" {
+		b, err := qa.ResolveAnyFlowDeclaration([]byte(req.FlowYAML), 0, func(p string) (qa.FlowVersionBundle, bool) {
+			found, _, _, _, ok, _ := s.lookupFlowBundle(r.Context(), p)
+			return found, ok
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		flowBundle = b
+	} else {
+		flowRef := strings.TrimSpace(req.FlowHash)
+		if flowRef == "" {
+			flowRef = "golden-v3@1"
+		}
+		found, _, _, _, ok, err := s.lookupFlowBundle(r.Context(), flowRef)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if !ok {
+			writeError(w, http.StatusNotFound, fmt.Errorf("flow version %q not found", flowRef))
+			return
+		}
+		flowBundle = found
 	}
 	flow := flowBundle.Resolved
 
@@ -63,48 +81,29 @@ func (s *Server) handlePostQAProbe(w http.ResponseWriter, r *http.Request) {
 	risk := qa.AssessDiffBlast(qa.DiffStats{
 		Files:                 req.Files,
 		NonTestAdded:          req.NonTestAdded,
+		NonTestDeleted:        req.NonTestDeleted,
 		SiblingCallerPackages: req.SiblingCallers,
+		TestTampered:          req.TestTampered,
 	}, flow.RiskOverrides, nil)
 
 	stagesFired := []string{}
 	if flow.S0Intent && !comp.HasDesignItem {
-		if len(flow.S0IntentConfig.Complexities) == 0 || contains(flow.S0IntentConfig.Complexities, string(comp.Tier)) {
+		if len(flow.S0IntentConfig.Complexities) == 0 || slices.Contains(flow.S0IntentConfig.Complexities, string(comp.Tier)) {
 			stagesFired = append(stagesFired, "S0")
 		}
 	}
 	stagesFired = append(stagesFired, "S1")
-	
+
 	if flow.S2PlanCritic {
-		if comp.Tier == qa.ComplexityHigh || contains(flow.S2PlanCriticConfig.Complexities, string(comp.Tier)) {
+		if comp.Tier == qa.ComplexityHigh || slices.Contains(flow.S2PlanCriticConfig.Complexities, string(comp.Tier)) {
 			stagesFired = append(stagesFired, "S2")
 		}
 	}
 	stagesFired = append(stagesFired, "S3")
 
 	for _, stg := range flow.CustomStages {
-		tierMatch := true
-		if stg.MinTier != "" {
-			if comp.Tier == qa.ComplexityLow && stg.MinTier != "low" {
-				tierMatch = false
-			} else if comp.Tier == qa.ComplexityMedium && stg.MinTier == "high" {
-				tierMatch = false
-			}
-		}
-		pathMatch := true
-		if len(stg.WhenPaths) > 0 {
-			pathMatch = false
-			for _, p := range stg.WhenPaths {
-				for _, w := range req.Files {
-					if strings.Contains(w, p) || strings.HasPrefix(w, p) {
-						pathMatch = true
-						break
-					}
-				}
-				if pathMatch {
-					break
-				}
-			}
-		}
+		tierMatch := qa.BlastTierAtLeast(risk.Tier, qa.BlastTier(stg.MinTier))
+		pathMatch := len(stg.WhenPaths) == 0 || qa.MatchesAnyGlob(stg.WhenPaths, req.Files)
 		if tierMatch && pathMatch {
 			stagesFired = append(stagesFired, stg.ID)
 		}
@@ -115,27 +114,29 @@ func (s *Server) handlePostQAProbe(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var triage qa.TriageVerdict
-	var modeStr string
-	if flow.S5MergeTriage.Mode != "" && flow.S5MergeTriage.Mode != "off" {
+	modeStr := flow.S5MergeTriage.Mode
+	if modeStr == "" {
+		modeStr = "off"
+	}
+	if modeStr != "off" {
 		stagesFired = append(stagesFired, "S5")
-		modeStr = flow.S5MergeTriage.Mode
 		var autoTiers, humTiers []qa.BlastTier
-		for _, s := range flow.S5MergeTriage.AutoMergeTiers {
-			autoTiers = append(autoTiers, qa.BlastTier(s))
+		for _, t := range flow.S5MergeTriage.AutoMergeTiers {
+			autoTiers = append(autoTiers, qa.BlastTier(t))
 		}
-		for _, s := range flow.S5MergeTriage.RequireHumanTiers {
-			humTiers = append(humTiers, qa.BlastTier(s))
+		for _, t := range flow.S5MergeTriage.RequireHumanTiers {
+			humTiers = append(humTiers, qa.BlastTier(t))
 		}
-		triageIn := qa.TriageInput{
-			Mode:                       flow.S5MergeTriage.Mode,
+		triage = qa.EvaluateTriage(qa.TriageInput{
+			Mode:                       modeStr,
 			AutoMergeTiers:             autoTiers,
 			RequireHumanTiers:          humTiers,
-			TrustBoundaryRequiresHuman: false,
+			Assessment:                 risk,
+			TrustBoundaryRequiresHuman: risk.TrustBoundaryHit || len(trustboundary.Classify(req.Files)) > 0,
 			FilesTruncated:             len(req.Files) >= 3000,
 			HasUnresolvedFindings:      false,
 			OperatorAutoMergeEnabled:   true,
-		}
-		triage = qa.EvaluateTriage(triageIn, nil)
+		}, nil)
 	}
 
 	res := map[string]any{
@@ -164,13 +165,4 @@ func (s *Server) handlePostQAProbe(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 	writeJSON(w, http.StatusOK, res)
-}
-
-func contains(slice []string, val string) bool {
-	for _, item := range slice {
-		if item == val {
-			return true
-		}
-	}
-	return false
 }

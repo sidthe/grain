@@ -1489,6 +1489,28 @@ func runDaemon(ctx context.Context, cfg Config, store *model.Store, sandboxes or
 			}
 			return res.FinalText, res.Usage.InputTokens, res.Usage.OutputTokens, nil
 		},
+		RunIsolatedPrompt: func(ctx context.Context, task model.Task, runPrefix, prompt string, maxTokens int) (string, int64, int64, error) {
+			fw, err := buildFramework(ctx, orchestrator.AgentChoice{
+				Framework: task.AgentFramework,
+				Model:     task.Model,
+			})
+			if err != nil || fw == nil {
+				return "", 0, 0, fmt.Errorf("qa isolated framework unavailable: %w", err)
+			}
+			if held, ok := fw.(*BackendFramework); ok {
+				defer held.Release()
+			}
+			res, err := fw.Run(ctx, agent.RunConfig{
+				Prompt:   prompt,
+				NoTools:  true,
+				RunID:    fmt.Sprintf("%s-%d", runPrefix, time.Now().UnixNano()),
+				MaxTurns: 2,
+			})
+			if err != nil || res == nil {
+				return "", 0, 0, err
+			}
+			return res.FinalText, res.Usage.InputTokens, res.Usage.OutputTokens, nil
+		},
 	})
 	qaresolve.SetRuntimeHooks(&qaresolve.RuntimeHooks{
 		DataDir: cfg.DataDir,
