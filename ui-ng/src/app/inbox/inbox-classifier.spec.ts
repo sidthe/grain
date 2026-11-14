@@ -15,6 +15,7 @@
 import type { Notification, Task } from "../api/models";
 import {
   buildEntries,
+  classifyInboxItem,
   classifyNotification,
   classifyTask,
   groupEntries,
@@ -267,5 +268,53 @@ describe("inbox classifier", () => {
     });
     expect(cleared.taskId).toBe("412");
     expect(cleared.taskLink).toBe("/task/412");
+  });
+});
+
+describe("classifyInboxItem", () => {
+  it("returns Empty for empty and whitespace-only titles", () => {
+    for (const title of ["", "   ", "\t\n\r", " \u00a0 "]) {
+      expect(classifyInboxItem(title)).toBe("Empty");
+    }
+  });
+
+  it("returns Urgent when the title contains URGENT or !, taking precedence over Question", () => {
+    for (const title of [
+      "URGENT: fix production",
+      "Build URGENT failure",
+      "Fix failing CI!",
+      "!Alert",
+      "   !",
+      "URGENT: deploy now?",
+      "Should we rollback!?",
+    ]) {
+      expect(classifyInboxItem(title)).toBe("Urgent");
+    }
+  });
+
+  it("matches URGENT case-sensitively and classifies trailing ? as Question", () => {
+    for (const title of ["Deploy now?", "?", "  ?", "Urgent review?"]) {
+      expect(classifyInboxItem(title)).toBe("Question");
+    }
+  });
+
+  it("returns Normal otherwise, including non-trailing ? and lowercase urgent", () => {
+    for (const title of [
+      "Update dependencies",
+      "urgent fix",
+      "What? Not now",
+      "Ready? ",
+    ]) {
+      expect(classifyInboxItem(title)).toBe("Normal");
+    }
+  });
+
+  it("handles huge input titles at scale", () => {
+    const pad = "a".repeat(50_000);
+    expect(classifyInboxItem(" ".repeat(50_000))).toBe("Empty");
+    expect(classifyInboxItem(`${pad}!`)).toBe("Urgent");
+    expect(classifyInboxItem(`${pad}URGENT`)).toBe("Urgent");
+    expect(classifyInboxItem(`${pad}?`)).toBe("Question");
+    expect(classifyInboxItem(pad)).toBe("Normal");
   });
 });
