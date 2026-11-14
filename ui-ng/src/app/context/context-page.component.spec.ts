@@ -794,26 +794,30 @@ describe("ContextPageComponent", () => {
     await settle(fixture);
 
     expect(
-      root.querySelector<HTMLTextAreaElement>(
-        '[data-testid="memory-textarea"]',
-      )!.readOnly,
-    ).toBe(true);
+      root.querySelector('[data-testid="context-add-repo-btn"]'),
+    ).toBeNull();
+    expect(root.querySelector('[data-testid="memory-textarea"]')).toBeNull();
+    expect(root.querySelector('[data-testid="memory-mode-edit"]')).toBeNull();
+    expect(root.querySelector('[data-testid="memory-mode-split"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="memory-mode-preview"]'),
+    ).toBeNull();
+    expect(
+      root.querySelector('[data-testid="memory-preview"]')?.textContent,
+    ).toContain("Global Rules");
     expect(
       root.querySelector('[data-testid="memory-write-denied"]')?.textContent,
     ).toContain("cannot modify deployment-wide memory");
     expect(root.querySelector('[data-testid="memory-save-btn"]')).toBeNull();
 
-    // Switch to Documents tab on deployment scope: + New pack disabled & deployment doc is read-only.
+    // Switch to Documents tab on deployment scope: + New pack hidden & deployment doc is read-only.
     root
       .querySelector<HTMLButtonElement>(
         '[data-testid="context-tab-documents"]',
       )!
       .click();
     await settle(fixture);
-    expect(
-      root.querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
-        .disabled,
-    ).toBe(true);
+    expect(root.querySelector('[data-testid="doc-new-btn"]')).toBeNull();
 
     root
       .querySelector<HTMLElement>(
@@ -821,14 +825,20 @@ describe("ContextPageComponent", () => {
       )!
       .click();
     await settle(fixture);
+    expect(root.querySelector('[data-testid="doc-mode-edit"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-mode-split"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-mode-preview"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-summary-input"]')).toBeNull();
     expect(
-      root.querySelector<HTMLInputElement>('[data-testid="doc-summary-input"]')!
-        .readOnly,
-    ).toBe(true);
+      root.querySelector('[data-testid="doc-summary-readonly"]')?.textContent,
+    ).toContain("Zero-downtime PostgreSQL migration");
+    expect(root.querySelector('[data-testid="doc-text-input"]')).toBeNull();
     expect(
-      root.querySelector<HTMLTextAreaElement>('[data-testid="doc-text-input"]')!
-        .readOnly,
-    ).toBe(true);
+      root.querySelector('[data-testid="doc-preview"]')?.textContent,
+    ).toContain("lock_timeout");
+    expect(
+      root.querySelector('[data-testid="doc-write-denied"]')?.textContent,
+    ).toContain("cannot modify deployment-wide memory");
     expect(root.querySelector('[data-testid="doc-save-btn"]')).toBeNull();
     expect(root.querySelector('[data-testid="doc-delete-btn"]')).toBeNull();
 
@@ -844,22 +854,22 @@ describe("ContextPageComponent", () => {
       .click();
     await settle(fixture);
     expect(
-      root.querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
-        .disabled,
-    ).toBe(false);
+      root.querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]'),
+    ).not.toBeNull();
     root
       .querySelector<HTMLElement>('[data-testid="doc-row-auth-tokens"] button')!
       .click();
     await settle(fixture);
+    expect(
+      root.querySelector('[data-testid="doc-summary-input"]'),
+    ).not.toBeNull();
+    expect(root.querySelector('[data-testid="doc-text-input"]')).not.toBeNull();
     expect(root.querySelector('[data-testid="doc-save-btn"]')).not.toBeNull();
 
     // Switch back to deployment scope -> stale selectedDocRepo must be cleared.
     depBtn.click();
     await settle(fixture);
-    expect(
-      root.querySelector<HTMLButtonElement>('[data-testid="doc-new-btn"]')!
-        .disabled,
-    ).toBe(true);
+    expect(root.querySelector('[data-testid="doc-new-btn"]')).toBeNull();
 
     // Namespace config:// must also be hidden because settings:read has repoLimits.
     root
@@ -1485,5 +1495,125 @@ describe("ContextPageComponent", () => {
 
     fixture.destroy();
     expect(await pending).toBe(false);
+  });
+
+  it("hides all interactive write controls for grain/viewer and blocks mutation handlers", async () => {
+    const api = new FakeContextApi();
+    api.configBody = {
+      version: "v3.5.0-test",
+      targetRepos: ["acme/api"],
+      access: {
+        role: "grain/viewer",
+        roles: ["grain/viewer"],
+        full: false,
+        scopes: ["memory:read", "settings:read"],
+      },
+    };
+
+    const { fixture, root } = await setup(api);
+
+    // Refresh stays available for viewers with memory:read; + Add repository scope is hidden.
+    expect(
+      root.querySelector<HTMLButtonElement>('[data-testid="context-refresh"]')!
+        .disabled,
+    ).toBe(false);
+    expect(
+      root.querySelector('[data-testid="context-add-repo-btn"]'),
+    ).toBeNull();
+
+    // Standing Instructions: show only read-only preview & denial reason, hide editor controls.
+    expect(root.querySelector('[data-testid="memory-mode-edit"]')).toBeNull();
+    expect(root.querySelector('[data-testid="memory-mode-split"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="memory-mode-preview"]'),
+    ).toBeNull();
+    expect(root.querySelector('[data-testid="memory-textarea"]')).toBeNull();
+    expect(root.querySelector('[data-testid="memory-save-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="memory-revert-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="memory-dirty-pill"]')).toBeNull();
+    expect(
+      root.querySelector(".ctx-editor-grid")?.classList.contains("is-split"),
+    ).toBe(false);
+    expect(
+      root.querySelector('[data-testid="memory-preview"]')?.textContent,
+    ).toContain("Global Rules");
+    expect(
+      root.querySelector('[data-testid="memory-write-denied"]')?.textContent,
+    ).toContain("memory:write");
+
+    // Memory Documents: + New pack and create hint hidden; read-only summary + preview shown.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="context-tab-documents"]',
+      )!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="doc-new-btn"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="doc-placeholder"]')?.textContent,
+    ).not.toContain("create a new pack");
+
+    root
+      .querySelector<HTMLElement>(
+        '[data-testid="doc-row-db-migrations"] button',
+      )!
+      .click();
+    await settle(fixture);
+    expect(root.querySelector('[data-testid="doc-mode-edit"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-name-input"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-summary-input"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="doc-summary-readonly"]')?.textContent,
+    ).toContain("Zero-downtime PostgreSQL migration");
+    expect(root.querySelector('[data-testid="doc-text-input"]')).toBeNull();
+    expect(
+      root.querySelector('[data-testid="doc-preview"]')?.textContent,
+    ).toContain("lock_timeout");
+    expect(
+      root.querySelector('[data-testid="doc-write-denied"]')?.textContent,
+    ).toContain("memory:write");
+    expect(root.querySelector('[data-testid="doc-save-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-revert-btn"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-delete-btn"]')).toBeNull();
+
+    // Direct imperative invocations of write handlers must fail closed without PUT requests or dirty state.
+    const inst = fixture.componentInstance as unknown as {
+      openAddRepo: () => void;
+      commitAddRepo: () => void;
+      onMemoryInput: (v: string) => void;
+      revertMemory: () => void;
+      saveMemory: () => void;
+      startNewDocument: () => void;
+      onDocSummaryInput: (v: string) => void;
+      onDocTextInput: (v: string) => void;
+      revertDocument: () => void;
+      saveDocument: () => Promise<void>;
+      confirmDeleteDocument: () => void;
+      canDeactivate: () => boolean | Promise<boolean>;
+    };
+    const putCountBefore = api.calls.filter((c) => c.method === "PUT").length;
+    inst.openAddRepo();
+    inst.commitAddRepo();
+    inst.onMemoryInput("tampered");
+    inst.revertMemory();
+    inst.saveMemory();
+    inst.startNewDocument();
+    inst.onDocSummaryInput("tampered summary");
+    inst.onDocTextInput("tampered body");
+    inst.revertDocument();
+    await inst.saveDocument();
+    inst.confirmDeleteDocument();
+    await settle(fixture);
+
+    expect(api.calls.filter((c) => c.method === "PUT").length).toBe(
+      putCountBefore,
+    );
+    expect(
+      root.querySelector('[data-testid="context-add-repo-input"]'),
+    ).toBeNull();
+    expect(root.querySelector('[data-testid="confirm-dialog"]')).toBeNull();
+    expect(root.querySelector('[data-testid="memory-dirty-pill"]')).toBeNull();
+    expect(root.querySelector('[data-testid="doc-dirty-pill"]')).toBeNull();
+    expect(inst.canDeactivate()).toBe(true);
   });
 });
