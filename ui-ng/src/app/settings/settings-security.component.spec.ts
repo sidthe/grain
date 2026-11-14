@@ -50,6 +50,10 @@ class FakeSecurityApi {
     },
   };
 
+  settingsBody: Record<string, unknown> = {
+    environmentName: "Staging",
+    externalAgentApi: true,
+  };
   principalsResponse: unknown = [
     { entry: "operator@example.com", role: "grain/operator" },
   ];
@@ -79,10 +83,7 @@ class FakeSecurityApi {
   get = (key: string, params?: RouteParams) => {
     this.calls.push({ method: "GET", key, params });
     if (key === "GET /api/settings") {
-      return Promise.resolve({
-        environmentName: "Staging",
-        externalAgentApi: true,
-      });
+      return Promise.resolve(structuredClone(this.settingsBody));
     }
     if (key === "GET /api/deployment") {
       return Promise.resolve({});
@@ -127,6 +128,15 @@ class FakeSecurityApi {
 
   post = (key: string, params?: RouteParams, body?: unknown) => {
     this.calls.push({ method: "POST", key, params, body });
+    if (key === "POST /api/settings") {
+      if (body && typeof body === "object") {
+        this.settingsBody = {
+          ...this.settingsBody,
+          ...(body as Record<string, unknown>),
+        };
+      }
+      return Promise.resolve(structuredClone(this.settingsBody));
+    }
     if (key === "POST /api/external-agents/tokens") {
       return this.mintError
         ? this.rejectAsync(this.mintError)
@@ -549,5 +559,200 @@ describe("SettingsSecurityComponent helpers & error states", () => {
     expect(
       errRes.el.querySelector('[data-testid="audit-error"]')?.textContent,
     ).toContain("audit store unavailable");
+  });
+
+  it("exposes role=switch, accessible label/description, and reactive aria-checked across toggle, discard, and save", async () => {
+    const { el, api, harness } = await mountSecurity("/settings/access");
+
+    const toggle = el.querySelector<HTMLButtonElement>(
+      '[data-testid="switch-external-agent-api"]',
+    )!;
+    expect(toggle).not.toBeNull();
+    expect(toggle.getAttribute("role")).toBe("switch");
+    expect(toggle.getAttribute("aria-label")).toBe(
+      "Accept external agent tokens",
+    );
+    const hintId = toggle.getAttribute("aria-describedby");
+    expect(hintId).toBe("external-agent-api-hint");
+    expect(el.querySelector(`#${hintId}`)?.textContent).toContain(
+      "gma_ tokens",
+    );
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+    expect(toggle.disabled).toBe(false);
+
+    // Toggling off updates aria-checked immediately for screen readers and stages a draft.
+    toggle.click();
+    harness.detectChanges();
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(
+      el.querySelector('[data-testid="settings-save-bar"]'),
+    ).not.toBeNull();
+
+    // Discarding reverts aria-checked back to the server state.
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-discard-btn"]',
+    )!.click();
+    harness.detectChanges();
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+
+    // Toggling off and saving persists { externalAgentApi: false } and keeps aria-checked="false".
+    toggle.click();
+    harness.detectChanges();
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-save-btn"]',
+    )!.click();
+    await new Promise((r) => setTimeout(r, 30));
+    harness.detectChanges();
+
+    const saveCall = api.calls.find((c) => c.key === "POST /api/settings");
+    expect(saveCall?.body).toEqual({ externalAgentApi: false });
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("initializes aria-checked='false' when externalAgentApi is disabled and toggles to 'true'", async () => {
+    const api = new FakeSecurityApi();
+    api.settingsBody = { environmentName: "Staging", externalAgentApi: false };
+
+    const { el, harness } = await mountSecurity("/settings/access", api);
+    const toggle = el.querySelector<HTMLButtonElement>(
+      '[data-testid="switch-external-agent-api"]',
+    )!;
+    expect(toggle.getAttribute("role")).toBe("switch");
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+
+    toggle.click();
+    harness.detectChanges();
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-save-btn"]',
+    )!.click();
+    await new Promise((r) => setTimeout(r, 30));
+    harness.detectChanges();
+
+    const saveCall = api.calls.find((c) => c.key === "POST /api/settings");
+    expect(saveCall?.body).toEqual({ externalAgentApi: true });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("keeps security toggle aria-checked and role intact when disabled by missing write scope or configRepoOnly", async () => {
+    const viewerApi = new FakeSecurityApi();
+    viewerApi.settingsBody = {
+      environmentName: "Staging",
+      externalAgentApi: false,
+    };
+    viewerApi.configBody.access = {
+      role: "grain/viewer",
+      roles: ["grain/viewer"],
+      full: false,
+      scopes: ["settings:read", "access:read"],
+    };
+
+    const viewerMount = await mountSecurity("/settings/access", viewerApi);
+    const viewerToggle = viewerMount.el.querySelector<HTMLButtonElement>(
+      '[data-testid="switch-external-agent-api"]',
+    )!;
+    expect(viewerToggle.disabled).toBe(true);
+    expect(viewerToggle.getAttribute("role")).toBe("switch");
+    expect(viewerToggle.getAttribute("aria-checked")).toBe("false");
+    expect(viewerToggle.getAttribute("title")).toContain("settings:write");
+
+    viewerToggle.click();
+    viewerMount.harness.detectChanges();
+    expect(viewerToggle.getAttribute("aria-checked")).toBe("false");
+    expect(
+      viewerMount.el.querySelector('[data-testid="settings-save-bar"]'),
+    ).toBeNull();
+
+    TestBed.resetTestingModule();
+    const lockedApi = new FakeSecurityApi();
+    lockedApi.configBody.configRepoOnly = true;
+    lockedApi.settingsBody = {
+      environmentName: "Staging",
+      externalAgentApi: true,
+      configRepoOnly: true,
+    };
+    const lockedMount = await mountSecurity("/settings/access", lockedApi);
+    const lockedToggle = lockedMount.el.querySelector<HTMLButtonElement>(
+      '[data-testid="switch-external-agent-api"]',
+    )!;
+    expect(lockedToggle.disabled).toBe(true);
+    expect(lockedToggle.getAttribute("role")).toBe("switch");
+    expect(lockedToggle.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("exposes accessible table regions, live banners, and control labels across security and audit tabs", async () => {
+    const api = new FakeSecurityApi();
+    api.tokensResponse = [
+      { id: "tok-1", name: "ci-bot", scopes: ["tasks:read"], active: true },
+    ];
+    api.gcpKeysResponse = [
+      {
+        name: "runner-key",
+        projectId: "proj-1",
+        serviceAccountEmail: "sa@proj-1.iam.gserviceaccount.com",
+      },
+    ];
+    api.auditConfigResponse = [
+      {
+        id: 1,
+        createdAt: "2026-11-13T10:00:00Z",
+        actor: "operator@example.com",
+        action: "settings.update",
+        detail: "externalAgentApi=true",
+      },
+    ];
+
+    const { el, harness } = await mountSecurity("/settings/access", api);
+
+    const regions = Array.from(
+      el.querySelectorAll<HTMLElement>('.s-table-wrap[role="region"]'),
+    );
+    expect(regions.map((r) => r.getAttribute("aria-label"))).toEqual([
+      "Access principals",
+      "External agent tokens",
+    ]);
+    expect(regions.every((r) => r.getAttribute("tabindex") === "0")).toBe(true);
+
+    expect(
+      el
+        .querySelector('[data-testid="delete-gcp-key-runner-key"]')
+        ?.getAttribute("aria-label"),
+    ).toBe("Delete GCP key runner-key");
+
+    setInput(
+      el.querySelector<HTMLInputElement>(
+        '[data-testid="input-gma-token-name"]',
+      )!,
+      "aria-bot",
+    );
+    harness.detectChanges();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="mint-gma-token-btn"]',
+    )!.click();
+    await new Promise((r) => setTimeout(r, 30));
+    harness.detectChanges();
+
+    expect(
+      el
+        .querySelector('[data-testid="minted-gma-token"]')
+        ?.getAttribute("role"),
+    ).toBe("status");
+
+    await harness.navigateByUrl("/settings/audit");
+    await new Promise((r) => setTimeout(r, 30));
+    harness.detectChanges();
+
+    expect(
+      el.querySelector(
+        'form[role="search"] [data-testid="audit-actor-filter"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      el
+        .querySelector('.s-table-wrap[role="region"]')
+        ?.getAttribute("aria-label"),
+    ).toBe("Audit events");
   });
 });
