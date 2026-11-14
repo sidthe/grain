@@ -372,6 +372,15 @@
   flex-shrink: 0;
 }
 
+.s-textarea[aria-invalid="true"] {
+  border-color: var(--md-sys-color-error);
+}
+
+.repo-error-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+
 @media (max-width: 767px), (max-height: 480px) and (orientation: landscape) {
   .repo-page-scroll {
     padding: 16px 16px 120px;
