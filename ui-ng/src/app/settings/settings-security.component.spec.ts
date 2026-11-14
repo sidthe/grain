@@ -30,6 +30,7 @@ import {
   normalizeExternalTokenRows,
   normalizeGcpKeyRows,
   normalizePrincipalResponse,
+  parseSettingBoolean,
   validateExternalTokenScopes,
 } from "./settings-security.component";
 
@@ -60,6 +61,13 @@ class FakeSecurityApi {
   auditLogsResponse: unknown = { items: [] };
   secretAuditResponse: unknown = { items: [] };
   accessHistoryResponse: unknown = { items: [] };
+  configRepoOnly = false;
+  settingsResponse: Record<string, unknown> = {
+    environmentName: "Staging",
+    externalAgentApi: true,
+    gcpProject: "",
+    gcpServiceAccountEmail: "",
+  };
 
   mintResponse: unknown = {
     token: "gma_live_secret_token_999",
@@ -72,7 +80,7 @@ class FakeSecurityApi {
   config = (): Promise<GrainConfig> =>
     Promise.resolve({
       version: "v3.6.0",
-      configRepoOnly: false,
+      configRepoOnly: this.configRepoOnly,
       access: this.access,
     });
 
@@ -87,12 +95,7 @@ class FakeSecurityApi {
     }
     switch (key) {
       case "GET /api/settings":
-        return Promise.resolve({
-          environmentName: "Staging",
-          externalAgentApi: true,
-          gcpProject: "",
-          gcpServiceAccountEmail: "",
-        });
+        return Promise.resolve(structuredClone(this.settingsResponse));
       case "GET /api/deployment":
         return Promise.resolve({});
       case "GET /api/access/principals":
@@ -124,6 +127,13 @@ class FakeSecurityApi {
     this.calls.push({ method: "POST", key, params, body });
     if (this.errors.has(key)) {
       return Promise.reject(this.errors.get(key));
+    }
+    if (key === "POST /api/settings") {
+      Object.assign(
+        this.settingsResponse,
+        (body as Record<string, unknown>) ?? {},
+      );
+      return Promise.resolve(structuredClone(this.settingsResponse));
     }
     if (key === "POST /api/external-agents/tokens") {
       return Promise.resolve(structuredClone(this.mintResponse));
@@ -668,5 +678,125 @@ describe("SettingsSecurityComponent missing keys and token scope error states", 
           c.key === "GET /api/access/history",
       ),
     ).toBe(false);
+  });
+});
+
+describe("SettingsSecurityComponent ARIA toggle semantics", () => {
+  it("normalizes boolean and string/numeric boolean setting values", () => {
+    expect(parseSettingBoolean(true, false)).toBe(true);
+    expect(parseSettingBoolean(false, true)).toBe(false);
+    expect(parseSettingBoolean("false", true)).toBe(false);
+    expect(parseSettingBoolean(" FALSE ", true)).toBe(false);
+    expect(parseSettingBoolean("0", true)).toBe(false);
+    expect(parseSettingBoolean("off", true)).toBe(false);
+    expect(parseSettingBoolean("no", true)).toBe(false);
+    expect(parseSettingBoolean("true", false)).toBe(true);
+    expect(parseSettingBoolean("1", false)).toBe(true);
+    expect(parseSettingBoolean("on", false)).toBe(true);
+    expect(parseSettingBoolean("yes", false)).toBe(true);
+    expect(parseSettingBoolean(0, true)).toBe(false);
+    expect(parseSettingBoolean(1, false)).toBe(true);
+    expect(parseSettingBoolean("", true)).toBe(true);
+    expect(parseSettingBoolean(undefined, true)).toBe(true);
+    expect(parseSettingBoolean(null, false)).toBe(false);
+  });
+
+  it("exposes switch role, accessible name/description, and updates aria-checked across toggle, discard, and save", async () => {
+    const { api, q, settle } = await mountSecurity("access");
+    const sw = q<HTMLButtonElement>(
+      '[data-testid="switch-external-agent-api"]',
+    );
+    expect(sw).toBeTruthy();
+    expect(sw!.getAttribute("role")).toBe("switch");
+    expect(sw!.getAttribute("aria-label")).toBe("Accept external agent tokens");
+    expect(sw!.getAttribute("aria-describedby")).toBe(
+      "switch-external-agent-api-hint",
+    );
+    expect(q("#switch-external-agent-api-hint")?.textContent).toContain(
+      "gma_ tokens",
+    );
+    expect(sw!.getAttribute("aria-checked")).toBe("true");
+
+    sw!.click();
+    await settle();
+    expect(sw!.getAttribute("aria-checked")).toBe("false");
+    expect(q('[data-testid="settings-save-bar"]')).toBeTruthy();
+
+    // Discard restores aria-checked to saved state.
+    q<HTMLButtonElement>('[data-testid="settings-discard-btn"]')!.click();
+    await settle();
+    expect(sw!.getAttribute("aria-checked")).toBe("true");
+    expect(q('[data-testid="settings-save-bar"]')).toBeNull();
+
+    // Toggle off and save commits false and preserves aria-checked="false".
+    sw!.click();
+    await settle();
+    expect(sw!.getAttribute("aria-checked")).toBe("false");
+    q<HTMLButtonElement>('[data-testid="settings-save-btn"]')!.click();
+    await settle();
+
+    const saveCall = api.calls.find((c) => c.key === "POST /api/settings");
+    expect(saveCall?.body).toEqual({ externalAgentApi: false });
+    expect(sw!.getAttribute("aria-checked")).toBe("false");
+    expect(q('[data-testid="settings-save-bar"]')).toBeNull();
+
+    // Toggling back on flips aria-checked to "true".
+    sw!.click();
+    await settle();
+    expect(sw!.getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("represents false and string 'false' settings with aria-checked='false'", async () => {
+    const { q: qBool } = await mountSecurity("access", (api) => {
+      api.settingsResponse["externalAgentApi"] = false;
+    });
+    expect(
+      qBool('[data-testid="switch-external-agent-api"]')?.getAttribute(
+        "aria-checked",
+      ),
+    ).toBe("false");
+
+    const { q: qStr } = await mountSecurity("access", (api) => {
+      api.settingsResponse["externalAgentApi"] = "false";
+    });
+    expect(
+      qStr('[data-testid="switch-external-agent-api"]')?.getAttribute(
+        "aria-checked",
+      ),
+    ).toBe("false");
+  });
+
+  it("keeps aria-checked accurate and switch disabled when settings write is forbidden or configRepoOnly", async () => {
+    const { q, settle } = await mountSecurity("access", (fake) => {
+      fake.access = {
+        role: "grain/viewer",
+        roles: ["grain/viewer"],
+        full: false,
+        scopes: ["settings:read"],
+      };
+      fake.settingsResponse["externalAgentApi"] = false;
+    });
+
+    const sw = q<HTMLButtonElement>(
+      '[data-testid="switch-external-agent-api"]',
+    )!;
+    expect(sw.disabled).toBe(true);
+    expect(sw.getAttribute("aria-checked")).toBe("false");
+    expect(sw.title).toContain("settings:write");
+
+    sw.click();
+    await settle();
+    expect(sw.getAttribute("aria-checked")).toBe("false");
+
+    const { q: qRepo } = await mountSecurity("access", (fake) => {
+      fake.configRepoOnly = true;
+      fake.settingsResponse["externalAgentApi"] = true;
+    });
+    const swRepo = qRepo<HTMLButtonElement>(
+      '[data-testid="switch-external-agent-api"]',
+    )!;
+    expect(swRepo.disabled).toBe(true);
+    expect(swRepo.getAttribute("aria-checked")).toBe("true");
+    expect(swRepo.title).toContain("config repository");
   });
 });
