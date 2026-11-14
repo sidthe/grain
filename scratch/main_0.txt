@@ -1,0 +1,95 @@
+                        class="tel-swatch"
+                        [style.background]="o.color"
+                      ></span>
+                      {{ o.key }}: <strong>{{ o.count }}</strong> ({{
+                        fmtPct(o.share)
+                      }})
+                    </span>
+                  }
+                </div>
+              }
+
+              @if ((report()?.agents?.templates?.length ?? 0) > 0) {
+                <div
+                  class="ops-table-wrap"
+                  tabindex="0"
+                  role="region"
+                  aria-label="Agent template wake efficiency"
+                >
+                  <table class="ops-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">Template</th>
+                        <th scope="col">Wakes</th>
+                        <th scope="col">Calls p50 / p95</th>
+                        <th scope="col">Uncited rate</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      @for (tpl of visibleTemplates(); track tpl.templateId) {
+                        <tr>
+                          <td class="tabular">{{ tpl.templateId }}</td>
+                          <td class="tabular">{{ tpl.wakes }}</td>
+                          <td class="tabular">
+                            {{ tpl.callsP50 }} / {{ tpl.callsP95 }}
+                          </td>
+                          <td class="tabular">
+                            {{ fmtPct(tpl.report?.uncitedRate) }}
+                          </td>
+                        </tr>
+                      }
+                    </tbody>
+                  </table>
+                </div>
+                @if ((report()?.agents?.templates?.length ?? 0) > 8) {
+                  <div class="tel-more-row">
+                    <button
+                      type="button"
+                      class="tel-more-btn"
+                      data-testid="templates-show-all"
+                      (click)="showAllTemplates.set(!showAllTemplates())"
+                    >
+                      {{
+                        showAllTemplates()
+                          ? "Show top 8"
+                          : "Show all " +
+                            (report()?.agents?.templates?.length ?? 0)
+                      }}
+                    </button>
+                  </div>
+                }
+              }
+            </article>
+
+            <!-- Chart 4: Top Tools & CI Queue Wait Causes -->
+            <article class="ops-card" data-testid="card-tools">
+              <div class="ops-card-head">
+                <div>
+                  <h2 class="ops-card-title">
+                    Top Tools &amp; CI Queue Causes
+                  </h2>
+                  <p class="ops-card-sub">
+                    {{ fmtNum(report()?.tools?.calls ?? 0) }} tool calls ({{
+                      fmtPct(report()?.tools?.erroredShare)
+                    }}
+                    errored) · CI queued share
+                    {{ fmtPct(report()?.ciQueueing?.queuedShare) }}
+                  </p>
+                </div>
+              </div>
+
+              @if (toolRows().length === 0 && queueCauseRows().length === 0) {
+                <p class="muted" style="margin: 8px 0">
+                  No tool census or CI queue delays recorded in this window.
+                </p>
+              } @else {
+                <div class="tel-stage-list" data-testid="chart-tools">
+                  @for (t of toolRows(); track t.name) {
+                    <div class="tel-stage-row">
+                      <span class="tel-stage-name tabular">{{ t.name }}</span>
+                      <svg
+                        width="100%"
+                        height="12"
+                        viewBox="0 0 200 12"
+                        preserveAspectRatio="none"
+                        aria-hidden="true"

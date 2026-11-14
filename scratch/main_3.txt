@@ -1,0 +1,17 @@
+                    </tbody>
+                  </table>
+                </div>
+                @if (u.scopes.length > 8) {
+                  <div class="tel-more-row">
+                    <button
+                      type="button"
+                      class="tel-more-btn"
+                      data-testid="scopes-show-all"
+                      (click)="showAllScopes.set(!showAllScopes())"
+                    >
+                      {{
+                        showAllScopes()
+                          ? "Show top 8"
+                          : "Show all " + u.scopes.length
+                      }}
+                    </button>

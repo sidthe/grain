@@ -1,0 +1,8 @@
+                        class="tel-legend-item tabular"
+                        [class.is-active]="outcomeHover() === o.key"
+                        [class.is-dim]="
+                          outcomeHover() && outcomeHover() !== o.key
+                        "
+                        style="cursor: pointer"
+                        (mouseenter)="outcomeHover.set(o.key)"
+                        (mouseleave)="outcomeHover.set(null)"

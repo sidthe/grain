@@ -1,0 +1,24 @@
+              @if (u.scopes.length > 0) {
+                <div
+                  class="ops-table-wrap"
+                  tabindex="0"
+                  role="region"
+                  aria-label="Token usage by connection"
+                >
+                  <table class="ops-table" data-testid="usage-scopes-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">Connection / Model</th>
+                        <th scope="col">Runs</th>
+                        <th scope="col">Input / Output</th>
+                        <th scope="col">Cached (R/W)</th>
+                        <th scope="col">Window Usage &amp; Cap</th>
+                        <th scope="col">Burn / hr</th>
+                        <th scope="col">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      @for (
+                        s of visibleScopes();
+                        track s.connection + ":" + (s.model || "*")
+                      ) {

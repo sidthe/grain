@@ -1,0 +1,9 @@
+                @if (u.scopes.length > 0) {
+                  <div
+                    class="ops-table-wrap"
+                    tabindex="0"
+                    role="region"
+                    aria-label="Token usage by connection"
+                  >
+                    <table class="ops-table" data-testid="usage-scopes-table">
+                      <thead>

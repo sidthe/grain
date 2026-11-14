@@ -22,14 +22,16 @@ import {
   viewChild,
 } from "@angular/core";
 import { RouterLink } from "@angular/router";
+import { AccessService } from "../services/access.service";
 import { TaskFeedStore } from "../services/task-feed.service";
+import { summarizeDispatchStatus } from "../shared/dispatch-status";
 import {
   isBlocked,
   isWork,
   jumpsQueue,
   nextUp,
   priorityOf,
-} from "../tasks/task-view";
+} from "../tasks/task-queue-helpers";
 import { NextUpPopoverComponent } from "./next-up-popover.component";
 
 // NextUpComponent is the persistent top-bar Next up split chip (spec D-28):
@@ -127,6 +129,7 @@ import { NextUpPopoverComponent } from "./next-up-popover.component";
             [backlog]="backlog()"
             [headId]="head()?.id ?? null"
             [runningCount]="feed.runningCount()"
+            [dispatchPaused]="dispatchPaused()"
             (closed)="open.set(false)"
           />
         }
@@ -136,8 +139,17 @@ import { NextUpPopoverComponent } from "./next-up-popover.component";
 })
 export class NextUpComponent {
   protected readonly feed = inject(TaskFeedStore);
+  private readonly access = inject(AccessService);
   protected readonly open = signal(false);
   private readonly caret = viewChild<ElementRef<HTMLButtonElement>>("caret");
+
+  protected readonly dispatchPaused = computed(() =>
+    summarizeDispatchStatus(
+      this.access.rawConfig(),
+      this.access.usage(),
+      this.access.clockNow(),
+    ),
+  );
 
   // The shared feed's open task list is in server backlog order already.
   protected readonly backlog = computed(() =>

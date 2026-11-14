@@ -21,6 +21,7 @@ import {
 } from "@angular/core";
 import { RouterLink } from "@angular/router";
 import type { Task } from "../api/models";
+import type { DispatchStatusBanner } from "../shared/dispatch-status";
 import { isBlocked, levelOf, priorityOf } from "../tasks/task-view";
 
 const SHOWN = 7;
@@ -44,6 +45,18 @@ const SHOWN = 7;
           {{ runningCount() }} running</span
         >
       </div>
+
+      @if (dispatchPaused(); as dp) {
+        <p
+          class="banner banner-info next-up-note"
+          data-testid="next-up-paused-note"
+        >
+          {{ dp.headline }}
+          @if (dp.resetText) {
+            · {{ dp.resetText }}
+          }
+        </p>
+      }
       @if (backlog().length === 0) {
         <p class="muted next-up-note" data-testid="next-up-empty-note">
           Nothing is waiting to run. Approved tasks appear here in the order
@@ -89,6 +102,7 @@ export class NextUpPopoverComponent {
   readonly backlog = input.required<readonly Task[]>();
   readonly headId = input<string | null>(null);
   readonly runningCount = input(0);
+  readonly dispatchPaused = input<DispatchStatusBanner | null>(null);
   readonly closed = output<void>();
 
   protected readonly shown = computed(() => this.backlog().slice(0, SHOWN));

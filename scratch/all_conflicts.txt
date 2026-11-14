@@ -1,0 +1,168 @@
+<<<<<<< HEAD
+            </article>
+          </div>
+        }
+=======
+            </div>
+
+            @if (clusterStats(); as cs) {
+              <div class="tel-legend tabular">
+                <span
+                  >Period: <strong>{{ cs.period }}</strong></span
+                >
+                <span
+                  >PRs merged:
+                  <strong>{{ cs.pullRequestsMerged }}</strong></span
+                >
+                <span
+                  >Lines:
+                  <strong
+                    >+{{ fmtNum(cs.linesAdded) }} / −{{
+                      fmtNum(cs.linesDeleted)
+                    }}</strong
+                  ></span
+                >
+                <span
+                  >Agent time:
+                  <strong>{{ cs.agentHours.toFixed(1) }}h</strong></span
+                >
+              </div>
+
+              @if ((cs.directions?.length ?? 0) > 0) {
+                <div>
+                  <h3 class="section-title">Active Workstream Directions</h3>
+                  <ul class="tel-dir-list">
+                    @for (dir of visibleDirections(); track dir.taskId) {
+                      <li class="tel-dir-item">
+                        <span class="tel-dir-main">
+                          <a
+                            class="row-title"
+                            [routerLink]="['/task', dir.taskId]"
+                            [title]="
+                              '#' +
+                              dir.taskId +
+                              ' ' +
+                              (dir.title || 'Workstream root')
+                            "
+                            >#{{ dir.taskId }}
+                            {{ dir.title || "Workstream root" }}</a
+                          >
+                          @if (dir.repo) {
+                            <span class="muted tabular tel-dir-repo">
+                              · {{ dir.repo }}</span
+                            >
+                          }
+                        </span>
+                        <span class="tabular muted tel-dir-metrics">
+                          {{ dir.pullRequestsMerged }} merged ·
+                          {{ dir.tasksCompleted }} completed
+                        </span>
+                      </li>
+                    }
+                  </ul>
+                  @if ((cs.directions?.length ?? 0) > 8) {
+                    <div class="tel-more-row">
+                      <button
+                        type="button"
+                        class="tel-more-btn"
+                        data-testid="directions-show-all"
+                        (click)="showAllDirections.set(!showAllDirections())"
+                      >
+                        {{
+                          showAllDirections()
+                            ? "Show top 8"
+                            : "Show all " + (cs.directions?.length ?? 0)
+                        }}
+                      </button>
+                    </div>
+                  }
+                </div>
+              }
+            }
+
+            <div>
+              <div class="tel-section-head">
+                <h3 class="section-title">
+                  Contributors &amp; Actors (Alphabetical A–Z)
+                </h3>
+                <div
+                  class="segmented"
+                  role="group"
+                  aria-label="Filter contributors"
+                >
+                  <button
+                    type="button"
+                    data-testid="actors-filter-all"
+                    [attr.aria-pressed]="actorsFilter() === 'all'"
+                    (click)="actorsFilter.set('all')"
+                  >
+                    All ({{ unfilteredActors().length }})
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="actors-filter-people"
+                    [attr.aria-pressed]="actorsFilter() === 'people'"
+                    (click)="actorsFilter.set('people')"
+                  >
+                    People ({{ peopleActorCount() }})
+                  </button>
+                </div>
+              </div>
+              @if (alphabeticalActors().length === 0) {
+                <p class="muted" style="margin: 0">
+                  No contributor records in the current view.
+                </p>
+              } @else {
+                <div class="tel-space-grid" data-testid="space-actors-grid">
+                  @for (actor of visibleActors(); track actor.id) {
+                    <div class="tel-space-card" data-testid="space-actor-row">
+                      <g-actor-chip [label]="actor.label" [kind]="actor.kind" />
+                      <div class="tel-space-meta tabular">
+                        @if (actor.workstreams > 0) {
+                          <span
+                            >{{ actor.workstreams }}
+                            {{
+                              actor.workstreams === 1
+                                ? "workstream"
+                                : "workstreams"
+                            }}</span
+                          >
+                        }
+                        @if (actor.activeTasks > 0) {
+                          <span
+                            >{{ actor.activeTasks }} open
+                            {{
+                              actor.activeTasks === 1 ? "task" : "tasks"
+                            }}</span
+                          >
+                        }
+                        @if (actor.repos.length > 0) {
+                          <span [title]="actor.repos.join(', ')">{{
+                            formatActorRepos(actor.repos)
+                          }}</span>
+                        }
+                      </div>
+                    </div>
+                  }
+                </div>
+                @if (alphabeticalActors().length > 12) {
+                  <div class="tel-more-row">
+                    <button
+                      type="button"
+                      class="tel-more-btn"
+                      data-testid="actors-show-all"
+                      (click)="showAllActors.set(!showAllActors())"
+                    >
+                      {{
+                        showAllActors()
+                          ? "Show top 12"
+                          : "Show all " + alphabeticalActors().length
+                      }}
+                    </button>
+                  </div>
+                }
+              }
+            </div>
+          </article>
+        </div>
+>>>>>>> origin/main

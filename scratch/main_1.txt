@@ -1,0 +1,55 @@
+            @if (usage(); as u) {
+              @if (usageNotices(); as notices) {
+                @if (notices.total > 0) {
+                  <div
+                    [class]="
+                      notices.hasError
+                        ? 'banner banner-error tel-notices-banner'
+                        : 'banner banner-warn tel-notices-banner'
+                    "
+                    role="status"
+                    data-testid="usage-warnings-banner"
+                  >
+                    <div class="tel-notices-head">
+                      <strong>
+                        {{
+                          notices.hasError
+                            ? "Model quota alerts"
+                            : "Model quota advisories"
+                        }}
+                        ({{ notices.total }})
+                      </strong>
+                      @if (notices.total > 2) {
+                        <button
+                          type="button"
+                          class="tel-more-btn"
+                          data-testid="usage-warnings-toggle"
+                          (click)="
+                            showAllUsageNotices.set(!showAllUsageNotices())
+                          "
+                        >
+                          {{
+                            showAllUsageNotices()
+                              ? "Show fewer"
+                              : "Show all " + notices.total + " notices"
+                          }}
+                        </button>
+                      }
+                    </div>
+                    <ul class="tel-notices-list">
+                      @for (n of notices.items; track n.text) {
+                        <li>{{ n.text }}</li>
+                      }
+                    </ul>
+                  </div>
+                }
+              }
+              <div class="ops-kpi-grid">
+                <div class="ops-kpi-card">
+                  <span class="ops-kpi-label">Billable Tokens</span>
+                  <span class="ops-kpi-value tabular">{{
+                    fmtNum(u.rollup.billable)
+                  }}</span>
+                  <span class="ops-kpi-sub tabular"
+                    >{{ u.rollup.runs }} recorded runs</span
+                  >

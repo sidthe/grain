@@ -1,0 +1,11 @@
+            <!-- Token Usage & Budget Caps (GET /api/usage, PUT /api/usage/settings) -->
+            <article class="ops-card" data-testid="telemetry-usage">
+              <div class="ops-card-head">
+                <div>
+                  <h2 class="ops-card-title">
+                    Token Usage, Cost &amp; Concurrency Budgets
+                  </h2>
+                  <p class="ops-card-sub">
+                    Per-connection and per-model token consumption, burn rate,
+                    and sustainable worker ceilings
+                  </p>
