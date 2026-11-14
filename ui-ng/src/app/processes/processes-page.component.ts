@@ -1589,49 +1589,116 @@ function isValidGitRef(raw: string): boolean {
                 </div>
 
                 @if (acceptancesForRepo(repo).length > 0) {
-                  <div class="proc-card" data-testid="decl-acceptances-card">
+                  <div
+                    class="proc-card"
+                    id="decl-acceptances-card"
+                    data-testid="decl-acceptances-card"
+                  >
                     <h3 class="section-title">
                       Declaration capability acceptances
                     </h3>
                     @for (acc of acceptancesForRepo(repo); track acc.id) {
-                      <div class="proc-kv-item" style="flex-wrap: wrap">
-                        <div>
-                          <strong>{{ acc.id }}</strong>
-                          <span class="muted"> ({{ acc.kind }})</span>
-                          <div class="muted" style="font-size: 12px">
-                            Requested:
-                            <code>{{ acc.requested.join(", ") }}</code>
-                            @if (acc.needsScopes.length > 0) {
-                              · Requires scopes:
-                              {{ acc.needsScopes.join(", ") }}
+                      @let deniedWhy =
+                        acc.awaiting ? acceptDeniedReason(acc) : "";
+                      @let warningId = "decl-accept-warning-" + $index;
+                      <div
+                        class="decl-acc-item"
+                        [class.is-awaiting]="acc.awaiting"
+                        [attr.data-testid]="'decl-acc-item-' + acc.id"
+                      >
+                        <div class="decl-acc-main">
+                          <div class="decl-acc-info">
+                            <div class="decl-acc-head">
+                              <strong class="decl-acc-id">{{ acc.id }}</strong>
+                              <span class="muted">({{ acc.kind }})</span>
+                              <span
+                                [class]="
+                                  acc.awaiting
+                                    ? 'status-pill blast'
+                                    : 'status-pill healthy'
+                                "
+                              >
+                                <g-status-icon
+                                  [tone]="acc.awaiting ? 'blast' : 'healthy'"
+                                  [kind]="acc.awaiting ? 'warning' : 'healthy'"
+                                />
+                                {{
+                                  acc.awaiting
+                                    ? "Awaiting acceptance"
+                                    : "Accepted"
+                                }}
+                              </span>
+                            </div>
+                            <div class="muted decl-acc-meta">
+                              Requested:
+                              <code class="decl-acc-code">{{
+                                acc.requested.join(", ")
+                              }}</code>
+                              @if (acc.needsScopes.length > 0) {
+                                <span>
+                                  · Requires global scopes:
+                                  <code class="decl-acc-code">{{
+                                    acc.needsScopes.join(", ")
+                                  }}</code>
+                                </span>
+                              }
+                            </div>
+                            @if (
+                              acc.acceptedAt &&
+                              (acc.unaccepted ?? []).length > 0
+                            ) {
+                              <div class="muted decl-acc-meta">
+                                New since last accepted:
+                                <code class="decl-acc-code">{{
+                                  acc.unaccepted!.join(", ")
+                                }}</code>
+                              </div>
+                            }
+                            @if (acc.acceptedBy) {
+                              <div class="decl-acc-accepted">
+                                Accepted by
+                                <g-actor-chip
+                                  [label]="acc.acceptedBy"
+                                  kind="human"
+                                />
+                              </div>
                             }
                           </div>
-                          @if (acc.acceptedBy) {
-                            <div style="margin-top: 4px">
-                              Accepted by
-                              <g-actor-chip
-                                [label]="acc.acceptedBy"
-                                kind="human"
-                              />
+                          @if (acc.awaiting) {
+                            <div class="decl-acc-actions">
+                              <button
+                                type="button"
+                                class="btn-primary"
+                                [attr.data-testid]="'decl-accept-btn-' + acc.id"
+                                [disabled]="
+                                  acceptingDeclId() === acc.id ||
+                                  !canAcceptDeclaration(acc)
+                                "
+                                [attr.aria-describedby]="
+                                  deniedWhy ? warningId : null
+                                "
+                                [gTip]="deniedWhy"
+                                (click)="acceptRepoDeclaration(acc)"
+                              >
+                                {{
+                                  acceptingDeclId() === acc.id
+                                    ? "Accepting…"
+                                    : "Accept declaration"
+                                }}
+                              </button>
                             </div>
                           }
                         </div>
-                        @if (acc.awaiting) {
-                          <button
-                            type="button"
-                            class="btn-primary"
-                            [attr.data-testid]="'decl-accept-btn-' + acc.id"
-                            [disabled]="!canAcceptDeclaration(acc)"
-                            [gTip]="acceptDeniedReason(acc)"
-                            (click)="acceptRepoDeclaration(acc)"
+                        @if (deniedWhy) {
+                          <div
+                            class="decl-scope-warning"
+                            role="note"
+                            [id]="warningId"
+                            [attr.data-testid]="'decl-accept-warning-' + acc.id"
                           >
-                            Accept declaration
-                          </button>
-                        } @else {
-                          <span class="status-pill healthy">
-                            <g-status-icon tone="healthy" kind="healthy" />
-                            Accepted
-                          </span>
+                            <g-status-icon tone="blast" kind="warning" />
+                            <span>{{ deniedWhy }}</span>
+                          </div>
                         }
                       </div>
                     }
@@ -3216,6 +3283,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
 
   protected readonly openPicker = signal<string | null>(null);
   protected readonly submitting = signal(false);
+  protected readonly acceptingDeclId = signal<string | null>(null);
   protected readonly confirming = signal<ConfirmRequest | null>(null);
 
   // Schedule dialog state
@@ -3811,30 +3879,71 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   protected repoPendingAcceptances(repo: string): number {
-    return this.store.acceptances().filter((a) => a.awaiting && a.repo === repo)
+    const want = repo.trim().toLowerCase();
+    return this.store
+      .acceptances()
+      .filter((a) => a.awaiting && a.repo?.trim().toLowerCase() === want)
       .length;
   }
 
   protected acceptancesForRepo(repo: string): DeclarationAcceptanceView[] {
-    return this.store.acceptances().filter((a) => !a.repo || a.repo === repo);
+    const want = repo.trim().toLowerCase();
+    return this.store
+      .acceptances()
+      .filter((a) => !a.repo || a.repo.trim().toLowerCase() === want);
+  }
+
+  protected missingDeclarationScopes(acc: DeclarationAcceptanceView): string[] {
+    return (acc.needsScopes ?? []).filter(
+      (sc) => !this.access.canGlobalScope(sc),
+    );
   }
 
   protected canAcceptDeclaration(acc: DeclarationAcceptanceView): boolean {
+    if (!acc.awaiting || !this.access.configLoaded()) return false;
     if (!this.access.can("POST /api/declarations/accept")) return false;
-    return (acc.needsScopes ?? []).every((sc) =>
-      this.access.canGlobalScope(sc),
-    );
+    return this.missingDeclarationScopes(acc).length === 0;
   }
 
   protected acceptDeniedReason(acc: DeclarationAcceptanceView): string {
+    if (!acc.awaiting) return "";
+    if (!this.access.configLoaded()) {
+      return "Unable to verify required global scopes before permissions load.";
+    }
     if (!this.access.can("POST /api/declarations/accept")) {
       return this.access.deniedReason("POST /api/declarations/accept");
     }
-    const missing = (acc.needsScopes ?? []).filter(
-      (sc) => !this.access.canGlobalScope(sc),
-    );
+    const missing = this.missingDeclarationScopes(acc);
     if (missing.length === 0) return "";
-    return `Accepting this declaration requires global scope(s): ${missing.join(", ")}.`;
+
+    const roleLabel = this.access.roleLabel();
+    const roles = this.access.roles();
+    const who = roleLabel
+      ? `your ${roles.length > 1 ? "roles" : "role"} ${roleLabel}`
+      : "your current access";
+    const heldScopes = this.access.scopes();
+    const limits = this.access.repoLimits();
+    const scopedOnly = missing.filter(
+      (sc) => heldScopes.includes(sc) && (limits[sc]?.length ?? 0) > 0,
+    );
+    const unheld = missing.filter((sc) => !scopedOnly.includes(sc));
+    const scopeWord = missing.length === 1 ? "scope" : "scopes";
+    const neededList = missing.join(", ");
+    const neededAnd = missing.join(" and ");
+
+    if (scopedOnly.length > 0 && unheld.length === 0) {
+      const details = scopedOnly
+        .map((sc) => `${sc} (scoped to ${limits[sc].join(", ")})`)
+        .join("; ");
+      return `Insufficient scopes: accepting requires global ${scopeWord} ${neededList}, but ${who} holds ${details} only. Ask a person holding ${neededAnd} globally to accept it.`;
+    }
+    if (scopedOnly.length > 0 && unheld.length > 0) {
+      const scopedDetails = scopedOnly
+        .map((sc) => `${sc} (scoped to ${limits[sc].join(", ")})`)
+        .join("; ");
+      return `Insufficient scopes: accepting requires global ${scopeWord} ${neededList}, which ${who} lacks (missing ${unheld.join(", ")}; ${scopedDetails} only). Ask a person holding ${neededAnd} globally to accept it.`;
+    }
+    return `Insufficient scopes: accepting requires global ${scopeWord} ${neededList}, which ${who} does not hold. Ask a person holding ${neededAnd} globally to accept it.`;
   }
 
   private scopeRepoLimits(route: RouteKey): string[] {
@@ -4996,12 +5105,19 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected async acceptRepoDeclaration(
     acc: DeclarationAcceptanceView,
   ): Promise<void> {
-    if (!this.canAcceptDeclaration(acc)) return;
+    if (this.acceptingDeclId() === acc.id || !this.canAcceptDeclaration(acc)) {
+      return;
+    }
+    this.acceptingDeclId.set(acc.id);
     try {
       await this.store.acceptDeclaration(acc.id, acc.requested ?? []);
       this.snackbar.show(`Accepted declaration ${acc.id}.`);
     } catch (err) {
       this.store.actionError.set(errorText(err));
+    } finally {
+      if (this.acceptingDeclId() === acc.id) {
+        this.acceptingDeclId.set(null);
+      }
     }
   }
 

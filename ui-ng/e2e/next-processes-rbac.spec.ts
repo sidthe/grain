@@ -319,3 +319,85 @@ test("repo-scoped suites:write enforces canGlobalScope for cross-repo/multi-repo
   await assertNoHorizontalOverflow(page);
   expect(await axe()).toEqual([]);
 });
+
+test("declaration acceptance gates missing and repo-limited global scopes with inline warnings @phone @dark", async ({
+  page,
+  axe,
+}) => {
+  test.setTimeout(120_000);
+  await mockConfigAccess(
+    page,
+    {
+      role: "widgets-cap-scoped",
+      roles: ["widgets-cap-scoped"],
+      full: false,
+      scopes: ["capabilities:read", "capabilities:admin", "repos:read"],
+      repoLimits: {
+        "capabilities:admin": ["acme/widgets"],
+      },
+    },
+    ["acme/widgets"],
+  );
+
+  let acceptRequests = 0;
+  page.on("request", (req) => {
+    if (req.url().includes("/api/declarations/accept")) {
+      acceptRequests++;
+    }
+  });
+
+  await page.goto("processes/declarations");
+  await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  await page.getByTestId("decl-repo-row-acme/widgets").click();
+
+  const item = page.getByTestId("decl-acc-item-ci:acme/widgets:deploy-preview");
+  await expect(item).toBeVisible();
+
+  const acceptBtn = page.getByTestId(
+    "decl-accept-btn-ci:acme/widgets:deploy-preview",
+  );
+  await expect(acceptBtn).toBeDisabled();
+
+  const warning = page.getByTestId(
+    "decl-accept-warning-ci:acme/widgets:deploy-preview",
+  );
+  await expect(warning).toBeVisible();
+  await expect(warning).toContainText("Insufficient scopes");
+  await expect(warning).toContainText("capabilities:admin");
+  await expect(warning).toContainText("scoped to acme/widgets");
+
+  const warnId = await warning.getAttribute("id");
+  expect(warnId).toBeTruthy();
+  await expect(acceptBtn).toHaveAttribute("aria-describedby", warnId!);
+
+  // Already-accepted item shows neither button nor warning
+  await expect(
+    page.getByTestId("decl-accept-btn-ci:acme/widgets:publish-images"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("decl-accept-warning-ci:acme/widgets:publish-images"),
+  ).toHaveCount(0);
+
+  // Bounding-box invariants: item, button, and warning fit inside viewport and item with no overlap
+  const vp = page.viewportSize()!;
+  const itemBox = await item.boundingBox();
+  const btnBox = await acceptBtn.boundingBox();
+  const warnBox = await warning.boundingBox();
+  expect(itemBox).not.toBeNull();
+  expect(btnBox).not.toBeNull();
+  expect(warnBox).not.toBeNull();
+
+  for (const box of [itemBox!, btnBox!, warnBox!]) {
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(vp.width + 1);
+  }
+  expect(warnBox!.x).toBeGreaterThanOrEqual(itemBox!.x - 1);
+  expect(warnBox!.x + warnBox!.width).toBeLessThanOrEqual(
+    itemBox!.x + itemBox!.width + 1,
+  );
+  expect(warnBox!.y).toBeGreaterThanOrEqual(btnBox!.y + btnBox!.height - 1);
+
+  expect(acceptRequests).toBe(0);
+  await assertNoHorizontalOverflow(page);
+  expect(await axe()).toEqual([]);
+});
