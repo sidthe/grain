@@ -40,55 +40,55 @@ import (
 )
 
 type postQAExperimentReq struct {
-	ID              string                        `json:"id,omitempty"`
-	Name            string                        `json:"name"`
-	ReferenceArmID  string                        `json:"referenceArmId,omitempty"`
-	Hypothesis      string                        `json:"hypothesis,omitempty"`
-	Arms            []model.QAExperimentArm       `json:"arms"`
-	Scope           model.QAExperimentScope       `json:"scope,omitempty"`
-	Allocation      model.QAExperimentAllocation  `json:"allocation,omitempty"`
-	PrimaryMetric   string                        `json:"primaryMetric,omitempty"`
-	CoPrimaries     []string                      `json:"coPrimaries,omitempty"`
-	PrimaryContrast string                        `json:"primaryContrast,omitempty"`
-	Secondaries     []string                      `json:"secondaries,omitempty"`
-	Guardrails      []string                      `json:"guardrails,omitempty"`
-	Plan            model.QAExperimentPlan        `json:"plan,omitempty"`
-	Options         model.QAExperimentOptions     `json:"options,omitempty"`
+	ID              string                       `json:"id,omitempty"`
+	Name            string                       `json:"name"`
+	ReferenceArmID  string                       `json:"referenceArmId,omitempty"`
+	Hypothesis      string                       `json:"hypothesis,omitempty"`
+	Arms            []model.QAExperimentArm      `json:"arms"`
+	Scope           model.QAExperimentScope      `json:"scope,omitempty"`
+	Allocation      model.QAExperimentAllocation `json:"allocation,omitempty"`
+	PrimaryMetric   string                       `json:"primaryMetric,omitempty"`
+	CoPrimaries     []string                     `json:"coPrimaries,omitempty"`
+	PrimaryContrast string                       `json:"primaryContrast,omitempty"`
+	Secondaries     []string                     `json:"secondaries,omitempty"`
+	Guardrails      []string                     `json:"guardrails,omitempty"`
+	Plan            model.QAExperimentPlan       `json:"plan,omitempty"`
+	Options         model.QAExperimentOptions    `json:"options,omitempty"`
 }
 
 type postQAExperimentTransitionReq struct {
-	Action          string                        `json:"action"`
-	Revision        int                           `json:"revision,omitempty"`
-	Reason          string                        `json:"reason,omitempty"`
-	Arm             string                        `json:"arm,omitempty"`
-	Decision        string                        `json:"decision,omitempty"`
-	DryRunViewed    bool                          `json:"dryRunViewed,omitempty"`
-	OverrideNotes   string                        `json:"overrideNotes,omitempty"`
-	Name            string                        `json:"name,omitempty"`
-	Hypothesis      *string                       `json:"hypothesis,omitempty"`
-	Arms            []model.QAExperimentArm       `json:"arms,omitempty"`
-	Scope           *model.QAExperimentScope      `json:"scope,omitempty"`
-	PrimaryMetric   string                        `json:"primaryMetric,omitempty"`
-	CoPrimaries     []string                      `json:"coPrimaries,omitempty"`
-	PrimaryContrast string                        `json:"primaryContrast,omitempty"`
-	Secondaries     []string                      `json:"secondaries,omitempty"`
-	Guardrails      []string                      `json:"guardrails,omitempty"`
-	Plan            *model.QAExperimentPlan       `json:"plan,omitempty"`
-	Options         *model.QAExperimentOptions    `json:"options,omitempty"`
-	ReferenceArmID  string                        `json:"referenceArmId,omitempty"`
+	Action          string                     `json:"action"`
+	Revision        int                        `json:"revision,omitempty"`
+	Reason          string                     `json:"reason,omitempty"`
+	Arm             string                     `json:"arm,omitempty"`
+	Decision        string                     `json:"decision,omitempty"`
+	DryRunViewed    bool                       `json:"dryRunViewed,omitempty"`
+	OverrideNotes   string                     `json:"overrideNotes,omitempty"`
+	Name            string                     `json:"name,omitempty"`
+	Hypothesis      *string                    `json:"hypothesis,omitempty"`
+	Arms            []model.QAExperimentArm    `json:"arms,omitempty"`
+	Scope           *model.QAExperimentScope   `json:"scope,omitempty"`
+	PrimaryMetric   string                     `json:"primaryMetric,omitempty"`
+	CoPrimaries     []string                   `json:"coPrimaries,omitempty"`
+	PrimaryContrast string                     `json:"primaryContrast,omitempty"`
+	Secondaries     []string                   `json:"secondaries,omitempty"`
+	Guardrails      []string                   `json:"guardrails,omitempty"`
+	Plan            *model.QAExperimentPlan    `json:"plan,omitempty"`
+	Options         *model.QAExperimentOptions `json:"options,omitempty"`
+	ReferenceArmID  string                     `json:"referenceArmId,omitempty"`
 }
 
 type qaPairEndpointOutcome struct {
-	SpecKey             string   `json:"specKey,omitempty"`
-	PairID              string   `json:"pairId,omitempty"`
-	ArmID               string   `json:"armId"`
-	RootOrigin          string   `json:"rootOrigin,omitempty"`
-	TaskID              string   `json:"taskId,omitempty"`
-	HiddenPassed        *bool    `json:"hiddenPassed,omitempty"`
-	MutationScore       *float64 `json:"mutationScore,omitempty"`
-	PanelScore          *float64 `json:"panelScore,omitempty"`
+	SpecKey             string    `json:"specKey,omitempty"`
+	PairID              string    `json:"pairId,omitempty"`
+	ArmID               string    `json:"armId"`
+	RootOrigin          string    `json:"rootOrigin,omitempty"`
+	TaskID              string    `json:"taskId,omitempty"`
+	HiddenPassed        *bool     `json:"hiddenPassed,omitempty"`
+	MutationScore       *float64  `json:"mutationScore,omitempty"`
+	PanelScore          *float64  `json:"panelScore,omitempty"`
 	RaterScores         []float64 `json:"raterScores,omitempty"`
-	SeverityWeightedSum *float64 `json:"severityWeightedSum,omitempty"`
+	SeverityWeightedSum *float64  `json:"severityWeightedSum,omitempty"`
 }
 
 type postQAExperimentReadoutReq struct {
@@ -584,8 +584,8 @@ func (s *Server) handleGetQAExperiments(w http.ResponseWriter, r *http.Request) 
 					pct = 50
 				}
 				out = append(out, qaExperimentSummaryView{
-					ID:   fmt.Sprintf("legacy-e%d", ep),
-					Name: fmt.Sprintf("Legacy Epoch %d (%s)", ep, firstNonEmptyStr(meta.flow, model.DefaultQAFlowID)),
+					ID:    fmt.Sprintf("legacy-e%d", ep),
+					Name:  fmt.Sprintf("Legacy Epoch %d (%s)", ep, firstNonEmptyStr(meta.flow, model.DefaultQAFlowID)),
 					State: st,
 					Arms: []model.QAExperimentArm{
 						{ID: "control", Label: "Control", FlowHash: "control", Weight: 100 - pct},
@@ -1233,9 +1233,6 @@ func (s *Server) handleGetQAExperimentResults(w http.ResponseWriter, r *http.Req
 	}
 
 	refArmID := exp.ReferenceArmID
-	if refArmID == "" {
-		refArmID = refArmID
-	}
 	var treatArmID string
 	if len(exp.Arms) >= 2 {
 		foundRef := false
@@ -1581,11 +1578,11 @@ func (s *Server) handleGetQAExperimentResults(w http.ResponseWriter, r *http.Req
 			rawPs = append(rawPs, p)
 			epRows = append(epRows, epRow{
 				id: "quality.panel_score", label: "Senior review score (1–10)",
-				sub: fmt.Sprintf("Primary · %d matched pairs (ρ=%.2f)", len(panelDiffs), rho),
-				tip: "Mean paired difference (treatment minus control) across 3 blind raters.",
+				sub:  fmt.Sprintf("Primary · %d matched pairs (ρ=%.2f)", len(panelDiffs), rho),
+				tip:  "Mean paired difference (treatment minus control) across 3 blind raters.",
 				minL: "-2.0 pts", maxL: "+2.0 pts",
 				valFmt: fmt.Sprintf("%+.2f pts [%.2f, %.2f]", m, lo, hi),
-				mean: m, lo: lo, hi: hi, span: 2.0, p: p,
+				mean:   m, lo: lo, hi: hi, span: 2.0, p: p,
 			})
 		}
 		if len(mutDiffs) >= 2 {
@@ -1593,11 +1590,11 @@ func (s *Server) handleGetQAExperimentResults(w http.ResponseWriter, r *http.Req
 			rawPs = append(rawPs, p)
 			epRows = append(epRows, epRow{
 				id: "quality.mutation_score.added_lines", label: "Test strength on new code",
-				sub: fmt.Sprintf("Co-primary · %d matched pairs", len(mutDiffs)),
-				tip: "Paired difference in mutation kill rate (percentage points) on PR-added lines.",
+				sub:  fmt.Sprintf("Co-primary · %d matched pairs", len(mutDiffs)),
+				tip:  "Paired difference in mutation kill rate (percentage points) on PR-added lines.",
 				minL: "-30 pp", maxL: "+30 pp",
 				valFmt: fmt.Sprintf("%+.1f pp [%.1f, %.1f]", m, lo, hi),
-				mean: m, lo: lo, hi: hi, span: 30.0, p: p,
+				mean:   m, lo: lo, hi: hi, span: 30.0, p: p,
 			})
 		}
 		if len(hidDiffs) >= 2 {
@@ -1605,11 +1602,11 @@ func (s *Server) handleGetQAExperimentResults(w http.ResponseWriter, r *http.Req
 			rawPs = append(rawPs, p)
 			epRows = append(epRows, epRow{
 				id: "bench.hidden_acceptance_pass", label: "Hidden acceptance tests passed",
-				sub: fmt.Sprintf("Co-primary · %d matched pairs", len(hidDiffs)),
-				tip: "Paired pass-rate difference (percentage points) on spec-derived hidden acceptance tests.",
+				sub:  fmt.Sprintf("Co-primary · %d matched pairs", len(hidDiffs)),
+				tip:  "Paired pass-rate difference (percentage points) on spec-derived hidden acceptance tests.",
 				minL: "-40 pp", maxL: "+40 pp",
 				valFmt: fmt.Sprintf("%+.1f pp [%.1f, %.1f]", m, lo, hi),
-				mean: m, lo: lo, hi: hi, span: 40.0, p: p,
+				mean:   m, lo: lo, hi: hi, span: 40.0, p: p,
 			})
 		}
 		adjPs := expstats.HolmAdjust(rawPs)
@@ -1819,9 +1816,9 @@ func (s *Server) handleGetQAExperimentResults(w http.ResponseWriter, r *http.Req
 
 	// Per-check health over enrolled tasks.
 	type ruleStat struct {
-		runs, fails  int
-		durations    []int64
-		posV, negV   int
+		runs, fails int
+		durations   []int64
+		posV, negV  int
 	}
 	ruleStats := map[string]*ruleStat{}
 	checkRunEnrolled := map[int64]bool{}
@@ -2062,11 +2059,11 @@ func (s *Server) handleGetQAExperimentResults(w http.ResponseWriter, r *http.Req
 		"stageFunnel":     stageFunnel,
 		"triageMetrics":   triageMetrics,
 		"state":           exp.State,
-		"periodLabel":  periodLabel,
-		"scopeRepos":   exp.Scope.Repos,
-		"verdicts":     verdicts,
-		"forestRows":   forestRows,
-		"provisional":  provisional,
+		"periodLabel":     periodLabel,
+		"scopeRepos":      exp.Scope.Repos,
+		"verdicts":        verdicts,
+		"forestRows":      forestRows,
+		"provisional":     provisional,
 		"assignmentAudit": map[string]any{
 			"passed":       auditRep.Passed,
 			"agreementPct": auditRep.AgreementPct,
@@ -2300,16 +2297,16 @@ func computeExperimentStageFunnel(
 			wilsonLB = math.Round(wilsonLB*1000) / 1000
 		}
 		out = append(out, map[string]any{
-			"armId":               k.armID,
-			"stage":               k.stage,
-			"runs":                runs,
-			"applicablePct":       appPct,
-			"findingsCount":       acc.findings,
+			"armId":                k.armID,
+			"stage":                k.stage,
+			"runs":                 runs,
+			"applicablePct":        appPct,
+			"findingsCount":        acc.findings,
 			"repairedInNextShaPct": repairedPct,
-			"durationP50Ms":       p50Ms,
-			"durationP95Ms":       p95Ms,
-			"tokensMedian":        medTok,
-			"notHelpfulWilsonLB":  wilsonLB,
+			"durationP50Ms":        p50Ms,
+			"durationP95Ms":        p95Ms,
+			"tokensMedian":         medTok,
+			"notHelpfulWilsonLB":   wilsonLB,
 		})
 	}
 	return out

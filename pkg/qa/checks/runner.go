@@ -269,6 +269,11 @@ func RunS3(ctx context.Context, ws WorkspaceReader, flow qa.FlowSpec, opts RunOp
 		}); err != nil {
 			return "error", err
 		}
+		if err := runOne(qa.RulePRDescriptionContract, func() ([]Finding, error) {
+			return CheckPRDescriptionContract(pd, "", "", flow.PRContract)
+		}); err != nil {
+			return "error", err
+		}
 
 		testTampered := false
 		for _, res := range report.Results {
@@ -276,7 +281,7 @@ func RunS3(ctx context.Context, ws WorkspaceReader, flow qa.FlowSpec, opts RunOp
 				testTampered = true
 			}
 		}
-		
+
 		for _, c := range flow.CustomChecks {
 			findings, err := qa.EvaluateCustomCheck(c, qa.CustomCheckContext{
 				ChangedFiles:    pd.AllPaths(),

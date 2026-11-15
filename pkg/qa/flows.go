@@ -27,15 +27,16 @@ import (
 
 // Built-in deterministic pre-PR S3/S3.5 and semantic S4 rule identifiers.
 const (
-	RuleTestIntegrityGuard   = "golden:test-integrity-guard"
-	RuleStrictConfigDecoder  = "golden:strict-config-decoder"
-	RuleSiblingExportHazard  = "golden:sibling-export-hazard"
-	RuleUIBudgetAndSpecFloor = "golden:ui-budget-and-spec-floor"
-	RuleExportedSurfaceDelta = "golden:exported-surface-delta"
-	RuleTestHygiene          = "golden:test-hygiene"
-	RuleMutationHardening    = "golden:mutation-hardening"
-	RuleBoundaryFuzz         = "golden:boundary-fuzz"
-	RuleS4OrthogonalVerifier = "golden:s4-orthogonal-verifier"
+	RuleTestIntegrityGuard    = "golden:test-integrity-guard"
+	RuleStrictConfigDecoder   = "golden:strict-config-decoder"
+	RuleSiblingExportHazard   = "golden:sibling-export-hazard"
+	RuleUIBudgetAndSpecFloor  = "golden:ui-budget-and-spec-floor"
+	RuleExportedSurfaceDelta  = "golden:exported-surface-delta"
+	RuleTestHygiene           = "golden:test-hygiene"
+	RuleMutationHardening     = "golden:mutation-hardening"
+	RuleBoundaryFuzz          = "golden:boundary-fuzz"
+	RulePRDescriptionContract = "golden:pr-description-contract"
+	RuleS4OrthogonalVerifier  = "golden:s4-orthogonal-verifier"
 )
 
 // RepoFlowCandidatePaths lists the in-tree YAML paths consulted when flowId is "repo-custom".
@@ -58,35 +59,40 @@ type RuleSpec struct {
 
 // FlowSpec describes a quality control flow package executable by the Grain QA engine.
 type FlowSpec struct {
-	ID                  string            `json:"id" yaml:"id"`
-	SchemaVer           string            `json:"schemaVer,omitempty" yaml:"-"`
-	Label               string            `json:"label" yaml:"label"`
-	Summary             string            `json:"summary" yaml:"summary"`
-	InjectSkill         bool              `json:"injectSkill" yaml:"inject-skill"`
-	SkillText           string            `json:"skillText,omitempty" yaml:"-"`
-	IntentSkillText     string            `json:"intentSkillText,omitempty" yaml:"-"`
-	PlanCriticSkillText string            `json:"planCriticSkillText,omitempty" yaml:"-"`
-	VerifierSkillText   string            `json:"verifierSkillText,omitempty" yaml:"-"`
-	SecuritySkillText   string            `json:"securitySkillText,omitempty" yaml:"-"`
-	SkillBytes          int               `json:"skillBytes" yaml:"-"`
-	StopNudge           bool              `json:"stopNudge" yaml:"stop-nudge"`
-	StagingIsolation    bool              `json:"stagingIsolation" yaml:"staging-isolation"`
-	EnableS4            bool              `json:"enableS4" yaml:"enable-s4"`
-	VerifierTiers       []string          `json:"verifierTiers,omitempty" yaml:"verifier-tiers,omitempty"`
-	MaxS4RepairRounds   int               `json:"maxS4RepairRounds" yaml:"max-s4-repair-rounds"`
-	MaxS4Seconds        int               `json:"maxS4Seconds,omitempty" yaml:"max-s4-seconds,omitempty"`
-	MaxS4Tokens         int               `json:"maxS4Tokens,omitempty" yaml:"max-s4-tokens,omitempty"`
-	VerifierChecklist   string            `json:"verifierChecklist,omitempty" yaml:"verifier-checklist,omitempty"`
-	StrictDecoderPaths  []string          `json:"strictDecoderPaths,omitempty" yaml:"strict-decoder-paths,omitempty"`
-	Rules               []RuleSpec        `json:"rules" yaml:"rules"`
-	S0Intent            bool              `json:"s0Intent,omitempty" yaml:"s0-intent,omitempty"`
-	S0IntentConfig      S0IntentDecl      `json:"s0IntentConfig,omitempty" yaml:"-"`
-	S2PlanCritic        bool              `json:"s2PlanCritic,omitempty" yaml:"s2-plan-critic,omitempty"`
-	S2PlanCriticConfig  S2PlanCriticDecl  `json:"s2PlanCriticConfig,omitempty" yaml:"-"`
-	RiskOverrides       []RiskOverride    `json:"riskOverrides,omitempty" yaml:"risk-overrides,omitempty"`
-	CustomStages        []CustomStageDecl `json:"customStages,omitempty" yaml:"custom-stages,omitempty"`
-	S5MergeTriage       TriageConfig      `json:"s5MergeTriage,omitempty" yaml:"s5-merge-triage,omitempty"`
-	CustomChecks        []CustomCheckDecl `json:"customChecks,omitempty" yaml:"custom-checks,omitempty"`
+	ID                  string                `json:"id" yaml:"id"`
+	SchemaVer           string                `json:"schemaVer,omitempty" yaml:"-"`
+	Label               string                `json:"label" yaml:"label"`
+	Summary             string                `json:"summary" yaml:"summary"`
+	InjectSkill         bool                  `json:"injectSkill" yaml:"inject-skill"`
+	SkillText           string                `json:"skillText,omitempty" yaml:"-"`
+	IntentSkillText     string                `json:"intentSkillText,omitempty" yaml:"-"`
+	PlanCriticSkillText string                `json:"planCriticSkillText,omitempty" yaml:"-"`
+	VerifierSkillText   string                `json:"verifierSkillText,omitempty" yaml:"-"`
+	SecuritySkillText   string                `json:"securitySkillText,omitempty" yaml:"-"`
+	SkillBytes          int                   `json:"skillBytes" yaml:"-"`
+	StopNudge           bool                  `json:"stopNudge" yaml:"stop-nudge"`
+	StagingIsolation    bool                  `json:"stagingIsolation" yaml:"staging-isolation"`
+	EnableS4            bool                  `json:"enableS4" yaml:"enable-s4"`
+	VerifierTiers       []string              `json:"verifierTiers,omitempty" yaml:"verifier-tiers,omitempty"`
+	MaxS4RepairRounds   int                   `json:"maxS4RepairRounds" yaml:"max-s4-repair-rounds"`
+	MaxS4Seconds        int                   `json:"maxS4Seconds,omitempty" yaml:"max-s4-seconds,omitempty"`
+	MaxS4Tokens         int                   `json:"maxS4Tokens,omitempty" yaml:"max-s4-tokens,omitempty"`
+	VerifierChecklist   string                `json:"verifierChecklist,omitempty" yaml:"verifier-checklist,omitempty"`
+	StrictDecoderPaths  []string              `json:"strictDecoderPaths,omitempty" yaml:"strict-decoder-paths,omitempty"`
+	Rules               []RuleSpec            `json:"rules" yaml:"rules"`
+	S0Intent            bool                  `json:"s0Intent,omitempty" yaml:"s0-intent,omitempty"`
+	S0IntentConfig      S0IntentDecl          `json:"s0IntentConfig,omitempty" yaml:"-"`
+	S2PlanCritic        bool                  `json:"s2PlanCritic,omitempty" yaml:"s2-plan-critic,omitempty"`
+	S2PlanCriticConfig  S2PlanCriticDecl      `json:"s2PlanCriticConfig,omitempty" yaml:"-"`
+	RiskOverrides       []RiskOverride        `json:"riskOverrides,omitempty" yaml:"risk-overrides,omitempty"`
+	CustomStages        []CustomStageDecl     `json:"customStages,omitempty" yaml:"custom-stages,omitempty"`
+	S5MergeTriage       TriageConfig          `json:"s5MergeTriage,omitempty" yaml:"s5-merge-triage,omitempty"`
+	CustomChecks        []CustomCheckDecl     `json:"customChecks,omitempty" yaml:"custom-checks,omitempty"`
+	Decompose           DecomposeDecl         `json:"decompose,omitempty" yaml:"-"`
+	Context             ContextDiscoveryDecl  `json:"context,omitempty" yaml:"-"`
+	ReadabilityPacks    []ReadabilityPackDecl `json:"readabilityPacks,omitempty" yaml:"-"`
+	SkillSteps          []SkillStepDecl       `json:"skillSteps,omitempty" yaml:"-"`
+	PRContract          PRContractDecl        `json:"prContract,omitempty" yaml:"-"`
 }
 
 type CustomStageDecl struct {
@@ -187,6 +193,15 @@ func defaultS3Rules() []RuleSpec {
 			Summary:     "Enforces angular.json component style budgets via a non-regressing size ratchet, blocks new eager feature imports in app.component.ts, and requires unit spec files for newly added Angular components.",
 			TargetPaths: []string{"ui/**", "ui-ng/**"},
 			Enabled:     true,
+		},
+		{
+			ID:          RulePRDescriptionContract,
+			Label:       "PR description & subject-line contract",
+			Stage:       "S3",
+			Severity:    "warn",
+			Summary:     "Enforces PR subject-line length caps, required description sections (Summary, Verification), and flags unannotated lint/type-check suppression directives in added lines.",
+			TargetPaths: []string{"**/*"},
+			Enabled:     false,
 		},
 	}
 }

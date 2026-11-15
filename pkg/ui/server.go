@@ -99,6 +99,8 @@ type Server struct {
 	fsNamespace func() *namespace.Server
 	// eventsKeepalive overrides defaultEventsKeepalive in tests (events.go).
 	eventsKeepalive time.Duration
+	// ReadRepoFileAtCommit overrides resolve.GetRuntimeHooks().ReadRepoFileAtCommit when non-nil.
+	ReadRepoFileAtCommit func(ctx context.Context, repo, commit, path string) ([]byte, error)
 }
 
 // NewServer builds a Server over a store.

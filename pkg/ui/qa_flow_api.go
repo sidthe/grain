@@ -15,6 +15,7 @@
 package ui
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -106,9 +107,12 @@ func (s *Server) hydrateStoredFlowBundle(ctx context.Context, fv model.QAFlowVer
 	_ = json.Unmarshal([]byte(fv.SpecJSON), &sp)
 	var declV2 qa.FlowDeclarationV2
 	var declV3 *qa.FlowDeclarationV3
+	var declV4 *qa.FlowDeclarationV4
 	if fv.SourceYAML != "" {
 		if parsed, pErr := qa.ParseFlowDeclaration([]byte(fv.SourceYAML)); pErr == nil {
 			switch d := parsed.(type) {
+			case *qa.FlowDeclarationV4:
+				declV4 = d
 			case *qa.FlowDeclarationV3:
 				declV3 = d
 			case *qa.FlowDeclarationV2:
@@ -128,6 +132,7 @@ func (s *Server) hydrateStoredFlowBundle(ctx context.Context, fv model.QAFlowVer
 		SourceYAML:    fv.SourceYAML,
 		Declaration:   declV2,
 		DeclarationV3: declV3,
+		DeclarationV4: declV4,
 		SpecJSON:      fv.SpecJSON,
 		Resolved:      sp,
 		SchemaVer:     fv.SchemaVer,
@@ -160,9 +165,13 @@ func formatFlowBundleMap(b qa.FlowVersionBundle, createdAt *time.Time, createdBy
 		"declaration": b.Declaration,
 		"resolved":    b.Resolved,
 		"spec":        b.Resolved,
+		"stagesView":  qa.BuildWorkflowStagesView(b),
 	}
 	if b.DeclarationV3 != nil {
 		m["declarationV3"] = b.DeclarationV3
+	}
+	if b.DeclarationV4 != nil {
+		m["declarationV4"] = b.DeclarationV4
 	}
 	return m
 }
@@ -250,11 +259,16 @@ func (s *Server) handleGetQAFlowVersion(w http.ResponseWriter, r *http.Request) 
 }
 
 type postFlowVersionReq struct {
-	YAML        string                `json:"yaml"`
-	Declaration *qa.FlowDeclarationV2 `json:"declaration"`
-	Action      string                `json:"action"`
-	Hash        string                `json:"hash"`
-	SampleLimit int                   `json:"sampleLimit"`
+	YAML        string          `json:"yaml"`
+	Declaration json.RawMessage `json:"declaration"`
+	Action      string          `json:"action"`
+	Hash        string          `json:"hash"`
+	SampleLimit int             `json:"sampleLimit"`
+}
+
+func hasRawDeclaration(raw json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) > 0 && !bytes.Equal(trimmed, []byte("null"))
 }
 
 func (s *Server) simulateDryRun(ctx context.Context, resolved qa.FlowSpec, hash string, sampleLimit int) (map[string]any, error) {
@@ -401,7 +415,7 @@ func (s *Server) handlePostQAFlowVersion(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Dry-run by existing flow hash/ref (used by Start Experiment dialog and Processes detail view).
-	if isDryRun && strings.TrimSpace(req.Hash) != "" && req.YAML == "" && req.Declaration == nil {
+	if isDryRun && strings.TrimSpace(req.Hash) != "" && req.YAML == "" && !hasRawDeclaration(req.Declaration) {
 		b, _, _, _, ok, err := s.lookupFlowBundle(ctx, req.Hash)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
@@ -424,10 +438,8 @@ func (s *Server) handlePostQAFlowVersion(w http.ResponseWriter, r *http.Request)
 	switch {
 	case strings.TrimSpace(req.YAML) != "":
 		yamlSrc = req.YAML
-	case req.Declaration != nil:
-		if raw, err := json.Marshal(req.Declaration); err == nil {
-			yamlSrc = string(raw)
-		}
+	case hasRawDeclaration(req.Declaration):
+		yamlSrc = string(bytes.TrimSpace(req.Declaration))
 	default:
 		writeError(w, http.StatusBadRequest, fmt.Errorf("missing yaml or declaration"))
 		return
@@ -578,13 +590,18 @@ func (s *Server) handlePostQAFlowVersionAdopt(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	hook := resolve.GetRuntimeHooks()
-	if hook == nil || hook.ReadRepoFileAtCommit == nil {
+	readFile := s.ReadRepoFileAtCommit
+	if readFile == nil {
+		if hook := resolve.GetRuntimeHooks(); hook != nil {
+			readFile = hook.ReadRepoFileAtCommit
+		}
+	}
+	if readFile == nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("ReadRepoFileAtCommit hook not configured"))
 		return
 	}
 
-	bContent, err := hook.ReadRepoFileAtCommit(ctx, req.Repo, req.Commit, req.Path)
+	bContent, err := readFile(ctx, req.Repo, req.Commit, req.Path)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("failed to read file: %w", err))
 		return

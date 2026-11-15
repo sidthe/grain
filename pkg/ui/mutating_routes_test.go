@@ -25,7 +25,6 @@ import (
 
 	"github.com/ai-on-gke/grain/pkg/capability/protocol"
 	"github.com/ai-on-gke/grain/pkg/model"
-	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 	"github.com/ai-on-gke/grain/pkg/secrets"
 	"github.com/ai-on-gke/grain/pkg/ui"
 	"github.com/ai-on-gke/grain/pkg/upgrade"
@@ -816,20 +815,8 @@ var attributedRoutes = map[string]attributedRoute{
 		recorded:    lastConfigAudit,
 	},
 	"POST /api/qa/flow-versions/adopt": {
-		setup: func(t *testing.T, _ *ui.Client, _ sender) string {
-			t.Helper()
-			prev := resolve.GetRuntimeHooks()
-			t.Cleanup(func() { resolve.SetRuntimeHooks(prev) })
-			resolve.SetRuntimeHooks(&resolve.RuntimeHooks{
-				ReadRepoFileAtCommit: func(_ context.Context, _, _, _ string) ([]byte, error) {
-					return []byte("schema: grain.dev/qa-flow/v2\nkey: adopted-flow\nlabel: Adopted\nskill:\n  mode: replace\n  max-bytes: 1800\n  text: test\n"), nil
-				},
-			})
-			return ""
-		},
-		body:        `{"repo":"acme/widgets","path":".grain/qa/flow.yml","commit":"1234567890abcdef1234567890abcdef12345678"}`,
-		agentGrants: []string{"api:qa:admin"},
-		recorded:    lastConfigAudit,
+		body:     `{"repo":"acme/widgets","path":".grain/qa/flow.yml","commit":"1234567890abcdef1234567890abcdef12345678"}`,
+		recorded: lastConfigAudit,
 	},
 	"POST /api/qa/experiments": {
 		body:        `{"name":"Test Exp","arms":[{"id":"control","label":"Control","flowHash":"control","weight":50},{"id":"treatment","label":"Treatment","flowHash":"golden-v2@1","weight":50}],"plan":{"plannedOriginsPerArm":10,"maxDays":7}}`,
@@ -1322,6 +1309,9 @@ func TestEveryMutatingRouteIsAttributed(t *testing.T) {
 				client.Config.LocalAPIToken = testAccessCode
 				client.Config.AllowedPrincipals = []string{"user:alice@example.com", "user:bob@example.com"}
 				srv := ui.NewServerWithClient(client)
+				srv.ReadRepoFileAtCommit = func(_ context.Context, _, _, _ string) ([]byte, error) {
+					return []byte("schema: grain.dev/qa-flow/v2\nkey: adopted-flow\nlabel: Adopted\nskill:\n  mode: replace\n  max-bytes: 1800\n  text: test\n"), nil
+				}
 				ctx := context.Background()
 				if way.agent {
 					seedAPITask(t, client, matrixAgent, "acme/widgets", route.agentGrants...)
