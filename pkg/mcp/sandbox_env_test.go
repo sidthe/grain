@@ -16,7 +16,11 @@ package mcp
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -132,5 +136,31 @@ func TestSandboxEnvFallbackPath(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected PATH=%s in sandboxEnv when PATH is empty, got: %v", sandboxFallbackPath, env)
+	}
+}
+
+func TestSandboxEnvFallbackTmpDirWhenDefaultTmpUnusable(t *testing.T) {
+	t.Setenv("TMPDIR", "")
+	origProbe := probeDefaultTmp
+	t.Cleanup(func() { probeDefaultTmp = origProbe })
+
+	root := t.TempDir()
+	wantTmp := filepath.Join(root, ".t")
+
+	probeDefaultTmp = func() error { return syscall.ENOSPC }
+	env := sandboxEnv(root)
+	if !slices.Contains(env, "TMPDIR="+wantTmp) {
+		t.Fatalf("expected TMPDIR=%s when /tmp returns ENOSPC, got: %v", wantTmp, env)
+	}
+	if info, err := os.Stat(wantTmp); err != nil || !info.IsDir() {
+		t.Fatalf("expected fallback tmp dir %s to exist, stat err=%v", wantTmp, err)
+	}
+
+	probeDefaultTmp = func() error { return nil }
+	envNormal := sandboxEnv(t.TempDir())
+	for _, kv := range envNormal {
+		if strings.HasPrefix(kv, "TMPDIR=") {
+			t.Errorf("did not expect fallback TMPDIR when /tmp probe succeeds, got %q", kv)
+		}
 	}
 }

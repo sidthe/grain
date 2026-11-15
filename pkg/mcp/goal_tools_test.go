@@ -28,6 +28,25 @@ func toolNamesOf(tools []Tool) []string {
 	return out
 }
 
+func TestNewGoalTools(t *testing.T) {
+	sink := &MockSink{}
+	tools := NewGoalTools(sink)
+	got := toolNamesOf(tools)
+	want := []string{"record_assumption", "complete_goal"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("NewGoalTools names = %v, want %v", got, want)
+	}
+	ctx := context.Background()
+	for _, tool := range tools {
+		if res := tool.Handler(ctx, map[string]any{}); !res.IsError {
+			t.Errorf("%s expected error for empty args", tool.Name)
+		}
+		if res := tool.Handler(ctx, map[string]any{"unknown": "x"}); !res.IsError {
+			t.Errorf("%s expected error for unknown arg", tool.Name)
+		}
+	}
+}
+
 func TestNewMockToolsWithOptionsVisibility(t *testing.T) {
 	sink := &MockSink{}
 

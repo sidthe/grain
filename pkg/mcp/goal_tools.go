@@ -58,6 +58,15 @@ func (s *MockSink) GoalCompletion() *GoalCompletion {
 	return &cp
 }
 
+// NewGoalTools returns the Autonomous Goal Mode control tools
+// (record_assumption and complete_goal).
+func NewGoalTools(sink *MockSink) []Tool {
+	return []Tool{
+		recordAssumptionTool(sink),
+		completeGoalTool(sink),
+	}
+}
+
 // NewMockToolsWithOptions returns the escape-hatch tools tailored for opts.
 // When opts.AutonomousGoal is true, ask_question and request_access are omitted
 // (and request_secret is omitted when opts.MockMissingSecrets is true), while
@@ -83,10 +92,7 @@ func NewMockToolsWithOptions(sink *MockSink, proposeRepos []string, opts MockToo
 		addReviewCommentTool(sink),
 	)
 	if opts.AutonomousGoal {
-		tools = append(tools,
-			recordAssumptionTool(sink),
-			completeGoalTool(sink),
-		)
+		tools = append(tools, NewGoalTools(sink)...)
 	}
 	return tools
 }

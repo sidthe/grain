@@ -327,6 +327,14 @@ func validEnvName(name string) bool {
 	return true
 }
 
+var probeDefaultTmp = func() error {
+	d, err := os.MkdirTemp("/tmp", "gtmp")
+	if err == nil {
+		_ = os.Remove(d)
+	}
+	return err
+}
+
 // sandboxEnv constructs a sanitized environment for local sandbox subprocesses:
 // HOME is pinned to root (so ~/.gitconfig, ~/.git-credentials, etc. remain confined),
 // and only safe, allowlisted host variables are passed through, followed by
@@ -337,6 +345,7 @@ func validEnvName(name string) bool {
 func sandboxEnv(root string, extra ...string) []string {
 	env := []string{"HOME=" + root}
 	havePath := false
+	haveTmpDir := false
 	for _, name := range sandboxPassthrough {
 		value, ok := os.LookupEnv(name)
 		if !ok {
@@ -348,16 +357,32 @@ func sandboxEnv(root string, extra ...string) []string {
 				continue
 			}
 		}
+		if name == "TMPDIR" {
+			haveTmpDir = value != ""
+			if !haveTmpDir {
+				continue
+			}
+		}
 		env = append(env, name+"="+value)
 	}
 	if !havePath {
 		env = append(env, "PATH="+sandboxFallbackPath)
 	}
 	for _, kv := range extra {
-		if name, _, ok := strings.Cut(kv, "="); !ok || name == "HOME" {
+		name, value, ok := strings.Cut(kv, "=")
+		if !ok || name == "HOME" {
 			continue
 		}
+		if name == "TMPDIR" && value != "" {
+			haveTmpDir = true
+		}
 		env = append(env, kv)
+	}
+	if !haveTmpDir && root != "" && probeDefaultTmp() != nil {
+		fallbackTmp := filepath.Join(root, ".t")
+		if err := os.MkdirAll(fallbackTmp, 0o700); err == nil {
+			env = append(env, "TMPDIR="+fallbackTmp)
+		}
 	}
 	return env
 }
