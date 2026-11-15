@@ -73,7 +73,7 @@ func commentStyle(rel string) string {
 	case ".sh", ".bash", ".py", ".tf":
 		return "#"
 	case ".yml", ".yaml":
-		if strings.HasPrefix(rel, ".grain/workflows/") || strings.HasPrefix(rel, ".github/workflows/") {
+		if strings.HasPrefix(rel, ".github/workflows/") || (strings.HasPrefix(rel, ".grain/workflows/") && rel != ".grain/workflows/tests.yml") {
 			return "#"
 		}
 		return ""

@@ -1233,9 +1233,6 @@ func (s *Server) handleGetQAExperimentResults(w http.ResponseWriter, r *http.Req
 	}
 
 	refArmID := exp.ReferenceArmID
-	if refArmID == "" {
-		refArmID = refArmID
-	}
 	var treatArmID string
 	if len(exp.Arms) >= 2 {
 		foundRef := false

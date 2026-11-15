@@ -171,6 +171,15 @@ func ComputeDeclarationDiff(ref, cand *FlowVersionBundle) DeclarationDiff {
 					diff.AddedCustomChecks = append(diff.AddedCustomChecks, chk.ID)
 				}
 			}
+			if cand.Resolved.Decompose.Enabled {
+				diff.AddedStages = append(diff.AddedStages, "s0-decompose")
+			}
+			if cand.Resolved.Context.Enabled {
+				diff.AddedStages = append(diff.AddedStages, "s1-context")
+			}
+			if cand.Resolved.PRContract.Enabled {
+				diff.AddedStages = append(diff.AddedStages, "s3-pr")
+			}
 		}
 		return diff
 	}
@@ -194,6 +203,15 @@ func ComputeDeclarationDiff(ref, cand *FlowVersionBundle) DeclarationDiff {
 	if ref.Resolved.SecuritySkillText != cand.Resolved.SecuritySkillText {
 		diff.ChangedSkills = append(diff.ChangedSkills, "security")
 	}
+	if fmt.Sprintf("%+v", ref.Resolved.ReadabilityPacks) != fmt.Sprintf("%+v", cand.Resolved.ReadabilityPacks) {
+		diff.ChangedSkills = append(diff.ChangedSkills, "readability-packs")
+	}
+	if fmt.Sprintf("%+v", ref.Resolved.SkillSteps) != fmt.Sprintf("%+v", cand.Resolved.SkillSteps) {
+		diff.ChangedSkills = append(diff.ChangedSkills, "skill-steps")
+	}
+	if fmt.Sprintf("%+v", ref.Resolved.PRContract) != fmt.Sprintf("%+v", cand.Resolved.PRContract) {
+		diff.ChangedSkills = append(diff.ChangedSkills, "pr-contract")
+	}
 
 	// Compare Stages
 	if !ref.Resolved.S0Intent && cand.Resolved.S0Intent {
@@ -205,6 +223,21 @@ func ComputeDeclarationDiff(ref, cand *FlowVersionBundle) DeclarationDiff {
 		diff.AddedStages = append(diff.AddedStages, "s2-plan-critic")
 	} else if ref.Resolved.S2PlanCritic && !cand.Resolved.S2PlanCritic {
 		diff.RemovedStages = append(diff.RemovedStages, "s2-plan-critic")
+	}
+	if !ref.Resolved.Decompose.Enabled && cand.Resolved.Decompose.Enabled {
+		diff.AddedStages = append(diff.AddedStages, "s0-decompose")
+	} else if ref.Resolved.Decompose.Enabled && !cand.Resolved.Decompose.Enabled {
+		diff.RemovedStages = append(diff.RemovedStages, "s0-decompose")
+	}
+	if !ref.Resolved.Context.Enabled && cand.Resolved.Context.Enabled {
+		diff.AddedStages = append(diff.AddedStages, "s1-context")
+	} else if ref.Resolved.Context.Enabled && !cand.Resolved.Context.Enabled {
+		diff.RemovedStages = append(diff.RemovedStages, "s1-context")
+	}
+	if !ref.Resolved.PRContract.Enabled && cand.Resolved.PRContract.Enabled {
+		diff.AddedStages = append(diff.AddedStages, "s3-pr")
+	} else if ref.Resolved.PRContract.Enabled && !cand.Resolved.PRContract.Enabled {
+		diff.RemovedStages = append(diff.RemovedStages, "s3-pr")
 	}
 
 	refCustomStages := make(map[string]bool)
@@ -266,6 +299,12 @@ func ComputeDeclarationDiff(ref, cand *FlowVersionBundle) DeclarationDiff {
 		}
 	}
 
+	if ref.Resolved.EnableS4 != cand.Resolved.EnableS4 ||
+		fmt.Sprintf("%v", ref.Resolved.VerifierTiers) != fmt.Sprintf("%v", cand.Resolved.VerifierTiers) ||
+		ref.Resolved.MaxS4RepairRounds != cand.Resolved.MaxS4RepairRounds {
+		diff.ChangedVerifier = true
+	}
+
 	if ref.Resolved.S5MergeTriage.Mode != cand.Resolved.S5MergeTriage.Mode {
 		diff.ChangedTriage = true
 	}
@@ -278,17 +317,36 @@ func ParseFlowDeclaration(raw []byte) (any, error) {
 	if len(trimmed) == 0 {
 		return nil, fmt.Errorf("qa: empty flow declaration")
 	}
-
-	var peek struct {
-		Schema string `yaml:"schema"`
+	normalized, err := normalizeFlowDeclarationInput(trimmed)
+	if err != nil {
+		return nil, err
 	}
-	if err := yaml.Unmarshal(trimmed, &peek); err != nil {
+
+	var peek map[string]any
+	if err := yaml.Unmarshal(normalized, &peek); err != nil {
 		return nil, fmt.Errorf("qa: checking flow schema: %w", err)
 	}
+	if peek == nil {
+		return nil, fmt.Errorf("qa: flow declaration must be a mapping")
+	}
+	schema, _ := peek["schema"].(string)
 
-	if peek.Schema == FlowSchemaV3 {
+	if schema == FlowSchemaV4 {
+		var decl FlowDeclarationV4
+		dec := yaml.NewDecoder(bytes.NewReader(normalized))
+		dec.KnownFields(true)
+		if err := dec.Decode(&decl); err != nil {
+			return nil, fmt.Errorf("qa: parsing flow declaration v4: %w", err)
+		}
+		if strings.TrimSpace(decl.Key) == "" {
+			return nil, fmt.Errorf("qa: flow key is required")
+		}
+		return &decl, nil
+	}
+
+	if schema == FlowSchemaV3 {
 		var decl FlowDeclarationV3
-		dec := yaml.NewDecoder(bytes.NewReader(trimmed))
+		dec := yaml.NewDecoder(bytes.NewReader(normalized))
 		dec.KnownFields(true)
 		if err := dec.Decode(&decl); err != nil {
 			return nil, fmt.Errorf("qa: parsing flow declaration v3: %w", err)
@@ -299,9 +357,9 @@ func ParseFlowDeclaration(raw []byte) (any, error) {
 		return &decl, nil
 	}
 
-	if peek.Schema == "" || peek.Schema == FlowSchemaV2 {
+	if schema == "" || schema == FlowSchemaV2 {
 		var decl FlowDeclarationV2
-		dec := yaml.NewDecoder(bytes.NewReader(trimmed))
+		dec := yaml.NewDecoder(bytes.NewReader(normalized))
 		dec.KnownFields(true)
 		if err := dec.Decode(&decl); err != nil {
 			return nil, fmt.Errorf("qa: parsing flow declaration v2: %w", err)
@@ -313,7 +371,7 @@ func ParseFlowDeclaration(raw []byte) (any, error) {
 		return &decl, nil
 	}
 
-	return nil, fmt.Errorf("qa: unsupported flow schema %q", peek.Schema)
+	return nil, fmt.Errorf("qa: unsupported flow schema %q", schema)
 }
 
 func ResolveFlowDeclarationV3(decl FlowDeclarationV3, version int, sourceYAML string, explicitParentHash string, builtIn bool, lookup ParentLookupFunc) (FlowVersionBundle, error) {
@@ -394,6 +452,11 @@ func ResolveFlowDeclarationV3(decl FlowDeclarationV3, version int, sourceYAML st
 		if len(normalizeSkillText(sk.Text)) > capB {
 			return FlowVersionBundle{}, fmt.Errorf("qa: skills.%s exceeds max-bytes %d", name, capB)
 		}
+	}
+
+	// Validate S0 on-clarification if specified.
+	if oc := strings.TrimSpace(decl.Stages.S0Intent.OnClarification); oc != "" && oc != "warn" && oc != "ask_human" {
+		return FlowVersionBundle{}, fmt.Errorf("qa: invalid s0-intent on-clarification %q (want warn or ask_human)", oc)
 	}
 
 	// Validate S5 triage mode if specified.
@@ -501,6 +564,8 @@ func ResolveAnyFlowDeclaration(raw []byte, version int, lookup ParentLookupFunc)
 		return FlowVersionBundle{}, err
 	}
 	switch d := anyDecl.(type) {
+	case *FlowDeclarationV4:
+		return ResolveFlowDeclarationV4(*d, version, string(raw), "", false, lookup)
 	case *FlowDeclarationV3:
 		return ResolveFlowDeclarationV3(*d, version, string(raw), "", false, lookup)
 	case *FlowDeclarationV2:
