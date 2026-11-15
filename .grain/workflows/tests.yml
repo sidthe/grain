@@ -38,9 +38,9 @@ jobs:
       - name: Format, vet, and test Goal Mode Go packages
         run: |
           set -euo pipefail
-          mkdir -p "$PWD/.ci-tmp"
-          trap 'rm -rf "$PWD/.ci-tmp"' EXIT
-          export TMPDIR="$PWD/.ci-tmp" GOTMPDIR="$PWD/.ci-tmp"
+          CI_TMP=$(mktemp -d /var/tmp/gci.XXXXXX)
+          trap 'rm -rf "$CI_TMP"' EXIT
+          export TMPDIR="$CI_TMP" GOTMPDIR="$CI_TMP"
           export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all GIT_CONFIG_KEY_1=init.defaultRefFormat GIT_CONFIG_VALUE_1=files
           bad_fmt=$(gofmt -l pkg/model pkg/mcp pkg/agent pkg/orchestrator pkg/daemon pkg/ui tests/hygiene)
           if [ -n "$bad_fmt" ]; then
@@ -64,9 +64,9 @@ jobs:
         working-directory: ui-ng
         run: |
           set -euo pipefail
-          mkdir -p "$PWD/.ci-tmp"
-          trap 'rm -rf "$PWD/.ci-tmp"' EXIT
-          export TMPDIR="$PWD/.ci-tmp"
+          CI_TMP=$(mktemp -d /var/tmp/gci.XXXXXX)
+          trap 'rm -rf "$CI_TMP"' EXIT
+          export TMPDIR="$CI_TMP"
           export PATH="$HOME/.local/node/bin:$PATH"
           npm ci --prefer-offline --no-audit --no-fund
           npm run format:check
