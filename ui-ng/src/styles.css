@@ -430,6 +430,10 @@ body {
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
 }
 
+.stage-header:has(> .tab-strip:last-child) {
+  padding-bottom: 0;
+}
+
 .view-headline-row {
   display: flex;
   align-items: center;
