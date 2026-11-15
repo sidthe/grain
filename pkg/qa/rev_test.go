@@ -23,7 +23,7 @@ import (
 	"testing"
 )
 
-const ExpectedQAEngineDigest = "7c9ac7494036695dc309a56a5698230860344509e4b331472f4553d0b4dab1bf"
+const ExpectedQAEngineDigest = "87ba2e128b0ad32f63527c4fe3de1f146381a5de65d9ae625cac1396f9c8e7d9"
 
 func TestQAEngineRevDigest(t *testing.T) {
 	got, err := ComputeQAEngineDigest(".")
@@ -78,10 +78,22 @@ func TestQAFlowsHaveNoInternalLinks(t *testing.T) {
 	}
 
 	for _, bundle := range BuiltInFlowVersions() {
-		str := bundle.Summary + " " + bundle.Label + " " + bundle.SourceYAML
+		str := bundle.Summary + " " + bundle.Label + " " + bundle.SourceYAML + " " + bundle.Resolved.ActiveCodingGuidance(nil)
 		for _, pat := range badPatterns {
 			if pat.MatchString(str) {
 				t.Errorf("Flow bundle %s contains forbidden internal pattern %s", bundle.Key, pat.String())
+			}
+		}
+	}
+
+	for _, id := range []string{"go", "ts-angular", "python", "cpp"} {
+		txt := BuiltInReadabilityPackText(id)
+		if strings.TrimSpace(txt) == "" {
+			t.Errorf("BuiltInReadabilityPackText(%q) is empty", id)
+		}
+		for _, pat := range badPatterns {
+			if pat.MatchString(txt) {
+				t.Errorf("Readability pack %s contains forbidden internal pattern %s", id, pat.String())
 			}
 		}
 	}

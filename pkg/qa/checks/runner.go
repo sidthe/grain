@@ -269,6 +269,11 @@ func RunS3(ctx context.Context, ws WorkspaceReader, flow qa.FlowSpec, opts RunOp
 		}); err != nil {
 			return "error", err
 		}
+		if err := runOne(qa.RulePRDescriptionContract, func() ([]Finding, error) {
+			return CheckPRDescriptionContract(ctx, ws, pd, flow.PRContract)
+		}); err != nil {
+			return "error", err
+		}
 
 		testTampered := false
 		for _, res := range report.Results {

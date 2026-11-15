@@ -33,9 +33,10 @@ const (
 	RuleUIBudgetAndSpecFloor = "golden:ui-budget-and-spec-floor"
 	RuleExportedSurfaceDelta = "golden:exported-surface-delta"
 	RuleTestHygiene          = "golden:test-hygiene"
-	RuleMutationHardening    = "golden:mutation-hardening"
-	RuleBoundaryFuzz         = "golden:boundary-fuzz"
-	RuleS4OrthogonalVerifier = "golden:s4-orthogonal-verifier"
+	RuleMutationHardening     = "golden:mutation-hardening"
+	RuleBoundaryFuzz          = "golden:boundary-fuzz"
+	RulePRDescriptionContract = "golden:pr-description-contract"
+	RuleS4OrthogonalVerifier  = "golden:s4-orthogonal-verifier"
 )
 
 // RepoFlowCandidatePaths lists the in-tree YAML paths consulted when flowId is "repo-custom".
@@ -84,9 +85,14 @@ type FlowSpec struct {
 	S2PlanCritic        bool              `json:"s2PlanCritic,omitempty" yaml:"s2-plan-critic,omitempty"`
 	S2PlanCriticConfig  S2PlanCriticDecl  `json:"s2PlanCriticConfig,omitempty" yaml:"-"`
 	RiskOverrides       []RiskOverride    `json:"riskOverrides,omitempty" yaml:"risk-overrides,omitempty"`
-	CustomStages        []CustomStageDecl `json:"customStages,omitempty" yaml:"custom-stages,omitempty"`
-	S5MergeTriage       TriageConfig      `json:"s5MergeTriage,omitempty" yaml:"s5-merge-triage,omitempty"`
-	CustomChecks        []CustomCheckDecl `json:"customChecks,omitempty" yaml:"custom-checks,omitempty"`
+	CustomStages        []CustomStageDecl     `json:"customStages,omitempty" yaml:"custom-stages,omitempty"`
+	S5MergeTriage       TriageConfig          `json:"s5MergeTriage,omitempty" yaml:"s5-merge-triage,omitempty"`
+	CustomChecks        []CustomCheckDecl     `json:"customChecks,omitempty" yaml:"custom-checks,omitempty"`
+	Decompose           DecomposeDecl         `json:"decompose,omitempty" yaml:"-"`
+	Context             ContextDiscoveryDecl  `json:"context,omitempty" yaml:"-"`
+	ReadabilityPacks    []ReadabilityPackDecl `json:"readabilityPacks,omitempty" yaml:"-"`
+	SkillSteps          []SkillStepDecl       `json:"skillSteps,omitempty" yaml:"-"`
+	PRContract          PRContractDecl        `json:"prContract,omitempty" yaml:"-"`
 }
 
 type CustomStageDecl struct {
@@ -187,6 +193,15 @@ func defaultS3Rules() []RuleSpec {
 			Summary:     "Enforces angular.json component style budgets via a non-regressing size ratchet, blocks new eager feature imports in app.component.ts, and requires unit spec files for newly added Angular components.",
 			TargetPaths: []string{"ui/**", "ui-ng/**"},
 			Enabled:     true,
+		},
+		{
+			ID:          RulePRDescriptionContract,
+			Label:       "PR description & lint-suppression contract",
+			Stage:       "S3",
+			Severity:    "warn",
+			Summary:     "Checks pull request subject length, required description sections, and audits newly added lint-suppression directives without justification.",
+			TargetPaths: []string{"**/*.go", "**/*.ts", "**/*.py", "**/*.cc", "**/*.cpp", "**/*.h"},
+			Enabled:     false,
 		},
 	}
 }

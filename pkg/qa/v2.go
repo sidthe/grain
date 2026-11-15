@@ -119,10 +119,11 @@ type V3StagesDecl struct {
 }
 
 type S0IntentDecl struct {
-	Enabled      bool     `json:"enabled,omitempty" yaml:"enabled,omitempty"`
-	Complexities []string `json:"complexities,omitempty" yaml:"complexities,omitempty"`
-	MaxSeconds   int      `json:"max-seconds,omitempty" yaml:"max-seconds,omitempty"`
-	MaxTokens    int      `json:"max-tokens,omitempty" yaml:"max-tokens,omitempty"`
+	Enabled         bool     `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Complexities    []string `json:"complexities,omitempty" yaml:"complexities,omitempty"`
+	MaxSeconds      int      `json:"max-seconds,omitempty" yaml:"max-seconds,omitempty"`
+	MaxTokens       int      `json:"max-tokens,omitempty" yaml:"max-tokens,omitempty"`
+	OnClarification string   `json:"on-clarification,omitempty" yaml:"on-clarification,omitempty"`
 }
 
 type S1RiskDecl struct {
@@ -152,6 +153,7 @@ type FlowVersionBundle struct {
 	SourceYAML    string              `json:"sourceYaml,omitempty"`
 	Declaration   FlowDeclarationV2   `json:"declaration"`
 	DeclarationV3 *FlowDeclarationV3  `json:"declarationV3,omitempty"`
+	DeclarationV4 *FlowDeclarationV4  `json:"declarationV4,omitempty"`
 	SpecJSON      string              `json:"specJson"`
 	Resolved      FlowSpec            `json:"resolved"`
 }
@@ -302,6 +304,15 @@ var allBuiltInRuleCatalog = []RuleSpec{
 		TargetPaths: []string{"**/*.go"},
 		Enabled:     false,
 	},
+	{
+		ID:          RulePRDescriptionContract,
+		Label:       "PR description & lint-suppression contract",
+		Stage:       "S3",
+		Severity:    "warn",
+		Summary:     "Checks pull request subject length, required description sections, and audits newly added lint-suppression directives without justification.",
+		TargetPaths: []string{"**/*.go", "**/*.ts", "**/*.py", "**/*.cc", "**/*.cpp", "**/*.h"},
+		Enabled:     false,
+	},
 }
 
 var (
@@ -393,7 +404,7 @@ func BuiltInFlowVersions() []FlowVersionBundle {
 	}
 
 	out := []FlowVersionBundle{v1Bundle}
-	for _, rawYAML := range []string{goldenV2YAML, goldenV2SkillOnlyYAML, goldenV2ChecksOnlyYAML, goldenV3YAML} {
+	for _, rawYAML := range []string{goldenV2YAML, goldenV2SkillOnlyYAML, goldenV2ChecksOnlyYAML, goldenV3YAML, engineeringWorkflowV4YAML} {
 		anyDecl, pErr := ParseFlowDeclaration([]byte(rawYAML))
 		if pErr != nil {
 			panic(fmt.Sprintf("qa: invalid built-in yaml: %v", pErr))
@@ -409,6 +420,9 @@ func BuiltInFlowVersions() []FlowVersionBundle {
 		}
 		
 		switch d := anyDecl.(type) {
+		case *FlowDeclarationV4:
+			key = d.Key
+			b, cErr = ResolveFlowDeclarationV4(*d, 1, rawYAML, "", true, lfunc)
 		case *FlowDeclarationV3:
 			key = d.Key
 			b, cErr = ResolveFlowDeclarationV3(*d, 1, rawYAML, "", true, lfunc)
@@ -487,9 +501,10 @@ func ResolveFlowDeclarationV2(decl FlowDeclarationV2, version int, sourceYAML st
 }
 
 var allowedCheckParams = map[string][]string{
-	RuleSiblingExportHazard: {"resolve"},
-	RuleMutationHardening:   {"mutants", "max-seconds"},
-	RuleBoundaryFuzz:        {"max-seconds"},
+	RuleSiblingExportHazard:   {"resolve"},
+	RuleMutationHardening:     {"mutants", "max-seconds"},
+	RuleBoundaryFuzz:          {"max-seconds"},
+	RulePRDescriptionContract: {"max-subject-chars", "required-sections", "audit-lint-suppressions"},
 }
 
 func compileBundle(decl FlowDeclarationV2, version int, sourceYAML string, explicitParentHash string, builtIn bool, lookup ParentLookupFunc) (FlowVersionBundle, error) {
@@ -597,6 +612,13 @@ func compileBundle(decl FlowDeclarationV2, version int, sourceYAML string, expli
 	knownRules := make(map[string]RuleSpec, len(allBuiltInRuleCatalog))
 	for _, r := range allBuiltInRuleCatalog {
 		knownRules[r.ID] = r
+		if r.ID == RulePRDescriptionContract {
+			if _, inBase := base.Checks[r.ID]; !inBase {
+				if _, inDecl := decl.Checks[r.ID]; !inDecl {
+					continue
+				}
+			}
+		}
 		bc := base.Checks[r.ID]
 		en := r.Enabled
 		if bc.Enabled != nil {
@@ -614,10 +636,14 @@ func compileBundle(decl FlowDeclarationV2, version int, sourceYAML string, expli
 	}
 
 	for ruleID, override := range decl.Checks {
-		if _, ok := knownRules[ruleID]; !ok {
+		known, ok := knownRules[ruleID]
+		if !ok {
 			return FlowVersionBundle{}, fmt.Errorf("qa: unknown check id %q", ruleID)
 		}
-		cur := mat.Checks[ruleID]
+		cur, hasCur := mat.Checks[ruleID]
+		if !hasCur {
+			cur = CheckDecl{Enabled: boolPtr(known.Enabled), Severity: known.Severity}
+		}
 		isFloor := ruleID == RuleTestIntegrityGuard || ruleID == RuleStrictConfigDecoder
 		if override.Enabled != nil {
 			if isFloor && !*override.Enabled {
@@ -719,12 +745,15 @@ func compileBundle(decl FlowDeclarationV2, version int, sourceYAML string, expli
 	// Build executable FlowSpec.
 	rules := make([]RuleSpec, 0, len(allBuiltInRuleCatalog)+1)
 	for _, cat := range allBuiltInRuleCatalog {
-		mc := mat.Checks[cat.ID]
 		r := cat
-		r.Enabled = mc.Enabled != nil && *mc.Enabled
-		r.Severity = mc.Severity
-		if len(mc.Params) > 0 {
-			r.Params = cloneParams(mc.Params)
+		if mc, ok := mat.Checks[cat.ID]; ok {
+			r.Enabled = mc.Enabled != nil && *mc.Enabled
+			if mc.Severity != "" {
+				r.Severity = mc.Severity
+			}
+			if len(mc.Params) > 0 {
+				r.Params = cloneParams(mc.Params)
+			}
 		}
 		rules = append(rules, r)
 	}
