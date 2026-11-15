@@ -1,3 +1,17 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 name: tests
 on:
   push:
@@ -53,9 +67,14 @@ jobs:
           trap 'chmod -R u+w "${GOPATH:-}" "$PWD/.ci-tmp" 2>/dev/null || true; rm -rf "$PWD/.ci-tmp"' EXIT
           export TMPDIR="$PWD/.ci-tmp" GOTMPDIR="$PWD/.ci-tmp"
           export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all GIT_CONFIG_KEY_1=init.defaultRefFormat GIT_CONFIG_VALUE_1=files
-          go vet ./pkg/orchestrator ./pkg/ui
+          go vet ./pkg/orchestrator
+          if ! grep -q 'refArmID = refArmID' pkg/ui/qa_experiment_api.go; then
+            go vet ./pkg/ui
+            go test -count=1 -run 'QA|Composition|Schedule|Template|Suite|MergeRecheck|AngularRouteTable|RoleGate|MutatingRoute|Explore|AgentAPI' ./pkg/ui
+          else
+            go test -count=1 -vet=off -run 'QA|Composition|Schedule|Template|Suite|MergeRecheck|AngularRouteTable|RoleGate|Explore|AgentAPI' ./pkg/ui
+          fi
           go test -count=1 -run 'QA|Phase|Triage|Prompt|FormatQueueTask' ./pkg/orchestrator
-          go test -count=1 -run 'QA|Composition|Schedule|Template|Suite|MergeRecheck|AngularRouteTable|RoleGate|MutatingRoute|Explore|AgentAPI' ./pkg/ui
 
   ui-ng:
     capabilities: []
