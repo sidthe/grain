@@ -16,7 +16,7 @@ import { ComponentFixture, TestBed } from "@angular/core/testing";
 import { vi } from "vitest";
 import { GrainApi } from "../api/grain-api.service";
 import { SnackbarService } from "../services/snackbar.service";
-import type { FlowDeclarationV3 } from "./qa-flows.models";
+import type { FlowDeclarationV3, FlowDeclarationV4 } from "./qa-flows.models";
 import { QaV3StudioComponent } from "./qa-v3-studio.component";
 
 const ROUTE_RESPONSES: Readonly<Record<string, unknown>> = {
@@ -227,5 +227,95 @@ describe("QaV3StudioComponent", () => {
 
     expect(showSpy).toHaveBeenCalledWith("Adopted flow sha256:adopted123");
     expect(root.querySelector('[data-testid="qa-v3-adopt-dialog"]')).toBeNull();
+  });
+
+  it("authors V4 readability packs, skill steps, PR contract, runs inline fixture self-tests, and publishes V4 YAML", async () => {
+    const v4Decl: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      key: "engineering-workflow-v4",
+      extends: "golden-v3@1",
+      decompose: { enabled: true, mode: "slice_plan", maxSubtasks: 5 },
+      context: { enabled: true, includeCallers: true, maxTokens: 12000 },
+      readabilityPacks: [
+        { id: "go", enabled: true, activation: "auto" },
+        { id: "ts-angular", enabled: true, activation: "auto" },
+        { id: "python", enabled: true, activation: "auto" },
+        { id: "cpp", enabled: true, activation: "auto" },
+      ],
+      skillSteps: [
+        {
+          id: "step:caller-sweep",
+          label: "Caller sweep",
+          stage: "coding",
+          enabled: true,
+          text: "Sweep callers by import path.",
+        },
+      ],
+      prContract: {
+        enabled: true,
+        mode: "warn",
+        requiredSections: ["Summary", "Verification"],
+      },
+      "custom-checks": [
+        {
+          id: "custom:no-println",
+          kind: "pattern",
+          "forbid-added": "\\bfmt\\.Println\\(",
+          fixtures: {
+            fail: [{ name: "bad", "added-lines": ["fmt.Println(1)"] }],
+            pass: [{ name: "good", "added-lines": ["slog.Info(1)"] }],
+          },
+        },
+      ],
+    };
+
+    fixture.componentRef.setInput("decl", v4Decl);
+    fixture.detectChanges();
+
+    const root = fixture.nativeElement as HTMLElement;
+    expect(root.querySelector('[data-testid="qa-pack-row-go"]')).toBeTruthy();
+    expect(
+      root.querySelector('[data-testid="qa-pack-row-ts-angular"]'),
+    ).toBeTruthy();
+
+    // Add a skill step
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="qa-add-skill-step-btn"]',
+      )!
+      .click();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.skillSteps().length).toBe(2);
+
+    // Run inline fixture self-test runner
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="qa-run-fixtures-btn"]')!
+      .click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const selfTestEl = root.querySelector(
+      '[data-testid="qa-fixture-selftest-result"]',
+    );
+    expect(selfTestEl?.textContent).toContain("Fail trap caught");
+    expect(selfTestEl?.textContent).toContain("Clean pass green");
+
+    // Publish V4 version
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="qa-v3-publish-v4"]')!
+      .click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(postSpy).toHaveBeenCalledWith(
+      "POST /api/qa/flow-versions",
+      undefined,
+      expect.objectContaining({
+        declaration: expect.objectContaining({
+          schema: "grain.dev/qa-flow/v4",
+          key: "engineering-workflow-v4",
+        }),
+      }),
+    );
   });
 });

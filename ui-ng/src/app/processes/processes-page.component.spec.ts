@@ -427,6 +427,16 @@ class FakeProcessesApi {
     return Promise.resolve({});
   };
 
+  getText = (route: string, params?: Record<string, unknown>) => {
+    this.calls.push({ method: "GET_TEXT", route, params });
+    if (route === "GET /api/fs/repo/{path...}") {
+      return Promise.resolve(
+        `# fetched from ${String(params?.["path"] ?? "")}\nname: CI\non: [push, pull_request]\n`,
+      );
+    }
+    return Promise.resolve("");
+  };
+
   post = (route: string, params?: unknown, body?: Record<string, unknown>) => {
     this.calls.push({ method: "POST", route, params, body });
     if (
@@ -1115,5 +1125,71 @@ describe("ProcessesPageComponent (D-9)", () => {
     expect(
       root.querySelector('[data-testid="qa-flow-detail-card"]')!.textContent,
     ).toContain("disabled");
+  });
+
+  it("toggles inline read-only YAML preview on Repo Workflows & Declarations and sizes prompt textareas to 8 rows", async () => {
+    const harness = await RouterTestingHarness.create(
+      "/processes/declarations",
+    );
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    const toggleBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="decl-inline-yaml-toggle"]',
+    )!;
+    expect(toggleBtn).not.toBeNull();
+    expect(toggleBtn.textContent?.trim()).toBe("View YAML");
+    expect(root.querySelector('[data-testid="decl-inline-yaml"]')).toBeNull();
+
+    toggleBtn.click();
+    await flush(harness);
+
+    const yamlCall = api.calls.find(
+      (c) => c.route === "GET /api/fs/repo/{path...}",
+    );
+    expect(yamlCall).toBeTruthy();
+    expect(yamlCall!.params).toEqual({
+      path: ".grain/templates/release-notes.yml",
+    });
+
+    const yamlPre = root.querySelector<HTMLPreElement>(
+      '[data-testid="decl-inline-yaml"]',
+    )!;
+    expect(yamlPre).not.toBeNull();
+    expect(yamlPre.classList.contains("comp-body-well")).toBe(true);
+    expect(yamlPre.textContent).toContain(
+      "# fetched from .grain/templates/release-notes.yml",
+    );
+    expect(toggleBtn.textContent?.trim()).toBe("Hide YAML");
+
+    toggleBtn.click();
+    await flush(harness);
+
+    expect(root.querySelector('[data-testid="decl-inline-yaml"]')).toBeNull();
+    expect(toggleBtn.textContent?.trim()).toBe("View YAML");
+
+    await harness.navigateByUrl("/processes/schedules?new=1");
+    await flush(harness);
+    expect(
+      harness.routeNativeElement
+        ?.querySelector<HTMLTextAreaElement>('[data-testid="sched-desc-input"]')
+        ?.getAttribute("rows"),
+    ).toBe("8");
+
+    await harness.navigateByUrl("/processes/templates");
+    await flush(harness);
+    harness.routeNativeElement
+      ?.querySelector<HTMLElement>('[data-testid="tmpl-row-tmpl-deploy-1"]')
+      ?.click();
+    await flush(harness);
+    harness.routeNativeElement
+      ?.querySelector<HTMLButtonElement>('[data-testid="tmpl-edit-btn"]')
+      ?.click();
+    await flush(harness);
+    expect(
+      harness.routeNativeElement
+        ?.querySelector<HTMLTextAreaElement>('[data-testid="tmpl-desc-input"]')
+        ?.getAttribute("rows"),
+    ).toBe("8");
   });
 });

@@ -155,199 +155,6 @@ export type TelemetryTab = "overview" | "quality";
         </p>
 
         <div
-          class="ops-toolbar"
-          role="toolbar"
-          aria-label="Telemetry window and scope"
-        >
-          @if (!qualityPeriod()) {
-            <div class="segmented" role="group" aria-label="Time window">
-              @for (w of windows; track w.id) {
-                <button
-                  type="button"
-                  [attr.aria-pressed]="window() === w.id"
-                  [attr.data-testid]="'telemetry-window-' + w.id"
-                  (click)="pickWindow(w.id)"
-                >
-                  {{ w.label }}
-                </button>
-              }
-            </div>
-          }
-
-          <div class="pop-wrap">
-            @if (tab() === "quality") {
-              <span
-                class="status-pill neutral"
-                gTip="Quality check rollouts and experiments are evaluated across their configured scope"
-                data-testid="telemetry-repo-readonly"
-              >
-                All repositories
-              </span>
-            } @else {
-              <button
-                #repoTrigger
-                type="button"
-                class="pop-trigger"
-                [class.is-active]="!!selectedRepo()"
-                data-testid="telemetry-repo-trigger"
-                aria-haspopup="listbox"
-                [attr.aria-expanded]="openMenu() === 'repo'"
-                aria-controls="telemetry-repo-menu"
-                (click)="toggleMenu('repo', $event)"
-                (keydown)="onMenuTriggerKeydown('repo', $event)"
-              >
-                <span>{{
-                  selectedRepo()
-                    ? "Repo: " + selectedRepo()
-                    : "All repositories"
-                }}</span>
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  aria-hidden="true"
-                >
-                  <path d="M7 10l5 5 5-5z" fill="currentColor" />
-                </svg>
-              </button>
-              @if (openMenu() === "repo") {
-                <ul
-                  #repoListbox
-                  class="pop-menu"
-                  id="telemetry-repo-menu"
-                  role="listbox"
-                  tabindex="-1"
-                  aria-label="Filter by repository"
-                  data-testid="telemetry-repo-menu"
-                  (keydown)="onListboxKeydown('repo', $event)"
-                >
-                  <li role="none">
-                    <button
-                      type="button"
-                      class="pop-item"
-                      role="option"
-                      [disabled]="!canReadAllReposMetrics()"
-                      [attr.aria-selected]="!selectedRepo()"
-                      (click)="pickRepo('')"
-                    >
-                      <span>All repositories</span>
-                      @if (!selectedRepo()) {
-                        <span aria-hidden="true">✓</span>
-                      }
-                    </button>
-                  </li>
-                  @for (r of repoOptions(); track r) {
-                    <li role="none">
-                      <button
-                        type="button"
-                        class="pop-item"
-                        role="option"
-                        [attr.aria-selected]="selectedRepo() === r"
-                        [attr.data-testid]="'telemetry-repo-opt-' + r"
-                        (click)="pickRepo(r)"
-                      >
-                        <span class="tabular">{{ r }}</span>
-                        @if (selectedRepo() === r) {
-                          <span aria-hidden="true">✓</span>
-                        }
-                      </button>
-                    </li>
-                  }
-                </ul>
-              }
-            }
-          </div>
-
-          @if (tab() === "overview") {
-            <div class="pop-wrap">
-              <button
-                #authorTrigger
-                type="button"
-                class="pop-trigger"
-                [class.is-active]="!!selectedAuthor()"
-                data-testid="telemetry-author-trigger"
-                aria-haspopup="listbox"
-                [attr.aria-expanded]="openMenu() === 'author'"
-                aria-controls="telemetry-author-menu"
-                (click)="toggleMenu('author', $event)"
-                (keydown)="onMenuTriggerKeydown('author', $event)"
-              >
-                <span>{{
-                  selectedAuthor()
-                    ? "Author: " + selectedAuthor()
-                    : "All contributors"
-                }}</span>
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  aria-hidden="true"
-                >
-                  <path d="M7 10l5 5 5-5z" fill="currentColor" />
-                </svg>
-              </button>
-              @if (openMenu() === "author") {
-                <ul
-                  #authorListbox
-                  class="pop-menu"
-                  id="telemetry-author-menu"
-                  role="listbox"
-                  tabindex="-1"
-                  aria-label="Filter by contributor"
-                  data-testid="telemetry-author-menu"
-                  (keydown)="onListboxKeydown('author', $event)"
-                >
-                  <li role="none">
-                    <button
-                      type="button"
-                      class="pop-item"
-                      role="option"
-                      [attr.aria-selected]="!selectedAuthor()"
-                      (click)="pickAuthor('')"
-                    >
-                      <span>All contributors</span>
-                      @if (!selectedAuthor()) {
-                        <span aria-hidden="true">✓</span>
-                      }
-                    </button>
-                  </li>
-                  @for (a of authorOptions(); track a) {
-                    <li role="none">
-                      <button
-                        type="button"
-                        class="pop-item"
-                        role="option"
-                        [attr.aria-selected]="selectedAuthor() === a"
-                        (click)="pickAuthor(a)"
-                      >
-                        <span>{{ a }}</span>
-                        @if (selectedAuthor() === a) {
-                          <span aria-hidden="true">✓</span>
-                        }
-                      </button>
-                    </li>
-                  }
-                </ul>
-              }
-            </div>
-          }
-
-          @if (
-            (selectedRepo() && canReadAllReposMetrics()) ||
-            (selectedAuthor() && tab() === "overview")
-          ) {
-            <button
-              type="button"
-              class="btn-text"
-              data-testid="telemetry-clear-scope"
-              (click)="clearScope()"
-            >
-              Clear scope
-            </button>
-          }
-        </div>
-
-        <div
           class="tab-strip"
           role="tablist"
           aria-label="Telemetry views"
@@ -375,6 +182,197 @@ export type TelemetryTab = "overview" | "quality";
             </button>
           }
         </div>
+      </div>
+
+      <div
+        class="ops-toolbar"
+        role="toolbar"
+        aria-label="Telemetry window and scope"
+      >
+        @if (!qualityPeriod()) {
+          <div class="segmented" role="group" aria-label="Time window">
+            @for (w of windows; track w.id) {
+              <button
+                type="button"
+                [attr.aria-pressed]="window() === w.id"
+                [attr.data-testid]="'telemetry-window-' + w.id"
+                (click)="pickWindow(w.id)"
+              >
+                {{ w.label }}
+              </button>
+            }
+          </div>
+        }
+
+        <div class="pop-wrap">
+          @if (tab() === "quality") {
+            <span
+              class="status-pill neutral"
+              gTip="Quality check rollouts and experiments are evaluated across their configured scope"
+              data-testid="telemetry-repo-readonly"
+            >
+              All repositories
+            </span>
+          } @else {
+            <button
+              #repoTrigger
+              type="button"
+              class="pop-trigger"
+              [class.is-active]="!!selectedRepo()"
+              data-testid="telemetry-repo-trigger"
+              aria-haspopup="listbox"
+              [attr.aria-expanded]="openMenu() === 'repo'"
+              aria-controls="telemetry-repo-menu"
+              (click)="toggleMenu('repo', $event)"
+              (keydown)="onMenuTriggerKeydown('repo', $event)"
+            >
+              <span>{{
+                selectedRepo() ? "Repo: " + selectedRepo() : "All repositories"
+              }}</span>
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <path d="M7 10l5 5 5-5z" fill="currentColor" />
+              </svg>
+            </button>
+            @if (openMenu() === "repo") {
+              <ul
+                #repoListbox
+                class="pop-menu"
+                id="telemetry-repo-menu"
+                role="listbox"
+                tabindex="-1"
+                aria-label="Filter by repository"
+                data-testid="telemetry-repo-menu"
+                (keydown)="onListboxKeydown('repo', $event)"
+              >
+                <li role="none">
+                  <button
+                    type="button"
+                    class="pop-item"
+                    role="option"
+                    [disabled]="!canReadAllReposMetrics()"
+                    [attr.aria-selected]="!selectedRepo()"
+                    (click)="pickRepo('')"
+                  >
+                    <span>All repositories</span>
+                    @if (!selectedRepo()) {
+                      <span aria-hidden="true">✓</span>
+                    }
+                  </button>
+                </li>
+                @for (r of repoOptions(); track r) {
+                  <li role="none">
+                    <button
+                      type="button"
+                      class="pop-item"
+                      role="option"
+                      [attr.aria-selected]="selectedRepo() === r"
+                      [attr.data-testid]="'telemetry-repo-opt-' + r"
+                      (click)="pickRepo(r)"
+                    >
+                      <span class="tabular">{{ r }}</span>
+                      @if (selectedRepo() === r) {
+                        <span aria-hidden="true">✓</span>
+                      }
+                    </button>
+                  </li>
+                }
+              </ul>
+            }
+          }
+        </div>
+
+        @if (tab() === "overview") {
+          <div class="pop-wrap">
+            <button
+              #authorTrigger
+              type="button"
+              class="pop-trigger"
+              [class.is-active]="!!selectedAuthor()"
+              data-testid="telemetry-author-trigger"
+              aria-haspopup="listbox"
+              [attr.aria-expanded]="openMenu() === 'author'"
+              aria-controls="telemetry-author-menu"
+              (click)="toggleMenu('author', $event)"
+              (keydown)="onMenuTriggerKeydown('author', $event)"
+            >
+              <span>{{
+                selectedAuthor()
+                  ? "Author: " + selectedAuthor()
+                  : "All contributors"
+              }}</span>
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <path d="M7 10l5 5 5-5z" fill="currentColor" />
+              </svg>
+            </button>
+            @if (openMenu() === "author") {
+              <ul
+                #authorListbox
+                class="pop-menu"
+                id="telemetry-author-menu"
+                role="listbox"
+                tabindex="-1"
+                aria-label="Filter by contributor"
+                data-testid="telemetry-author-menu"
+                (keydown)="onListboxKeydown('author', $event)"
+              >
+                <li role="none">
+                  <button
+                    type="button"
+                    class="pop-item"
+                    role="option"
+                    [attr.aria-selected]="!selectedAuthor()"
+                    (click)="pickAuthor('')"
+                  >
+                    <span>All contributors</span>
+                    @if (!selectedAuthor()) {
+                      <span aria-hidden="true">✓</span>
+                    }
+                  </button>
+                </li>
+                @for (a of authorOptions(); track a) {
+                  <li role="none">
+                    <button
+                      type="button"
+                      class="pop-item"
+                      role="option"
+                      [attr.aria-selected]="selectedAuthor() === a"
+                      (click)="pickAuthor(a)"
+                    >
+                      <span>{{ a }}</span>
+                      @if (selectedAuthor() === a) {
+                        <span aria-hidden="true">✓</span>
+                      }
+                    </button>
+                  </li>
+                }
+              </ul>
+            }
+          </div>
+        }
+
+        @if (
+          (selectedRepo() && canReadAllReposMetrics()) ||
+          (selectedAuthor() && tab() === "overview")
+        ) {
+          <button
+            type="button"
+            class="btn-text"
+            data-testid="telemetry-clear-scope"
+            (click)="clearScope()"
+          >
+            Clear scope
+          </button>
+        }
       </div>
 
       @if (tab() === "quality") {

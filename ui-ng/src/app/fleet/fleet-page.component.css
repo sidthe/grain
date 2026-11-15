@@ -122,15 +122,3 @@ g-fleet-page {
   flex-wrap: wrap;
   gap: 6px;
 }
-
-.fleet-tab-btn {
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  font: inherit;
-}
-
-.fleet-tab-btn[aria-selected="true"] {
-  color: var(--md-sys-color-primary);
-  border-bottom-color: var(--md-sys-color-primary);
-}
