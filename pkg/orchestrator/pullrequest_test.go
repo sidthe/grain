@@ -747,11 +747,11 @@ func TestRunCycleDoesNotSalvageAnUntouchedBranchWhenARepairRunFails(t *testing.T
 	pause := &orchestrator.Pause{}
 	pausedBeforePush := openingFramework{agentFunc(func(ctx context.Context, cfg agent.RunConfig) (*agent.Result, error) {
 		return &agent.Result{ToolCalls: []agent.ToolCall{
-				{Name: "run_command", Text: "git status"},
-			}}, &agent.UsageLimitError{
-				Framework: model.AgentFrameworkClaude,
-				Message:   "hit your limit",
-			}
+			{Name: "run_command", Text: "git status"},
+		}}, &agent.UsageLimitError{
+			Framework: model.AgentFrameworkClaude,
+			Message:   "hit your limit",
+		}
 	})}
 
 	deps := orchestrator.Deps{

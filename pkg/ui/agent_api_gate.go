@@ -3929,6 +3929,7 @@ func editedPatchResponseKeys(body []byte) []string {
 	add(req.GoogleChatSpace != nil, "googleChatSpace")
 	add(req.Designs != nil, "designs")
 	add(req.Context != nil, "context")
+	add(req.GoalMode != nil, "goalMode")
 	return keys
 }
 
