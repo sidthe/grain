@@ -413,6 +413,11 @@ func (c *Client) CreateTemplate(ctx context.Context, req CreateTemplateRequest) 
 	if err := c.checkSettingsWritable(ctx, "template"); err != nil {
 		return Template{}, err
 	}
+	if strings.TrimSpace(req.QAFlowRef) != "" {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, ""); err != nil {
+			return Template{}, err
+		}
+	}
 	if strings.TrimSpace(req.Name) == "" {
 		return Template{}, validationErrorf("name is required")
 	}
@@ -891,6 +896,11 @@ type UpdateTemplateRequest struct {
 func (c *Client) UpdateTemplate(ctx context.Context, id string, req UpdateTemplateRequest) (Template, error) {
 	if err := c.checkSettingsWritable(ctx, "template"); err != nil {
 		return Template{}, err
+	}
+	if req.QAFlowRef != nil {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, ""); err != nil {
+			return Template{}, err
+		}
 	}
 	// Before anything is parsed: a request that may not change this
 	// template at all should hear that, not a complaint about a field

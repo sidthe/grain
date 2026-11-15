@@ -828,6 +828,11 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 	if err := c.checkSettingsWritable(ctx, "schedule"); err != nil {
 		return Schedule{}, err
 	}
+	if strings.TrimSpace(req.QAFlowRef) != "" {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, ""); err != nil {
+			return Schedule{}, err
+		}
+	}
 	recurrence, err := parseRecurrence(req.Recurrence)
 	if err != nil {
 		return Schedule{}, err
@@ -1760,6 +1765,11 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 	if err := c.checkSettingsWritable(ctx, "schedule"); err != nil {
 		return Schedule{}, err
 	}
+	if req.QAFlowRef != nil {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, ""); err != nil {
+			return Schedule{}, err
+		}
+	}
 	if req.Base != nil {
 		trimmed := strings.TrimSpace(*req.Base) // CreateSchedule's reason
 		req.Base = &trimmed
@@ -2140,6 +2150,9 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 				// as inline content of its own -- the rest of that content
 				// is already on the row as its display cache.
 				*s = withScheduleTemplateSettings(*s, existingTemplate)
+				if s.QAFlowRef == "" && req.QAFlowRef == nil && existingTemplate != nil {
+					s.QAFlowRef = existingTemplate.QAFlowRef
+				}
 				s.TemplateID = nil
 			}
 			if req.Title != nil {

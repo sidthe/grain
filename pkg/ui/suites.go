@@ -243,6 +243,11 @@ func (c *Client) CreateSuite(ctx context.Context, req CreateSuiteRequest) (Suite
 	if err := c.checkSettingsWritable(ctx, "suite"); err != nil {
 		return Suite{}, err
 	}
+	if strings.TrimSpace(req.QAFlowRef) != "" {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, ""); err != nil {
+			return Suite{}, err
+		}
+	}
 	if strings.TrimSpace(req.Name) == "" {
 		return Suite{}, validationErrorf("name is required")
 	}
@@ -361,6 +366,11 @@ type UpdateSuiteRequest struct {
 func (c *Client) UpdateSuite(ctx context.Context, id string, req UpdateSuiteRequest) (Suite, error) {
 	if err := c.checkSettingsWritable(ctx, "suite"); err != nil {
 		return Suite{}, err
+	}
+	if req.QAFlowRef != nil {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, ""); err != nil {
+			return Suite{}, err
+		}
 	}
 	if err := c.refuseDeclaredEdit(ctx, id, "edit"); err != nil {
 		return Suite{}, err

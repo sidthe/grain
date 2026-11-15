@@ -1218,6 +1218,11 @@ func (c *Client) SetRepoSettings(ctx context.Context, repo string, req SetRepoSe
 	if err != nil {
 		return RepoDefaults{}, validationErrorf("repo: %v", err)
 	}
+	if req.QAFlowRef != nil {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, ""); err != nil {
+			return RepoDefaults{}, err
+		}
+	}
 	var recheck model.MergeRecheckMode
 	if req.MergeRecheck != nil {
 		if recheck, err = model.ParseMergeRecheckMode(*req.MergeRecheck); err != nil {

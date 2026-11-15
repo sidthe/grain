@@ -2246,8 +2246,7 @@ func (s *Server) filingEscalation(ctx context.Context, held []string, set APIGra
 				return errors.New("an agent cannot set proposalKey directly")
 			}
 		case "qaflowref", "qa_flow_ref", "qaflow":
-			var ref string
-			if json.Unmarshal(raw, &ref) == nil && strings.TrimSpace(ref) != "" {
+			if hasQAFlowRefField(pattern, raw) {
 				if opts.role != nil {
 					return fmt.Errorf("%s cannot set %s directly", opts.role.label(), key)
 				}
@@ -2746,6 +2745,20 @@ func hasReviewersField(pattern string, raw json.RawMessage) bool {
 	var one string
 	if json.Unmarshal(raw, &one) == nil {
 		return strings.TrimSpace(one) != ""
+	}
+	return len(strings.TrimSpace(string(raw))) > 0
+}
+
+func hasQAFlowRefField(pattern string, raw json.RawMessage) bool {
+	if strings.TrimSpace(string(raw)) == "null" {
+		return false
+	}
+	if strings.HasPrefix(pattern, "PATCH ") || strings.HasPrefix(pattern, "PUT ") {
+		return true
+	}
+	var ref string
+	if json.Unmarshal(raw, &ref) == nil {
+		return strings.TrimSpace(ref) != ""
 	}
 	return len(strings.TrimSpace(string(raw))) > 0
 }

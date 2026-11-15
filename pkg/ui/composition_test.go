@@ -21,7 +21,9 @@ package ui_test
 
 import (
 	"context"
+	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ai-on-gke/grain/pkg/model"
@@ -885,5 +887,70 @@ func TestCompositionShowsQAFlowAndUICRUDRoundTripAndAgentRefusal(t *testing.T) {
 		QAFlowRef:  "golden-v3@1",
 	}); err == nil {
 		t.Fatalf("expected error when proposal sets qaFlowRef, got nil")
+	}
+
+	// 6. Agent principal cannot set or clear qaFlowRef on templates, schedules, suites, or repo settings.
+	agentCtx := ui.WithPrincipal(ctx, model.Principal{Kind: model.PrincipalAgent, ID: humanTask.ID})
+	if _, err := c.CreateTemplate(agentCtx, ui.CreateTemplateRequest{
+		Name:      "Agent Template",
+		Title:     "Agent Task",
+		QAFlowRef: "golden-v3@1",
+	}); err == nil {
+		t.Fatalf("expected error when agent creates template with qaFlowRef")
+	}
+	if _, err := c.UpdateTemplate(agentCtx, tmpl.ID, ui.UpdateTemplateRequest{QAFlowRef: &emptyFlow}); err == nil {
+		t.Fatalf("expected error when agent clears template qaFlowRef")
+	}
+	if _, err := c.CreateSchedule(agentCtx, ui.CreateScheduleRequest{
+		Repo:       "acme/widgets",
+		Base:       "main",
+		Title:      "Agent Schedule",
+		QAFlowRef:  "golden-v3@1",
+		Recurrence: everyDay,
+	}); err == nil {
+		t.Fatalf("expected error when agent creates schedule with qaFlowRef")
+	}
+	if _, err := c.UpdateSchedule(agentCtx, sched.ID, ui.UpdateScheduleRequest{QAFlowRef: &emptyFlow}); err == nil {
+		t.Fatalf("expected error when agent clears schedule qaFlowRef")
+	}
+	if _, err := c.CreateSuite(agentCtx, ui.CreateSuiteRequest{
+		Name:        "Agent Suite",
+		TemplateIDs: []string{tmpl.ID},
+		Mode:        "count",
+		Count:       1,
+		QAFlowRef:   "golden-v3@1",
+	}); err == nil {
+		t.Fatalf("expected error when agent creates suite with qaFlowRef")
+	}
+	if _, err := c.UpdateSuite(agentCtx, suite.ID, ui.UpdateSuiteRequest{QAFlowRef: &emptyFlow}); err == nil {
+		t.Fatalf("expected error when agent clears suite qaFlowRef")
+	}
+	if _, err := c.SetRepoSettings(agentCtx, "acme/widgets", ui.SetRepoSettingsRequest{QAFlowRef: &emptyFlow}); err == nil {
+		t.Fatalf("expected error when agent clears repo qaFlowRef")
+	}
+
+	// 7. Detaching a template from a schedule preserves the template's qaFlowRef on the inline schedule.
+	detached, err := c.UpdateSchedule(ctx, sched.ID, ui.UpdateScheduleRequest{TemplateID: &emptyFlow})
+	if err != nil || detached.QAFlowRef != "v4-2@1" {
+		t.Fatalf("UpdateSchedule detach TemplateID QAFlowRef = %q, %v; want v4-2@1", detached.QAFlowRef, err)
+	}
+
+	// 8. HTTP agent API gate refuses clearing qaFlowRef via PATCH/PUT even with write scopes.
+	srv, srvClient := testServer(t)
+	seedAPITask(t, srvClient, "agent-writer", "acme/widgets",
+		"api:templates:write", "api:schedules:write", "api:suites:write", "api:repos:write")
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPatch, "/api/templates/tpl-1"},
+		{http.MethodPatch, "/api/schedules/sched-1"},
+		{http.MethodPatch, "/api/suites/suite-1"},
+		{http.MethodPut, "/api/repos/acme/widgets/settings"},
+	} {
+		code, body := asAgent(t, srv, "agent-writer", tc.method, tc.path, `{"qaFlowRef":""}`, "")
+		if code != http.StatusForbidden || !strings.Contains(body, "qaFlowRef") {
+			t.Fatalf("%s %s with empty qaFlowRef: got %d %s, want 403 naming qaFlowRef", tc.method, tc.path, code, body)
+		}
 	}
 }

@@ -2874,6 +2874,16 @@ func (c *Client) defaultTaskHosting(ctx context.Context, target *model.RepoRef) 
 // sandboxes have no shape of their own, rather than filed and then
 // discovered at sandbox setup -- refuseIgnoredSandboxShape has why, and
 // UpdateTask applies the same rule to an edit.
+func (c *Client) refuseNonOperatorQAFlowRef(ctx context.Context, proposedBy string) error {
+	if strings.TrimSpace(proposedBy) != "" || c.requestActor(ctx).Actor.Kind == model.PrincipalAgent {
+		return forbiddenErrorf("an agent cannot set qaFlowRef")
+	}
+	if a := accessRoleFromContext(ctx); a != nil && !a.Full {
+		return forbiddenErrorf("%s cannot set qaFlowRef", a.label())
+	}
+	return nil
+}
+
 func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, error) {
 	if req.ProposalKey != "" {
 		if existing, err := c.Store.TaskWithTag(ctx, req.ProposalKey); err != nil {
@@ -2883,11 +2893,8 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		}
 	}
 	if strings.TrimSpace(req.QAFlowRef) != "" {
-		if strings.TrimSpace(req.ProposedBy) != "" || c.requestActor(ctx).Actor.Kind == model.PrincipalAgent {
-			return Task{}, forbiddenErrorf("an agent cannot set qaFlowRef")
-		}
-		if a := accessRoleFromContext(ctx); a != nil && !a.Full {
-			return Task{}, forbiddenErrorf("%s cannot set qaFlowRef", a.label())
+		if err := c.refuseNonOperatorQAFlowRef(ctx, req.ProposedBy); err != nil {
+			return Task{}, err
 		}
 	}
 	req, err := c.fromTemplate(ctx, req)
