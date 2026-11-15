@@ -538,3 +538,21 @@ The **Telemetry Cards** (`/next/telemetry?tab=quality`) adds three new compact e
 - A **Human-Review Triage (S5)** ops-card highlighting escape rates, human-routed precision, and reviews saved.
 
 The **Inbox & Tasks views** now integrate a compact `[T2/T3 · Review]` triage chip natively in queue rows (via `qaTriageChip()`), reducing UI noise while ensuring safety-critical `qa-triage` tasks are immediately identifiable in `<span class="row-line3">`. The Task Changes tab also explicitly flags `Complexity` and `Blast` tiers.
+
+## 13. V4 Software Workflow & QA Studio, Tab-Strip Underline, & Full-Width Composition Body Well
+
+1. **Flush `3px` Active Tab Underline (`button.tab-link` & `.stage-header:has(> .tab-strip:last-child)`):**
+   - Both `<a class="tab-link">` and `<button class="tab-link">` reset top/left/right borders (`border-top: 0; border-right: 0; border-left: 0`) and reserve a `3px` bottom border (`border-bottom: 3px solid transparent`), switching to `border-bottom-color: var(--md-sys-color-primary)` and `color: var(--md-sys-color-primary)` when `[aria-current="page"]` or `[aria-selected="true"]`.
+   - When `.tab-strip` is the last child of `.stage-header` (such as on `/next/telemetry` and `/next/processes`), `.stage-header:has(> .tab-strip:last-child) { padding-bottom: 0 }` removes the bottom header padding so the active tab's `3px` underline sits flush against `.stage-header`'s `1px` bottom border with zero horizontal overflow at both `1440×900` and `390×844`.
+
+2. **`CompositionViewComponent` Full-Width `.comp-body-well` Rule (`processes-detail.css`):**
+   - In `g-composition-view` (`[data-testid="composition-preview"]`), scalar metadata fields flow in `.comp-meta-grid` (`grid-template-columns: repeat(auto-fill, minmax(170px, 1fr))`), while list fields (`reads`, `writes`, `capabilities`, `customFields`) and the `body` prompt row use `.comp-row-full` (`grid-column: 1 / -1; width: 100%`).
+   - `.comp-body-well` (`[data-testid="composition-body-well"]`) spans `grid-column: 1 / -1; width: 100%; box-sizing: border-box` (`>= 85%` of `.comp-task` `clientWidth`, never crushed into a narrow `~220px` single grid column), with a `320px` max-height scroll clamp (`.is-clamped`) and an `Expand full prompt` / `Collapse prompt` toggle (`[data-testid="composition-body-toggle"]`) for long task prompts.
+
+3. **`30/70` 8-Stage `Software Workflow & QA` Studio Layout & Operator `qaFlowRef` Pickers:**
+   - Under `/next/processes/quality`, the tab is titled **`Software Workflow & QA`** (`[data-testid="proc-tab-quality"]`) and renders a full-bleed workbench (`g-qa-flows-panel` + `g-qa-v3-studio`) without the narrow master-detail list pane.
+   - A top sub-header toolbar (`[data-testid="qa-studio-toolbar"]`) houses the flow package switcher (`<g-pill-select testid="qa-flow-switcher">`), active/schema badges (`v2`, `v3`, `v4`), live prompt-budget meter (`[data-testid="qa-prompt-budget"]`, `<= 8,192 B`), flow version quick-select strip (`[data-testid="quality-flows-list"]`), and studio actions (`What-if probe`, `Dry run`, `Adopt from commit`, `Fork flow`, `New version`).
+   - Below the toolbar, `.qa-workbench-split` uses a `30/70` split (`grid-template-columns: clamp(300px, 30%, 440px) minmax(0, 1fr)`):
+     - **Left `30%` Stage & Step Tree (`[data-testid="qa-stage-tree"]`):** search input (`[data-testid="qa-step-search"]`), step-kind filter chips (`All`, `Skills`, `Checks`, `Agents`), and the collapsible 8-stage software lifecycle tree (`1. Decompose & Contract` through `8. Merge & Post-Merge`, plus custom stages).
+     - **Right `70%` Full-Width Stage / Step Inspector & Live Editor (`[data-testid="qa-step-inspector"]`):** stage summary bar (`[data-testid="qa-flow-detail-card"]`) and three inspector tabs (`Definition & fixtures`, `Empirical stats & dry-run`, `Lineage & YAML`).
+   - Operator-owned Schedule, Template, and Suite create/edit drawers include a **`Software workflow`** `<g-pill-select>` picker (`[data-testid="process-qa-flow-select"]`) populated from `GET /api/qa/flow-versions` (defaulting to `Deployment default` plus active/built-in flows such as `engineering-workflow-v4@1`, `golden-v3-enforced@1`, `golden-v3@1`, `golden-v2@1`), persisting `qaFlowRef` and displaying a `Workflow: <qaFlowRef>` badge (`[data-testid="process-qa-flow-badge"]`) in the detail header when set.

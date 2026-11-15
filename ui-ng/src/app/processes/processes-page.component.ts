@@ -59,6 +59,7 @@ import {
   type Composition,
   type CreateScheduleRequest,
   type CreateSuiteRequest,
+  type CreateTemplateRequest,
   type DeclarationAcceptanceView,
   type ProcessTab,
   type Recurrence,
@@ -69,6 +70,8 @@ import {
   type Template,
   type TemplateField,
   type UpdateScheduleRequest,
+  type UpdateSuiteRequest,
+  type UpdateTemplateRequest,
   buildSuiteRunPasses,
   describeSuiteMode,
   formatCadence,
@@ -78,6 +81,13 @@ import {
   templateSourceBadge,
 } from "./processes.models";
 import { ProcessesStore } from "./processes.store";
+
+const DEFAULT_QA_FLOW_REFS = [
+  "engineering-workflow-v4@1",
+  "golden-v3-enforced@1",
+  "golden-v3@1",
+  "golden-v2@1",
+] as const;
 
 const TABS: readonly { id: ProcessTab; label: string; tip: string }[] = [
   {
@@ -102,7 +112,7 @@ const TABS: readonly { id: ProcessTab; label: string; tip: string }[] = [
   },
   {
     id: "quality",
-    label: "Quality checks",
+    label: "Software Workflow & QA",
     tip: "Pre-PR deterministic and fresh-context quality flow packages and rules.",
   },
 ];
@@ -824,6 +834,13 @@ type SuitesPaneView = "suites" | "runs";
                         >Overlap:
                         <strong>{{ s.overlap || "skip" }}</strong></span
                       >
+                      @if (s.qaFlowRef) {
+                        <span
+                          class="ci-provider-tag"
+                          data-testid="process-qa-flow-badge"
+                          >Workflow: {{ s.qaFlowRef }}</span
+                        >
+                      }
                       @if (s.nextRunAt) {
                         <span class="tabular">Next: {{ s.nextRunAt }}</span>
                       }
@@ -1004,6 +1021,13 @@ type SuitesPaneView = "suites" | "runs";
                         >
                       }
                       <span>Auto-merge: {{ t.autoMerge ? "on" : "off" }}</span>
+                      @if (t.qaFlowRef) {
+                        <span
+                          class="ci-provider-tag"
+                          data-testid="process-qa-flow-badge"
+                          >Workflow: {{ t.qaFlowRef }}</span
+                        >
+                      }
                     </div>
 
                     @if (t.declaredIn) {
@@ -1277,6 +1301,13 @@ type SuitesPaneView = "suites" | "runs";
                             : "auto-approved"
                         }}</strong></span
                       >
+                      @if (st.qaFlowRef) {
+                        <span
+                          class="ci-provider-tag"
+                          data-testid="process-qa-flow-badge"
+                          >Workflow: {{ st.qaFlowRef }}</span
+                        >
+                      }
                     </div>
                     @if (st.declaredIn) {
                       <p class="banner banner-info" style="margin: 6px 0 0">
@@ -2005,7 +2036,18 @@ type SuitesPaneView = "suites" | "runs";
           </div>
         </div>
 
-        @if (!editingSchedule()?.system) {
+        @if (!editingSchedule()?.system && !editingSchedule()?.declaredIn) {
+          <div class="field">
+            <span>Software workflow</span>
+            <g-pill-select
+              [options]="qaFlowOptions()"
+              [value]="sDraftQaFlowRef()"
+              ariaLabel="Software workflow"
+              align="left"
+              testid="process-qa-flow-select"
+              (valueChange)="sDraftQaFlowRef.set($event)"
+            />
+          </div>
           <div style="margin-top: 12px">
             <button
               type="button"
@@ -2314,6 +2356,20 @@ type SuitesPaneView = "suites" | "runs";
           </div>
         }
 
+        @if (!editingTemplate()?.declaredIn && !editingTemplate()?.system) {
+          <div class="field">
+            <span>Software workflow</span>
+            <g-pill-select
+              [options]="qaFlowOptions()"
+              [value]="tDraftQaFlowRef()"
+              ariaLabel="Software workflow"
+              align="left"
+              testid="process-qa-flow-select"
+              (valueChange)="tDraftQaFlowRef.set($event)"
+            />
+          </div>
+        }
+
         <div class="switch-row" style="margin-top: 14px">
           <button
             type="button"
@@ -2438,6 +2494,20 @@ type SuitesPaneView = "suites" | "runs";
             }
           </div>
         </div>
+
+        @if (!editingSuite()?.declaredIn) {
+          <div class="field">
+            <span>Software workflow</span>
+            <g-pill-select
+              [options]="qaFlowOptions()"
+              [value]="stDraftQaFlowRef()"
+              ariaLabel="Software workflow"
+              align="left"
+              testid="process-qa-flow-select"
+              (valueChange)="stDraftQaFlowRef.set($event)"
+            />
+          </div>
+        }
 
         <div class="proc-field-grid" style="margin-top: 14px">
           <div class="switch-row">
@@ -2776,6 +2846,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly sDraftGitRefRepo = signal("");
   protected readonly sDraftGitRef = signal("refs/heads/main");
   protected readonly sDraftOverlap = signal("skip");
+  protected readonly sDraftQaFlowRef = signal("");
   protected readonly draftSchedComposition = signal<Composition | null>(null);
 
   // Launch template dialog state
@@ -2796,6 +2867,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly tDraftParamsCsv = signal("");
   protected readonly tDraftFields = signal<TemplateField[]>([]);
   protected readonly tDraftAutoMerge = signal(false);
+  protected readonly tDraftQaFlowRef = signal("");
 
   // Create/Edit suite dialog state
   protected readonly suiteDialogOpen = signal(false);
@@ -2807,7 +2879,26 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly stDraftTemplateIds = signal<string[]>([]);
   protected readonly stDraftRequireApproval = signal(false);
   protected readonly stDraftAutoMerge = signal(true);
+  protected readonly stDraftQaFlowRef = signal("");
   protected readonly draftSuiteComposition = signal<Composition | null>(null);
+
+  protected readonly loadedQaFlowRefs = signal<string[]>([]);
+  protected readonly qaFlowOptions = computed<PillOption[]>(() => {
+    const opts: PillOption[] = [{ value: "", label: "Deployment default" }];
+    const seen = new Set<string>([""]);
+    const addRef = (raw: string | undefined): void => {
+      const ref = (raw ?? "").trim();
+      if (!ref || seen.has(ref)) return;
+      seen.add(ref);
+      opts.push({ value: ref, label: ref });
+    };
+    for (const ref of this.loadedQaFlowRefs()) addRef(ref);
+    for (const ref of DEFAULT_QA_FLOW_REFS) addRef(ref);
+    addRef(this.sDraftQaFlowRef());
+    addRef(this.tDraftQaFlowRef());
+    addRef(this.stDraftQaFlowRef());
+    return opts;
+  });
 
   // Run suite dialog state
   protected readonly runSuiteDialogOpen = signal(false);
@@ -3051,6 +3142,34 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       this.doc.addEventListener("keydown", this.onCaptureKeydown, true);
     });
     this.store.start();
+    void this.loadQaFlowOptions();
+  }
+
+  private async loadQaFlowOptions(): Promise<void> {
+    try {
+      const res = (await this.api.get(
+        "GET /api/qa/flow-versions" as RouteKey,
+        undefined,
+        "limit=50",
+      )) as {
+        versions?: {
+          key?: string;
+          version?: number;
+          retiredAt?: string | null;
+          retired?: boolean;
+        }[];
+      } | null;
+      const refs: string[] = [];
+      for (const v of res?.versions ?? []) {
+        if (v.retiredAt || v.retired || !v.key) continue;
+        refs.push(`${v.key}@${v.version ?? 1}`);
+      }
+      if (refs.length > 0) {
+        this.loadedQaFlowRefs.set(refs);
+      }
+    } catch {
+      // Built-in fallback options remain available.
+    }
   }
 
   ngOnDestroy(): void {
@@ -3471,6 +3590,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
         existing.recurrence?.gitRef?.ref ?? "refs/heads/main",
       );
       this.sDraftOverlap.set(existing.overlap || "skip");
+      this.sDraftQaFlowRef.set(existing.qaFlowRef || "");
     } else {
       this.schedTargetKind.set("prompt");
       this.sDraftTitle.set("");
@@ -3492,6 +3612,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       this.sDraftGitRefRepo.set("");
       this.sDraftGitRef.set("refs/heads/main");
       this.sDraftOverlap.set("skip");
+      this.sDraftQaFlowRef.set("");
     }
     this.schedDialogOpen.set(true);
   }
@@ -3598,6 +3719,10 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       baseReq.reads = [];
       baseReq.writes = [];
     }
+    const qaFlowRef = this.sDraftQaFlowRef().trim();
+    if (qaFlowRef) {
+      baseReq.qaFlowRef = qaFlowRef;
+    }
     return baseReq;
   }
 
@@ -3619,6 +3744,10 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       overlap: this.sDraftOverlap(),
       revision: editing.revision,
     };
+    const qaFlowRef = this.sDraftQaFlowRef().trim();
+    if (qaFlowRef || editing.qaFlowRef) {
+      patchReq.qaFlowRef = qaFlowRef;
+    }
     if (tk === "template") {
       patchReq.templateId = this.sDraftTemplateId();
     } else if (tk === "suite") {
@@ -3739,6 +3868,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       this.tDraftFields.set(clonedFields);
       this.tDraftParamsCsv.set(clonedFields.map((f) => f.name).join(", "));
       this.tDraftAutoMerge.set(existing.autoMerge);
+      this.tDraftQaFlowRef.set(existing.qaFlowRef || "");
     } else {
       this.tDraftName.set("");
       this.tDraftTitle.set("");
@@ -3747,6 +3877,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       this.tDraftFields.set([]);
       this.tDraftParamsCsv.set("");
       this.tDraftAutoMerge.set(false);
+      this.tDraftQaFlowRef.set("");
     }
     this.tmplDialogOpen.set(true);
   }
@@ -3806,8 +3937,9 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     const fields = structuredClone(this.tDraftFields());
     try {
       const editing = this.editingTemplate();
+      const qaFlowRef = this.tDraftQaFlowRef().trim();
       if (editing) {
-        const updated = await this.store.updateTemplate(editing.id, {
+        const patchReq: UpdateTemplateRequest = {
           name: this.tDraftName().trim(),
           title: this.tDraftTitle().trim(),
           description: this.tDraftDesc(),
@@ -3815,11 +3947,15 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
           fields,
           autoMerge: this.tDraftAutoMerge(),
           revision: editing.revision,
-        });
+        };
+        if (qaFlowRef || editing.qaFlowRef) {
+          patchReq.qaFlowRef = qaFlowRef;
+        }
+        const updated = await this.store.updateTemplate(editing.id, patchReq);
         this.selectTemplate(updated.id, false);
         this.snackbar.show("Template updated.");
       } else {
-        const created = await this.store.createTemplate({
+        const createReq: CreateTemplateRequest = {
           name: this.tDraftName().trim(),
           title: this.tDraftTitle().trim(),
           description: this.tDraftDesc(),
@@ -3830,7 +3966,11 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
           reads: [],
           writes: [],
           customFields: {},
-        });
+        };
+        if (qaFlowRef) {
+          createReq.qaFlowRef = qaFlowRef;
+        }
+        const created = await this.store.createTemplate(createReq);
         this.selectTemplate(created.id, false);
         this.snackbar.show("Template created.");
       }
@@ -3873,6 +4013,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       );
       this.stDraftRequireApproval.set(!!existing.requireApproval);
       this.stDraftAutoMerge.set(!!existing.autoMerge);
+      this.stDraftQaFlowRef.set(existing.qaFlowRef || "");
     } else {
       this.stDraftName.set("");
       this.stDraftMode.set("count");
@@ -3882,6 +4023,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       this.stDraftTemplateIds.set(firstId ? [firstId] : []);
       this.stDraftRequireApproval.set(false);
       this.stDraftAutoMerge.set(true);
+      this.stDraftQaFlowRef.set("");
     }
     this.suiteDialogOpen.set(true);
   }
@@ -3909,7 +4051,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   private buildSuiteCreatePayload(): CreateSuiteRequest {
-    return {
+    const req: CreateSuiteRequest = {
       name: this.stDraftName().trim(),
       templateIds: this.stDraftTemplateIds(),
       mode: this.stDraftMode(),
@@ -3918,6 +4060,11 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       requireApproval: this.stDraftRequireApproval(),
       autoMerge: this.stDraftAutoMerge(),
     };
+    const qaFlowRef = this.stDraftQaFlowRef().trim();
+    if (qaFlowRef) {
+      req.qaFlowRef = qaFlowRef;
+    }
+    return req;
   }
 
   protected async previewSuiteDraft(): Promise<void> {
@@ -3937,11 +4084,16 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     try {
       const editing = this.editingSuite();
       const payload = this.buildSuiteCreatePayload();
+      const qaFlowRef = this.stDraftQaFlowRef().trim();
       if (editing) {
-        const updated = await this.store.updateSuite(editing.id, {
+        const patchReq: UpdateSuiteRequest = {
           ...payload,
           revision: editing.revision,
-        });
+        };
+        if (qaFlowRef || editing.qaFlowRef) {
+          patchReq.qaFlowRef = qaFlowRef;
+        }
+        const updated = await this.store.updateSuite(editing.id, patchReq);
         this.selectSuite(updated.id, false);
         this.snackbar.show("Suite updated.");
       } else {
