@@ -2254,6 +2254,7 @@ func ServeMCPServer(in io.Reader, out io.Writer, args []string) error {
 	}
 	if mockToolsOpts.AutonomousGoal {
 		registry.Register(mcp.NewMockToolsWithOptions(escapeSink, proposeRepoList.Nameable(), mockToolsOpts)...)
+		registry.Register(mcp.NewGoalTools(escapeSink)...)
 	} else {
 		registry.Register(mcp.NewMockTools(escapeSink, proposeRepoList.Nameable())...)
 	}
