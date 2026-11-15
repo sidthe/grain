@@ -223,6 +223,7 @@ export interface Task {
   reviewTemplateName?: string;
   // The template the task was filed from, absent for one written from scratch.
   templateId?: string;
+  qaFlowRef?: string;
   sandboxCpus?: number;
   sandboxMemoryMb?: number;
   sandboxDiskGb?: number;
@@ -510,6 +511,7 @@ export interface Template {
   networkAccess?: string;
   nothingNeededAction?: string;
   model?: string;
+  qaFlowRef?: string;
   interactive?: boolean;
   keepRunning?: boolean;
   admission?: string;

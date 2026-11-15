@@ -452,6 +452,10 @@ class FakeProcessesApi {
         ...this.schedules[0],
         id: "sched-new",
         title: String(body?.["title"] || "New sched"),
+        qaFlowRef:
+          typeof body?.["qaFlowRef"] === "string"
+            ? body["qaFlowRef"]
+            : undefined,
       };
       this.schedules.push(created);
       return Promise.resolve(created);
@@ -467,6 +471,10 @@ class FakeProcessesApi {
         description: String(body?.["description"] ?? ""),
         autoMerge: false,
         capabilities: [],
+        qaFlowRef:
+          typeof body?.["qaFlowRef"] === "string"
+            ? body["qaFlowRef"]
+            : undefined,
       };
       this.templates.push(created);
       return Promise.resolve(created);
@@ -488,6 +496,10 @@ class FakeProcessesApi {
         requireApproval: Boolean(body?.["requireApproval"]),
         autoMerge: body?.["autoMerge"] !== false,
         autoApproveProposals: false,
+        qaFlowRef:
+          typeof body?.["qaFlowRef"] === "string"
+            ? body["qaFlowRef"]
+            : undefined,
       };
       this.suites.push(created);
       return Promise.resolve(created);
@@ -523,13 +535,27 @@ class FakeProcessesApi {
       if (typeof body?.["enabled"] === "boolean") {
         found.enabled = body["enabled"];
       }
+      if (typeof body?.["qaFlowRef"] === "string") {
+        found.qaFlowRef = body["qaFlowRef"] || undefined;
+      }
       return Promise.resolve(structuredClone(found));
     }
     if (route === "PATCH /api/templates/{id}") {
-      return Promise.resolve(structuredClone(this.templates[1]));
+      const id = String(params?.["id"] ?? "");
+      const found =
+        this.templates.find((t) => t.id === id) ?? this.templates[1];
+      if (typeof body?.["qaFlowRef"] === "string") {
+        found.qaFlowRef = body["qaFlowRef"] || undefined;
+      }
+      return Promise.resolve(structuredClone(found));
     }
     if (route === "PATCH /api/suites/{id}") {
-      return Promise.resolve(structuredClone(this.suites[0]));
+      const id = String(params?.["id"] ?? "");
+      const found = this.suites.find((s) => s.id === id) ?? this.suites[0];
+      if (typeof body?.["qaFlowRef"] === "string") {
+        found.qaFlowRef = body["qaFlowRef"] || undefined;
+      }
+      return Promise.resolve(structuredClone(found));
     }
     return Promise.resolve({});
   };
@@ -1187,5 +1213,237 @@ describe("ProcessesPageComponent (D-9)", () => {
         .querySelector('[data-testid="sched-desc-input"]')
         ?.getAttribute("rows"),
     ).toBe("8");
+  });
+
+  it("renders Software Workflow & QA tab label and round-trips qaFlowRef across Schedule, Template, and Suite create/edit drawers", async () => {
+    const baseGet = api.get;
+    api.get = (route: string, params?: Record<string, unknown>) => {
+      if (route === "GET /api/qa/flow-versions") {
+        api.calls.push({ method: "GET", route, params });
+        return Promise.resolve({
+          versions: [
+            {
+              hash: "builtin:engineering-workflow-v4@1#4",
+              key: "engineering-workflow-v4",
+              version: 1,
+              label: "Engineering Workflow V4",
+              builtIn: true,
+            },
+            {
+              hash: "builtin:golden-v3-enforced@1#4",
+              key: "golden-v3-enforced",
+              version: 1,
+              label: "Golden V3 Enforced",
+              builtIn: true,
+            },
+          ],
+        });
+      }
+      return baseGet(route, params);
+    };
+
+    const harness = await RouterTestingHarness.create(
+      "/processes/schedules?new=1",
+    );
+    await flush(harness);
+    let root = harness.routeNativeElement!;
+
+    // 1. Quality tab displays "Software Workflow & QA"
+    const qualityTab = root.querySelector('[data-testid="proc-tab-quality"]')!;
+    expect(qualityTab.textContent).toContain("Software Workflow & QA");
+    expect(api.calls.some((c) => c.route === "GET /api/qa/flow-versions")).toBe(
+      true,
+    );
+
+    // 2. Schedule create & edit round-trip for qaFlowRef
+    const schedTitleIn = root.querySelector<HTMLInputElement>(
+      '[data-testid="sched-title-input"]',
+    )!;
+    schedTitleIn.value = "V4 workflow schedule";
+    schedTitleIn.dispatchEvent(new Event("input"));
+
+    const schedFlowBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="process-qa-flow-select"]',
+    )!;
+    expect(schedFlowBtn.textContent).toContain("Deployment default");
+    schedFlowBtn.click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="process-qa-flow-select-opt-engineering-workflow-v4@1"]',
+      )!
+      .click();
+    await flush(harness);
+    expect(schedFlowBtn.textContent).toContain("engineering-workflow-v4@1");
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+
+    const createSchedCall = api.calls.find(
+      (c) => c.route === "POST /api/schedules",
+    )!;
+    expect((createSchedCall.body as Record<string, unknown>)["qaFlowRef"]).toBe(
+      "engineering-workflow-v4@1",
+    );
+    expect(
+      root.querySelector('[data-testid="process-qa-flow-badge"]')?.textContent,
+    ).toContain("Workflow: engineering-workflow-v4@1");
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-edit-btn"]')!
+      .click();
+    await flush(harness);
+    const editSchedFlowBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="process-qa-flow-select"]',
+    )!;
+    expect(editSchedFlowBtn.textContent).toContain("engineering-workflow-v4@1");
+    editSchedFlowBtn.click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="process-qa-flow-select-opt-golden-v3-enforced@1"]',
+      )!
+      .click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="sched-save-btn"]')!
+      .click();
+    await flush(harness);
+
+    const patchSchedCall = api.calls.find(
+      (c) =>
+        c.route === "PATCH /api/schedules/{id}" &&
+        (c.params as { id?: string })?.id === "sched-new",
+    )!;
+    expect((patchSchedCall.body as Record<string, unknown>)["qaFlowRef"]).toBe(
+      "golden-v3-enforced@1",
+    );
+
+    // 3. Template create & edit round-trip for qaFlowRef
+    await harness.navigateByUrl("/processes/templates");
+    await flush(harness);
+    root = harness.routeNativeElement!;
+
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="proc-new-template-btn"]',
+      )!
+      .click();
+    await flush(harness);
+
+    const tmplNameIn = root.querySelector<HTMLInputElement>(
+      '[data-testid="tmpl-name-input"]',
+    )!;
+    tmplNameIn.value = "V4 service upgrade";
+    tmplNameIn.dispatchEvent(new Event("input"));
+    const tmplTitleIn = root.querySelector<HTMLInputElement>(
+      '[data-testid="tmpl-title-input"]',
+    )!;
+    tmplTitleIn.value = "feat: upgrade service";
+    tmplTitleIn.dispatchEvent(new Event("input"));
+
+    const tmplFlowBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="process-qa-flow-select"]',
+    )!;
+    tmplFlowBtn.click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="process-qa-flow-select-opt-engineering-workflow-v4@1"]',
+      )!
+      .click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="tmpl-save-btn"]')!
+      .click();
+    await flush(harness);
+
+    const createTmplCall = api.calls.find(
+      (c) => c.route === "POST /api/templates",
+    )!;
+    expect((createTmplCall.body as Record<string, unknown>)["qaFlowRef"]).toBe(
+      "engineering-workflow-v4@1",
+    );
+    expect(
+      root.querySelector('[data-testid="process-qa-flow-badge"]')?.textContent,
+    ).toContain("Workflow: engineering-workflow-v4@1");
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="tmpl-edit-btn"]')!
+      .click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="tmpl-save-btn"]')!
+      .click();
+    await flush(harness);
+    const patchTmplCall = api.calls.find(
+      (c) =>
+        c.route === "PATCH /api/templates/{id}" &&
+        (c.params as { id?: string })?.id === "tmpl-new",
+    )!;
+    expect((patchTmplCall.body as Record<string, unknown>)["qaFlowRef"]).toBe(
+      "engineering-workflow-v4@1",
+    );
+
+    // 4. Suite create & edit round-trip for qaFlowRef
+    await harness.navigateByUrl("/processes/suites");
+    await flush(harness);
+    root = harness.routeNativeElement!;
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="proc-new-suite-btn"]')!
+      .click();
+    await flush(harness);
+
+    const suiteNameIn = root.querySelector<HTMLInputElement>(
+      '[data-testid="suite-name-input"]',
+    )!;
+    suiteNameIn.value = "V4 hardening suite";
+    suiteNameIn.dispatchEvent(new Event("input"));
+
+    const suiteFlowBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="process-qa-flow-select"]',
+    )!;
+    suiteFlowBtn.click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="process-qa-flow-select-opt-engineering-workflow-v4@1"]',
+      )!
+      .click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="suite-save-btn"]')!
+      .click();
+    await flush(harness);
+
+    const createSuiteCall = api.calls.find(
+      (c) => c.route === "POST /api/suites",
+    )!;
+    expect((createSuiteCall.body as Record<string, unknown>)["qaFlowRef"]).toBe(
+      "engineering-workflow-v4@1",
+    );
+    expect(
+      root.querySelector('[data-testid="process-qa-flow-badge"]')?.textContent,
+    ).toContain("Workflow: engineering-workflow-v4@1");
+
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="suite-edit-btn"]')!
+      .click();
+    await flush(harness);
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="suite-save-btn"]')!
+      .click();
+    await flush(harness);
+    const patchSuiteCall = api.calls.find(
+      (c) =>
+        c.route === "PATCH /api/suites/{id}" &&
+        (c.params as { id?: string })?.id === "suite-2",
+    )!;
+    expect((patchSuiteCall.body as Record<string, unknown>)["qaFlowRef"]).toBe(
+      "engineering-workflow-v4@1",
+    );
   });
 });
