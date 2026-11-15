@@ -582,6 +582,7 @@ Autonomous Goal Mode lets an operator hand Grain a multi-pass outcome ("Prototyp
   - **Wall-clock budget (min)** (`data-testid="nt-wall-clock"`, `5..720`, default `120`).
   - **Mock missing external secrets locally** (`data-testid="nt-mock-secrets"`, `role="switch"`).
   - Primary submit action label updates to **Start autonomous goal** (`data-testid="new-task-submit"`).
+- `.sheet-body` carries `32px` bottom padding and `scroll-padding-bottom: 32px` (with `flex-shrink: 0` on direct children) so bottom controls scroll comfortably clear of the sticky `.sheet-foot`. Active snackbars anchor above `--grain-bottombar-height` (`+ 16px` desktop, `+ 84px` phone, `+ 80px` landscape short) and dismiss/suppress overlapping bottom-bar tooltips on open.
 
 ### 13.2 Inbox Silence & Terminal Surfacing (`inbox-classifier.ts`)
 
