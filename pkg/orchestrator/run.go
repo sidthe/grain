@@ -2527,7 +2527,7 @@ func proposalSection(task model.Task) string {
 		"in your comments, questions, chat messages, or task descriptions must always be a " +
 		"relative path (such as `[Task #31](/tasks/31)` or `[Settings → CI](/settings/ci)`) " +
 		"and never an absolute `http://127.0.0.1:...` or `http://localhost:...` URL, so links " +
-		"work when viewed through UberProxy or any reverse proxy. To point at one comment " +
+		"work when viewed through an authenticating reverse proxy or any reverse proxy. To point at one comment " +
 		"in a task's conversation, add its comment id as the fragment: " +
 		"`[comment](/tasks/31#comment=13)`."
 	return s
@@ -3352,7 +3352,31 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		if qaAssignment.Spec != nil {
 			qaSkillPrompt = qaAssignment.Spec.SkillPrompt()
 			qaStopNudge = qaAssignment.Spec.StopNudge
-			qaSkillPrompt = ExecutePreDispatchQAPhases(ctx, store, task, qaAssignment.Spec, qaAssignment.ExperimentID, qaAssignment.ArmID, qaAssignment.FlowHash, qaSkillPrompt)
+			s0Res := ExecutePreCloneQAPhase(ctx, store, task, qaAssignment.Spec, qaAssignment.ExperimentID, qaAssignment.ArmID, qaAssignment.FlowHash, qaSkillPrompt)
+			if s0Res.NeedsClarification {
+				now := cfg.now()
+				qText := strings.TrimSpace(s0Res.Question)
+				if qText == "" {
+					qText = "Please clarify the requirements and acceptance criteria for this task before implementation begins."
+				}
+				summary := model.QuestionSummary("Clarify task requirements", qText, "S0 clarification on "+task.ID)
+				commentID, qErr := relayQuestion(ctx, store, task, qText, summary, nil, now)
+				if qErr != nil {
+					return unprepared(qErr)
+				}
+				if oErr := observeField(ctx, store, task.ID, now, func(o *model.Observation) {
+					o.PendingQuestionCommentID = &commentID
+				}); oErr != nil {
+					return unprepared(oErr)
+				}
+				cleanupCtx := context.WithoutCancel(ctx)
+				revokeAll(cleanupCtx, store, cc, cfg.PreparedCapabilities)
+				if fErr := store.FinishRun(cleanupCtx, d.RunID, now, "succeeded", "parked on S0 clarification question"); fErr != nil {
+					return nil, fmt.Errorf("orchestrator: finishing run %s after S0 clarification: %w", d.RunID, fErr)
+				}
+				return &agent.Result{FinalText: qText}, nil
+			}
+			qaSkillPrompt = s0Res.Prompt
 		}
 	}
 
@@ -3461,6 +3485,13 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	var repoSkills []intree.SkillIndexEntry
 	if checkoutErr == nil && prepErr == nil && len(skillFolders) > 0 && prepared.Dir != "" {
 		repoSkills = discoverRepoSkills(runCtx, tools, prepared, task, skillFolders, d.RunID, nil)
+	}
+	if qaAssignment != nil && qaAssignment.IsEnforcedTreatment() && model.TaskEligibleForQAStaging(task) && qaAssignment.Spec != nil && checkoutErr == nil && prepErr == nil {
+		worktreeDir := prepared.Dir
+		if worktreeDir != "" && sandboxRoot != "" && !filepath.IsAbs(worktreeDir) {
+			worktreeDir = filepath.Join(sandboxRoot, worktreeDir)
+		}
+		qaSkillPrompt = ExecutePostCloneWorkflowPhases(ctx, store, task, worktreeDir, qaAssignment.Spec, qaAssignment.ExperimentID, qaAssignment.ArmID, qaAssignment.FlowHash, qaSkillPrompt)
 	}
 
 	// The commits those earlier attempts pushed, read out of the checkout
