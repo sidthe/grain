@@ -1059,29 +1059,73 @@ describe("TelemetryPageComponent", () => {
     expect(summary?.textContent).not.toContain("88.0%");
   });
 
-  it("hides the repository filter trigger on the Quality checks tab, replacing it with a read-only chip", async () => {
+  it("renders .tab-strip inside .stage-header ahead of .ops-toolbar, switches aria-selected cleanly, and renders telemetry-repo-readonly on quality", async () => {
     const { fixture, root } = await setup();
 
+    const stageHeader = root.querySelector<HTMLElement>(".stage-header")!;
+    const tabStrip = root.querySelector<HTMLElement>(
+      '[data-testid="telemetry-tabs"]',
+    )!;
+    const opsToolbar = root.querySelector<HTMLElement>(".ops-toolbar")!;
+    const overviewTab = root.querySelector<HTMLButtonElement>(
+      '[data-testid="telemetry-tab-overview"]',
+    )!;
+    const qualityTab = root.querySelector<HTMLButtonElement>(
+      '[data-testid="telemetry-tab-quality"]',
+    )!;
+
+    expect(stageHeader).not.toBeNull();
+    expect(tabStrip).not.toBeNull();
+    expect(opsToolbar).not.toBeNull();
+    expect(stageHeader.contains(tabStrip)).toBe(true);
+    expect(stageHeader.lastElementChild).toBe(tabStrip);
+    expect(stageHeader.contains(opsToolbar)).toBe(false);
     expect(
-      root.querySelector('[data-testid="telemetry-repo-trigger"]'),
+      Boolean(
+        tabStrip.compareDocumentPosition(opsToolbar) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
+
+    expect(overviewTab.getAttribute("aria-selected")).toBe("true");
+    expect(qualityTab.getAttribute("aria-selected")).toBe("false");
+    expect(
+      opsToolbar.querySelector('[data-testid="telemetry-window-24h"]'),
     ).not.toBeNull();
     expect(
-      root.querySelector('[data-testid="telemetry-repo-readonly"]'),
+      opsToolbar.querySelector('[data-testid="telemetry-window-7d"]'),
+    ).not.toBeNull();
+    expect(
+      opsToolbar.querySelector('[data-testid="telemetry-window-30d"]'),
+    ).not.toBeNull();
+    expect(
+      opsToolbar.querySelector('[data-testid="telemetry-repo-trigger"]'),
+    ).not.toBeNull();
+    expect(
+      opsToolbar.querySelector('[data-testid="telemetry-author-trigger"]'),
+    ).not.toBeNull();
+    expect(
+      opsToolbar.querySelector('[data-testid="telemetry-repo-readonly"]'),
     ).toBeNull();
 
-    root.querySelector('[data-testid="telemetry-tab-quality"]')?.click();
+    qualityTab.click();
     await settle(fixture);
 
+    expect(overviewTab.getAttribute("aria-selected")).toBe("false");
+    expect(qualityTab.getAttribute("aria-selected")).toBe("true");
     expect(
-      root.querySelector('[data-testid="telemetry-repo-trigger"]'),
+      opsToolbar.querySelector('[data-testid="telemetry-repo-trigger"]'),
     ).toBeNull();
     expect(
-      root.querySelector('[data-testid="telemetry-repo-readonly"]'),
+      opsToolbar.querySelector('[data-testid="telemetry-repo-readonly"]'),
     ).not.toBeNull();
     expect(
-      root.querySelector('[data-testid="telemetry-repo-readonly"]')
+      opsToolbar.querySelector('[data-testid="telemetry-repo-readonly"]')
         ?.textContent,
     ).toContain("All repositories");
+    expect(
+      opsToolbar.querySelector('[data-testid="telemetry-author-trigger"]'),
+    ).toBeNull();
   });
 
   it("shows calm off-state guidance when QA is disabled and surfaces circuit-breaker banner when tripped", async () => {

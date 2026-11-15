@@ -87,19 +87,29 @@ describe("QualityV3CardsComponent", () => {
     fixture.detectChanges();
 
     const root = fixture.nativeElement as HTMLElement;
-    const diffStrip = root.querySelector(
+    const wrapper = root.querySelector<HTMLElement>(
+      '.quality-v3-cards[data-testid="quality-v3-cards"]',
+    );
+    expect(wrapper).not.toBeNull();
+    expect(wrapper?.children.length).toBe(3);
+
+    const diffStrip = wrapper!.querySelector(
       '[data-testid="v3-declaration-diff"]',
     )!;
     expect(diffStrip.textContent).toContain("Changed vs. golden-v2:");
     expect(diffStrip.textContent).toContain("+s0-intent");
     expect(diffStrip.textContent).toContain("+1 custom checks");
     expect(diffStrip.textContent).toContain("Triage changed");
+    expect(diffStrip.querySelectorAll(".status-pill.healthy").length).toBe(3);
+    expect(diffStrip.querySelectorAll(".status-pill.blast").length).toBe(2);
+    expect(diffStrip.querySelector(".status-pill.success")).toBeNull();
+    expect(diffStrip.querySelector(".status-pill.warning")).toBeNull();
 
-    const funnel = root.querySelector('[data-testid="v3-stage-funnel"]')!;
+    const funnel = wrapper!.querySelector('[data-testid="v3-stage-funnel"]')!;
     expect(funnel.textContent).toContain("67%");
     expect(funnel.textContent).toContain("6800 ms");
 
-    const triage = root.querySelector('[data-testid="v3-triage-metrics"]')!;
+    const triage = wrapper!.querySelector('[data-testid="v3-triage-metrics"]')!;
     expect(triage.textContent).toContain("enforced");
     expect(triage.textContent).toContain("50%");
     expect(triage.textContent).toContain("60%");

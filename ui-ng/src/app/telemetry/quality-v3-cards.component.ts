@@ -33,13 +33,13 @@ import type { QAExperimentResults } from "./qa-experiments.models";
             >Changed vs. {{ results()?.referenceArmId ?? "control" }}:</strong
           >
           @for (s of diff.addedStages ?? []; track s) {
-            <span class="status-pill success">+{{ s }}</span>
+            <span class="status-pill healthy">+{{ s }}</span>
           }
           @for (s of diff.removedStages ?? []; track s) {
             <span class="status-pill error">-{{ s }}</span>
           }
           @if ((diff.addedCustomChecks ?? []).length) {
-            <span class="status-pill success"
+            <span class="status-pill healthy"
               >+{{ (diff.addedCustomChecks ?? []).length }} custom checks</span
             >
           }
@@ -50,15 +50,15 @@ import type { QAExperimentResults } from "./qa-experiments.models";
             >
           }
           @if ((diff.changedChecks ?? []).length) {
-            <span class="status-pill warning"
+            <span class="status-pill blast"
               >{{ (diff.changedChecks ?? []).length }} changed checks</span
             >
           }
           @if (diff.changedVerifier) {
-            <span class="status-pill warning">Verifier changed</span>
+            <span class="status-pill blast">Verifier changed</span>
           }
           @if (diff.changedTriage) {
-            <span class="status-pill warning">Triage changed</span>
+            <span class="status-pill blast">Triage changed</span>
           }
         </div>
       }
