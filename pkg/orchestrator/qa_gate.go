@@ -15,7 +15,6 @@
 package orchestrator
 
 import (
-	"github.com/ai-on-gke/grain/pkg/trustboundary"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -34,6 +33,7 @@ import (
 	"github.com/ai-on-gke/grain/pkg/qa/checks"
 	"github.com/ai-on-gke/grain/pkg/qa/expstats"
 	"github.com/ai-on-gke/grain/pkg/qa/resolve"
+	"github.com/ai-on-gke/grain/pkg/trustboundary"
 )
 
 // QAOpenPROptions carries optional pre-PR quality verification metadata from `open_pull_request`.
@@ -52,11 +52,12 @@ type MirrorRemoteResolver func(ctx context.Context, repo model.RepoRef) (remoteU
 // QARuntime holds controller-level dependencies used by pre-PR quality checks during
 // `OpenPullRequestForTaskWithQA`, `salvagePushedBranch`, and async Control shadow runs.
 type QARuntime struct {
-	DataDir       string
-	Profiler      *qa.Profiler
-	ResolveRemote MirrorRemoteResolver
+	DataDir           string
+	Profiler          *qa.Profiler
+	ResolveRemote     MirrorRemoteResolver
 	VerifyS4          S4VerifyFunc
 	RunIsolatedPrompt func(ctx context.Context, task model.Task, runPrefix, prompt string, maxTokens int) (output string, tokensIn, tokensOut int64, err error)
+	ExecInSandbox     func(ctx context.Context, dir string, argv []string, timeout time.Duration) (string, int, error)
 }
 
 var liveQARuntime atomic.Pointer[QARuntime]
@@ -183,8 +184,8 @@ func OpenPullRequestForTaskWithQA(
 	}
 
 	// On configured blast tiers under a flow with EnableS4, defer live PR branch promotion so the
-	// orchestrator can run 1 fresh-context S4 verification pass once the coding turn exits.
-	if stageExists && flow.RequiresS4ForTier(blastTier) && !hasTaskLink(task, model.LinkQAS4Attempted) {
+	// orchestrator can run bounded fresh-context S4 verification once the coding turn exits.
+	if stageExists && flow.RequiresS4ForTier(blastTier) && canRunS4RepairRound(task, flow, headSHA) {
 		_ = store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
 			t.Links = withoutTaskLinkKinds(t.Links, model.LinkQAHold)
 			t.Links = append(t.Links, model.Link{Kind: model.LinkQAHold, Target: headSHA})
@@ -354,15 +355,15 @@ func salvageQAStageIfPresent(
 		return false, nil
 	}
 
-	// 2. S3 passed! Run bounded 1-round fresh-context S4 verifier when required for this blast tier and not yet attempted.
+	// 2. S3 passed! Run bounded fresh-context S4 verifier when required for this blast tier and repair rounds remain.
 	flow := *assign.Spec
-	if flow.RequiresS4ForTier(blastTier) && !hasTaskLink(task, model.LinkQAS4Attempted) {
+	if flow.RequiresS4ForTier(blastTier) && canRunS4RepairRound(task, flow, headSHA) {
 		s4Findings, s4Err := runFreshContextS4(ctx, store, task, assign, headSHA, checkBranch, mirrorWS, s3HazardSites)
 		if s4Err != nil {
 			log.Printf("orchestrator: task %s S4 verification degraded to S3-pass: %v", task.ID, s4Err)
 		} else {
 			if err := store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
-				if !hasTaskLink(*t, model.LinkQAS4Attempted) {
+				if !hasTaskLinkTarget(*t, model.LinkQAS4Attempted, headSHA) {
 					t.Links = append(t.Links, model.Link{Kind: model.LinkQAS4Attempted, Target: headSHA})
 				}
 				return nil
@@ -511,18 +512,40 @@ func runMirrorS3WithWorkspace(
 	if shadow || assign.ArmID == model.QAArmControl {
 		armLabel = model.QAArmControl
 	}
-	rep, err := checks.RunS3(ctx, ws, flow, checks.RunOptions{
+
+	// CustomChecks referenced by a CustomStageDecl are evaluated inside executeCustomStages
+	// when that stage's WhenPaths and MinTier match.
+	s3Flow := flow
+	if len(flow.CustomStages) > 0 && len(flow.CustomChecks) > 0 {
+		stagedIDs := map[string]bool{}
+		for _, stg := range flow.CustomStages {
+			for _, cid := range stg.CheckIDs {
+				stagedIDs[cid] = true
+			}
+		}
+		var ungrouped []qa.CustomCheckDecl
+		for _, cc := range flow.CustomChecks {
+			if !stagedIDs[cc.ID] {
+				ungrouped = append(ungrouped, cc)
+			}
+		}
+		s3Flow.CustomChecks = ungrouped
+	}
+
+	rep, err := checks.RunS3(ctx, ws, s3Flow, checks.RunOptions{
 		TaskID:        task.ID,
 		Arm:           armLabel,
 		Shadow:        shadow,
 		Attempt:       1,
 		CallerNotes:   callerNotes,
 		TaskSpecBytes: len(task.Title) + len(task.Body),
+		ExecInSandbox: rt.ExecInSandbox,
 	}, rt.Profiler)
 	if err != nil {
 		return checks.Report{}, ws, false, err
 	}
 	persistS3ReportToStore(ctx, store, task, "", assign, shadow, callerNotes, ws.BaseSHA, rep)
+	executeCustomStages(ctx, store, task, "", assign, shadow, callerNotes, ws, &rep)
 	return rep, ws, true, nil
 }
 
@@ -619,47 +642,371 @@ func persistS3ReportToStore(
 			_ = store.MarkPriorQACheckRunsRepaired(ctx, task.ID, cr.CheckID, rep.HeadSHA)
 		}
 	}
+}
 
-	if assign != nil && assign.Spec != nil && len(assign.Spec.CustomStages) > 0 {
-		for _, stg := range assign.Spec.CustomStages {
+func executeCustomStages(
+	ctx context.Context,
+	store *model.Store,
+	task model.Task,
+	runID string,
+	assign *resolve.Resolution,
+	shadow bool,
+	callerNotes string,
+	ws *checks.MirrorWorkspace,
+	rep *checks.Report,
+) {
+	if store == nil || assign == nil || assign.Spec == nil || rep == nil || len(assign.Spec.CustomStages) == 0 {
+		return
+	}
+	flow := *assign.Spec
+	rt := LiveQARuntime()
+
+	comp := qa.AssessTaskComplexity(qa.ComplexityInput{
+		Title:       task.Title,
+		Body:        task.Body,
+		ReadsCount:  len(task.Reads),
+		WritesCount: len(task.Writes),
+	}, nil)
+
+	armCol := model.QAArmTreatment
+	if shadow || assign.ArmID == model.QAArmControl {
+		armCol = model.QAArmControl
+	}
+	baseSHA := ""
+	var rawDiff string
+	var pd checks.ParsedDiff
+	if ws != nil {
+		baseSHA = ws.BaseSHA
+		rawDiff, _ = ws.BaseHeadDiff(ctx)
+		pd = checks.ParseUnifiedDiff(rawDiff)
+	}
+
+	customCheckByID := make(map[string]qa.CustomCheckDecl, len(flow.CustomChecks))
+	for _, cc := range flow.CustomChecks {
+		customCheckByID[cc.ID] = cc
+	}
+
+	detailBytes, _ := json.Marshal(map[string]any{
+		"blastTier":    rep.BlastTier,
+		"blastScore":   rep.BlastScore,
+		"blastReasons": rep.BlastReasons,
+		"changedFiles": rep.ChangedFiles,
+		"testTampered": rep.TestTampered,
+	})
+
+	for _, insertSlot := range []string{"s2", "s3", "s4"} {
+		for _, stg := range flow.CustomStages {
+			slot := strings.ToLower(strings.TrimSpace(stg.InsertAfter))
+			if slot == "" {
+				slot = "s3"
+			}
+			if slot != insertSlot {
+				continue
+			}
 			tierMatch := qa.BlastTierAtLeast(rep.BlastTier, qa.BlastTier(stg.MinTier))
 			pathMatch := len(stg.WhenPaths) == 0 || qa.MatchesAnyGlob(stg.WhenPaths, rep.ChangedFiles)
-			if tierMatch && pathMatch {
-				stageVerdict := "pass"
-				if len(stg.CheckIDs) > 0 {
+			if !tierMatch || !pathMatch {
+				continue
+			}
+
+			kind := strings.ToLower(strings.TrimSpace(stg.Kind))
+			if kind == "" {
+				kind = "deterministic_batch"
+			}
+			stageVerdict := "pass"
+			var stageFindings []model.QAFinding
+			var tokIn, tokOut int64
+			start := time.Now()
+
+			switch kind {
+			case "deterministic_batch", "isolated_sandbox_check":
+				for _, cid := range stg.CheckIDs {
+					if cc, ok := customCheckByID[cid]; ok {
+						fs, cErr := qa.EvaluateCustomCheck(cc, qa.CustomCheckContext{
+							ChangedFiles:    pd.AllPaths(),
+							AddedLines:      pd.AddedLinesMap(),
+							TotalLinesAdded: pd.NonTestAdded + pd.TestAdded,
+							CallerNotes:     callerNotes,
+							ReadFile: func(p string) ([]byte, error) {
+								if ws == nil {
+									return nil, fmt.Errorf("no workspace")
+								}
+								return ws.ReadFileAtHead(ctx, p)
+							},
+						})
+						if cErr != nil {
+							continue
+						}
+						var chkFindings []checks.Finding
+						var chkModelFindings []model.QAFinding
+						hasBlock := false
+						for _, f := range fs {
+							sev := f.Severity
+							if sev == "" {
+								sev = cc.Severity
+							}
+							if sev == "" || sev == "blocking" || sev == "error" {
+								hasBlock = true
+							}
+							chkFindings = append(chkFindings, checks.Finding{
+								RuleID:   f.RuleID,
+								Stage:    stg.ID,
+								Severity: sev,
+								FilePath: f.FilePath,
+								Line:     f.Line,
+								Summary:  f.Summary,
+								Evidence: f.Evidence,
+							})
+							mf := model.QAFinding{
+								TaskID:   task.ID,
+								Stage:    stg.ID,
+								RuleID:   f.RuleID,
+								Severity: sev,
+								FilePath: f.FilePath,
+								Line:     f.Line,
+								Summary:  f.Summary,
+								Evidence: f.Evidence,
+							}
+							chkModelFindings = append(chkModelFindings, mf)
+							stageFindings = append(stageFindings, mf)
+						}
+						cVerdict := "pass"
+						if len(chkFindings) > 0 {
+							if hasBlock {
+								cVerdict = "fail"
+								stageVerdict = "fail"
+								rep.Passed = false
+							} else if stageVerdict == "pass" {
+								cVerdict = "warn"
+								stageVerdict = "warn"
+							} else {
+								cVerdict = "warn"
+							}
+						}
+						rep.Results = append(rep.Results, checks.CheckResult{
+							CheckID:  cc.ID,
+							Stage:    stg.ID,
+							Verdict:  cVerdict,
+							Findings: chkFindings,
+						})
+						rep.Findings = append(rep.Findings, chkFindings...)
+						_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
+							TaskID:         task.ID,
+							RunID:          runID,
+							CommitSHA:      rep.HeadSHA,
+							Stage:          "S3",
+							CheckID:        cc.ID,
+							Arm:            armCol,
+							Shadow:         shadow,
+							Verdict:        cVerdict,
+							DetailJSON:     string(detailBytes),
+							ExperimentID:   assign.ExperimentID,
+							ArmID:          assign.ArmID,
+							FlowHash:       assign.FlowHash,
+							QAEngineRev:    assign.QAEngineRev,
+							Model:          task.Model,
+							BaseSHA:        baseSHA,
+							BlastTier:      string(rep.BlastTier),
+							BlastScore:     rep.BlastScore,
+							ComplexityTier: string(comp.Tier),
+						}, chkModelFindings)
+						if !shadow && cVerdict == "pass" && rep.HeadSHA != "" {
+							_ = store.MarkPriorQACheckRunsRepaired(ctx, task.ID, cc.ID, rep.HeadSHA)
+						}
+						continue
+					}
 					for _, cr := range rep.Results {
-						if slices.Contains(stg.CheckIDs, cr.CheckID) {
+						if cr.CheckID == cid {
 							if cr.Verdict == "fail" {
 								stageVerdict = "fail"
-								break
-							}
-							if cr.Verdict == "warn" && stageVerdict == "pass" {
+								rep.Passed = false
+							} else if cr.Verdict == "warn" && stageVerdict == "pass" {
 								stageVerdict = "warn"
 							}
 						}
 					}
 				}
-				_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
-					TaskID:         task.ID,
-					RunID:          runID,
-					CommitSHA:      rep.HeadSHA,
-					Stage:          stg.ID,
-					CheckID:        stg.ID,
-					Arm:            armCol,
-					Shadow:         shadow,
-					Verdict:        stageVerdict,
-					ExperimentID:   expID,
-					ArmID:          armID,
-					FlowHash:       flowHash,
-					QAEngineRev:    engineRev,
-					Model:          task.Model,
-					BaseSHA:        baseSHA,
-					BlastTier:      string(rep.BlastTier),
-					BlastScore:     rep.BlastScore,
-					ComplexityTier: string(comp.Tier),
-				}, nil)
+
+			case "isolated_critic":
+				if !shadow && assign.ArmID != model.QAArmControl && rt != nil && rt.RunIsolatedPrompt != nil {
+					skillText := resolveCustomStageSkillText(flow, stg.SkillRef)
+					tSec := stg.TimeoutSeconds
+					if tSec <= 0 {
+						tSec = stg.Timeout
+					}
+					if tSec <= 0 {
+						tSec = 30
+					}
+					cCtx, cancel := context.WithTimeout(ctx, time.Duration(tSec)*time.Second)
+					var promptBuf strings.Builder
+					promptBuf.WriteString("You are an isolated pre-PR critic stage evaluating a candidate diff.\n")
+					if skillText != "" {
+						promptBuf.WriteString("\n## Critic Skill Instructions\n")
+						promptBuf.WriteString(skillText)
+						promptBuf.WriteString("\n")
+					}
+					fmt.Fprintf(&promptBuf, "\n## Task\nTitle: %s\n\n%s\n", task.Title, strings.TrimSpace(task.Body))
+					if rawDiff != "" {
+						diffExcerpt := rawDiff
+						if len(diffExcerpt) > 32*1024 {
+							diffExcerpt = diffExcerpt[:32*1024] + "\n... [diff truncated]"
+						}
+						fmt.Fprintf(&promptBuf, "\n## Candidate Diff\n```diff\n%s\n```\n", diffExcerpt)
+					}
+					out, inTok, outTok, pErr := rt.RunIsolatedPrompt(cCtx, task, task.ID+"-"+stg.ID, promptBuf.String(), 25000)
+					cancel()
+					tokIn = inTok
+					tokOut = outTok
+					if pErr == nil {
+						trimmed := strings.TrimSpace(out)
+						if parsed, jErr := qa.ExtractS4JSONFindings(trimmed); jErr == nil {
+							for _, pf := range parsed {
+								summary := strings.TrimSpace(pf.TriggerScenario)
+								if summary == "" {
+									summary = "isolated critic finding"
+								}
+								cf := checks.Finding{
+									RuleID:   stg.ID,
+									Stage:    stg.ID,
+									Severity: "blocking",
+									FilePath: pf.File,
+									Line:     pf.Line,
+									Summary:  summary,
+									Evidence: pf.FixHint,
+								}
+								rep.Findings = append(rep.Findings, cf)
+								stageFindings = append(stageFindings, model.QAFinding{
+									TaskID:   task.ID,
+									Stage:    stg.ID,
+									RuleID:   stg.ID,
+									Severity: "blocking",
+									FilePath: pf.File,
+									Line:     pf.Line,
+									Summary:  summary,
+									Evidence: pf.FixHint,
+								})
+							}
+						} else if trimmed != "" && !strings.EqualFold(trimmed, "PASS") && !strings.EqualFold(trimmed, "OK") && trimmed != "[]" {
+							summary := firstLineSummary(trimmed)
+							cf := checks.Finding{
+								RuleID:   stg.ID,
+								Stage:    stg.ID,
+								Severity: "blocking",
+								Summary:  summary,
+								Evidence: trimmed,
+							}
+							rep.Findings = append(rep.Findings, cf)
+							stageFindings = append(stageFindings, model.QAFinding{
+								TaskID:   task.ID,
+								Stage:    stg.ID,
+								RuleID:   stg.ID,
+								Severity: "blocking",
+								Summary:  summary,
+								Evidence: trimmed,
+							})
+						}
+						if len(stageFindings) > 0 {
+							stageVerdict = "fail"
+							rep.Passed = false
+						}
+					}
+				}
+
+			case "human_gate":
+				stageVerdict = "hold"
+				if !shadow && assign.ArmID != model.QAArmControl {
+					label := strings.TrimSpace(stg.Label)
+					if label == "" {
+						label = stg.ID
+					}
+					_ = store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
+						model.AddHumanReviewReason(t, model.HumanReviewReason{
+							Source:   model.HumanReviewQATriage,
+							Category: model.HumanReviewRisk,
+							Reason:   fmt.Sprintf("custom human_gate %s matched (%s)", stg.ID, label),
+						})
+						return nil
+					})
+				}
+			}
+
+			_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
+				TaskID:         task.ID,
+				RunID:          runID,
+				CommitSHA:      rep.HeadSHA,
+				Stage:          stg.ID,
+				CheckID:        stg.ID,
+				Arm:            armCol,
+				Shadow:         shadow,
+				Verdict:        stageVerdict,
+				DurationMS:     time.Since(start).Milliseconds(),
+				TokensIn:       tokIn,
+				TokensOut:      tokOut,
+				DetailJSON:     string(detailBytes),
+				ExperimentID:   assign.ExperimentID,
+				ArmID:          assign.ArmID,
+				FlowHash:       assign.FlowHash,
+				QAEngineRev:    assign.QAEngineRev,
+				Model:          task.Model,
+				BaseSHA:        baseSHA,
+				BlastTier:      string(rep.BlastTier),
+				BlastScore:     rep.BlastScore,
+				ComplexityTier: string(comp.Tier),
+			}, stageFindings)
+			if !shadow && stageVerdict == "pass" && rep.HeadSHA != "" {
+				_ = store.MarkPriorQACheckRunsRepaired(ctx, task.ID, stg.ID, rep.HeadSHA)
 			}
 		}
+	}
+}
+
+func resolveCustomStageSkillText(flow qa.FlowSpec, skillRef string) string {
+	ref := strings.TrimSpace(skillRef)
+	if ref == "" {
+		return ""
+	}
+	for _, ss := range flow.SkillSteps {
+		if ss.ID == ref && strings.TrimSpace(ss.Text) != "" {
+			return strings.TrimSpace(ss.Text)
+		}
+	}
+	for _, rp := range flow.ReadabilityPacks {
+		if rp.ID == ref {
+			if txt := qa.BuiltInReadabilityPackText(rp.ID); txt != "" {
+				return txt
+			}
+			if strings.TrimSpace(rp.CustomText) != "" {
+				return strings.TrimSpace(rp.CustomText)
+			}
+		}
+	}
+	switch strings.ToLower(ref) {
+	case "verifier":
+		return strings.TrimSpace(flow.VerifierSkillText)
+	case "security":
+		return strings.TrimSpace(flow.SecuritySkillText)
+	case "plan-critic", "plan_critic":
+		return strings.TrimSpace(flow.PlanCriticSkillText)
+	case "intent":
+		return strings.TrimSpace(flow.IntentSkillText)
+	case "coding":
+		return strings.TrimSpace(flow.SkillText)
+	}
+	if txt := qa.BuiltInReadabilityPackText(ref); txt != "" {
+		return txt
+	}
+	return ref
+}
+
+func isPrePRDeterministicOrCustomStage(stage string) bool {
+	if stage == "S3" || strings.HasPrefix(stage, "S3") {
+		return true
+	}
+	switch stage {
+	case "", "S0", "S0b", "S1", "S2", "S4", "S5", "S-promote":
+		return false
+	default:
+		return true
 	}
 }
 
@@ -672,7 +1019,7 @@ func loadRecordedS3Outcome(ctx context.Context, store *model.Store, taskID, head
 	tier = qa.BlastT1
 	runIDs := map[int64]bool{}
 	for _, r := range runs {
-		if r.Shadow || r.Stage != "S3" || r.CommitSHA != headSHA {
+		if r.Shadow || !isPrePRDeterministicOrCustomStage(r.Stage) || r.CommitSHA != headSHA {
 			continue
 		}
 		ran = true
@@ -696,7 +1043,7 @@ func loadRecordedS3Outcome(ctx context.Context, store *model.Store, taskID, head
 		findings, _ := store.ListQAFindingsForTask(ctx, taskID)
 		var lines []string
 		for _, f := range findings {
-			if f.Stage == "S3" && runIDs[f.CheckRunID] {
+			if runIDs[f.CheckRunID] {
 				loc := f.FilePath
 				if loc != "" && f.Line > 0 {
 					loc = fmt.Sprintf("%s:%d", loc, f.Line)
@@ -720,7 +1067,7 @@ func runFreshContextS4(
 	hazardSites map[string][]int,
 ) ([]qa.ValidatedS4Finding, error) {
 	rt := LiveQARuntime()
-	if rt == nil || rt.VerifyS4 == nil || task.Target == nil {
+	if rt == nil || (rt.VerifyS4 == nil && rt.RunIsolatedPrompt == nil) || task.Target == nil {
 		return nil, nil
 	}
 	if ws == nil && rt.DataDir != "" && rt.ResolveRemote != nil {
@@ -759,16 +1106,20 @@ func runFreshContextS4(
 		}
 	}
 
-	var checklistID string
+	var spec qa.FlowSpec
 	s4Timeout := 90 * time.Second
+	maxS4Tokens := 50000
 	if assign != nil && assign.Spec != nil {
-		checklistID = assign.Spec.VerifierChecklist
-		if assign.Spec.MaxS4Seconds > 0 {
-			s4Timeout = time.Duration(assign.Spec.MaxS4Seconds) * time.Second
+		spec = *assign.Spec
+		if spec.MaxS4Seconds > 0 {
+			s4Timeout = time.Duration(spec.MaxS4Seconds) * time.Second
+		}
+		if spec.MaxS4Tokens > 0 {
+			maxS4Tokens = spec.MaxS4Tokens
 		}
 	}
 
-	prompt := buildS4VerifierPrompt(task, rawDiff, hazardSites, checklistID)
+	prompt := buildS4VerifierPrompt(task, rawDiff, hazardSites, spec)
 	s4Ctx, cancel := context.WithTimeout(ctx, s4Timeout)
 	defer cancel()
 
@@ -782,7 +1133,21 @@ func runFreshContextS4(
 		Stage:   "S4",
 		CheckID: qa.RuleS4OrthogonalVerifier,
 	}, func() (string, error) {
-		out, inTok, outTok, err := rt.VerifyS4(s4Ctx, task, prompt)
+		var out string
+		var inTok, outTok int64
+		var err error
+		if rt.RunIsolatedPrompt != nil {
+			out, inTok, outTok, err = rt.RunIsolatedPrompt(s4Ctx, task, task.ID+"-qa-s4", prompt, maxS4Tokens)
+			if (err != nil || strings.TrimSpace(out) == "") && rt.VerifyS4 != nil {
+				out, inTok, outTok, err = rt.VerifyS4(s4Ctx, task, prompt)
+			} else if rt.VerifyS4 != nil {
+				if _, pErr := qa.ExtractS4JSONFindings(out); pErr != nil {
+					out, inTok, outTok, err = rt.VerifyS4(s4Ctx, task, prompt)
+				}
+			}
+		} else if rt.VerifyS4 != nil {
+			out, inTok, outTok, err = rt.VerifyS4(s4Ctx, task, prompt)
+		}
 		rawOut = out
 		tokIn = inTok
 		tokOut = outTok
@@ -857,7 +1222,7 @@ func runFreshContextS4(
 	return kept, nil
 }
 
-func buildS4VerifierPrompt(task model.Task, rawDiff string, hazardSites map[string][]int, checklistID string) string {
+func buildS4VerifierPrompt(task model.Task, rawDiff string, hazardSites map[string][]int, spec qa.FlowSpec) string {
 	const maxDiffPromptBytes = 48 * 1024
 	diffExcerpt := rawDiff
 	if len(diffExcerpt) > maxDiffPromptBytes {
@@ -867,10 +1232,26 @@ func buildS4VerifierPrompt(task model.Task, rawDiff string, hazardSites map[stri
 	b.WriteString("You are an orthogonal pre-PR defect verifier inspecting a candidate diff with zero author context.\n")
 	b.WriteString("Report ONLY concrete, reproducible logic bugs, missed sibling caller breakages, concurrency/state bugs, or spec violations introduced by this diff.\n")
 	b.WriteString("Do NOT report style nits, defensive boilerplate, hypothetical architecture wishes, or pre-existing code outside the diff.\n\n")
-	if checklistID == qa.ChecklistEscapeClassesV1 {
+	if spec.VerifierChecklist == qa.ChecklistEscapeClassesV1 {
 		b.WriteString("## Verification Checklist\n")
 		b.WriteString(qa.EscapeClassesV1ChecklistText)
 		b.WriteString("\n\n")
+	}
+	if vSkill := strings.TrimSpace(spec.VerifierSkillText); vSkill != "" {
+		b.WriteString("## Verifier Skill Instructions\n")
+		b.WriteString(vSkill)
+		b.WriteString("\n\n")
+	}
+	if secSkill := strings.TrimSpace(spec.SecuritySkillText); secSkill != "" {
+		b.WriteString("## Security Verification Instructions\n")
+		b.WriteString(secSkill)
+		b.WriteString("\n\n")
+	}
+	for _, step := range spec.SkillSteps {
+		if step.Enabled && strings.EqualFold(step.Stage, "s4") && strings.TrimSpace(step.Text) != "" {
+			b.WriteString(strings.TrimSpace(step.Text))
+			b.WriteString("\n\n")
+		}
 	}
 	fmt.Fprintf(&b, "## Task Specification\nTitle: %s\n\n%s\n\n", task.Title, strings.TrimSpace(task.Body))
 	if len(hazardSites) > 0 {
@@ -928,6 +1309,35 @@ func clearTaskQAHold(ctx context.Context, store *model.Store, taskID string) {
 
 func hasTaskLink(t model.Task, kind model.LinkKind) bool {
 	return slices.ContainsFunc(t.Links, func(l model.Link) bool { return l.Kind == kind })
+}
+
+func hasTaskLinkTarget(t model.Task, kind model.LinkKind, target string) bool {
+	return slices.ContainsFunc(t.Links, func(l model.Link) bool { return l.Kind == kind && l.Target == target })
+}
+
+func countTaskLinks(t model.Task, kind model.LinkKind) int {
+	n := 0
+	for _, l := range t.Links {
+		if l.Kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
+func maxS4RepairRounds(flow qa.FlowSpec) int {
+	return max(0, min(flow.MaxS4RepairRounds, 3))
+}
+
+func canRunS4RepairRound(t model.Task, flow qa.FlowSpec, headSHA string) bool {
+	capRounds := maxS4RepairRounds(flow)
+	if capRounds <= 0 {
+		return false
+	}
+	if headSHA != "" && hasTaskLinkTarget(t, model.LinkQAS4Attempted, headSHA) {
+		return false
+	}
+	return countTaskLinks(t, model.LinkQAS4Attempted) < capRounds
 }
 
 func withoutTaskLinkKinds(links []model.Link, kinds ...model.LinkKind) []model.Link {
@@ -1468,10 +1878,14 @@ func EvaluateAndApplyQATriage(
 	var s3Reasons []string
 	var s3Files []string
 	var s3Tampered bool
+	var hasCustomHumanGateHold bool
 	if runs, rErr := store.ListQACheckRunsForTask(ctx, task.ID); rErr == nil {
 		for _, r := range runs {
 			if r.Stage == "S5" && r.CommitSHA == headSHA && headSHA != "" {
 				return
+			}
+			if r.Verdict == "hold" && (headSHA == "" || r.CommitSHA == headSHA) && !r.Shadow && r.Stage != "S0" {
+				hasCustomHumanGateHold = true
 			}
 			if r.Stage == "S3" && (headSHA == "" || r.CommitSHA == headSHA) && !r.Shadow {
 				if r.BlastTier != "" {
@@ -1554,13 +1968,105 @@ func EvaluateAndApplyQATriage(
 		effectiveMode = string(qa.TriageShadow)
 	}
 
+	mergeRulesRequireHuman := false
+	if p, ok := model.MergePolicyOf(task); ok && p.AutoMergeNever {
+		mergeRulesRequireHuman = true
+	}
+	for _, r := range model.HumanReviewReasons(task) {
+		if r.Source == model.HumanReviewHumanOnly {
+			mergeRulesRequireHuman = true
+			break
+		}
+	}
+	for _, p := range prFiles {
+		if slices.Contains(model.MergeRulesPaths, p) {
+			mergeRulesRequireHuman = true
+			break
+		}
+	}
+	if !mergeRulesRequireHuman && task.Target != nil {
+		if rules, rErr := store.MergeRulesOf(ctx, *task.Target); rErr == nil && rules != nil && !rules.Empty() {
+			ciMode := model.CIModeGitHub
+			if rc, cErr := store.GetRepoConfig(ctx, *task.Target); cErr == nil && rc != nil && rc.CIMode != "" {
+				ciMode = rc.CIMode
+			}
+			eff := rules.Effective(prFiles, len(prFiles) < github.PullRequestFilesCap, ciMode)
+			if eff.AutoMergeNever {
+				mergeRulesRequireHuman = true
+			}
+		}
+	}
+
+	gateTriggerMatched := hasPathTriggerHold(task) || hasCustomHumanGateHold
+	if !gateTriggerMatched && task.Target != nil {
+		if triggers, tErr := store.PathTriggersOf(ctx, *task.Target); tErr == nil {
+			for _, rt := range triggers {
+				if !rt.Trigger.Gate {
+					continue
+				}
+				if len(rt.Trigger.Paths) == 0 || len(rt.Trigger.Match(prFiles)) > 0 {
+					gateTriggerMatched = true
+					break
+				}
+			}
+		}
+	}
+
+	ciRedOrPending := false
+	if obs, oErr := store.GetObservation(ctx, task.ID); oErr == nil && obs != nil && obs.CI != nil {
+		if !obs.CI.Done() {
+			ciRedOrPending = true
+		} else {
+			switch strings.ToLower(strings.TrimSpace(obs.CI.Conclusion)) {
+			case "failure", "errored", "cancelled", "timed_out", "action_required":
+				ciRedOrPending = true
+			}
+		}
+	}
+	if !ciRedOrPending && client != nil && task.Target != nil && headSHA != "" {
+		if checksList, cErr := client.ListCheckRuns(task.Target.StoredOwner(), task.Target.Name, headSHA); cErr == nil {
+			for _, chk := range checksList {
+				st := strings.ToLower(strings.TrimSpace(chk.Status))
+				if st != "" && st != "completed" {
+					ciRedOrPending = true
+					break
+				}
+				concl := ""
+				if chk.Conclusion != nil {
+					concl = strings.ToLower(strings.TrimSpace(*chk.Conclusion))
+				}
+				if concl != "" && concl != "success" && concl != "neutral" && concl != "skipped" {
+					ciRedOrPending = true
+					break
+				}
+			}
+		}
+	}
+	if !ciRedOrPending && task.Target != nil && headSHA != "" {
+		repoFull := task.Target.StoredOwner() + "/" + task.Target.Name
+		if ghaRuns, gErr := store.GitHubCIOutcomes(ctx); gErr == nil {
+			for _, gr := range ghaRuns {
+				if gr.Repo == repoFull && gr.Commit == headSHA {
+					concl := strings.ToLower(strings.TrimSpace(gr.Conclusion))
+					if concl != "success" && concl != "neutral" && concl != "skipped" {
+						ciRedOrPending = true
+						break
+					}
+				}
+			}
+		}
+	}
+
 	triageIn := qa.TriageInput{
 		Mode:                       effectiveMode,
 		AutoMergeTiers:             autoTiers,
 		RequireHumanTiers:          humTiers,
 		Assessment:                 risk,
 		TrustBoundaryRequiresHuman: risk.TrustBoundaryHit || len(trustboundary.Classify(prFiles)) > 0,
+		MergeRulesRequireHuman:     mergeRulesRequireHuman,
+		GateTriggerMatched:         gateTriggerMatched,
 		FilesTruncated:             len(prFiles) >= github.PullRequestFilesCap,
+		CIRedOrPending:             ciRedOrPending,
 		HasUnresolvedFindings:      !s3Passed || hasTaskLink(task, model.LinkQAHold) || hasTaskLink(task, model.LinkReviewFindings),
 		OperatorAutoMergeEnabled:   task.AutoMerge,
 	}

@@ -29,6 +29,7 @@ import (
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/orchestrator"
 	"github.com/ai-on-gke/grain/pkg/qa"
+	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 )
 
 func commitAndPushFile(t *testing.T, bareRepo, branch, relFile, content, msg string) string {
@@ -829,5 +830,426 @@ func TestSweepStrandedQAStagesSkipsClosedUntreatedAndAlreadySweptTasks(t *testin
 	}
 	if client.branchHeadCalls != promotedCalls {
 		t.Fatalf("expected 0 additional GetBranchHead calls on second sweep tick, got %d -> %d", promotedCalls, client.branchHeadCalls)
+	}
+}
+
+func TestQACustomStagesExecutionAndExecInSandboxWiring(t *testing.T) {
+	store, ctx := openStore(t)
+	enableTestQA(t, ctx, store, 100)
+
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	now := time.Date(2026, 11, 15, 13, 0, 0, 0, time.UTC)
+
+	customStagesYAML := `schema: grain.dev/qa-flow/v4
+key: v4-custom-stages
+extends: golden-v2@1
+label: v4 custom stages
+summary: Tests custom stages and ExecInSandbox wiring
+skill-steps:
+  - id: skill:custom-critic
+    stage: coding
+    enabled: true
+    text: Verify schema migrations accompany schema edits.
+stages:
+  custom:
+    - id: custom:s3b-batch
+      label: Companion migration batch
+      insert-after: s3
+      kind: deterministic_batch
+      when-paths: ["pkg/model/**"]
+      min-tier: T1
+      timeout-seconds: 20
+      check-ids: ["custom:schema-needs-migration"]
+    - id: custom:s3c-critic
+      label: Isolated critic stage
+      insert-after: s3
+      kind: isolated_critic
+      skill-ref: skill:custom-critic
+      when-paths: ["pkg/critic/**"]
+      min-tier: T1
+      timeout-seconds: 20
+    - id: custom:s4b-human-gate
+      label: Human gate on billing paths
+      insert-after: s4
+      kind: human_gate
+      when-paths: ["pkg/billing/**"]
+      min-tier: T1
+      timeout-seconds: 20
+checks:
+  golden:mutation-hardening:
+    enabled: true
+    severity: warn
+    params:
+      mutants: 2
+      max-seconds: 10
+custom-checks:
+  - id: custom:schema-needs-migration
+    label: Schema edit requires migration
+    kind: companion
+    severity: blocking
+    when-changed: ["pkg/model/schema.go"]
+    require-changed: ["pkg/model/migrations.go"]
+    message: Changing pkg/model/schema.go requires pkg/model/migrations.go.
+    fixtures:
+      fail:
+        - name: schema alone
+          changed-files: ["pkg/model/schema.go"]
+      pass:
+        - name: both
+          changed-files: ["pkg/model/schema.go", "pkg/model/migrations.go"]
+verifier:
+  enabled: true
+  tiers: [T2, T3]
+  max-repair-rounds: 0
+`
+	bundle, err := qa.ResolveAnyFlowDeclaration([]byte(customStagesYAML), 1, nil)
+	if err != nil {
+		t.Fatalf("ResolveAnyFlowDeclaration: %v", err)
+	}
+	if err := store.InsertQAFlowVersion(ctx, model.QAFlowVersion{
+		Hash:        bundle.Hash,
+		Key:         bundle.Key,
+		Version:     bundle.Version,
+		Label:       bundle.Label,
+		QAEngineRev: bundle.QAEngineRev,
+		SourceYAML:  bundle.SourceYAML,
+		SpecJSON:    bundle.SpecJSON,
+		CreatedAt:   now,
+	}); err != nil {
+		t.Fatalf("InsertQAFlowVersion: %v", err)
+	}
+
+	dataDir := t.TempDir()
+	execInSandboxCalls := 0
+	var criticPrompts []string
+	orchestrator.SetLiveQARuntime(&orchestrator.QARuntime{
+		DataDir:  dataDir,
+		Profiler: qa.NewProfiler(filepath.Join(dataDir, "perf", "qa.jsonl")),
+		ResolveRemote: func(_ context.Context, _ model.RepoRef) (string, string, error) {
+			return sim.BareRepo, "", nil
+		},
+		ExecInSandbox: func(_ context.Context, _ string, _ []string, _ time.Duration) (string, int, error) {
+			execInSandboxCalls++
+			// Simulate surviving mutant (exitCode 0 on mutated test run).
+			return "PASS\n", 0, nil
+		},
+		RunIsolatedPrompt: func(_ context.Context, _ model.Task, runPrefix, prompt string, _ int) (string, int64, int64, error) {
+			if strings.Contains(runPrefix, "custom:s3c-critic") {
+				criticPrompts = append(criticPrompts, prompt)
+				return `[{"file":"pkg/critic/handler.go","line":2,"category":"logic_bug","trigger_scenario":"Unchecked nil request in handler","fix_hint":"Check req != nil"}]`, 80, 30, nil
+			}
+			return "[]", 10, 5, nil
+		},
+	})
+	t.Cleanup(func() { orchestrator.SetLiveQARuntime(nil) })
+
+	// 1. deterministic_batch custom stage blocks PR when custom:schema-needs-migration fails.
+	taskBatch := filedTask(t, ctx, store, "qacust-batch", repo)
+	if _, err := store.EnsureQAAssignment(ctx, model.QAAssignment{
+		RootOrigin:         model.ResolveQARootOrigin(taskBatch.WorkOrigin, taskBatch.ID),
+		Epoch:              1,
+		RegimeID:           1,
+		Arm:                model.QAArmTreatment,
+		FlowID:             bundle.Key,
+		RolloutPctAtAssign: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	commitAndPushFile(t, sim.BareRepo, model.QAStageBranchName(taskBatch.ID), "pkg/model/schema.go",
+		"package model\nfunc Touch(a, b int) bool { return a == b }\n",
+		"Update schema\n\nBody.")
+	if _, err := orchestrator.OpenPullRequestForTaskWithQA(ctx, store, client, taskBatch, orchestrator.QAOpenPROptions{}); err == nil {
+		t.Fatalf("expected deterministic_batch custom stage to block PR when companion migration is missing")
+	}
+	if execInSandboxCalls == 0 {
+		t.Fatalf("expected ExecInSandbox to be invoked by mutation hardening during runMirrorS3WithWorkspace")
+	}
+
+	// 2. isolated_critic custom stage runs RunIsolatedPrompt with SkillRef and blocks when findings are returned.
+	taskCritic := filedTask(t, ctx, store, "qacust-critic", repo)
+	if _, err := store.EnsureQAAssignment(ctx, model.QAAssignment{
+		RootOrigin:         model.ResolveQARootOrigin(taskCritic.WorkOrigin, taskCritic.ID),
+		Epoch:              1,
+		RegimeID:           1,
+		Arm:                model.QAArmTreatment,
+		FlowID:             bundle.Key,
+		RolloutPctAtAssign: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	commitAndPushFile(t, sim.BareRepo, model.QAStageBranchName(taskCritic.ID), "pkg/critic/handler.go",
+		"package critic\nfunc Handle() string { return \"ok\" }\n",
+		"Add critic handler\n\nBody.")
+	if _, err := orchestrator.OpenPullRequestForTaskWithQA(ctx, store, client, taskCritic, orchestrator.QAOpenPROptions{}); err == nil {
+		t.Fatalf("expected isolated_critic custom stage to block PR on critic finding")
+	}
+	if len(criticPrompts) == 0 || !strings.Contains(criticPrompts[0], "Verify schema migrations accompany schema edits.") {
+		t.Fatalf("expected isolated_critic prompt to include resolved SkillRef text, got %+v", criticPrompts)
+	}
+	criticFindings, _ := store.ListQAFindingsForTask(ctx, taskCritic.ID)
+	foundCritic := false
+	for _, f := range criticFindings {
+		if f.Stage == "custom:s3c-critic" && strings.Contains(f.Summary, "Unchecked nil request") {
+			foundCritic = true
+		}
+	}
+	if !foundCritic {
+		t.Fatalf("expected recorded QAFinding for custom:s3c-critic, got %+v", criticFindings)
+	}
+
+	// 3. human_gate custom stage sets LinkQATriageHold when WhenPaths/MinTier match.
+	taskGate := filedTask(t, ctx, store, "qacust-gate", repo)
+	_ = store.UpdateTask(ctx, taskGate.ID, func(tk *model.Task) error {
+		tk.AutoMerge = true
+		return nil
+	})
+	freshGate, _ := store.GetTask(ctx, taskGate.ID)
+	taskGate = *freshGate
+	if _, err := store.EnsureQAAssignment(ctx, model.QAAssignment{
+		RootOrigin:         model.ResolveQARootOrigin(taskGate.WorkOrigin, taskGate.ID),
+		Epoch:              1,
+		RegimeID:           1,
+		Arm:                model.QAArmTreatment,
+		FlowID:             bundle.Key,
+		RolloutPctAtAssign: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	commitAndPushFile(t, sim.BareRepo, model.QAStageBranchName(taskGate.ID), "pkg/billing/invoice.go",
+		"package billing\nfunc Total() int { return 42 }\n",
+		"Add billing total\n\nBody.")
+	if _, err := orchestrator.OpenPullRequestForTaskWithQA(ctx, store, client, taskGate, orchestrator.QAOpenPROptions{}); err != nil {
+		t.Fatalf("OpenPullRequestForTaskWithQA on human_gate task: %v", err)
+	}
+	afterGate, _ := store.GetTask(ctx, taskGate.ID)
+	hasTriageHold := false
+	for _, l := range afterGate.Links {
+		if l.Kind == model.LinkQATriageHold {
+			hasTriageHold = true
+		}
+	}
+	if !hasTriageHold || afterGate.AutoMerge {
+		t.Fatalf("expected human_gate custom stage to set LinkQATriageHold and withdraw AutoMerge, got links=%+v AutoMerge=%v",
+			afterGate.Links, afterGate.AutoMerge)
+	}
+}
+
+func TestQAS4VerifierSkillSecuritySkillMaxTokensAndTwoRepairRounds(t *testing.T) {
+	store, ctx := openStore(t)
+	enableTestQA(t, ctx, store, 100)
+
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	task := filedTask(t, ctx, store, "qas4-r2", repo)
+	now := time.Date(2026, 11, 15, 14, 0, 0, 0, time.UTC)
+
+	s4YAML := `schema: grain.dev/qa-flow/v4
+key: v4-s4-r2
+extends: golden-v2@1
+label: v4 s4 two rounds
+summary: Tests S4 verifier/security skills, MaxS4Tokens, and MaxS4RepairRounds=2
+skills:
+  verifier:
+    mode: replace
+    max-bytes: 1200
+    text: "VERIFIER_SKILL_MARKER: verify slice bounds before indexing."
+  security:
+    mode: replace
+    max-bytes: 1200
+    text: "SECURITY_SKILL_MARKER: verify auth token audience."
+verifier:
+  enabled: true
+  tiers: [T1, T2, T3]
+  max-repair-rounds: 2
+  max-tokens: 42000
+`
+	bundle, err := qa.ResolveAnyFlowDeclaration([]byte(s4YAML), 1, nil)
+	if err != nil {
+		t.Fatalf("ResolveAnyFlowDeclaration: %v", err)
+	}
+	if err := store.InsertQAFlowVersion(ctx, model.QAFlowVersion{
+		Hash:        bundle.Hash,
+		Key:         bundle.Key,
+		Version:     bundle.Version,
+		Label:       bundle.Label,
+		QAEngineRev: bundle.QAEngineRev,
+		SourceYAML:  bundle.SourceYAML,
+		SpecJSON:    bundle.SpecJSON,
+		CreatedAt:   now,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnsureQAAssignment(ctx, model.QAAssignment{
+		RootOrigin:         model.ResolveQARootOrigin(task.WorkOrigin, task.ID),
+		Epoch:              1,
+		RegimeID:           1,
+		Arm:                model.QAArmTreatment,
+		FlowID:             bundle.Key,
+		RolloutPctAtAssign: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	dataDir := t.TempDir()
+	s4Calls := 0
+	var sawPrompts []string
+	var sawMaxTokens []int
+	orchestrator.SetLiveQARuntime(&orchestrator.QARuntime{
+		DataDir:  dataDir,
+		Profiler: qa.NewProfiler(filepath.Join(dataDir, "perf", "qa.jsonl")),
+		ResolveRemote: func(_ context.Context, _ model.RepoRef) (string, string, error) {
+			return sim.BareRepo, "", nil
+		},
+		RunIsolatedPrompt: func(_ context.Context, _ model.Task, runPrefix, prompt string, maxTokens int) (string, int64, int64, error) {
+			if strings.HasSuffix(runPrefix, "-qa-s4") {
+				s4Calls++
+				sawPrompts = append(sawPrompts, prompt)
+				sawMaxTokens = append(sawMaxTokens, maxTokens)
+				return `[{
+					"file": "pkg/staterepo/loader.go",
+					"line": 3,
+					"category": "logic_bug",
+					"trigger_scenario": "Empty items slice causes index out of range panic.",
+					"fix_hint": "Check len(items) == 0."
+				}]`, 200, 60, nil
+			}
+			return "[]", 0, 0, nil
+		},
+	})
+	t.Cleanup(func() { orchestrator.SetLiveQARuntime(nil) })
+
+	stageBranch := model.QAStageBranchName(task.ID)
+
+	// Round 1 commit -> S4 runs (call #1) and requests repair.
+	commitAndPushFile(t, sim.BareRepo, stageBranch, "pkg/staterepo/loader.go",
+		"package staterepo\nfunc LoadItems(items []string) string {\n\treturn items[0]\n}\n",
+		"Round 1 loader\n\nBody.")
+	salvaged1, err := orchestrator.SalvagePushedBranch(ctx, store, client, task, now)
+	if err != nil || !salvaged1 || s4Calls != 1 {
+		t.Fatalf("round 1: salvaged=%v err=%v s4Calls=%d (want true, nil, 1)", salvaged1, err, s4Calls)
+	}
+	if !strings.Contains(sawPrompts[0], "VERIFIER_SKILL_MARKER") || !strings.Contains(sawPrompts[0], "SECURITY_SKILL_MARKER") {
+		t.Fatalf("expected S4 prompt to include VerifierSkillText and SecuritySkillText, got:\n%s", sawPrompts[0])
+	}
+	if sawMaxTokens[0] != 42000 {
+		t.Fatalf("expected MaxS4Tokens=42000 passed to RunIsolatedPrompt, got %d", sawMaxTokens[0])
+	}
+
+	// Round 2 commit -> S4 runs a second time (call #2) because MaxS4RepairRounds=2, and requests repair.
+	commitAndPushFile(t, sim.BareRepo, stageBranch, "pkg/staterepo/loader.go",
+		"package staterepo\nfunc LoadItems(items []string) string {\n\treturn items[0] // round 2\n}\n",
+		"Round 2 loader\n\nBody.")
+	salvaged2, err := orchestrator.SalvagePushedBranch(ctx, store, client, task, now.Add(time.Minute))
+	if err != nil || !salvaged2 || s4Calls != 2 {
+		t.Fatalf("round 2: salvaged=%v err=%v s4Calls=%d (want true, nil, 2)", salvaged2, err, s4Calls)
+	}
+
+	// Round 3 commit -> S4 repair cap (2) reached, so S4 does NOT run a 3rd time; branch promotes and opens PR!
+	sha3 := commitAndPushFile(t, sim.BareRepo, stageBranch, "pkg/staterepo/loader.go",
+		"package staterepo\nfunc LoadItems(items []string) string {\n\tif len(items) == 0 { return \"\" }\n\treturn items[0]\n}\n",
+		"Round 3 loader\n\nBody.")
+	salvaged3, err := orchestrator.SalvagePushedBranch(ctx, store, client, task, now.Add(2*time.Minute))
+	if err != nil || !salvaged3 {
+		t.Fatalf("round 3: salvaged=%v err=%v", salvaged3, err)
+	}
+	if s4Calls != 2 {
+		t.Fatalf("expected S4 not to run after 2 repair rounds, got s4Calls=%d", s4Calls)
+	}
+	liveHead, _ := client.GetBranchHead(repo.Owner, repo.Name, task.BranchName())
+	if liveHead == nil || liveHead.SHA != sha3 {
+		t.Fatalf("expected round 3 commit %s promoted to %s, got %+v", sha3, task.BranchName(), liveHead)
+	}
+}
+
+func TestEvaluateAndApplyQATriageSafetyFloors(t *testing.T) {
+	store, ctx := openStore(t)
+	sim, client := newSim(t, "acme", "widgets", "main")
+	_ = sim
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+	now := time.Date(2026, 11, 15, 15, 0, 0, 0, time.UTC)
+
+	enforcedSpec := &qa.FlowSpec{
+		ID: "v4-triage-floors",
+		S5MergeTriage: qa.TriageConfig{
+			Mode:              "enforced",
+			AutoMergeTiers:    []string{"T0", "T1"},
+			RequireHumanTiers: []string{"T2", "T3"},
+		},
+	}
+	assign := &resolve.Resolution{
+		ExperimentID: "exp-floors",
+		ArmID:        "v4-triage-floors",
+		FlowHash:     "sha256:floors",
+		Spec:         enforcedSpec,
+		QAEngineRev:  qa.QAEngineRev,
+	}
+
+	// Sync repo merge rules (human-only on pkg/release/**) and gating path trigger (on pkg/gated/**).
+	if _, err := store.SyncRepoDeclarations(ctx, repo, "base-sha", model.RepoDeclarations{
+		MergeRules: &model.MergeRules{
+			Path: model.MergeRulesPath,
+			Rules: []model.MergeRule{
+				{
+					ID:          "release-human-only",
+					Paths:       []string{"pkg/release/**"},
+					MergePolicy: model.MergePolicy{AutoMerge: model.AutoMergeNever},
+				},
+			},
+		},
+		Triggers: []model.PathTrigger{
+			{
+				Name:     "gated-trigger",
+				Path:     ".grain/triggers/gated.yml",
+				Paths:    []string{"pkg/gated/**"},
+				Gate:     true,
+				Template: model.TemplateNone,
+			},
+		},
+	}, now, time.UTC); err != nil {
+		t.Fatalf("SyncRepoDeclarations: %v", err)
+	}
+
+	// 1. MergeRulesRequireHuman floor blocks auto-merge even on a T1 path.
+	tMergeRule := filedTask(t, ctx, store, "floor-mr", repo)
+	_ = store.UpdateTask(ctx, tMergeRule.ID, func(tk *model.Task) error {
+		tk.AutoMerge = true
+		return nil
+	})
+	orchestrator.EvaluateAndApplyQATriage(ctx, store, client, tMergeRule, assign, "aaaa1111", []string{"pkg/release/version.go"}, true)
+	gotMR, _ := store.GetTask(ctx, tMergeRule.ID)
+	if gotMR.AutoMerge {
+		t.Fatalf("expected MergeRulesRequireHuman floor to withdraw AutoMerge on pkg/release/version.go")
+	}
+
+	// 2. GateTriggerMatched floor blocks auto-merge even on a T1 path.
+	tGateTrig := filedTask(t, ctx, store, "floor-trig", repo)
+	_ = store.UpdateTask(ctx, tGateTrig.ID, func(tk *model.Task) error {
+		tk.AutoMerge = true
+		return nil
+	})
+	orchestrator.EvaluateAndApplyQATriage(ctx, store, client, tGateTrig, assign, "bbbb2222", []string{"pkg/gated/feature.go"}, true)
+	gotTrig, _ := store.GetTask(ctx, tGateTrig.ID)
+	if gotTrig.AutoMerge {
+		t.Fatalf("expected GateTriggerMatched floor to withdraw AutoMerge on pkg/gated/feature.go")
+	}
+
+	// 3. CIRedOrPending floor blocks auto-merge when Observation.CI is failing/pending.
+	tCIRed := filedTask(t, ctx, store, "floor-ci", repo)
+	_ = store.UpdateTask(ctx, tCIRed.ID, func(tk *model.Task) error {
+		tk.AutoMerge = true
+		return nil
+	})
+	_ = store.ObserveField(ctx, tCIRed.ID, now, func(obs *model.Observation) {
+		obs.CI = &model.CIStatus{
+			RunID:      "ci-run-1",
+			FinishedAt: &now,
+			Conclusion: "failure",
+		}
+	})
+	orchestrator.EvaluateAndApplyQATriage(ctx, store, client, tCIRed, assign, "cccc3333", []string{"pkg/leaf/math.go"}, true)
+	gotCI, _ := store.GetTask(ctx, tCIRed.ID)
+	if gotCI.AutoMerge {
+		t.Fatalf("expected CIRedOrPending floor to withdraw AutoMerge when CI conclusion is failure")
 	}
 }
