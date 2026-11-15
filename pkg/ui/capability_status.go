@@ -511,7 +511,7 @@ func capabilitySecretsFor(requires []string, list []secrets.SecretInfo) []Capabi
 
 // capabilitiesWithReadiness is pickerCapabilities -- the per-task
 // picker's own listing, its api scope sets as they are now -- with each
-// row told whether this deployment can actually honour it, from the same capabilityStatuses the Settings
+// row told whether this deployment can actually honour it, from the same capabilityStatusesWithSecrets the Settings
 // pane's Capabilities tab is built from.
 //
 // The two listings were entirely independent before this, which is the
@@ -526,7 +526,7 @@ func capabilitySecretsFor(requires []string, list []secrets.SecretInfo) []Capabi
 // shared by every request this Client serves, and readiness is a
 // per-deployment answer written per call.
 //
-// A picker row with no capabilityStatuses entry keeps a nil Ready --
+// A picker row with no capabilityStatusesWithSecrets entry keeps a nil Ready --
 // unknown, not broken. That can only happen if OfferedCapabilities and
 // capabilityCatalog drift, which
 // TestOfferedCapabilitiesCoversEveryShippedCapability exists to stop,
@@ -568,13 +568,9 @@ func (c *Client) capabilitiesWithReadinessFrom(cfg *model.Config, repoConfigs []
 	return out
 }
 
-// ciCapabilitiesWithReadiness returns every capability supported for CI shells
+// ciCapabilitiesWithReadinessFrom returns every capability supported for CI shells
 // (including CI-only capabilities like package-publish and registry-push),
-// annotated with readiness for this deployment.
-func (c *Client) ciCapabilitiesWithReadiness(cfg *model.Config, repoConfigs []model.RepoConfig) []Capability {
-	return c.ciCapabilitiesWithReadinessFrom(cfg, repoConfigs, c.listSecretsBestEffort())
-}
-
+// annotated with readiness for this deployment using secretList.
 func (c *Client) ciCapabilitiesWithReadinessFrom(cfg *model.Config, repoConfigs []model.RepoConfig, secretList []secrets.SecretInfo) []Capability {
 	var deployment model.Config
 	if cfg != nil {
@@ -623,11 +619,8 @@ func capabilityStatusKey(id string) string {
 	return g.Key()
 }
 
-// capabilityStatuses builds every CapabilityStatus for cfg -- the
-// deployment's current store-backed settings -- repoConfigs, every repo
-// that adds defaults of its own (Store.ListRepoConfigs), c.Config.Secrets,
-// this Client's own secrets store, if any, and c.Config.Capabilities, the
-// picker listing that decides Grantable.
+// listSecretsBestEffort lists secrets from c.Config.Secrets, returning nil
+// when the store is absent or fails to list.
 func (c *Client) listSecretsBestEffort() []secrets.SecretInfo {
 	if c == nil || c.Config.Secrets == nil {
 		return nil
@@ -639,10 +632,10 @@ func (c *Client) listSecretsBestEffort() []secrets.SecretInfo {
 	return list
 }
 
-func (c *Client) capabilityStatuses(cfg model.Config, repoConfigs []model.RepoConfig) []CapabilityStatus {
-	return c.capabilityStatusesWithSecrets(cfg, repoConfigs, c.listSecretsBestEffort())
-}
-
+// capabilityStatusesWithSecrets builds every CapabilityStatus for cfg -- the
+// deployment's current store-backed settings -- repoConfigs, every repo
+// that adds defaults of its own (Store.ListRepoConfigs), secretList, and
+// c.Config.Capabilities, the picker listing that decides Grantable.
 func (c *Client) capabilityStatusesWithSecrets(cfg model.Config, repoConfigs []model.RepoConfig, secretList []secrets.SecretInfo) []CapabilityStatus {
 	// Inverted once, here, rather than rescanned per capability: the
 	// listing is one row per capability and the answer each row needs is

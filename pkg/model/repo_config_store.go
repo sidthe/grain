@@ -141,7 +141,7 @@ func readWorkOwnership(ownership, overrides string, legacyReleaseDisabled bool) 
 // insertion order. Every entry is non-Empty: PutRepoConfig deletes a row
 // that would say nothing, so this is exactly the set of repos that add
 // something to the deployment-wide answer -- which is what
-// ui.capabilityStatuses reports as CapabilityStatus.DefaultRepos and
+// ui.capabilityStatusesWithSecrets reports as CapabilityStatus.DefaultRepos and
 // what GET /api/config hands the new-task form.
 func (s *Store) ListRepoConfigs(ctx context.Context) ([]RepoConfig, error) {
 	var out []RepoConfig

@@ -2098,7 +2098,7 @@ func TestSettingsAndConfigCallSecretsListOnce(t *testing.T) {
 		t.Fatalf("GetSettings (saved config) called Secrets.List %d times, want 1", got)
 	}
 
-	// 3. GET /api/config (calls both capabilitiesWithReadiness and ciCapabilitiesWithReadiness).
+	// 3. GET /api/config (calls both capabilitiesWithReadinessFrom and ciCapabilitiesWithReadinessFrom).
 	srv := ui.NewServerWithClient(ui.NewClient(c.Config, store))
 	cat.listCalls.Store(0)
 	rec := do(t, srv, http.MethodGet, "/api/config", "")

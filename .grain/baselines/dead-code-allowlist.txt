@@ -21,6 +21,7 @@ pkg/orchestrator/serving_test.go:dialableRunner.DialStream  # satisfies streamRu
 pkg/capability/geminikey/geminikey.go:Capability.ScarceResourceProvider  # marker method; model.IsScarceResourceProvider type-asserts model.ScarceResourceProvider
 
 # Run from build files and CI, not imported.
+ui/e2e/grantMatrixReport.mjs  # manual CLI script documented in docs/test-runs/2026-11-11-grant-ui-matrix.md
 ui/e2e/screenshot.mjs  # make ui-screenshots
 ui/scripts/summarize-trace-network.mjs  # the ui e2e job in .github/workflows/tests.yml and .grain/workflows/tests.yml
 

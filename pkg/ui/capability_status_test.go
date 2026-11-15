@@ -58,10 +58,10 @@ func TestConfigPickerReportsACapabilityThisDeploymentCannotHonour(t *testing.T) 
 	srv, client := testServer(t)
 	client.Config.Secrets = secrets.New(t.TempDir())
 	// github-sandbox is retired from OfferedCapabilities() onto
-	// github#sandbox-repo (schema migration 124), while capabilityStatuses
+	// github#sandbox-repo (schema migration 124), while capabilityStatusesWithSecrets
 	// keeps its readiness row; attach both a legacy row and the bare
 	// capability reference (without ={}) to exercise capabilityStatusKey on
-	// capabilitiesWithReadiness as well as ciCapabilitiesWithReadiness.
+	// capabilitiesWithReadinessFrom as well as ciCapabilitiesWithReadinessFrom.
 	client.Config.Capabilities = append(ui.OfferedCapabilities(),
 		ui.Capability{ID: model.GitHubSandboxRepoRef, Name: "GitHub sandbox repo"},
 		ui.Capability{ID: model.GitHubSandboxRepoGrant, Name: "GitHub sandbox"},
