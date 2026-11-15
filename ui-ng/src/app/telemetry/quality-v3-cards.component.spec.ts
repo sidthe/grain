@@ -54,6 +54,18 @@ describe("QualityV3CardsComponent", () => {
           tokensMedian: 4200,
           notHelpfulWilsonLB: 0,
         },
+        {
+          armId: "golden-v3",
+          stage: "S3",
+          runs: 8,
+          applicablePct: 50,
+          findingsCount: 4,
+          repairedInNextShaPct: 25,
+          durationP50Ms: 4100,
+          durationP95Ms: 7900,
+          tokensMedian: 5100,
+          notHelpfulWilsonLB: 35,
+        },
       ],
       triageMetrics: [
         {
@@ -63,6 +75,14 @@ describe("QualityV3CardsComponent", () => {
           humanRoutedPct: 50,
           autoMergedEscapeRate: 0,
           humanRoutedTruePositiveRate: 60,
+        },
+        {
+          armId: "golden-v3-noisy",
+          mode: "shadow",
+          autoMergeEligiblePct: 40,
+          humanRoutedPct: 60,
+          autoMergedEscapeRate: 8,
+          humanRoutedTruePositiveRate: 45,
         },
       ],
       verdicts: [],
@@ -87,6 +107,11 @@ describe("QualityV3CardsComponent", () => {
     fixture.detectChanges();
 
     const root = fixture.nativeElement as HTMLElement;
+    const scopedRoot = root.querySelector(
+      '[data-testid="quality-v3-cards"].quality-v3-cards',
+    );
+    expect(scopedRoot).not.toBeNull();
+
     const diffStrip = root.querySelector(
       '[data-testid="v3-declaration-diff"]',
     )!;
@@ -94,6 +119,14 @@ describe("QualityV3CardsComponent", () => {
     expect(diffStrip.textContent).toContain("+s0-intent");
     expect(diffStrip.textContent).toContain("+1 custom checks");
     expect(diffStrip.textContent).toContain("Triage changed");
+    expect(
+      diffStrip.querySelector(".status-pill.healthy")?.textContent,
+    ).toContain("+s0-intent");
+    expect(
+      diffStrip.querySelector(".status-pill.blast")?.textContent,
+    ).toContain("1 changed checks");
+    expect(root.querySelector(".status-pill.success")).toBeNull();
+    expect(root.querySelector(".status-pill.warning")).toBeNull();
 
     const funnel = root.querySelector('[data-testid="v3-stage-funnel"]')!;
     expect(funnel.textContent).toContain("67%");

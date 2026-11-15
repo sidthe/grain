@@ -902,8 +902,27 @@ describe("TelemetryPageComponent", () => {
     expect(names).toEqual(["Alice", "Maya", "Zane"]);
   });
 
-  it("supports keyboard navigation on the telemetry tabs", async () => {
+  it("renders .tab-strip inside .stage-header ahead of .ops-toolbar and switches aria-selected cleanly", async () => {
     const { fixture, root } = await setup();
+
+    const stageHeader = root.querySelector<HTMLElement>(".stage-header")!;
+    const tabStrip = root.querySelector<HTMLElement>(
+      '[data-testid="telemetry-tabs"]',
+    )!;
+    const toolbar = root.querySelector<HTMLElement>(".ops-toolbar")!;
+
+    expect(stageHeader).not.toBeNull();
+    expect(tabStrip).not.toBeNull();
+    expect(toolbar).not.toBeNull();
+    expect(stageHeader.contains(tabStrip)).toBe(true);
+    expect(stageHeader.lastElementChild).toBe(tabStrip);
+    expect(stageHeader.contains(toolbar)).toBe(false);
+    expect(
+      Boolean(
+        tabStrip.compareDocumentPosition(toolbar) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+      ),
+    ).toBe(true);
 
     const tabs = Array.from(
       root.querySelectorAll<HTMLButtonElement>(".tel-tab-btn"),
@@ -915,6 +934,9 @@ describe("TelemetryPageComponent", () => {
     expect(overviewTab.getAttribute("tabindex")).toBe("0");
     expect(qualityTab.getAttribute("aria-selected")).toBe("false");
     expect(qualityTab.getAttribute("tabindex")).toBe("-1");
+    expect(
+      toolbar.querySelector('[data-testid="telemetry-window-7d"]'),
+    ).not.toBeNull();
 
     overviewTab.dispatchEvent(
       new KeyboardEvent("keydown", {
@@ -930,6 +952,9 @@ describe("TelemetryPageComponent", () => {
     expect(qualityTab.getAttribute("tabindex")).toBe("0");
     expect(
       root.querySelector('[data-testid="telemetry-panel-quality"]'),
+    ).not.toBeNull();
+    expect(
+      toolbar.querySelector('[data-testid="telemetry-repo-readonly"]'),
     ).not.toBeNull();
 
     qualityTab.dispatchEvent(
