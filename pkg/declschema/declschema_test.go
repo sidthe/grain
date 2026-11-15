@@ -542,3 +542,24 @@ func TestTheAPIScopeSetSchemaMatchesTheModelAndTheTable(t *testing.T) {
 		}
 	}
 }
+
+func TestQAFlowIsSettingsOnlyAuthorityRefusalAcrossAllSchemas(t *testing.T) {
+	for _, s := range declschema.All() {
+		f, ok := s.Field("QAFlowRef")
+		if !ok {
+			t.Fatalf("%s: missing QAFlowRef field", s.Kind)
+		}
+		if key, ok := f.KeyIn(declschema.Settings); !ok || key != "qa-flow" {
+			t.Errorf("%s: KeyIn(Settings) = (%q, %v), want (\"qa-flow\", true)", s.Kind, key, ok)
+		}
+		if key, ok := f.KeyIn(declschema.Repo); ok {
+			t.Errorf("%s: KeyIn(Repo) = (%q, true), want refused in repo declarations", s.Kind, key)
+		}
+		if f.Declared != "" || f.Compose != declschema.Fixed {
+			t.Errorf("%s: QAFlowRef Declared=%q Compose=%v, want empty and Fixed", s.Kind, f.Declared, f.Compose)
+		}
+		if why := s.RepoRefusals()["qa-flow"]; why != declschema.Authority {
+			t.Errorf("%s: RepoRefusals()[\"qa-flow\"] = %q, want %q", s.Kind, why, declschema.Authority)
+		}
+	}
+}

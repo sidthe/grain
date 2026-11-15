@@ -197,6 +197,8 @@ type Template struct {
 	// sandboxShapeLimits, as a hand-sized task is.
 	Sandbox SandboxShape
 
+	QAFlowRef string `json:"qaFlowRef,omitempty"`
+
 	CreatedAt time.Time
 }
 

@@ -164,6 +164,7 @@ type Task struct {
 	// "schedule", model.Task.ModelSource -- or absent when the task chose
 	// it itself, or chose none and runs on its team's default.
 	ModelSource string `json:"modelSource,omitempty"`
+	QAFlowRef   string `json:"qaFlowRef,omitempty"`
 	// NetworkAccess is this task's own override of how much of the
 	// internet its sandbox may reach -- model.Task's own field of the
 	// same name (grain/task-269). Omitted, like the overrides above, for
@@ -1254,6 +1255,7 @@ func taskFrom(t model.Task, state model.State, targetStates map[string]model.Sta
 		AgentBackendID:       t.AgentBackendID,
 		Model:                t.Model,
 		ModelSource:          string(t.ModelSource),
+		QAFlowRef:            t.QAFlowRef,
 		NetworkAccess:        string(t.NetworkAccess),
 		NothingNeededAction:  string(t.NothingNeededAction),
 		KeepRunning:          t.KeepRunning,

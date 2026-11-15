@@ -584,7 +584,11 @@ type RepoDefaults struct {
 	// repository (model.RepoConfig.UpstreamRepo), "" when pull requests
 	// open against this repository itself.
 	UpstreamRepo string `json:"upstreamRepo"`
+	QAFlowRef    string `json:"qaFlowRef,omitempty"`
 }
+
+// RepoSettings aliases RepoDefaults.
+type RepoSettings = RepoDefaults
 
 // RepoDeclarationsStatus is what grain has made of one repository's
 // declarations (model.RepoDeclarationSync, plus what it declares now).
@@ -722,6 +726,7 @@ type SetRepoSettingsRequest struct {
 	// are opened and tracked against, or "" to open pull requests on this
 	// repository itself.
 	UpstreamRepo *string `json:"upstreamRepo,omitempty"`
+	QAFlowRef    *string `json:"qaFlowRef,omitempty"`
 }
 
 // SetRepoWatchDefaultBranchRequest is PUT /api/repos/{owner}/{name}/
@@ -840,6 +845,7 @@ func (c *Client) repoDefaults(ctx context.Context, repo model.RepoRef) (RepoDefa
 		out.BaseRepairBypassesHumanGates = stored.BaseRepairBypassesHumanGates
 		out.UnfixableChecks = stored.UnfixableChecks
 		out.UpstreamRepo = stored.UpstreamRepo
+		out.QAFlowRef = stored.QAFlowRef
 		out.PortBranches = stored.PortBranches
 		out.DeclaredPortBranches = stored.DeclaredPortBranches
 		out.PairedBranches = stored.PairedBranches()
@@ -1212,6 +1218,11 @@ func (c *Client) SetRepoSettings(ctx context.Context, repo string, req SetRepoSe
 	if err != nil {
 		return RepoDefaults{}, validationErrorf("repo: %v", err)
 	}
+	if req.QAFlowRef != nil {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, ""); err != nil {
+			return RepoDefaults{}, err
+		}
+	}
 	var recheck model.MergeRecheckMode
 	if req.MergeRecheck != nil {
 		if recheck, err = model.ParseMergeRecheckMode(*req.MergeRecheck); err != nil {
@@ -1383,6 +1394,9 @@ func (c *Client) SetRepoSettings(ctx context.Context, repo string, req SetRepoSe
 		}
 		if req.UpstreamRepo != nil {
 			rc.UpstreamRepo = upstreamRepo
+		}
+		if req.QAFlowRef != nil {
+			rc.QAFlowRef = strings.TrimSpace(*req.QAFlowRef)
 		}
 	})
 }

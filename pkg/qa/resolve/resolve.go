@@ -17,6 +17,7 @@ package resolve
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -68,6 +69,172 @@ func (r *Resolution) IsEnforcedTreatment() bool {
 	default:
 		return r.Spec != nil
 	}
+}
+
+func severityRank(s string) int {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "blocking":
+		return 3
+	case "warn":
+		return 2
+	case "shadow":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func tighterSeverity(a, b string) string {
+	if severityRank(b) > severityRank(a) {
+		return strings.ToLower(strings.TrimSpace(b))
+	}
+	if strings.TrimSpace(a) == "" {
+		return "blocking"
+	}
+	return strings.ToLower(strings.TrimSpace(a))
+}
+
+// ComposeTightenOnly enforces locked QA floors on spec (RuleTestIntegrityGuard and
+// RuleStrictConfigDecoder always Enabled: true, Severity: "blocking", and
+// StagingIsolation: true) and applies any overlays tighten-only so nothing can
+// weaken an enabled gate or floor.
+func ComposeTightenOnly(spec qa.FlowSpec, overlays ...qa.FlowSpec) qa.FlowSpec {
+	out := spec
+	out.StagingIsolation = true
+	out.Rules = slices.Clone(spec.Rules)
+
+	applyRuleFloor := func(ruleID, label, summary string) {
+		for i := range out.Rules {
+			if out.Rules[i].ID == ruleID {
+				out.Rules[i].Enabled = true
+				out.Rules[i].Severity = "blocking"
+				if out.Rules[i].Stage == "" {
+					out.Rules[i].Stage = "S3"
+				}
+				return
+			}
+		}
+		out.Rules = append(out.Rules, qa.RuleSpec{
+			ID:       ruleID,
+			Label:    label,
+			Stage:    "S3",
+			Severity: "blocking",
+			Summary:  summary,
+			Enabled:  true,
+		})
+	}
+
+	for _, ov := range overlays {
+		if ov.StopNudge {
+			out.StopNudge = true
+		}
+		if ov.EnableS4 {
+			out.EnableS4 = true
+		}
+		if ov.S0Intent {
+			out.S0Intent = true
+		}
+		if ov.S2PlanCritic {
+			out.S2PlanCritic = true
+		}
+		if ov.Decompose.Enabled {
+			out.Decompose.Enabled = true
+		}
+		if ov.Context.Enabled {
+			out.Context.Enabled = true
+		}
+		if ov.PRContract.Enabled {
+			out.PRContract.Enabled = true
+		}
+		for _, r := range ov.Rules {
+			found := false
+			for i := range out.Rules {
+				if out.Rules[i].ID == r.ID {
+					found = true
+					if r.Enabled {
+						out.Rules[i].Enabled = true
+					}
+					out.Rules[i].Severity = tighterSeverity(out.Rules[i].Severity, r.Severity)
+					break
+				}
+			}
+			if !found {
+				out.Rules = append(out.Rules, r)
+			}
+		}
+	}
+
+	applyRuleFloor(
+		qa.RuleTestIntegrityGuard,
+		"Test integrity & weakened-assertion guard",
+		"Blocks weakened assertions, deleted test cases without replacement, skipped tests, and tautological assertions.",
+	)
+	applyRuleFloor(
+		qa.RuleStrictConfigDecoder,
+		"Strict YAML/JSON config decoder guard",
+		"Requires KnownFields(true) or DisallowUnknownFields() on config/declaration decoders.",
+	)
+	return out
+}
+
+func resolveBoundQAFlow(ctx context.Context, store *model.Store, task model.Task) (*Resolution, error) {
+	if store == nil {
+		return nil, nil
+	}
+	taskRef := strings.TrimSpace(task.QAFlowRef)
+	var repoRef string
+	if task.Target != nil && *task.Target != (model.RepoRef{}) {
+		repoCfg, err := store.RepoConfig(ctx, *task.Target)
+		if err != nil {
+			return nil, err
+		}
+		if repoCfg != nil {
+			repoRef = strings.TrimSpace(repoCfg.QAFlowRef)
+		}
+	}
+	if taskRef != "" {
+		spec, hash, err := LookupFlowSpec(ctx, store, taskRef)
+		if err != nil {
+			return nil, err
+		}
+		if spec != nil {
+			var overlays []qa.FlowSpec
+			if repoRef != "" && repoRef != taskRef {
+				if rSpec, _, rErr := LookupFlowSpec(ctx, store, repoRef); rErr == nil && rSpec != nil {
+					overlays = append(overlays, *rSpec)
+				}
+			}
+			enforced := ComposeTightenOnly(*spec, overlays...)
+			return &Resolution{
+				Source:      "process",
+				ArmID:       model.QAArmTreatment,
+				FlowID:      taskRef,
+				FlowHash:    hash,
+				QAEngineRev: qa.QAEngineRev,
+				Spec:        &enforced,
+				Shadow:      false,
+			}, nil
+		}
+	}
+	if repoRef != "" {
+		spec, hash, err := LookupFlowSpec(ctx, store, repoRef)
+		if err != nil {
+			return nil, err
+		}
+		if spec != nil {
+			enforced := ComposeTightenOnly(*spec)
+			return &Resolution{
+				Source:      "repo",
+				ArmID:       model.QAArmTreatment,
+				FlowID:      repoRef,
+				FlowHash:    hash,
+				QAEngineRev: qa.QAEngineRev,
+				Spec:        &enforced,
+				Shadow:      false,
+			}, nil
+		}
+	}
+	return nil, nil
 }
 
 // LookupFlowSpec resolves ref against built-in/registered v2/v3 flows, stored qa_flow_version rows, or v1 flows.
@@ -170,9 +337,16 @@ func ActiveQAResolutionForTask(ctx context.Context, store *model.Store, taskID s
 		if err != nil {
 			return nil, qaCfg, err
 		}
-		if res != nil {
+		if res != nil && res.Source != "none" {
 			return res, qaCfg, nil
 		}
+	}
+
+	// Step 2.5: Operator-bound process (task/template/schedule/suite) or repository QA flow.
+	if bound, err := resolveBoundQAFlow(ctx, store, *task); err != nil {
+		return nil, qaCfg, err
+	} else if bound != nil {
+		return bound, qaCfg, nil
 	}
 
 	// Step 3: Sticky legacy assignment from task_qa_assignment.
@@ -233,14 +407,28 @@ func EnsureQAResolutionAtDispatchWithConfig(
 	}
 
 	// Step 1: Running or previously enrolled qa_experiment takes precedence over legacy rollout.
+	var expNone *Resolution
 	if RegistryDispatchResolver != nil {
 		res, err := RegistryDispatchResolver(ctx, store, task, root, hasPrior, qaCfg, now)
 		if err != nil {
 			return nil, qaCfg, err
 		}
 		if res != nil {
-			return res, qaCfg, nil
+			if res.Source != "none" {
+				return res, qaCfg, nil
+			}
+			expNone = res
 		}
+	}
+
+	// Step 1.5: Operator-bound process (task/template/schedule/suite) or repository QA flow.
+	if bound, err := resolveBoundQAFlow(ctx, store, task); err != nil {
+		return nil, qaCfg, err
+	} else if bound != nil {
+		return bound, qaCfg, nil
+	}
+	if expNone != nil {
+		return expNone, qaCfg, nil
 	}
 
 	// Step 2: Sticky legacy assignment; pre-existing work trees with prior runs are excluded from new rollout.

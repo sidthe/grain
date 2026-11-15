@@ -21,7 +21,9 @@ package ui_test
 
 import (
 	"context"
+	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/ai-on-gke/grain/pkg/model"
@@ -759,4 +761,196 @@ func TestDraftScheduleCompositionKeepsAScheduleCapabilitiesBesideItsTemplates(t 
 		t.Errorf("draft sources = %v, want [template schedule repo]", caps.Sources)
 	}
 
+}
+
+func TestCompositionShowsQAFlowAndUICRUDRoundTripAndAgentRefusal(t *testing.T) {
+	t.Parallel()
+	c, _, ctx := testClient(t)
+
+	// 1. Template CRUD + Composition qaFlow field.
+	tmpl, err := c.CreateTemplate(ctx, ui.CreateTemplateRequest{
+		Name:      "QA Template",
+		Title:     "QA Task",
+		Repo:      "acme/widgets",
+		Base:      "main",
+		QAFlowRef: "golden-v3@1",
+	})
+	if err != nil {
+		t.Fatalf("CreateTemplate: %v", err)
+	}
+	if tmpl.QAFlowRef != "golden-v3@1" {
+		t.Fatalf("CreateTemplate QAFlowRef = %q, want golden-v3@1", tmpl.QAFlowRef)
+	}
+	tComp, err := c.TemplateComposition(ctx, tmpl.ID, "acme/widgets", "main", nil, true)
+	if err != nil {
+		t.Fatalf("TemplateComposition: %v", err)
+	}
+	wantField(t, tComp.Tasks[0], "qaFlow", "template", "golden-v3@1")
+
+	updatedTmplFlow := "v4-2@1"
+	tmpl, err = c.UpdateTemplate(ctx, tmpl.ID, ui.UpdateTemplateRequest{QAFlowRef: &updatedTmplFlow})
+	if err != nil || tmpl.QAFlowRef != "v4-2@1" {
+		t.Fatalf("UpdateTemplate QAFlowRef = %q, %v; want v4-2@1", tmpl.QAFlowRef, err)
+	}
+
+	// 2. Schedule CRUD + Composition qaFlow precedence (Schedule > Template).
+	sched, err := c.CreateSchedule(ctx, ui.CreateScheduleRequest{
+		Repo:       "acme/widgets",
+		Base:       "main",
+		TemplateID: tmpl.ID,
+		QAFlowRef:  "golden-v3@1",
+		Recurrence: everyDay,
+	})
+	if err != nil {
+		t.Fatalf("CreateSchedule: %v", err)
+	}
+	if sched.QAFlowRef != "golden-v3@1" {
+		t.Fatalf("CreateSchedule QAFlowRef = %q, want golden-v3@1", sched.QAFlowRef)
+	}
+	sComp, err := c.ScheduleComposition(ctx, sched.ID)
+	if err != nil {
+		t.Fatalf("ScheduleComposition: %v", err)
+	}
+	wantField(t, sComp.Tasks[0], "qaFlow", "schedule", "golden-v3@1")
+
+	emptyFlow := ""
+	sched, err = c.UpdateSchedule(ctx, sched.ID, ui.UpdateScheduleRequest{QAFlowRef: &emptyFlow})
+	if err != nil || sched.QAFlowRef != "" {
+		t.Fatalf("UpdateSchedule clear QAFlowRef = %q, %v; want empty", sched.QAFlowRef, err)
+	}
+	sCompInherited, err := c.ScheduleComposition(ctx, sched.ID)
+	if err != nil {
+		t.Fatalf("ScheduleComposition (inherited): %v", err)
+	}
+	wantField(t, sCompInherited.Tasks[0], "qaFlow", "template", "v4-2@1")
+
+	// 3. Suite CRUD + Composition qaFlow precedence (Suite > Schedule > Template).
+	suite, err := c.CreateSuite(ctx, ui.CreateSuiteRequest{
+		Name:        "QA Suite",
+		TemplateIDs: []string{tmpl.ID},
+		Mode:        "count",
+		Count:       1,
+		QAFlowRef:   "v4-3@1",
+	})
+	if err != nil {
+		t.Fatalf("CreateSuite: %v", err)
+	}
+	if suite.QAFlowRef != "v4-3@1" {
+		t.Fatalf("CreateSuite QAFlowRef = %q, want v4-3@1", suite.QAFlowRef)
+	}
+	suiteComp, err := c.SuiteComposition(ctx, suite.ID, "acme/widgets", "main")
+	if err != nil {
+		t.Fatalf("SuiteComposition: %v", err)
+	}
+	wantField(t, suiteComp.Tasks[0], "qaFlow", "suite", "v4-3@1")
+
+	updatedSuiteFlow := "golden-v3@1"
+	suite, err = c.UpdateSuite(ctx, suite.ID, ui.UpdateSuiteRequest{QAFlowRef: &updatedSuiteFlow})
+	if err != nil || suite.QAFlowRef != "golden-v3@1" {
+		t.Fatalf("UpdateSuite QAFlowRef = %q, %v; want golden-v3@1", suite.QAFlowRef, err)
+	}
+
+	// 4. RepoSettings CRUD round-trip.
+	repoFlow := "v4-2@1"
+	repoDefs, err := c.SetRepoSettings(ctx, "acme/widgets", ui.SetRepoSettingsRequest{QAFlowRef: &repoFlow})
+	if err != nil || repoDefs.QAFlowRef != "v4-2@1" {
+		t.Fatalf("SetRepoSettings: %+v, %v; want v4-2@1", repoDefs, err)
+	}
+	repoDefs, err = c.RepoDefaults(ctx, "acme/widgets")
+	if err != nil || repoDefs.QAFlowRef != "v4-2@1" {
+		t.Fatalf("RepoDefaults QAFlowRef = %q, %v; want v4-2@1", repoDefs.QAFlowRef, err)
+	}
+
+	// 5. Task creation (human direct + template inheritance) and agent refusal.
+	humanTask, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title:     "Human QA Task",
+		Repo:      "acme/widgets",
+		Base:      "main",
+		QAFlowRef: "v4-3@1",
+	})
+	if err != nil || humanTask.QAFlowRef != "v4-3@1" {
+		t.Fatalf("CreateTask (human) QAFlowRef = %q, %v; want v4-3@1", humanTask.QAFlowRef, err)
+	}
+	fromTmplTask, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		TemplateID: tmpl.ID,
+		Repo:       "acme/widgets",
+		Base:       "main",
+	})
+	if err != nil || fromTmplTask.QAFlowRef != "v4-2@1" {
+		t.Fatalf("CreateTask (from template) QAFlowRef = %q, %v; want v4-2@1", fromTmplTask.QAFlowRef, err)
+	}
+	if _, err := c.CreateTask(ctx, ui.CreateTaskRequest{
+		Title:      "Agent Proposed Task",
+		Repo:       "acme/widgets",
+		Base:       "main",
+		ProposedBy: humanTask.ID,
+		QAFlowRef:  "golden-v3@1",
+	}); err == nil {
+		t.Fatalf("expected error when proposal sets qaFlowRef, got nil")
+	}
+
+	// 6. Agent principal cannot set or clear qaFlowRef on templates, schedules, suites, or repo settings.
+	agentCtx := ui.WithPrincipal(ctx, model.Principal{Kind: model.PrincipalAgent, ID: humanTask.ID})
+	if _, err := c.CreateTemplate(agentCtx, ui.CreateTemplateRequest{
+		Name:      "Agent Template",
+		Title:     "Agent Task",
+		QAFlowRef: "golden-v3@1",
+	}); err == nil {
+		t.Fatalf("expected error when agent creates template with qaFlowRef")
+	}
+	if _, err := c.UpdateTemplate(agentCtx, tmpl.ID, ui.UpdateTemplateRequest{QAFlowRef: &emptyFlow}); err == nil {
+		t.Fatalf("expected error when agent clears template qaFlowRef")
+	}
+	if _, err := c.CreateSchedule(agentCtx, ui.CreateScheduleRequest{
+		Repo:       "acme/widgets",
+		Base:       "main",
+		Title:      "Agent Schedule",
+		QAFlowRef:  "golden-v3@1",
+		Recurrence: everyDay,
+	}); err == nil {
+		t.Fatalf("expected error when agent creates schedule with qaFlowRef")
+	}
+	if _, err := c.UpdateSchedule(agentCtx, sched.ID, ui.UpdateScheduleRequest{QAFlowRef: &emptyFlow}); err == nil {
+		t.Fatalf("expected error when agent clears schedule qaFlowRef")
+	}
+	if _, err := c.CreateSuite(agentCtx, ui.CreateSuiteRequest{
+		Name:        "Agent Suite",
+		TemplateIDs: []string{tmpl.ID},
+		Mode:        "count",
+		Count:       1,
+		QAFlowRef:   "golden-v3@1",
+	}); err == nil {
+		t.Fatalf("expected error when agent creates suite with qaFlowRef")
+	}
+	if _, err := c.UpdateSuite(agentCtx, suite.ID, ui.UpdateSuiteRequest{QAFlowRef: &emptyFlow}); err == nil {
+		t.Fatalf("expected error when agent clears suite qaFlowRef")
+	}
+	if _, err := c.SetRepoSettings(agentCtx, "acme/widgets", ui.SetRepoSettingsRequest{QAFlowRef: &emptyFlow}); err == nil {
+		t.Fatalf("expected error when agent clears repo qaFlowRef")
+	}
+
+	// 7. Detaching a template from a schedule preserves the template's qaFlowRef on the inline schedule.
+	detached, err := c.UpdateSchedule(ctx, sched.ID, ui.UpdateScheduleRequest{TemplateID: &emptyFlow})
+	if err != nil || detached.QAFlowRef != "v4-2@1" {
+		t.Fatalf("UpdateSchedule detach TemplateID QAFlowRef = %q, %v; want v4-2@1", detached.QAFlowRef, err)
+	}
+
+	// 8. HTTP agent API gate refuses clearing qaFlowRef via PATCH/PUT even with write scopes.
+	srv, srvClient := testServer(t)
+	seedAPITask(t, srvClient, "agent-writer", "acme/widgets",
+		"api:templates:write", "api:schedules:write", "api:suites:write", "api:repos:write")
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPatch, "/api/templates/tpl-1"},
+		{http.MethodPatch, "/api/schedules/sched-1"},
+		{http.MethodPatch, "/api/suites/suite-1"},
+		{http.MethodPut, "/api/repos/acme/widgets/settings"},
+	} {
+		code, body := asAgent(t, srv, "agent-writer", tc.method, tc.path, `{"qaFlowRef":""}`, "")
+		if code != http.StatusForbidden || !strings.Contains(body, "qaFlowRef") {
+			t.Fatalf("%s %s with empty qaFlowRef: got %d %s, want 403 naming qaFlowRef", tc.method, tc.path, code, body)
+		}
+	}
 }

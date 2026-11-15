@@ -2508,6 +2508,7 @@ type CreateTaskRequest struct {
 	// hostd host work runs on is the model connection's or the capability
 	// server's, not the task's.
 	Hostd      string `json:"hostd,omitempty"`
+	QAFlowRef  string `json:"qaFlowRef,omitempty"`
 	ProposedBy string `json:"proposedBy,omitempty"`
 	// HoldForApproval is propose_task's own `hold_for_approval`: file
 	// this proposal for a person to approve even if ProposedBy's
@@ -2873,12 +2874,27 @@ func (c *Client) defaultTaskHosting(ctx context.Context, target *model.RepoRef) 
 // sandboxes have no shape of their own, rather than filed and then
 // discovered at sandbox setup -- refuseIgnoredSandboxShape has why, and
 // UpdateTask applies the same rule to an edit.
+func (c *Client) refuseNonOperatorQAFlowRef(ctx context.Context, proposedBy string) error {
+	if strings.TrimSpace(proposedBy) != "" || c.requestActor(ctx).Actor.Kind == model.PrincipalAgent {
+		return forbiddenErrorf("an agent cannot set qaFlowRef")
+	}
+	if a := accessRoleFromContext(ctx); a != nil && !a.Full {
+		return forbiddenErrorf("%s cannot set qaFlowRef", a.label())
+	}
+	return nil
+}
+
 func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, error) {
 	if req.ProposalKey != "" {
 		if existing, err := c.Store.TaskWithTag(ctx, req.ProposalKey); err != nil {
 			return Task{}, err
 		} else if existing != nil {
 			return c.Task(ctx, existing.ID)
+		}
+	}
+	if strings.TrimSpace(req.QAFlowRef) != "" {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, req.ProposedBy); err != nil {
+			return Task{}, err
 		}
 	}
 	req, err := c.fromTemplate(ctx, req)
@@ -3755,6 +3771,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		AgentBackendID:       strings.TrimSpace(req.AgentBackendID),
 		Model:                chosenModel,
 		ModelSource:          modelSourceOfRequest(req, chosenModel),
+		QAFlowRef:            strings.TrimSpace(req.QAFlowRef),
 		PromptExtension:      strings.TrimSpace(req.PromptExtension),
 		Skills:               chosenSkills,
 		ReviewTemplateID:     reviewTemplateID,

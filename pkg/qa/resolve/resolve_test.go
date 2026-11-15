@@ -24,6 +24,7 @@ import (
 
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/model/sqlite"
+	"github.com/ai-on-gke/grain/pkg/qa"
 	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 )
 
@@ -293,6 +294,90 @@ func TestRandomInterleavingPropertyTest(t *testing.T) {
 				Epoch:      epoch,
 				RegimeID:   1,
 			})
+		}
+	}
+}
+
+func TestQAFlowRefProcessAndRepoBindingPrecedenceAndTightenOnlyFloors(t *testing.T) {
+	ctx := context.Background()
+	st := openTestStore(t)
+
+	// Enable QA with 0% legacy rollout so legacy fallback yields baseline unless bound.
+	setQAConfig(t, st, model.QAConfig{
+		Enabled:    true,
+		FlowID:     model.DefaultQAFlowID,
+		RolloutPct: 0,
+		Epoch:      1,
+		RegimeID:   1,
+	})
+
+	repo := model.RepoRef{Owner: "acme", Name: "svc"}
+	if err := st.PutRepoConfig(ctx, model.RepoConfig{
+		Repo:      repo,
+		QAFlowRef: "golden-v3@1",
+	}); err != nil {
+		t.Fatalf("PutRepoConfig: %v", err)
+	}
+
+	now := time.Now().UTC()
+	// 1. Task with no QAFlowRef of its own resolves RepoConfig.QAFlowRef ("repo").
+	repoTask := insertEligibleTask(t, st, "t-repo-bound", "t-repo-bound")
+	resRepo, _, err := resolve.EnsureQAResolutionAtDispatch(ctx, st, repoTask, "run-1", now)
+	if err != nil {
+		t.Fatalf("EnsureQAResolutionAtDispatch(repoTask): %v", err)
+	}
+	if resRepo == nil || resRepo.Source != "repo" || resRepo.ArmID != model.QAArmTreatment || resRepo.FlowID != "golden-v3@1" {
+		t.Fatalf("repo resolution = %+v, want Source=repo ArmID=treatment FlowID=golden-v3@1", resRepo)
+	}
+
+	// 2. Task with QAFlowRef resolves task.QAFlowRef ("process") over RepoConfig.QAFlowRef.
+	procTask := insertEligibleTask(t, st, "t-process-bound", "t-process-bound")
+	procTask.QAFlowRef = "engineering-workflow-v4@1"
+	if err := st.PutTask(ctx, procTask); err != nil {
+		t.Fatalf("PutTask(procTask): %v", err)
+	}
+	resProc, _, err := resolve.ActiveQAResolutionForTask(ctx, st, procTask.ID)
+	if err != nil {
+		t.Fatalf("ActiveQAResolutionForTask(procTask): %v", err)
+	}
+	if resProc == nil || resProc.Source != "process" || resProc.ArmID != model.QAArmTreatment || resProc.FlowID != "engineering-workflow-v4@1" {
+		t.Fatalf("process resolution = %+v, want Source=process ArmID=treatment FlowID=engineering-workflow-v4@1", resProc)
+	}
+
+	// 3. ComposeTightenOnly preserves non-weakening floors even if overlaid with a weakened spec.
+	baseSpec, hash, err := resolve.LookupFlowSpec(ctx, st, "engineering-workflow-v4@1")
+	if err != nil || baseSpec == nil || hash == "" {
+		t.Fatalf("LookupFlowSpec(engineering-workflow-v4@1): spec=%v hash=%q err=%v", baseSpec, hash, err)
+	}
+	weakerOverlay := qa.FlowSpec{
+		ID:               "weaker@1",
+		StagingIsolation: false,
+		StopNudge:        false,
+		EnableS4:         false,
+		Rules: []qa.RuleSpec{
+			{ID: qa.RuleTestIntegrityGuard, Enabled: false, Severity: "advisory"},
+			{ID: qa.RuleStrictConfigDecoder, Enabled: false, Severity: "advisory"},
+		},
+	}
+	tightened := resolve.ComposeTightenOnly(*baseSpec, weakerOverlay)
+	if !tightened.StagingIsolation {
+		t.Fatalf("ComposeTightenOnly allowed StagingIsolation to be weakened to false")
+	}
+	if baseSpec.StopNudge && !tightened.StopNudge {
+		t.Fatalf("ComposeTightenOnly allowed StopNudge to drop to false")
+	}
+	for _, floorID := range []string{qa.RuleTestIntegrityGuard, qa.RuleStrictConfigDecoder} {
+		found := false
+		for _, r := range tightened.Rules {
+			if r.ID == floorID {
+				found = true
+				if !r.Enabled || r.Severity != "blocking" {
+					t.Fatalf("floor rule %s weakened to %+v", floorID, r)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("floor rule %s missing from tightened spec", floorID)
 		}
 	}
 }
