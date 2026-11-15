@@ -86,6 +86,7 @@ import {
 } from "./force-merge-dialog.component";
 import { TaskEditPanelComponent } from "./task-edit-panel.component";
 import { TaskGatesBarComponent } from "./task-gates-bar.component";
+import { TaskGoalCardComponent } from "./task-goal-card.component";
 import { TaskStore } from "./task.store";
 
 export type TaskTab = "conversation" | "runs" | "changes" | "tree" | "details";
@@ -137,6 +138,7 @@ export function duration(from?: string, to?: string): string {
     AttachmentListComponent,
     GrantsPickerComponent,
     TaskGatesBarComponent,
+    TaskGoalCardComponent,
     TaskChangesTabComponent,
     ForceMergeDialogComponent,
     TaskEditPanelComponent,
@@ -838,6 +840,11 @@ export function duration(from?: string, to?: string): string {
               @switch (current()) {
                 @case ("conversation") {
                   <h2 class="sr-only">Conversation</h2>
+                  <g-task-goal-card
+                    [task]="t"
+                    [attemptsCount]="attempts().length"
+                    (acted)="acted.emit()"
+                  />
                   @if (t.questionSummary && t.state === "awaiting_reply") {
                     <div class="question-card" data-testid="question">
                       <strong>Asked:</strong> {{ t.questionSummary }}
@@ -1249,6 +1256,19 @@ export function duration(from?: string, to?: string): string {
                 <dt>Goal</dt>
                 <dd>{{ g.kind }}</dd>
               }
+              <dt>Execution posture</dt>
+              <dd data-testid="task-fact-posture">
+                @if (t.goalMode?.enabled) {
+                  Autonomous goal ({{ t.goalMode?.maxPasses ?? 8 }} passes ·
+                  {{ t.goalMode?.wallClockMinutes ?? 120 }}m{{
+                    t.goalMode?.mockMissingSecrets
+                      ? " · mock missing secrets"
+                      : ""
+                  }})
+                } @else {
+                  Supervised
+                }
+              </dd>
               <dt>Capabilities</dt>
               <dd>{{ capCount() }}</dd>
               @if (t.closedReason) {

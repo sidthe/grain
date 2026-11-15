@@ -474,7 +474,8 @@ body {
   color: var(--md-sys-color-on-secondary-container);
 }
 
-.status-pill.blast {
+.status-pill.blast,
+.status-pill.warn {
   background: var(--md-sys-color-warning-container);
   color: var(--md-sys-color-on-warning-container);
 }

@@ -683,4 +683,55 @@ describe("NewTaskSheetComponent", () => {
       ),
     ).toBeTruthy();
   });
+
+  it("switches to Autonomous goal posture, configures bounded passes/wall-clock/mock-secrets, and files goalMode", async () => {
+    const api = new FakeApi();
+    const f = await render(api);
+    await open(f);
+
+    expect(q('[data-testid="nt-posture"]')?.textContent).toContain(
+      "Supervised",
+    );
+    expect(q('[data-testid="nt-goal-config"]')).toBeNull();
+    expect(q('[data-testid="new-task-submit"]')?.textContent?.trim()).toBe(
+      "Create and start",
+    );
+
+    await pickPill(f, "nt-posture", "goal");
+    await settle(f);
+
+    const cfg = q('[data-testid="nt-goal-config"]')!;
+    expect(cfg).not.toBeNull();
+    expect(cfg.textContent).toContain("Runs without stopping for questions");
+    expect(q<HTMLInputElement>('[data-testid="nt-max-passes"]')!.value).toBe(
+      "8",
+    );
+    expect(q<HTMLInputElement>('[data-testid="nt-wall-clock"]')!.value).toBe(
+      "120",
+    );
+    expect(
+      q('[data-testid="nt-mock-secrets"]')!.getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(q('[data-testid="new-task-submit"]')?.textContent?.trim()).toBe(
+      "Start autonomous goal",
+    );
+
+    type('[data-testid="nt-max-passes"]', "6");
+    type('[data-testid="nt-wall-clock"]', "90");
+    type('[data-testid="nt-title"]', "Prototype OAuth device flow");
+    q<HTMLButtonElement>('[data-testid="new-task-submit"]')!.click();
+    await settle(f);
+
+    const post = api.calls.find((c) => c.route === "POST /api/tasks");
+    expect(post?.body).toMatchObject({
+      title: "Prototype OAuth device flow",
+      autoApproveProposals: true,
+      goalMode: {
+        enabled: true,
+        maxPasses: 6,
+        wallClockMinutes: 90,
+        mockMissingSecrets: true,
+      },
+    });
+  });
 });
