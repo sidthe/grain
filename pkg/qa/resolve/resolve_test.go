@@ -16,6 +16,7 @@ package resolve_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	mathrand "math/rand/v2"
 	"strings"
@@ -24,6 +25,7 @@ import (
 
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/model/sqlite"
+	"github.com/ai-on-gke/grain/pkg/qa"
 	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 )
 
@@ -296,3 +298,148 @@ func TestRandomInterleavingPropertyTest(t *testing.T) {
 		}
 	}
 }
+
+func TestQAFlowRefOperatorBindingPrecedenceAndTightenOnlyFloors(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// Seed a custom flow version that attempts to disable StagingIsolation and
+	// weaken the two immutable integrity floors (golden:test-integrity-guard and
+	// golden:strict-config-decoder).
+	weakerSpec, ok := qa.LookupFlow(model.DefaultQAFlowID)
+	if !ok {
+		t.Fatalf("LookupFlow(%s) failed", model.DefaultQAFlowID)
+	}
+	weakerSpec.ID = "custom-weaker-flow"
+	weakerSpec.StagingIsolation = false
+	for i := range weakerSpec.Rules {
+		switch weakerSpec.Rules[i].ID {
+		case qa.RuleTestIntegrityGuard:
+			weakerSpec.Rules[i].Enabled = false
+			weakerSpec.Rules[i].Severity = "advisory"
+		case qa.RuleStrictConfigDecoder:
+			weakerSpec.Rules[i].Enabled = false
+			weakerSpec.Rules[i].Severity = "advisory"
+		}
+	}
+	specBytes, err := json.Marshal(weakerSpec)
+	if err != nil {
+		t.Fatalf("json.Marshal(weakerSpec): %v", err)
+	}
+	if err := st.InsertQAFlowVersion(ctx, model.QAFlowVersion{
+		Hash:      "hash-custom-weaker-flow",
+		Key:       "custom-weaker-flow",
+		Version:   1,
+		SpecJSON:  string(specBytes),
+		CreatedAt: now,
+		CreatedBy: "operator",
+	}); err != nil {
+		t.Fatalf("InsertQAFlowVersion: %v", err)
+	}
+
+	repoFlowSpec, _ := qa.LookupFlow(model.DefaultQAFlowID)
+	repoFlowSpec.ID = "repo-default-flow"
+	repoSpecBytes, err := json.Marshal(repoFlowSpec)
+	if err != nil {
+		t.Fatalf("json.Marshal(repoFlowSpec): %v", err)
+	}
+	if err := st.InsertQAFlowVersion(ctx, model.QAFlowVersion{
+		Hash:      "hash-repo-default-flow",
+		Key:       "repo-default-flow",
+		Version:   1,
+		SpecJSON:  string(repoSpecBytes),
+		CreatedAt: now,
+		CreatedBy: "operator",
+	}); err != nil {
+		t.Fatalf("InsertQAFlowVersion repo: %v", err)
+	}
+
+	targetRepo := model.RepoRef{Owner: "acme", Name: "svc"}
+	if err := st.PutRepoConfig(ctx, model.RepoConfig{
+		Repo:      targetRepo,
+		QAFlowRef: "repo-default-flow",
+	}); err != nil {
+		t.Fatalf("PutRepoConfig: %v", err)
+	}
+
+	// Enable QA globally with RolloutPct = 0 so legacy fallback would pick control/baseline,
+	// proving that operator-bound QAFlowRef activates treatment directly.
+	setQAConfig(t, st, model.QAConfig{
+		Enabled:    true,
+		FlowID:     model.DefaultQAFlowID,
+		RolloutPct: 0,
+		Epoch:      1,
+		RegimeID:   1,
+	})
+
+	// 1. Task with no QAFlowRef resolves target RepoConfig.QAFlowRef ("repo").
+	repoTask := insertEligibleTask(t, st, "501", "501")
+	rRes, _, err := resolve.ActiveQAResolutionForTask(ctx, st, repoTask.ID)
+	if err != nil {
+		t.Fatalf("ActiveQAResolutionForTask(repoTask): %v", err)
+	}
+	if rRes == nil || rRes.Source != "repo" || rRes.FlowID != "repo-default-flow" || rRes.ArmID != model.QAArmTreatment || !rRes.IsEnforcedTreatment() {
+		t.Fatalf("expected repo operator flow resolution, got %+v", rRes)
+	}
+	dRes, _, err := resolve.EnsureQAResolutionAtDispatch(ctx, st, repoTask, "run-501", now)
+	if err != nil {
+		t.Fatalf("EnsureQAResolutionAtDispatch(repoTask): %v", err)
+	}
+	if dRes == nil || dRes.Source != "repo" || dRes.FlowID != "repo-default-flow" || !dRes.IsEnforcedTreatment() {
+		t.Fatalf("expected dispatch repo operator flow resolution, got %+v", dRes)
+	}
+
+	// 2. Task with its own QAFlowRef ("process") beats RepoConfig.QAFlowRef ("repo")
+	// and enforces ComposeTightenOnly floors.
+	procTask := insertEligibleTask(t, st, "502", "502")
+	procTask.QAFlowRef = "custom-weaker-flow"
+	if err := st.PutTask(ctx, procTask); err != nil {
+		t.Fatalf("PutTask(procTask): %v", err)
+	}
+	pRes, _, err := resolve.ActiveQAResolutionForTask(ctx, st, procTask.ID)
+	if err != nil {
+		t.Fatalf("ActiveQAResolutionForTask(procTask): %v", err)
+	}
+	if pRes == nil || pRes.Source != "process" || pRes.FlowID != "custom-weaker-flow" || pRes.ArmID != model.QAArmTreatment || !pRes.IsEnforcedTreatment() {
+		t.Fatalf("expected process operator flow resolution, got %+v", pRes)
+	}
+	if pRes.Spec == nil || !pRes.Spec.StagingIsolation {
+		t.Fatalf("ComposeTightenOnly must enforce StagingIsolation=true, got %+v", pRes.Spec)
+	}
+	foundIntegrity, foundStrict := false, false
+	for _, r := range pRes.Spec.Rules {
+		switch r.ID {
+		case qa.RuleTestIntegrityGuard:
+			foundIntegrity = true
+			if !r.Enabled || r.Severity != "blocking" {
+				t.Fatalf("ComposeTightenOnly failed to preserve RuleTestIntegrityGuard floor: %+v", r)
+			}
+		case qa.RuleStrictConfigDecoder:
+			foundStrict = true
+			if !r.Enabled || r.Severity != "blocking" {
+				t.Fatalf("ComposeTightenOnly failed to preserve RuleStrictConfigDecoder floor: %+v", r)
+			}
+		}
+	}
+	if !foundIntegrity || !foundStrict {
+		t.Fatalf("ComposeTightenOnly missing mandatory rules: integrity=%v strict=%v", foundIntegrity, foundStrict)
+	}
+
+	// 3. Kill switch (qaCfg.Enabled = false) still overrides operator bindings.
+	setQAConfig(t, st, model.QAConfig{
+		Enabled:    false,
+		FlowID:     model.DefaultQAFlowID,
+		RolloutPct: 0,
+		Epoch:      1,
+		RegimeID:   1,
+	})
+	disabledRes, _, err := resolve.ActiveQAResolutionForTask(ctx, st, procTask.ID)
+	if err != nil {
+		t.Fatalf("ActiveQAResolutionForTask disabled: %v", err)
+	}
+	if disabledRes != nil {
+		t.Fatalf("expected nil resolution when QA kill switch is off, got %+v", disabledRes)
+	}
+}
+

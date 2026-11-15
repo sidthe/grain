@@ -290,6 +290,7 @@ func fill(t *testing.T, ctx context.Context, store *model.Store, db *sql.DB) {
 	tk := task("a1b2")
 	tk.Title = awkward
 	tk.Body = ""
+	tk.QAFlowRef = "qa-flow-task"
 	// The template it was filed from (grain/task-2536), in
 	// task_filed_template.
 	tk.TemplateID = "template-7"
@@ -640,6 +641,7 @@ func fill(t *testing.T, ctx context.Context, store *model.Store, db *sql.DB) {
 		},
 		CustomFields: map[string][]string{"customer": {"acme", awkward}},
 		Interactive:  true,
+		QAFlowRef:    "qa-flow-tpl",
 		CreatedAt:    sub,
 	}); err != nil {
 		t.Fatalf("putting a template: %v", err)
@@ -655,7 +657,7 @@ func fill(t *testing.T, ctx context.Context, store *model.Store, db *sql.DB) {
 	if err := store.PutSuite(ctx, model.Suite{
 		ID: "suite-1", Name: awkward, Mode: model.SuiteCount, Count: 3,
 		Items:     []model.SuiteItem{{TemplateID: "tpl-1"}, {TemplateID: "tpl-1"}},
-		AutoMerge: true, CreatedAt: sub,
+		AutoMerge: true, QAFlowRef: "qa-flow-suite", CreatedAt: sub,
 	}); err != nil {
 		t.Fatalf("putting a suite: %v", err)
 	}
@@ -665,6 +667,7 @@ func fill(t *testing.T, ctx context.Context, store *model.Store, db *sql.DB) {
 		CICapabilities:      []string{"gcp-key"},
 		PromptExtension:     awkward,
 		SetupCommand:        "",
+		QAFlowRef:           "qa-flow-repo",
 		// Every one of the issue importer's columns set off its
 		// default, so the round trip has to carry each of them.
 		IssueImport: model.IssueImport{
@@ -839,6 +842,7 @@ func fill(t *testing.T, ctx context.Context, store *model.Store, db *sql.DB) {
 		},
 		Grants:       []model.Grant{{Capability: "githubtoken", Via: model.GrantByLabel}},
 		CustomFields: map[string][]string{"customer": {"acme", awkward}},
+		QAFlowRef:    "qa-flow-sched",
 		Enabled:      true, NextRunAt: sub, CreatedAt: sub,
 	}); err != nil {
 		t.Fatalf("putting a schedule: %v", err)

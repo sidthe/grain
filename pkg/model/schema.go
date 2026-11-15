@@ -683,7 +683,11 @@ import "strconv"
 // and indexes `task(origin_ref)` to quickly find prior runs of an origin.
 // 148 adds `qa_experiment` and `qa_enrollment` for pre-registered quality
 // experiments and extends `task_qa_check_run` with experiment/engine provenance.
-const SchemaVersion = 149
+// 149 adds `schema_ver` and source provenance to `qa_flow_version`, and
+// blast/complexity/triage tracking to `task_qa_check_run`.
+// 150 adds operator-only `qa_flow_ref` to `template`, `suite`, `schedule`,
+// `repo_config`, and `task`.
+const SchemaVersion = 150
 
 const qaExperimentTable = `CREATE TABLE IF NOT EXISTS ` + "`qa_experiment`" + ` (
   ` + "`id`" + `                   TEXT     NOT NULL PRIMARY KEY,
@@ -1246,6 +1250,7 @@ var Tables = []string{
   ` + "`admission`" + `             TEXT     NOT NULL DEFAULT 'standard',
   ` + "`hosting`" + `               TEXT     NOT NULL DEFAULT 'unattended',
   ` + "`skills`" + `                TEXT     NOT NULL DEFAULT '',
+  ` + "`qa_flow_ref`" + `           TEXT     NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 	`CREATE INDEX IF NOT EXISTS ` + "`task_external_ref`" + ` ON ` + "`task`" + ` (` + "`external_ref`" + `, ` + "`id`" + `)`,
@@ -2268,6 +2273,7 @@ var Tables = []string{
   ` + "`grain_ci`" + `              INTEGER  NOT NULL DEFAULT 0,
   ` + "`overlap_group`" + `         TEXT     NOT NULL DEFAULT '',
   ` + "`skip_when`" + `             TEXT     NOT NULL DEFAULT '',
+  ` + "`qa_flow_ref`" + `           TEXT     NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
@@ -2390,6 +2396,7 @@ var Tables = []string{
   ` + "`hosting`" + `            TEXT NOT NULL DEFAULT '',
   ` + "`skills`" + `             TEXT NOT NULL DEFAULT '',
   ` + "`sandbox`" + `            TEXT NOT NULL DEFAULT '',
+  ` + "`qa_flow_ref`" + `        TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 
@@ -3643,6 +3650,7 @@ var Tables = []string{
   ` + "`default_hosting`" + `          TEXT NOT NULL DEFAULT '',
   ` + "`skills`" + `                   TEXT NOT NULL DEFAULT '',
   ` + "`declared_skills`" + `          TEXT NOT NULL DEFAULT '',
+  ` + "`qa_flow_ref`" + `              TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`owner`" + `, ` + "`name`" + `)
 )`,
 
@@ -4104,6 +4112,7 @@ var Tables = []string{
   ` + "`auto_merge`" + `        INTEGER  NOT NULL,
   ` + "`auto_approve_proposals`" + ` INTEGER NOT NULL DEFAULT 0,
   ` + "`created_at`" + `        DATETIME NOT NULL,
+  ` + "`qa_flow_ref`" + `        TEXT     NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 

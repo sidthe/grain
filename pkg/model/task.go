@@ -1872,6 +1872,9 @@ type Task struct {
 	// Skills is the per-task repository skill discovery override (nil defers
 	// to the target repository and deployment defaults).
 	Skills *SkillsConfig `json:"skills,omitempty"`
+	// QAFlowRef is the operator-configured quality-control flow reference
+	// bound to this task (`<key>`, `<key>@v<N>`, or `sha256:<hex>`).
+	QAFlowRef string `json:"qaFlowRef,omitempty"`
 	// Branch is the resolved branch this task owns. It is fixed when the
 	// task is first written so changing the deployment's naming template
 	// cannot strand work already pushed under an earlier name. Empty is a
