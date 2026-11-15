@@ -67,13 +67,8 @@ jobs:
           trap 'chmod -R u+w "${GOPATH:-}" "$PWD/.ci-tmp" 2>/dev/null || true; rm -rf "$PWD/.ci-tmp"' EXIT
           export TMPDIR="$PWD/.ci-tmp" GOTMPDIR="$PWD/.ci-tmp"
           export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all GIT_CONFIG_KEY_1=init.defaultRefFormat GIT_CONFIG_VALUE_1=files
-          go vet ./pkg/orchestrator
-          if ! grep -q 'refArmID = refArmID' pkg/ui/qa_experiment_api.go; then
-            go vet ./pkg/ui
-            go test -count=1 -run 'QA|Composition|Schedule|Template|Suite|MergeRecheck|AngularRouteTable|RoleGate|MutatingRoute|Explore|AgentAPI' ./pkg/ui
-          else
-            go test -count=1 -vet=off -run 'QA|Composition|Schedule|Template|Suite|MergeRecheck|AngularRouteTable|RoleGate|Explore|AgentAPI' ./pkg/ui
-          fi
+          go vet ./pkg/orchestrator ./pkg/ui
+          go test -count=1 -run 'QA|Composition|Schedule|Template|Suite|MergeRecheck|AngularRouteTable|RoleGate|MutatingRoute|Explore|AgentAPI' ./pkg/ui
           go test -count=1 -run 'QA|Phase|Triage|Prompt|FormatQueueTask' ./pkg/orchestrator
 
   ui-ng:

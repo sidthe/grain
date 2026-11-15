@@ -411,6 +411,11 @@ func (c *Client) parseBinding(repo, base string) (*model.RepoRef, string, error)
 
 // CreateTemplate files a new template straight into the store.
 func (c *Client) CreateTemplate(ctx context.Context, req CreateTemplateRequest) (Template, error) {
+	if strings.TrimSpace(req.QAFlowRef) != "" {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, ""); err != nil {
+			return Template{}, err
+		}
+	}
 	if err := c.checkSettingsWritable(ctx, "template"); err != nil {
 		return Template{}, err
 	}
@@ -890,6 +895,11 @@ type UpdateTemplateRequest struct {
 
 // UpdateTemplate edits a template's fields in place.
 func (c *Client) UpdateTemplate(ctx context.Context, id string, req UpdateTemplateRequest) (Template, error) {
+	if req.QAFlowRef != nil {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, ""); err != nil {
+			return Template{}, err
+		}
+	}
 	if err := c.checkSettingsWritable(ctx, "template"); err != nil {
 		return Template{}, err
 	}

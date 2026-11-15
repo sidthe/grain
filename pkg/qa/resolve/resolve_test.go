@@ -443,3 +443,117 @@ func TestQAFlowRefOperatorBindingPrecedenceAndTightenOnlyFloors(t *testing.T) {
 	}
 }
 
+func TestComposeTightenOnlyOverlaysAndFloors(t *testing.T) {
+	// Synthesizing missing floor rules populates complete metadata.
+	empty := resolve.ComposeTightenOnly(qa.FlowSpec{ID: "bare-flow"})
+	if !empty.StagingIsolation {
+		t.Fatal("expected StagingIsolation=true on bare flow")
+	}
+	for _, id := range []string{qa.RuleTestIntegrityGuard, qa.RuleStrictConfigDecoder} {
+		r, ok := empty.Rule(id)
+		if !ok || !r.Enabled || r.Severity != "blocking" || r.Stage != "S3" || r.Label == "" || r.Summary == "" || len(r.TargetPaths) == 0 {
+			t.Fatalf("synthesized floor rule %s incomplete: %+v (ok=%v)", id, r, ok)
+		}
+	}
+
+	// Overlay tightens stages, severities, S5 triage, V4 packs/steps, and never weakens base settings.
+	base := qa.FlowSpec{
+		ID:            "base-flow",
+		S0Intent:      true,
+		S2PlanCritic:  false,
+		EnableS4:      true,
+		VerifierTiers: []string{"T3"},
+		Rules: []qa.RuleSpec{
+			{ID: qa.RuleSiblingExportHazard, Stage: "S3", Severity: "blocking", Enabled: true},
+			{ID: qa.RuleTestHygiene, Stage: "S3", Severity: "warn", Enabled: true},
+		},
+		S5MergeTriage: qa.TriageConfig{
+			Mode:              "shadow",
+			AutoMergeTiers:    []string{"T0", "T1", "T2"},
+			RequireHumanTiers: []string{"T3"},
+		},
+		Decompose: qa.DecomposeDecl{
+			Enabled:         true,
+			Mode:            "slice_plan",
+			TargetDiffLines: 400,
+		},
+		PRContract: qa.PRContractDecl{
+			Enabled:          true,
+			Mode:             "blocking",
+			MaxSubjectChars:  72,
+			RequiredSections: []string{"Summary"},
+		},
+		ReadabilityPacks: []qa.ReadabilityPackDecl{
+			{ID: "go", Enabled: true, Activation: "auto"},
+		},
+	}
+
+	overlay := qa.FlowSpec{
+		ID:            "overlay-flow",
+		S0Intent:      false, // cannot weaken base S0Intent=true
+		S2PlanCritic:  true,  // tightens S2PlanCritic to true
+		EnableS4:      false, // cannot weaken base EnableS4=true
+		VerifierTiers: []string{"T2", "T3"},
+		Rules: []qa.RuleSpec{
+			// Attempt to disable & downgrade sibling-export-hazard -> must stay enabled+blocking
+			{ID: qa.RuleSiblingExportHazard, Stage: "S3", Severity: "warn", Enabled: false},
+			// Upgrade test-hygiene from warn -> blocking
+			{ID: qa.RuleTestHygiene, Stage: "S3", Severity: "blocking", Enabled: true},
+			// Add new rule
+			{ID: qa.RuleExportedSurfaceDelta, Stage: "S3", Severity: "warn", Enabled: true},
+		},
+		S5MergeTriage: qa.TriageConfig{
+			Mode:              "enforced",
+			AutoMergeTiers:    []string{"T0", "T1"},
+			RequireHumanTiers: []string{"T1", "T2", "T3"},
+		},
+		Decompose: qa.DecomposeDecl{
+			Enabled:         false, // cannot disable base Decompose
+			Mode:            "off",
+			TargetDiffLines: 600,
+		},
+		PRContract: qa.PRContractDecl{
+			Enabled:          true,
+			Mode:             "warn", // cannot downgrade base blocking -> warn
+			MaxSubjectChars:  100,    // cannot loosen 72 -> 100
+			RequiredSections: []string{"Verification"},
+		},
+		ReadabilityPacks: []qa.ReadabilityPackDecl{
+			{ID: "go", Enabled: false}, // cannot disable
+			{ID: "ts-angular", Enabled: true, Activation: "auto"},
+		},
+	}
+
+	composed := resolve.ComposeTightenOnly(base, overlay)
+	if !composed.S0Intent || !composed.S2PlanCritic || !composed.EnableS4 {
+		t.Fatalf("expected S0Intent, S2PlanCritic, EnableS4 all true after tighten-only compose: %+v", composed)
+	}
+	sib, _ := composed.Rule(qa.RuleSiblingExportHazard)
+	if !sib.Enabled || sib.Severity != "blocking" {
+		t.Fatalf("expected sibling-export-hazard to stay enabled+blocking, got %+v", sib)
+	}
+	hyg, _ := composed.Rule(qa.RuleTestHygiene)
+	if !hyg.Enabled || hyg.Severity != "blocking" {
+		t.Fatalf("expected test-hygiene tightened to blocking, got %+v", hyg)
+	}
+	surf, ok := composed.Rule(qa.RuleExportedSurfaceDelta)
+	if !ok || !surf.Enabled || surf.Severity != "warn" {
+		t.Fatalf("expected exported-surface-delta added from overlay, got %+v", surf)
+	}
+	if composed.S5MergeTriage.Mode != "enforced" {
+		t.Fatalf("expected S5MergeTriage.Mode tightened to enforced, got %q", composed.S5MergeTriage.Mode)
+	}
+	// T1 is in RequireHumanTiers in overlay, so AutoMergeTiers must only retain T0.
+	if len(composed.S5MergeTriage.AutoMergeTiers) != 1 || composed.S5MergeTriage.AutoMergeTiers[0] != "T0" {
+		t.Fatalf("expected AutoMergeTiers=[T0] after removing RequireHumanTiers overlap, got %v", composed.S5MergeTriage.AutoMergeTiers)
+	}
+	if !composed.Decompose.Enabled || composed.Decompose.Mode != "slice_plan" || composed.Decompose.TargetDiffLines != 400 {
+		t.Fatalf("expected Decompose preserved against weakening overlay, got %+v", composed.Decompose)
+	}
+	if !composed.PRContract.Enabled || composed.PRContract.Mode != "blocking" || composed.PRContract.MaxSubjectChars != 72 || len(composed.PRContract.RequiredSections) != 2 {
+		t.Fatalf("expected PRContract tightened without weakening mode or subject cap, got %+v", composed.PRContract)
+	}
+	if len(composed.ReadabilityPacks) != 2 || !composed.ReadabilityPacks[0].Enabled || !composed.ReadabilityPacks[1].Enabled {
+		t.Fatalf("expected both ReadabilityPacks enabled, got %+v", composed.ReadabilityPacks)
+	}
+}

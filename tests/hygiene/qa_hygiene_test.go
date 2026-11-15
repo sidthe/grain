@@ -15,7 +15,9 @@
 package hygiene_test
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -27,7 +29,7 @@ func TestOnlyResolverReadsQAAssignment(t *testing.T) {
 	if err != nil && cmd.ProcessState.ExitCode() != 1 {
 		t.Fatalf("git grep failed: %v", err)
 	}
-	
+
 	lines := strings.Split(string(out), "\n")
 	for _, line := range lines {
 		if line == "" {
@@ -40,5 +42,39 @@ func TestOnlyResolverReadsQAAssignment(t *testing.T) {
 			!strings.HasPrefix(line, "pkg/daemon/mcpserver.go") {
 			t.Errorf("Forbidden QA read outside pkg/qa/ and pkg/model/qa.go: %s", line)
 		}
+	}
+}
+
+func TestQAE2ESpecsPinDemoActor(t *testing.T) {
+	matches, err := filepath.Glob("../../ui-ng/e2e/next-qa-*.spec.js")
+	if err != nil {
+		t.Fatalf("glob next-qa-*.spec.js: %v", err)
+	}
+	if len(matches) == 0 {
+		t.Fatal("expected at least one ui-ng/e2e/next-qa-*.spec.js file")
+	}
+	for _, m := range matches {
+		raw, err := os.ReadFile(m)
+		if err != nil {
+			t.Fatalf("read %s: %v", m, err)
+		}
+		text := string(raw)
+		if !strings.Contains(text, `demoArgs: ["-as"`) {
+			t.Errorf("%s must configure test.use({ demoArgs: [\"-as\", ...] }) so QA E2E specs never leak the host OS username", filepath.Base(m))
+		}
+	}
+}
+
+func TestTestsWorkflowEnforcesGoVetAndMutatingRouteWithoutBypass(t *testing.T) {
+	raw, err := os.ReadFile("../../.grain/workflows/tests.yml")
+	if err != nil {
+		t.Fatalf("read .grain/workflows/tests.yml: %v", err)
+	}
+	text := string(raw)
+	if strings.Contains(text, "-vet=off") {
+		t.Error(".grain/workflows/tests.yml must not disable go vet with -vet=off")
+	}
+	if !strings.Contains(text, "MutatingRoute") {
+		t.Error(".grain/workflows/tests.yml must run MutatingRoute invariant tests in go-orch-ui")
 	}
 }

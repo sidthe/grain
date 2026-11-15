@@ -386,6 +386,60 @@ func salvageQAStageIfPresent(
 		}
 	}
 
+	// 2b. Run any post-S4 custom stages (insert-after: s4) that have not yet run for headSHA.
+	if hasUnrecordedCustomStageForSlot(ctx, store, task.ID, headSHA, flow, "s4") {
+		if mirrorWS == nil {
+			if rt := LiveQARuntime(); rt != nil && rt.DataDir != "" && rt.ResolveRemote != nil {
+				if remoteURL, bearer, rErr := rt.ResolveRemote(ctx, *task.Target); rErr == nil && remoteURL != "" {
+					mirrorWS, _ = checks.OpenMirrorWorkspace(ctx, filepath.Join(rt.DataDir, "qa-repos"), remoteURL, bearer, task.Base, checkBranch)
+				}
+			}
+		}
+		var changedFiles []string
+		if mirrorWS != nil {
+			if rawDiff, dErr := mirrorWS.BaseHeadDiff(ctx); dErr == nil {
+				changedFiles = checks.ParseUnifiedDiff(rawDiff).AllPaths()
+			}
+		}
+		postRep := checks.Report{
+			Passed:       true,
+			HeadSHA:      headSHA,
+			BlastTier:    blastTier,
+			ChangedFiles: changedFiles,
+		}
+		executeCustomStages(ctx, store, task, "", assign, false, "", mirrorWS, &postRep, "s4")
+		if !postRep.Passed {
+			failSummary := postRep.FormatAgentFailure()
+			if !hasTaskLink(task, model.LinkQASalvageRetried) {
+				_ = store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
+					if !hasTaskLink(*t, model.LinkQASalvageRetried) {
+						t.Links = append(t.Links, model.Link{Kind: model.LinkQASalvageRetried, Target: headSHA})
+					}
+					return nil
+				})
+				if err := noteOnTask(ctx, store, task.ID, failSummary, now); err != nil {
+					return true, err
+				}
+				if err := observeField(ctx, store, task.ID, now, func(o *model.Observation) {
+					o.CompletedAt = nil
+					o.RetryRequestedAt = &now
+				}); err != nil {
+					return true, err
+				}
+				return true, nil
+			}
+			if stageExists {
+				if _, err := promoteQAStageBranch(client, *task.Target, stageBranch, task.BranchName(), headSHA); err != nil {
+					return true, err
+				}
+			}
+			if err := holdTaskForQA(ctx, store, task.ID, headSHA, firstLineSummary(failSummary), now); err != nil {
+				return true, err
+			}
+			return false, nil
+		}
+	}
+
 	// 3. Verified! Promote staging branch to real PR branch and clear any QA hold.
 	if stageExists {
 		if _, err := promoteQAStageBranch(client, *task.Target, stageBranch, task.BranchName(), headSHA); err != nil {
@@ -545,7 +599,12 @@ func runMirrorS3WithWorkspace(
 		return checks.Report{}, ws, false, err
 	}
 	persistS3ReportToStore(ctx, store, task, "", assign, shadow, callerNotes, ws.BaseSHA, rep)
-	executeCustomStages(ctx, store, task, "", assign, shadow, callerNotes, ws, &rep)
+	slots := []string{"s2", "s3", "s4"}
+	if !shadow && flow.RequiresS4ForTier(rep.BlastTier) && canRunS4RepairRound(task, flow, rep.HeadSHA) {
+		// Defer post-S4 custom stages until after fresh-context S4 verification finishes.
+		slots = []string{"s2", "s3"}
+	}
+	executeCustomStages(ctx, store, task, "", assign, shadow, callerNotes, ws, &rep, slots...)
 	return rep, ws, true, nil
 }
 
@@ -644,6 +703,42 @@ func persistS3ReportToStore(
 	}
 }
 
+func hasUnrecordedCustomStageForSlot(ctx context.Context, store *model.Store, taskID, headSHA string, flow qa.FlowSpec, slot string) bool {
+	if store == nil || len(flow.CustomStages) == 0 {
+		return false
+	}
+	var slotIDs []string
+	for _, stg := range flow.CustomStages {
+		s := strings.ToLower(strings.TrimSpace(stg.InsertAfter))
+		if s == "" {
+			s = "s3"
+		}
+		if s == slot {
+			slotIDs = append(slotIDs, stg.ID)
+		}
+	}
+	if len(slotIDs) == 0 {
+		return false
+	}
+	runs, err := store.ListQACheckRunsForTask(ctx, taskID)
+	if err != nil {
+		return true
+	}
+	recorded := map[string]bool{}
+	for _, r := range runs {
+		if !r.Shadow && r.CommitSHA == headSHA {
+			recorded[r.Stage] = true
+			recorded[r.CheckID] = true
+		}
+	}
+	for _, id := range slotIDs {
+		if !recorded[id] {
+			return true
+		}
+	}
+	return false
+}
+
 func executeCustomStages(
 	ctx context.Context,
 	store *model.Store,
@@ -654,9 +749,13 @@ func executeCustomStages(
 	callerNotes string,
 	ws *checks.MirrorWorkspace,
 	rep *checks.Report,
+	slots ...string,
 ) {
 	if store == nil || assign == nil || assign.Spec == nil || rep == nil || len(assign.Spec.CustomStages) == 0 {
 		return
+	}
+	if len(slots) == 0 {
+		slots = []string{"s2", "s3", "s4"}
 	}
 	flow := *assign.Spec
 	rt := LiveQARuntime()
@@ -694,7 +793,7 @@ func executeCustomStages(
 		"testTampered": rep.TestTampered,
 	})
 
-	for _, insertSlot := range []string{"s2", "s3", "s4"} {
+	for _, insertSlot := range slots {
 		for _, stg := range flow.CustomStages {
 			slot := strings.ToLower(strings.TrimSpace(stg.InsertAfter))
 			if slot == "" {
@@ -1734,7 +1833,6 @@ func MaybeAutoDowngradeQARollout(ctx context.Context, store *model.Store, now ti
 	return true, reasons, nil
 }
 
-
 // PromoteStrandedQAStage promotes a stranded QA stage branch to the task's live PR branch, if it exists,
 // and records a fail-open check run.
 func PromoteStrandedQAStage(ctx context.Context, store *model.Store, client github.Client, task model.Task, reason string) error {
@@ -1973,7 +2071,7 @@ func EvaluateAndApplyQATriage(
 		mergeRulesRequireHuman = true
 	}
 	for _, r := range model.HumanReviewReasons(task) {
-		if r.Source == model.HumanReviewHumanOnly {
+		if r.Source != model.HumanReviewQATriage {
 			mergeRulesRequireHuman = true
 			break
 		}
@@ -1984,13 +2082,14 @@ func EvaluateAndApplyQATriage(
 			break
 		}
 	}
+	known := len(prFiles) > 0 && len(prFiles) < github.PullRequestFilesCap
 	if !mergeRulesRequireHuman && task.Target != nil {
 		if rules, rErr := store.MergeRulesOf(ctx, *task.Target); rErr == nil && rules != nil && !rules.Empty() {
 			ciMode := model.CIModeGitHub
 			if rc, cErr := store.GetRepoConfig(ctx, *task.Target); cErr == nil && rc != nil && rc.CIMode != "" {
 				ciMode = rc.CIMode
 			}
-			eff := rules.Effective(prFiles, len(prFiles) < github.PullRequestFilesCap, ciMode)
+			eff := rules.Effective(prFiles, known, ciMode)
 			if eff.AutoMergeNever {
 				mergeRulesRequireHuman = true
 			}
@@ -2004,7 +2103,7 @@ func EvaluateAndApplyQATriage(
 				if !rt.Trigger.Gate {
 					continue
 				}
-				if len(rt.Trigger.Paths) == 0 || len(rt.Trigger.Match(prFiles)) > 0 {
+				if !known || len(rt.Trigger.Paths) == 0 || len(rt.Trigger.Match(prFiles)) > 0 {
 					gateTriggerMatched = true
 					break
 				}
@@ -2067,7 +2166,7 @@ func EvaluateAndApplyQATriage(
 		GateTriggerMatched:         gateTriggerMatched,
 		FilesTruncated:             len(prFiles) >= github.PullRequestFilesCap,
 		CIRedOrPending:             ciRedOrPending,
-		HasUnresolvedFindings:      !s3Passed || hasTaskLink(task, model.LinkQAHold) || hasTaskLink(task, model.LinkReviewFindings),
+		HasUnresolvedFindings:      !s3Passed || hasTaskLink(task, model.LinkQAHold) || hasTaskLink(task, model.LinkReviewFindings) || hasTaskLink(task, model.LinkSecurityHold),
 		OperatorAutoMergeEnabled:   task.AutoMerge,
 	}
 
@@ -2117,7 +2216,7 @@ func EvaluateAndApplyQATriage(
 				t.AutoMerge = false
 				return nil
 			})
-		} else if verdict.Decision == qa.TriageAutoMerge && !verdict.BlockedByFloor && hasTaskLink(task, model.LinkQATriageHold) {
+		} else if verdict.Decision == qa.TriageAutoMerge && !verdict.BlockedByFloor && !hasCustomHumanGateHold && hasTaskLink(task, model.LinkQATriageHold) {
 			_ = store.UpdateTask(ctx, task.ID, func(t *model.Task) error {
 				t.Links = slices.DeleteFunc(t.Links, func(l model.Link) bool {
 					if l.Kind == model.LinkQATriageHold {

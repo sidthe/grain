@@ -17,6 +17,9 @@ import path from "node:path";
 import AxeBuilder from "@axe-core/playwright";
 import { test, expect } from "./fixtures.js";
 
+// A named actor, so no screenshot or task payload carries the host account's user name.
+test.use({ demoArgs: ["-as", "demo-operator"] });
+
 test.afterEach(async ({ demoServer, accessCode }) => {
   await fetch(`${demoServer}/api/settings`, {
     method: "PUT",
