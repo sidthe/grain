@@ -2527,7 +2527,7 @@ func proposalSection(task model.Task) string {
 		"in your comments, questions, chat messages, or task descriptions must always be a " +
 		"relative path (such as `[Task #31](/tasks/31)` or `[Settings → CI](/settings/ci)`) " +
 		"and never an absolute `http://127.0.0.1:...` or `http://localhost:...` URL, so links " +
-		"work when viewed through UberProxy or any reverse proxy. To point at one comment " +
+		"work when viewed through an authenticating reverse proxy or any reverse proxy. To point at one comment " +
 		"in a task's conversation, add its comment id as the fragment: " +
 		"`[comment](/tasks/31#comment=13)`."
 	return s
@@ -3345,6 +3345,7 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	pushBranch := task.BranchName()
 	var qaSkillPrompt string
 	qaStopNudge := false
+	var preCloneClarification *PreCloneQAResult
 	if qaAssignment != nil && qaAssignment.IsEnforcedTreatment() && model.TaskEligibleForQAStaging(task) {
 		if cfg.GitRemoteBase != "" && (qaAssignment.Spec == nil || qaAssignment.Spec.StagingIsolation) {
 			pushBranch = model.QAStageBranchName(task.ID)
@@ -3352,8 +3353,44 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		if qaAssignment.Spec != nil {
 			qaSkillPrompt = qaAssignment.Spec.SkillPrompt()
 			qaStopNudge = qaAssignment.Spec.StopNudge
-			qaSkillPrompt = ExecutePreDispatchQAPhases(ctx, store, task, qaAssignment.Spec, qaAssignment.ExperimentID, qaAssignment.ArmID, qaAssignment.FlowHash, qaSkillPrompt)
+			preRes := ExecutePreCloneQAPhase(ctx, store, task, qaAssignment.Spec, qaAssignment.ExperimentID, qaAssignment.ArmID, qaAssignment.FlowHash, qaSkillPrompt)
+			qaSkillPrompt = preRes.Prompt
+			if preRes.NeedsClarification {
+				preCloneClarification = &preRes
+			}
 		}
+	}
+	if preCloneClarification != nil {
+		cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), runCleanupTimeout)
+		defer cancelCleanup()
+		revokeAll(cleanupCtx, store, cc, cfg.PreparedCapabilities)
+		q := strings.TrimSpace(preCloneClarification.Question)
+		if q == "" {
+			q = "Clarification is required before this task can proceed."
+		}
+		summary := model.QuestionSummary("Clarification needed before implementation", q, "s0_clarification on "+task.ID)
+		commentID, qErr := relayQuestion(ctx, store, task, q, summary, nil, cfg.now())
+		if qErr != nil {
+			return unprepared(fmt.Errorf("orchestrator: posting S0 clarification question for %s: %w", task.ID, qErr))
+		}
+		if oErr := observeField(ctx, store, task.ID, cfg.now(), func(o *model.Observation) {
+			o.PendingQuestionCommentID = &commentID
+		}); oErr != nil {
+			return unprepared(fmt.Errorf("orchestrator: parking %s on S0 clarification question: %w", task.ID, oErr))
+		}
+		clarifyResult := &agent.Result{
+			ToolCalls: []agent.ToolCall{{
+				Name: "ask_question",
+				Arguments: map[string]any{
+					"question": q,
+					"summary":  summary,
+				},
+				Relayed: true,
+			}},
+		}
+		_ = recordRunEnd(ctx, cleanupCtx, store, cfg, task, d.RunID, obs, clarifyResult,
+			runEnding{outcome: "succeeded"}, nil, false, "", "")
+		return clarifyResult, nil
 	}
 
 	// Before the agent's first turn: a run whose sandbox never got its repo
@@ -3457,6 +3494,17 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 			persistCommittedContextManifests(ctx, store, &task, prepared.Context)
 			cc.Task = task
 		}
+	}
+	if checkoutErr == nil && prepErr == nil && qaAssignment != nil && qaAssignment.IsEnforcedTreatment() && model.TaskEligibleForQAStaging(task) && qaAssignment.Spec != nil {
+		worktreeDir := prepared.Dir
+		if worktreeDir != "" && !filepath.IsAbs(worktreeDir) {
+			if sandboxRoot != "" {
+				worktreeDir = filepath.Join(sandboxRoot, worktreeDir)
+			} else if prepared.Root != "" {
+				worktreeDir = filepath.Join(prepared.Root, worktreeDir)
+			}
+		}
+		qaSkillPrompt = ExecutePostCloneWorkflowPhases(ctx, store, task, worktreeDir, qaAssignment.Spec, qaAssignment.ExperimentID, qaAssignment.ArmID, qaAssignment.FlowHash, qaSkillPrompt)
 	}
 	var repoSkills []intree.SkillIndexEntry
 	if checkoutErr == nil && prepErr == nil && len(skillFolders) > 0 && prepared.Dir != "" {

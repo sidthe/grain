@@ -16,6 +16,12 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -24,15 +30,88 @@ import (
 	"github.com/ai-on-gke/grain/pkg/qa"
 )
 
-// ExecutePreDispatchQAPhases executes complexity-gated isolated pre-coding stages (S0 EARS intent
-// checklist and S2 read-only Plan Critic) for enforced non-control arms before coding dispatch.
-func ExecutePreDispatchQAPhases(ctx context.Context, store *model.Store, task model.Task, spec *qa.FlowSpec, expID, armID, flowHash string, initialPrompt string) string {
+// PreCloneQAResult holds the result of pre-clone S0 EARS intent extraction.
+type PreCloneQAResult struct {
+	Prompt             string
+	NeedsClarification bool
+	Question           string
+}
+
+var pathTokenRe = regexp.MustCompile(`(?:[a-zA-Z0-9_.-]+/)*[a-zA-Z0-9_.-]+\.(?:go|ts|tsx|js|jsx|py|cc|cpp|h|hpp|md|yml|yaml|sql|json|html|css|scss)`)
+var dirTokenRe = regexp.MustCompile(`(?:[a-zA-Z0-9_.-]+/)+[a-zA-Z0-9_.-]+`)
+var goImportLineRe = regexp.MustCompile(`"([^"]+)"`)
+var tsImportLineRe = regexp.MustCompile(`(?:from|require\()\s*['"]([^'"]+)['"]`)
+
+func matchesComplexityTier(allowed []string, actual qa.ComplexityTier) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	act := strings.ToLower(strings.TrimSpace(string(actual)))
+	for _, raw := range allowed {
+		norm := strings.ToLower(strings.TrimSpace(raw))
+		if norm == "large" {
+			norm = string(qa.ComplexityHigh)
+		}
+		if norm == act {
+			return true
+		}
+	}
+	return false
+}
+
+func extractS0ClarificationQuestion(out string) string {
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	var kept []string
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		lower := strings.ToLower(trimmed)
+		if strings.HasPrefix(lower, "status:") && strings.Contains(lower, "needs_clarification") {
+			if idx := strings.Index(lower, "needs_clarification"); idx >= 0 {
+				rest := strings.TrimSpace(trimmed[idx+len("needs_clarification"):])
+				rest = strings.TrimLeft(rest, ":- ")
+				if rest != "" {
+					kept = append(kept, rest)
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(lower, "question:") {
+			q := strings.TrimSpace(trimmed[len("question:"):])
+			if q != "" {
+				return q
+			}
+		}
+		upper := strings.ToUpper(trimmed)
+		if strings.HasPrefix(upper, "- WHEN ") || strings.HasPrefix(upper, "* WHEN ") {
+			continue
+		}
+		kept = append(kept, trimmed)
+	}
+	if len(kept) == 0 {
+		return "Clarification is required on ambiguous requirements before implementation proceeds."
+	}
+	return strings.Join(kept, "\n")
+}
+
+// ExecutePreCloneQAPhase runs S0 EARS intent extraction before git checkout so zero clone work is
+// spent when the specification requires human clarification.
+func ExecutePreCloneQAPhase(
+	ctx context.Context,
+	store *model.Store,
+	task model.Task,
+	spec *qa.FlowSpec,
+	expID, armID, flowHash string,
+	currentPrompt string,
+) PreCloneQAResult {
 	if spec == nil || armID == model.QAArmControl {
-		return initialPrompt
+		return PreCloneQAResult{Prompt: currentPrompt}
 	}
 	rt := LiveQARuntime()
 	if rt == nil || rt.RunIsolatedPrompt == nil {
-		return initialPrompt
+		return PreCloneQAResult{Prompt: currentPrompt}
 	}
 
 	comp := qa.AssessTaskComplexity(qa.ComplexityInput{
@@ -40,63 +119,243 @@ func ExecutePreDispatchQAPhases(ctx context.Context, store *model.Store, task mo
 		Body:        task.Body,
 		ReadsCount:  len(task.Reads),
 		WritesCount: len(task.Writes),
+		PathHints:   extractCandidatePaths(task, spec, ""),
 	}, rt.Profiler)
 
-	finalPrompt := initialPrompt
+	finalPrompt := currentPrompt
+	s0Enabled := spec.S0Intent || spec.S0IntentConfig.Enabled
+	if s0Enabled && !comp.HasDesignItem && matchesComplexityTier(spec.S0IntentConfig.Complexities, comp.Tier) {
+		timeout := time.Duration(spec.S0IntentConfig.MaxSeconds) * time.Second
+		if timeout <= 0 || timeout > 30*time.Second {
+			timeout = 30 * time.Second
+		}
+		intentGuidance := strings.TrimSpace(spec.IntentSkillText)
+		if intentGuidance == "" {
+			intentGuidance = "Extract 2 to 6 testable WHEN ... SHALL acceptance criteria and explicit non-goals strictly from the task title and body."
+		}
+		prompt := intentGuidance + "\n\nTask title: " + task.Title + "\n\nTask body:\n" + task.Body
+		runCtx, cancel := context.WithTimeout(ctx, timeout)
+		start := time.Now()
+		out, inTok, outTok, err := rt.RunIsolatedPrompt(runCtx, task, task.ID+"-qa-s0", prompt, spec.S0IntentConfig.MaxTokens)
+		duration := time.Since(start).Milliseconds()
+		cancel()
 
-	if spec.S0Intent && !comp.HasDesignItem {
-		if len(spec.S0IntentConfig.Complexities) == 0 || slices.Contains(spec.S0IntentConfig.Complexities, string(comp.Tier)) {
-			timeout := time.Duration(spec.S0IntentConfig.MaxSeconds) * time.Second
-			if timeout <= 0 || timeout > 30*time.Second {
-				timeout = 30 * time.Second
-			}
-			intentGuidance := strings.TrimSpace(spec.IntentSkillText)
-			if intentGuidance == "" {
-				intentGuidance = "Extract 2 to 6 testable WHEN ... SHALL acceptance criteria and explicit non-goals strictly from the task title and body."
-			}
-			prompt := intentGuidance + "\n\nTask title: " + task.Title + "\n\nTask body:\n" + task.Body
-			runCtx, cancel := context.WithTimeout(ctx, timeout)
-			start := time.Now()
-			out, inTok, outTok, err := rt.RunIsolatedPrompt(runCtx, task, task.ID+"-qa-s0", prompt, spec.S0IntentConfig.MaxTokens)
-			duration := time.Since(start).Milliseconds()
-			cancel()
-
-			cr := model.QACheckRun{
-				TaskID:         task.ID,
-				RunID:          task.ID + "-qa-s0",
-				Stage:          "S0",
-				CheckID:        "qa:intent",
-				Arm:            model.QAArmTreatment,
-				Verdict:        "pass",
-				DurationMS:     duration,
-				TokensIn:       inTok,
-				TokensOut:      outTok,
-				ComplexityTier: string(comp.Tier),
-				ExperimentID:   expID,
-				ArmID:          armID,
-				FlowHash:       flowHash,
-				QAEngineRev:    qa.QAEngineRev,
-				Model:          task.Model,
-			}
-			if err != nil {
-				cr.Verdict = "error"
-			} else {
-				checklist := strings.TrimSpace(out)
-				if strings.Contains(strings.ToLower(checklist), "status: needs_clarification") {
+		cr := model.QACheckRun{
+			TaskID:         task.ID,
+			RunID:          task.ID + "-qa-s0",
+			Stage:          "S0",
+			CheckID:        "qa:intent",
+			Arm:            model.QAArmTreatment,
+			Verdict:        "pass",
+			DurationMS:     duration,
+			TokensIn:       inTok,
+			TokensOut:      outTok,
+			ComplexityTier: string(comp.Tier),
+			ExperimentID:   expID,
+			ArmID:          armID,
+			FlowHash:       flowHash,
+			QAEngineRev:    qa.QAEngineRev,
+			Model:          task.Model,
+		}
+		var needsClarification bool
+		var question string
+		if err != nil {
+			cr.Verdict = "error"
+		} else {
+			checklist := strings.TrimSpace(out)
+			if strings.Contains(strings.ToLower(checklist), "status: needs_clarification") {
+				question = extractS0ClarificationQuestion(checklist)
+				onClarify := strings.ToLower(strings.TrimSpace(spec.S0IntentConfig.OnClarification))
+				detailBytes, _ := json.Marshal(map[string]any{
+					"onClarification": onClarify,
+					"question":        question,
+					"output":          checklist,
+				})
+				cr.DetailJSON = string(detailBytes)
+				if onClarify == "ask_human" {
+					cr.Verdict = "hold"
+					needsClarification = true
+				} else {
 					cr.Verdict = "warn"
+					if checklist != "" {
+						finalPrompt += "\n\n## EARS Intent Checklist\n" + checklist
+					}
 				}
-				if checklist != "" {
-					finalPrompt += "\n\n## EARS Intent Checklist\n" + checklist
-				}
+			} else if checklist != "" {
+				finalPrompt += "\n\n## EARS Intent Checklist\n" + checklist
 			}
-			if store != nil {
-				_, _ = store.RecordQACheckRun(ctx, cr, nil)
+		}
+		if store != nil {
+			_, _ = store.RecordQACheckRun(ctx, cr, nil)
+		}
+		if needsClarification {
+			return PreCloneQAResult{
+				Prompt:             finalPrompt,
+				NeedsClarification: true,
+				Question:           question,
 			}
 		}
 	}
 
-	if spec.S2PlanCritic {
-		if comp.Tier == qa.ComplexityHigh || slices.Contains(spec.S2PlanCriticConfig.Complexities, string(comp.Tier)) {
+	return PreCloneQAResult{Prompt: finalPrompt}
+}
+
+// ExecutePostCloneWorkflowPhases runs post-checkout S1 repository & caller context discovery,
+// S0b goal decomposition guidance, S2 fresh-context plan critique (with bounded REVISE_PLAN bounces),
+// and ActiveCodingGuidance injection.
+func ExecutePostCloneWorkflowPhases(
+	ctx context.Context,
+	store *model.Store,
+	task model.Task,
+	worktreeDir string,
+	spec *qa.FlowSpec,
+	expID, armID, flowHash string,
+	currentPrompt string,
+) string {
+	if spec == nil || armID == model.QAArmControl {
+		return currentPrompt
+	}
+	rt := LiveQARuntime()
+	var prof *qa.Profiler
+	if rt != nil {
+		prof = rt.Profiler
+	}
+
+	finalPrompt := currentPrompt
+	candidatePaths := extractCandidatePaths(task, spec, worktreeDir)
+
+	// 1. S1 (step:context-repo-discovery): deterministic repo & sibling importer context discovery.
+	var codebaseContext string
+	var siblingImporters []string
+	s2Enabled := spec.S2PlanCritic || spec.S2PlanCriticConfig.Enabled
+	if spec.Context.Enabled || s2Enabled {
+		s1Start := time.Now()
+		var existingPaths []string
+		if strings.TrimSpace(worktreeDir) != "" {
+			maxTokens := spec.Context.MaxTokens
+			if maxTokens <= 0 || maxTokens > 2000 {
+				maxTokens = 2000
+			}
+			codebaseContext, existingPaths, siblingImporters = discoverPostCloneCodebaseContext(worktreeDir, candidatePaths, maxTokens, 180*time.Millisecond)
+			for _, ep := range existingPaths {
+				if !slices.Contains(candidatePaths, ep) {
+					candidatePaths = append(candidatePaths, ep)
+				}
+			}
+		}
+		s1Duration := time.Since(s1Start).Milliseconds()
+		if spec.Context.Enabled || codebaseContext != "" {
+			if codebaseContext != "" {
+				finalPrompt += "\n\n## Codebase & Caller Context\n" + codebaseContext
+			} else if spec.Context.Enabled && len(candidatePaths) > 0 {
+				codebaseContext = "<codebase-context>\nCandidate paths: " + strings.Join(candidatePaths, ", ") + "\n</codebase-context>"
+				finalPrompt += "\n\n## Codebase & Caller Context\n" + codebaseContext
+			}
+			if store != nil && (spec.Context.Enabled || codebaseContext != "") {
+				detailBytes, _ := json.Marshal(map[string]any{
+					"discoveredPaths":  existingPaths,
+					"candidatePaths":   candidatePaths,
+					"siblingImporters": siblingImporters,
+					"contextBytes":     len(codebaseContext),
+				})
+				_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
+					TaskID:       task.ID,
+					RunID:        task.ID + "-qa-s1",
+					Stage:        "S1",
+					CheckID:      "qa:context-discovery",
+					Arm:          model.QAArmTreatment,
+					Verdict:      "pass",
+					DurationMS:   s1Duration,
+					DetailJSON:   string(detailBytes),
+					ExperimentID: expID,
+					ArmID:        armID,
+					FlowHash:     flowHash,
+					QAEngineRev:  qa.QAEngineRev,
+					Model:        task.Model,
+				}, nil)
+			}
+		}
+	}
+
+	comp := qa.AssessTaskComplexity(qa.ComplexityInput{
+		Title:       task.Title,
+		Body:        task.Body,
+		ReadsCount:  len(task.Reads),
+		WritesCount: len(task.Writes),
+		PathHints:   candidatePaths,
+	}, prof)
+
+	// 2. S0b (step:goal-subtask-decomposer): complexity-gated slice plan / wave DAG guidance.
+	if spec.Decompose.Enabled && spec.Decompose.Mode != "" && spec.Decompose.Mode != "off" {
+		if matchesComplexityTier(spec.Decompose.Complexities, comp.Tier) {
+			maxSub := spec.Decompose.MaxSubtasks
+			if maxSub <= 0 {
+				maxSub = 4
+			}
+			targetLines := spec.Decompose.TargetDiffLines
+			if targetLines <= 0 {
+				targetLines = 400
+			}
+			switch strings.ToLower(strings.TrimSpace(spec.Decompose.Mode)) {
+			case "propose_dag":
+				finalPrompt += fmt.Sprintf(
+					"\n\n## Goal Subtask Decomposition (S0b — propose_dag)\n"+
+						"Decompose multi-subsystem work into at most %d wave-ordered subtasks via `propose_task` "+
+						"(target ~%d diff lines per subtask) with non-overlapping `writes[]` scopes and explicit `depends_on` edges.",
+					maxSub, targetLines,
+				)
+			default:
+				finalPrompt += fmt.Sprintf(
+					"\n\n## Goal Subtask Decomposition (S0b — slice_plan)\n"+
+						"Execute this change as at most %d ordered single-PR slice steps targeting ~%d diff lines per slice, "+
+						"verifying compilation and targeted tests after each slice.",
+					maxSub, targetLines,
+				)
+			}
+			if store != nil {
+				_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
+					TaskID:         task.ID,
+					RunID:          task.ID + "-qa-s0b",
+					Stage:          "S0b",
+					CheckID:        "step:goal-subtask-decomposer",
+					Arm:            model.QAArmTreatment,
+					Verdict:        "pass",
+					ComplexityTier: string(comp.Tier),
+					ExperimentID:   expID,
+					ArmID:          armID,
+					FlowHash:       flowHash,
+					QAEngineRev:    qa.QAEngineRev,
+					Model:          task.Model,
+				}, nil)
+			}
+		}
+	}
+
+	// 3. S2 (qa:plan-critic): post-checkout plan critic honoring both Complexities and Tiers + MaxBounces.
+	if s2Enabled && rt != nil && rt.RunIsolatedPrompt != nil {
+		prelimRisk := qa.AssessDiffBlast(qa.DiffStats{
+			Files:                 candidatePaths,
+			SiblingCallerPackages: len(siblingImporters),
+		}, spec.RiskOverrides, prof)
+
+		hasComplexities := len(spec.S2PlanCriticConfig.Complexities) > 0
+		hasTiers := len(spec.S2PlanCriticConfig.Tiers) > 0
+		compMatch := matchesComplexityTier(spec.S2PlanCriticConfig.Complexities, comp.Tier)
+		tierMatch := slices.Contains(spec.S2PlanCriticConfig.Tiers, string(prelimRisk.Tier))
+
+		shouldRunS2 := false
+		switch {
+		case hasComplexities && hasTiers:
+			shouldRunS2 = compMatch || tierMatch
+		case hasComplexities:
+			shouldRunS2 = compMatch
+		case hasTiers:
+			shouldRunS2 = tierMatch
+		default:
+			shouldRunS2 = comp.Tier == qa.ComplexityHigh || prelimRisk.Tier == qa.BlastT2 || prelimRisk.Tier == qa.BlastT3
+		}
+
+		if shouldRunS2 {
 			timeout := time.Duration(spec.S2PlanCriticConfig.MaxSeconds) * time.Second
 			if timeout <= 0 || timeout > 45*time.Second {
 				timeout = 45 * time.Second
@@ -105,13 +364,47 @@ func ExecutePreDispatchQAPhases(ctx context.Context, store *model.Store, task mo
 			if criticGuidance == "" {
 				criticGuidance = "Inspect the proposed file plan and sibling importers. Flag missing caller updates, missing schema/route registrations, or scope creep beyond the task specification."
 			}
-			prompt := criticGuidance + "\n\nTask title: " + task.Title + "\n\nTask body:\n" + task.Body
+			s2Prompt := criticGuidance + "\n\nTask title: " + task.Title + "\n\nTask body:\n" + task.Body
+			if codebaseContext != "" {
+				s2Prompt += "\n\n## Codebase & Caller Context\n" + codebaseContext
+			}
+
+			maxBounces := spec.S2PlanCriticConfig.MaxBounces
+			if maxBounces < 0 {
+				maxBounces = 0
+			} else if maxBounces > 2 {
+				maxBounces = 2
+			}
+
 			runCtx, cancel := context.WithTimeout(ctx, timeout)
 			start := time.Now()
-			out, inTok, outTok, err := rt.RunIsolatedPrompt(runCtx, task, task.ID+"-qa-s2", prompt, spec.S2PlanCriticConfig.MaxTokens)
+			out, inTok, outTok, err := rt.RunIsolatedPrompt(runCtx, task, task.ID+"-qa-s2", s2Prompt, spec.S2PlanCriticConfig.MaxTokens)
+			totalInTok := inTok
+			totalOutTok := outTok
+			bounces := 0
+			for bounces < maxBounces && err == nil && runCtx.Err() == nil && strings.Contains(out, "REVISE_PLAN:") {
+				bounces++
+				refinePrompt := fmt.Sprintf("%s\n\nPrevious Critique (Pass %d):\n%s\n\nRefine the implementation plan to resolve the REVISE_PLAN findings above.",
+					s2Prompt, bounces, strings.TrimSpace(out))
+				bOut, bIn, bOutTok, bErr := rt.RunIsolatedPrompt(runCtx, task, task.ID+"-qa-s2", refinePrompt, spec.S2PlanCriticConfig.MaxTokens)
+				totalInTok += bIn
+				totalOutTok += bOutTok
+				if bErr != nil {
+					break
+				}
+				if strings.TrimSpace(bOut) != "" {
+					out = bOut
+				}
+			}
 			duration := time.Since(start).Milliseconds()
 			cancel()
 
+			detailBytes, _ := json.Marshal(map[string]any{
+				"bounces":          bounces,
+				"maxBounces":       maxBounces,
+				"prelimBlastTier":  prelimRisk.Tier,
+				"siblingImporters": siblingImporters,
+			})
 			cr := model.QACheckRun{
 				TaskID:         task.ID,
 				RunID:          task.ID + "-qa-s2",
@@ -120,8 +413,11 @@ func ExecutePreDispatchQAPhases(ctx context.Context, store *model.Store, task mo
 				Arm:            model.QAArmTreatment,
 				Verdict:        "pass",
 				DurationMS:     duration,
-				TokensIn:       inTok,
-				TokensOut:      outTok,
+				TokensIn:       totalInTok,
+				TokensOut:      totalOutTok,
+				DetailJSON:     string(detailBytes),
+				BlastTier:      string(prelimRisk.Tier),
+				BlastScore:     prelimRisk.Score,
 				ComplexityTier: string(comp.Tier),
 				ExperimentID:   expID,
 				ArmID:          armID,
@@ -143,5 +439,309 @@ func ExecutePreDispatchQAPhases(ctx context.Context, store *model.Store, task mo
 		}
 	}
 
+	// 4. Coding prompt assembly: inject ActiveCodingGuidance (ReadabilityPacks, SkillSteps, PRContract).
+	if guidance := strings.TrimSpace(spec.ActiveCodingGuidance(candidatePaths)); guidance != "" {
+		if !strings.Contains(finalPrompt, guidance) {
+			finalPrompt += "\n\n## Active Workflow Coding & PR Guidance\n" + guidance
+		}
+	}
+
 	return finalPrompt
+}
+
+// ExecutePreDispatchQAPhases executes pre-clone S0 and post-clone workflow stages for backward-compatible callers.
+func ExecutePreDispatchQAPhases(ctx context.Context, store *model.Store, task model.Task, spec *qa.FlowSpec, expID, armID, flowHash string, initialPrompt string) string {
+	pre := ExecutePreCloneQAPhase(ctx, store, task, spec, expID, armID, flowHash, initialPrompt)
+	if pre.NeedsClarification {
+		return pre.Prompt
+	}
+	return ExecutePostCloneWorkflowPhases(ctx, store, task, "", spec, expID, armID, flowHash, pre.Prompt)
+}
+
+func extractCandidatePaths(task model.Task, spec *qa.FlowSpec, worktreeDir string) []string {
+	seen := make(map[string]bool)
+	var out []string
+	add := func(raw string) {
+		p := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(raw)), "./")
+		p = strings.Trim(p, "`'\".,:;()[]{}")
+		if p == "" || p == "." || strings.HasPrefix(p, "http://") || strings.HasPrefix(p, "https://") {
+			return
+		}
+		if !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+
+	text := task.Title + "\n" + task.Body
+	for _, m := range pathTokenRe.FindAllString(text, -1) {
+		add(m)
+	}
+	for _, m := range dirTokenRe.FindAllString(text, -1) {
+		if worktreeDir != "" {
+			if _, err := os.Stat(filepath.Join(worktreeDir, m)); err == nil {
+				add(m)
+				continue
+			}
+		}
+		if strings.HasPrefix(m, "pkg/") || strings.HasPrefix(m, "cmd/") || strings.HasPrefix(m, "ui/") || strings.HasPrefix(m, "ui-ng/") || strings.HasPrefix(m, "internal/") || strings.HasPrefix(m, "tests/") {
+			add(m)
+		}
+	}
+	for _, w := range task.Writes {
+		if w.Repo.Name != "" {
+			add(w.Repo.Name)
+		}
+		if w.Base != "" && strings.Contains(w.Base, "/") {
+			add(w.Base)
+		}
+	}
+	if spec != nil {
+		for _, ep := range spec.Context.ExtraPaths {
+			cleaned := strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(ep), "/**"), "/*")
+			if cleaned != "" {
+				add(cleaned)
+			}
+		}
+	}
+	return out
+}
+
+func discoverPostCloneCodebaseContext(
+	worktreeDir string,
+	candidatePaths []string,
+	maxTokens int,
+	maxDuration time.Duration,
+) (contextBlock string, existingPaths []string, siblingImporters []string) {
+	deadline := time.Now().Add(maxDuration)
+	if maxTokens <= 0 || maxTokens > 2000 {
+		maxTokens = 2000
+	}
+	maxChars := maxTokens * 4
+
+	seenExist := make(map[string]bool)
+	targetDirs := make(map[string]bool)
+	targetBasenames := make(map[string]bool)
+
+	addExistingFile := func(rel string) {
+		rel = strings.TrimPrefix(filepath.ToSlash(filepath.Clean(rel)), "./")
+		if rel == "" || rel == "." || seenExist[rel] {
+			return
+		}
+		seenExist[rel] = true
+		existingPaths = append(existingPaths, rel)
+		dir := filepath.ToSlash(filepath.Dir(rel))
+		if dir != "" && dir != "." {
+			targetDirs[dir] = true
+		}
+		base := strings.TrimSuffix(filepath.Base(rel), filepath.Ext(rel))
+		if base != "" {
+			targetBasenames[base] = true
+		}
+	}
+
+	for _, cp := range candidatePaths {
+		if time.Now().After(deadline) {
+			break
+		}
+		rel := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(cp)), "./")
+		if rel == "" || rel == "." || strings.HasPrefix(rel, "..") {
+			continue
+		}
+		abs := filepath.Join(worktreeDir, rel)
+		info, err := os.Stat(abs)
+		if err != nil {
+			continue
+		}
+		if !info.IsDir() {
+			addExistingFile(rel)
+			continue
+		}
+		targetDirs[rel] = true
+		entries, rErr := os.ReadDir(abs)
+		if rErr != nil {
+			continue
+		}
+		addedInDir := 0
+		for _, ent := range entries {
+			if ent.IsDir() {
+				continue
+			}
+			name := ent.Name()
+			if strings.HasSuffix(name, "_test.go") || strings.HasSuffix(name, ".spec.ts") {
+				continue
+			}
+			if strings.HasSuffix(name, ".go") || strings.HasSuffix(name, ".ts") || strings.HasSuffix(name, ".py") || strings.HasSuffix(name, ".md") {
+				addExistingFile(filepath.ToSlash(filepath.Join(rel, name)))
+				addedInDir++
+				if addedInDir >= 3 {
+					break
+				}
+			}
+		}
+	}
+
+	// If no candidate path resolved directly in worktreeDir, fall back to matching basenames or top-level source files.
+	if len(existingPaths) == 0 && !time.Now().After(deadline) {
+		candidateBases := make(map[string]bool)
+		for _, cp := range candidatePaths {
+			b := filepath.Base(cp)
+			if b != "" && b != "." {
+				candidateBases[b] = true
+			}
+		}
+		_ = filepath.WalkDir(worktreeDir, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || time.Now().After(deadline) {
+				return fs.SkipAll
+			}
+			if d.IsDir() {
+				name := d.Name()
+				if name == ".git" || name == "node_modules" || name == "vendor" || name == "dist" {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if len(candidateBases) > 0 && candidateBases[d.Name()] {
+				if rel, rErr := filepath.Rel(worktreeDir, p); rErr == nil {
+					addExistingFile(rel)
+				}
+			}
+			return nil
+		})
+	}
+
+	// Discover direct Go/TS sibling importer directories within the 200ms budget.
+	if (len(targetDirs) > 0 || len(targetBasenames) > 0) && !time.Now().After(deadline) {
+		importerSet := make(map[string]bool)
+		scannedFiles := 0
+		_ = filepath.WalkDir(worktreeDir, func(p string, d fs.DirEntry, err error) error {
+			if err != nil || time.Now().After(deadline) || scannedFiles >= 300 {
+				return fs.SkipAll
+			}
+			if d.IsDir() {
+				name := d.Name()
+				if name == ".git" || name == "node_modules" || name == "vendor" || name == "dist" {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			name := d.Name()
+			isGo := strings.HasSuffix(name, ".go")
+			isTS := strings.HasSuffix(name, ".ts") || strings.HasSuffix(name, ".tsx") || strings.HasSuffix(name, ".js")
+			if !isGo && !isTS {
+				return nil
+			}
+			rel, rErr := filepath.Rel(worktreeDir, p)
+			if rErr != nil {
+				return nil
+			}
+			relDir := filepath.ToSlash(filepath.Dir(rel))
+			if targetDirs[relDir] || importerSet[relDir] {
+				return nil
+			}
+			scannedFiles++
+			raw, rErr := os.ReadFile(p)
+			if rErr != nil {
+				return nil
+			}
+			if len(raw) > 4096 {
+				raw = raw[:4096]
+			}
+			snippet := string(raw)
+			if isGo {
+				for _, m := range goImportLineRe.FindAllStringSubmatch(snippet, -1) {
+					imp := m[1]
+					for td := range targetDirs {
+						if imp == td || strings.HasSuffix(imp, "/"+td) {
+							importerSet[relDir] = true
+							break
+						}
+					}
+				}
+			} else if isTS {
+				for _, m := range tsImportLineRe.FindAllStringSubmatch(snippet, -1) {
+					imp := m[1]
+					for td := range targetDirs {
+						baseDir := filepath.Base(td)
+						if strings.Contains(imp, td) || (baseDir != "" && baseDir != "." && strings.Contains(imp, baseDir)) {
+							importerSet[relDir] = true
+							break
+						}
+					}
+					for tb := range targetBasenames {
+						if tb != "" && (strings.HasSuffix(imp, "/"+tb) || imp == "./"+tb || imp == "../"+tb) {
+							importerSet[relDir] = true
+							break
+						}
+					}
+				}
+			}
+			return nil
+		})
+		for impDir := range importerSet {
+			siblingImporters = append(siblingImporters, impDir)
+		}
+		slices.Sort(siblingImporters)
+		if len(siblingImporters) > 8 {
+			siblingImporters = siblingImporters[:8]
+		}
+	}
+
+	if len(existingPaths) == 0 && len(siblingImporters) == 0 {
+		return "", nil, nil
+	}
+
+	var b strings.Builder
+	b.WriteString("<codebase-context>\n")
+	if len(siblingImporters) > 0 {
+		b.WriteString("Direct sibling importer directories: ")
+		b.WriteString(strings.Join(siblingImporters, ", "))
+		b.WriteString("\n")
+	}
+	for _, rel := range existingPaths {
+		if time.Now().After(deadline) || b.Len() >= maxChars-128 {
+			break
+		}
+		raw, err := os.ReadFile(filepath.Join(worktreeDir, rel))
+		if err != nil {
+			continue
+		}
+		snippet := extractBoundedFileHeader(string(raw), 18, 800)
+		entry := fmt.Sprintf("--- %s ---\n%s\n", rel, snippet)
+		if b.Len()+len(entry)+32 > maxChars {
+			remaining := maxChars - b.Len() - 32
+			if remaining > 64 {
+				b.WriteString(entry[:remaining])
+				b.WriteString("\n")
+			}
+			break
+		}
+		b.WriteString(entry)
+	}
+	b.WriteString("</codebase-context>")
+	return b.String(), existingPaths, siblingImporters
+}
+
+func extractBoundedFileHeader(content string, maxLines, maxBytes int) string {
+	lines := strings.Split(content, "\n")
+	var kept []string
+	for _, ln := range lines {
+		trimmed := strings.TrimSpace(ln)
+		if strings.HasPrefix(trimmed, "// Copyright") || strings.HasPrefix(trimmed, "// Licensed") ||
+			strings.HasPrefix(trimmed, "// you may not") || strings.HasPrefix(trimmed, "//     http") ||
+			strings.HasPrefix(trimmed, "// Unless required") || strings.HasPrefix(trimmed, "// distributed under") ||
+			strings.HasPrefix(trimmed, "// WITHOUT WARRANTIES") || strings.HasPrefix(trimmed, "// See the License") ||
+			strings.HasPrefix(trimmed, "// limitations under") || trimmed == "//" {
+			continue
+		}
+		kept = append(kept, ln)
+		if len(kept) >= maxLines {
+			break
+		}
+	}
+	out := strings.TrimSpace(strings.Join(kept, "\n"))
+	if len(out) > maxBytes {
+		out = strings.TrimSpace(out[:maxBytes])
+	}
+	return out
 }
