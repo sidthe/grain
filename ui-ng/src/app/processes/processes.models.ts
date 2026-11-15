@@ -107,6 +107,7 @@ export interface Schedule {
   model?: string;
   templateId?: string;
   templateName?: string;
+  qaFlowRef?: string;
   system?: boolean;
   suiteId?: string;
   suiteName?: string;
@@ -145,6 +146,7 @@ export interface CreateScheduleRequest {
   model?: string;
   templateId?: string;
   suiteId?: string;
+  qaFlowRef?: string;
   recurrence: Recurrence;
   timeZone?: string;
   overlap?: string;
@@ -162,6 +164,7 @@ export interface UpdateScheduleRequest {
   capabilities?: string[];
   templateId?: string;
   suiteId?: string;
+  qaFlowRef?: string;
   recurrence?: Recurrence;
   timeZone?: string;
   overlap?: string;
@@ -207,6 +210,7 @@ export interface Template {
   capabilities: string[];
   createdAt?: string;
   declaredIn?: DeclarationRef;
+  qaFlowRef?: string;
   system?: boolean;
   revision?: string;
 }
@@ -224,6 +228,7 @@ export interface CreateTemplateRequest {
   model?: string;
   interactive?: boolean;
   keepRunning?: boolean;
+  qaFlowRef?: string;
   capabilities: string[];
   reads: string[];
   writes: WriteTarget[];
@@ -243,6 +248,7 @@ export interface UpdateTemplateRequest {
   model?: string;
   interactive?: boolean;
   keepRunning?: boolean;
+  qaFlowRef?: string;
   capabilities?: string[];
   revision?: string;
 }
@@ -264,6 +270,7 @@ export interface Suite {
   autoApproveProposals: boolean;
   createdAt?: string;
   declaredIn?: DeclarationRef;
+  qaFlowRef?: string;
   revision?: string;
 }
 
@@ -276,6 +283,7 @@ export interface CreateSuiteRequest {
   requireApproval: boolean;
   autoMerge?: boolean;
   autoApproveProposals?: boolean;
+  qaFlowRef?: string;
 }
 
 export interface UpdateSuiteRequest {
@@ -287,6 +295,7 @@ export interface UpdateSuiteRequest {
   requireApproval?: boolean;
   autoMerge?: boolean;
   autoApproveProposals?: boolean;
+  qaFlowRef?: string;
   revision?: string;
 }
 

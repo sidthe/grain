@@ -284,10 +284,26 @@ items or topbar chrome:
 
 - **Settings → Tasks:** opt-in rollout switch, flow package `<g-pill-select>`,
   rollout percentage, and control shadow-measurement toggle inside `.s-card`.
-- **Processes → Quality checks (`/processes/quality`):** standard 30/70 split
-  listing built-in and `.grain/qa-flow.yml` flow packages on the left and stage
-  checks, path scopes, and isolation settings in `.proc-card` panels on the
-  right, with a `Configure rollout` link to `/settings/tasks`.
+- **Processes → Software Workflow & QA (`/processes/quality`):** 30/70
+  8-stage `Software Workflow & QA` Studio layout (`clamp(290px, 30%, 380px)`
+  8-stage timeline rail on the left and `minmax(0, 1fr)` inspector workbench on
+  the right with `Definition`, `Impact & Stats`, and `YAML` tabs, collapsing to
+  a single column below `1024px`). Schedule, Template, and Suite create/edit
+  drawers expose an operator-controlled `Software workflow` (`qaFlowRef`)
+  `<g-pill-select>` (`data-testid="process-qa-flow-select"`) and render a
+  `Workflow: <qaFlowRef>` badge in the detail header when set.
+- **Processes & NewTaskSheet composition body wells (`CompositionViewComponent`):**
+  `body` fields in `.comp-field-list` render as full-width `.comp-body-well`
+  blocks above the compact `.comp-field-row` metadata grid (`>= 85%` of
+  `.comp-task` clientWidth, never crushed into a narrow value column).
+- **Stage header tab strips (`.tab-strip` & `button.tab-link`):** `button.tab-link`
+  uses `appearance: none`, transparent background, and a flush `3px solid`
+  active bottom border (`border-bottom: 3px solid transparent` /
+  `var(--md-sys-color-primary)` on `[aria-current="page"]`,
+  `[aria-selected="true"]`, or `.is-active`). Any `.stage-header` whose last
+  child is `.tab-strip` removes its bottom padding via
+  `.stage-header:has(> .tab-strip:last-child) { padding-bottom: 0 }` so the
+  active underline sits flush on the header hairline.
 - **Task Detail → Changes & CI:** a `.ci-runs-card` (`Pre-PR quality checks`)
   shown above `CI checks & runs` only when quality control is active or
   recorded on that task. Each check run uses `<g-status-icon>` inside
