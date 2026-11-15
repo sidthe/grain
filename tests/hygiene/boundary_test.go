@@ -35,7 +35,6 @@ var googleTokens = regexp.MustCompile(`gcert|googlers\.com|corp\.goog|corp\.goog
 // names were scrubbed on import, but a later record may quote one), and
 // this file, which has to spell the tokens to find them.
 var googleTokensExempt = []string{
-	".grain/",
 	"docs/test-runs/",
 	"docs/test-plans/",
 	"docs/releases/",
