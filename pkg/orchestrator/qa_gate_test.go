@@ -16,6 +16,7 @@ package orchestrator_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -831,3 +832,323 @@ func TestSweepStrandedQAStagesSkipsClosedUntreatedAndAlreadySweptTasks(t *testin
 		t.Fatalf("expected 0 additional GetBranchHead calls on second sweep tick, got %d -> %d", promotedCalls, client.branchHeadCalls)
 	}
 }
+
+func registerTestFlowSpec(t *testing.T, ctx context.Context, store *model.Store, key string, spec qa.FlowSpec) {
+	t.Helper()
+	spec.ID = key
+	raw, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal FlowSpec %s: %v", key, err)
+	}
+	if err := store.InsertQAFlowVersion(ctx, model.QAFlowVersion{
+		Hash:        "sha256:" + key,
+		Key:         key,
+		Version:     1,
+		Label:       key,
+		SpecJSON:    string(raw),
+		QAEngineRev: qa.QAEngineRev,
+		CreatedBy:   "test",
+		CreatedAt:   baseTime,
+		SchemaVer:   qa.FlowSchemaV4,
+		SourceKind:  "ui",
+	}); err != nil {
+		t.Fatalf("InsertQAFlowVersion(%s): %v", key, err)
+	}
+}
+
+func TestQACustomStagesDeterministicBatchIsolatedCriticAndHumanGate(t *testing.T) {
+	store, ctx := openStore(t)
+	enableTestQA(t, ctx, store, 100)
+
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+
+	criticOutput := "CRITICAL_BUG: pkg/billing/charge.go:2 - missing idempotency key"
+	var sawCriticPrompt string
+	dataDir := t.TempDir()
+	orchestrator.SetLiveQARuntime(&orchestrator.QARuntime{
+		DataDir:  dataDir,
+		Profiler: qa.NewProfiler(filepath.Join(dataDir, "perf", "qa.jsonl")),
+		ResolveRemote: func(_ context.Context, _ model.RepoRef) (string, string, error) {
+			return sim.BareRepo, "", nil
+		},
+		RunIsolatedPrompt: func(_ context.Context, _ model.Task, _ string, prompt string, _ int) (string, int64, int64, error) {
+			sawCriticPrompt = prompt
+			return criticOutput, 90, 30, nil
+		},
+	})
+	t.Cleanup(func() { orchestrator.SetLiveQARuntime(nil) })
+
+	spec := qa.FlowSpec{
+		CustomChecks: []qa.CustomCheckDecl{{
+			ID:          "custom:no-forbidden-token",
+			Label:       "No FORBIDDEN_TOKEN",
+			Kind:        "pattern",
+			Severity:    "blocking",
+			Paths:       []string{"**/*.go"},
+			ForbidAdded: "FORBIDDEN_TOKEN",
+			Message:     "FORBIDDEN_TOKEN is prohibited",
+		}},
+		SkillSteps: []qa.SkillStepDecl{{
+			ID:      "skill:billing-critic",
+			Label:   "Billing Critic Skill",
+			Stage:   "s4",
+			Enabled: true,
+			Text:    "Verify idempotency keys on all billing mutations.",
+		}},
+		CustomStages: []qa.CustomStageDecl{
+			{
+				ID:          "stage-det-batch",
+				Label:       "Custom Deterministic Batch",
+				InsertAfter: "s3",
+				Kind:        "deterministic_batch",
+				CheckIDs:    []string{"custom:no-forbidden-token"},
+			},
+			{
+				ID:             "stage-iso-critic",
+				Label:          "Custom Isolated Critic",
+				InsertAfter:    "s3",
+				Kind:           "isolated_critic",
+				SkillRef:       "skill:billing-critic",
+				TimeoutSeconds: 15,
+			},
+			{
+				ID:          "stage-human-gate",
+				Label:       "Billing Human Gate",
+				InsertAfter: "s4",
+				Kind:        "human_gate",
+				WhenPaths:   []string{"pkg/billing/**"},
+				MinTier:     "T0",
+			},
+		},
+	}
+	registerTestFlowSpec(t, ctx, store, "v4-custom-stages", spec)
+
+	task := filedTask(t, ctx, store, "qacustomstage", repo)
+	if err := store.UpdateTask(ctx, task.ID, func(tk *model.Task) error {
+		tk.AutoMerge = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fresh, _ := store.GetTask(ctx, task.ID)
+	task = *fresh
+
+	if _, err := store.EnsureQAAssignment(ctx, model.QAAssignment{
+		RootOrigin:         model.ResolveQARootOrigin(task.WorkOrigin, task.ID),
+		Epoch:              1,
+		RegimeID:           1,
+		Arm:                model.QAArmTreatment,
+		FlowID:             "v4-custom-stages",
+		RolloutPctAtAssign: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stageBranch := model.QAStageBranchName(task.ID)
+
+	// 1. Staged diff contains FORBIDDEN_TOKEN -> deterministic_batch custom stage blocks PR creation.
+	commitAndPushFile(t, sim.BareRepo, stageBranch, "pkg/billing/charge.go", "package billing\n// FORBIDDEN_TOKEN\nfunc Charge() {}\n", "feat: add billing charge\n\nBody.")
+	if _, err := orchestrator.OpenPullRequestForTaskWithQA(ctx, store, client, task, orchestrator.QAOpenPROptions{}); err == nil {
+		t.Fatal("expected deterministic_batch custom stage to block PR creation when FORBIDDEN_TOKEN is present")
+	} else if !strings.Contains(err.Error(), "custom:no-forbidden-token") {
+		t.Fatalf("expected error to mention custom:no-forbidden-token, got: %v", err)
+	}
+
+	// 2. Remove FORBIDDEN_TOKEN, but isolated_critic returns CRITICAL_BUG -> isolated_critic custom stage blocks PR creation.
+	commitAndPushFile(t, sim.BareRepo, stageBranch, "pkg/billing/charge.go", "package billing\nfunc Charge() {}\n", "feat: clean billing charge\n\nBody.")
+	if _, err := orchestrator.OpenPullRequestForTaskWithQA(ctx, store, client, task, orchestrator.QAOpenPROptions{}); err == nil {
+		t.Fatal("expected isolated_critic custom stage to block PR creation when critic returns CRITICAL_BUG")
+	}
+	if !strings.Contains(sawCriticPrompt, "Verify idempotency keys on all billing mutations.") {
+		t.Fatalf("expected isolated_critic prompt to include referenced SkillStep text, got:\n%s", sawCriticPrompt)
+	}
+
+	// 3. Push updated commit where critic returns PASS -> PR opens, and human_gate custom stage (InsertAfter: "s4", WhenPaths: ["pkg/billing/**"]) sets LinkQATriageHold and strips AutoMerge.
+	criticOutput = "PASS: idempotency verified"
+	commitAndPushFile(t, sim.BareRepo, stageBranch, "pkg/billing/charge.go", "package billing\nfunc Charge(idempotencyKey string) {}\n", "feat: idempotent billing charge\n\nBody.")
+	status, err := orchestrator.OpenPullRequestForTaskWithQA(ctx, store, client, task, orchestrator.QAOpenPROptions{})
+	if err != nil || status.PullRequest.Number == 0 {
+		t.Fatalf("expected PR to open after custom stages pass, got (%+v, %v)", status, err)
+	}
+	reloaded, err := store.GetTask(ctx, task.ID)
+	if err != nil || reloaded == nil {
+		t.Fatalf("GetTask: %v", err)
+	}
+	if reloaded.AutoMerge {
+		t.Fatal("expected human_gate custom stage to withdraw AutoMerge on matching pkg/billing/** path")
+	}
+	hasHoldLink := false
+	for _, l := range reloaded.Links {
+		if l.Kind == model.LinkQATriageHold && strings.Contains(l.Target, "stage-human-gate") {
+			hasHoldLink = true
+		}
+	}
+	if !hasHoldLink {
+		t.Fatalf("expected LinkQATriageHold from stage-human-gate, got links=%+v", reloaded.Links)
+	}
+}
+
+func TestQAS4VerifierSkillTextMaxTokensAndTwoRepairRounds(t *testing.T) {
+	store, ctx := openStore(t)
+	enableTestQA(t, ctx, store, 100)
+
+	sim, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+
+	var sawPrompts []string
+	var sawMaxTokens []int
+	dataDir := t.TempDir()
+	orchestrator.SetLiveQARuntime(&orchestrator.QARuntime{
+		DataDir:  dataDir,
+		Profiler: qa.NewProfiler(filepath.Join(dataDir, "perf", "qa.jsonl")),
+		ResolveRemote: func(_ context.Context, _ model.RepoRef) (string, string, error) {
+			return sim.BareRepo, "", nil
+		},
+		RunIsolatedPrompt: func(_ context.Context, _ model.Task, _ string, prompt string, maxTokens int) (string, int64, int64, error) {
+			sawPrompts = append(sawPrompts, prompt)
+			sawMaxTokens = append(sawMaxTokens, maxTokens)
+			return `{"findings":[{"file":"pkg/calc/add.go","line":2,"escape_class":"boundary","confidence":0.95,"trigger_scenario":"overflow bug on boundary input","fix_hint":"check overflow"}]}`, 120, 40, nil
+		},
+	})
+	t.Cleanup(func() { orchestrator.SetLiveQARuntime(nil) })
+
+	spec := qa.FlowSpec{
+		EnableS4:          true,
+		VerifierTiers:     []string{"T0", "T1", "T2", "T3"},
+		MaxS4Tokens:       42000,
+		MaxS4RepairRounds: 2,
+		VerifierSkillText: "CUSTOM_VERIFIER_SKILL_V4",
+		SecuritySkillText: "CUSTOM_SECURITY_SKILL_V4",
+	}
+	registerTestFlowSpec(t, ctx, store, "v4-s4-two-rounds", spec)
+
+	task := filedTask(t, ctx, store, "qas4rounds", repo)
+	if _, err := store.EnsureQAAssignment(ctx, model.QAAssignment{
+		RootOrigin:         model.ResolveQARootOrigin(task.WorkOrigin, task.ID),
+		Epoch:              1,
+		RegimeID:           1,
+		Arm:                model.QAArmTreatment,
+		FlowID:             "v4-s4-two-rounds",
+		RolloutPctAtAssign: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stageBranch := model.QAStageBranchName(task.ID)
+	commitAndPushFile(t, sim.BareRepo, stageBranch, "pkg/calc/add.go", "package calc\nfunc Add(a, b int) int { return a + b }\n", "feat: add calc\n\nBody.")
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+
+	// Repair round 1: SalvageQAStageIfPresent runs S4, records round-1 attempt, and requeues without opening PR.
+	handled1, err := orchestrator.SalvageQAStageIfPresent(ctx, store, client, task, now)
+	if err != nil || !handled1 {
+		t.Fatalf("round 1: expected SalvageQAStageIfPresent to handle S4 repair (handled=%v, err=%v)", handled1, err)
+	}
+	if len(sawPrompts) != 1 || sawMaxTokens[0] != 42000 {
+		t.Fatalf("round 1: expected 1 S4 call with maxTokens=42000, got calls=%d maxTokens=%v", len(sawPrompts), sawMaxTokens)
+	}
+	if !strings.Contains(sawPrompts[0], "CUSTOM_VERIFIER_SKILL_V4") || !strings.Contains(sawPrompts[0], "CUSTOM_SECURITY_SKILL_V4") {
+		t.Fatalf("expected S4 prompt to include VerifierSkillText and SecuritySkillText, got:\n%s", sawPrompts[0])
+	}
+
+	// Repair round 2: with MaxS4RepairRounds=2, second attempt must STILL run S4 and requeue (unlike legacy single-round cap).
+	reloaded1, _ := store.GetTask(ctx, task.ID)
+	commitAndPushFile(t, sim.BareRepo, stageBranch, "pkg/calc/add.go", "package calc\nfunc Add(a, b int) int { return a + b + 0 }\n", "feat: add calc attempt 2\n\nBody.")
+	handled2, err := orchestrator.SalvageQAStageIfPresent(ctx, store, client, *reloaded1, now.Add(time.Minute))
+	if err != nil || !handled2 {
+		t.Fatalf("round 2: expected SalvageQAStageIfPresent to handle second S4 repair round when MaxS4RepairRounds=2 (handled=%v, err=%v)", handled2, err)
+	}
+	if len(sawPrompts) != 2 {
+		t.Fatalf("round 2: expected 2 S4 calls, got %d", len(sawPrompts))
+	}
+
+	// Attempt 3 (after 2 repair rounds exhausted): S4 repair cap reached -> promotes and opens PR without blocking.
+	reloaded2, _ := store.GetTask(ctx, task.ID)
+	commitAndPushFile(t, sim.BareRepo, stageBranch, "pkg/calc/add.go", "package calc\nfunc Add(a, b int) int { return a + b }\n", "feat: add calc attempt 3\n\nBody.")
+	status, err := orchestrator.OpenPullRequestForTaskWithQA(ctx, store, client, *reloaded2, orchestrator.QAOpenPROptions{})
+	if err != nil || status.PullRequest.Number == 0 {
+		t.Fatalf("round 3 (after 2 S4 repair rounds): expected PR to open, got (%+v, %v)", status, err)
+	}
+	if len(sawPrompts) != 2 {
+		t.Fatalf("round 3: expected S4 not to re-run after MaxS4RepairRounds=2 exhausted, got %d calls", len(sawPrompts))
+	}
+}
+
+func TestQARunCyclePreCloneClarificationParksWithoutCloning(t *testing.T) {
+	store, ctx := openStore(t)
+	enableTestQA(t, ctx, store, 100)
+
+	_, client := newSim(t, "acme", "widgets", "main")
+	repo := model.RepoRef{Owner: "acme", Name: "widgets"}
+
+	spec := qa.FlowSpec{
+		S0Intent: true,
+		S0IntentConfig: qa.S0IntentDecl{
+			Enabled:         true,
+			Complexities:    []string{"low", "medium", "high"},
+			MaxSeconds:      15,
+			MaxTokens:       12000,
+			OnClarification: "ask_human",
+		},
+	}
+	registerTestFlowSpec(t, ctx, store, "v4-s0-ask-human", spec)
+
+	task := filedTask(t, ctx, store, "qapreclonehold", repo)
+	if _, err := store.EnsureQAAssignment(ctx, model.QAAssignment{
+		RootOrigin:         model.ResolveQARootOrigin(task.WorkOrigin, task.ID),
+		Epoch:              1,
+		RegimeID:           1,
+		Arm:                model.QAArmTreatment,
+		FlowID:             "v4-s0-ask-human",
+		RolloutPctAtAssign: 100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	orchestrator.SetLiveQARuntime(&orchestrator.QARuntime{
+		RunIsolatedPrompt: func(_ context.Context, _ model.Task, _ string, _ string, _ int) (string, int64, int64, error) {
+			return "status: needs_clarification\nquestion: Should rate-limiting apply per-user or per-IP?", 80, 25, nil
+		},
+	})
+	t.Cleanup(func() { orchestrator.SetLiveQARuntime(nil) })
+
+	agentCalled := false
+	fw := openingFramework{agentFunc(func(_ context.Context, _ agent.RunConfig) (*agent.Result, error) {
+		agentCalled = true
+		return &agent.Result{}, nil
+	})}
+
+	// Point GitRemoteBase to an empty directory so any attempt to git clone would fail with an error.
+	emptyRemoteBase := t.TempDir()
+	deps := orchestrator.Deps{
+		Store:     store,
+		Client:    client,
+		Sandboxes: orchestrator.NewHostSandboxes(t.TempDir()),
+		Config: orchestrator.Config{
+			GitRemoteBase: emptyRemoteBase,
+			QAProfiler:    qa.NewProfiler(filepath.Join(t.TempDir(), "qa.jsonl")),
+		},
+		Framework:  orchestrator.StaticFramework(fw),
+		MaxWorkers: 1,
+	}
+	if err := orchestrator.RunCycle(ctx, deps, baseTime); err != nil {
+		t.Fatalf("RunCycle: %v", err)
+	}
+	if agentCalled {
+		t.Fatal("expected pre-clone S0 ask_human hold to park before running coding agent")
+	}
+
+	state, err := store.State(ctx, task.ID)
+	if err != nil {
+		t.Fatalf("store.State: %v", err)
+	}
+	if state != model.StateAwaitingReply {
+		obs, _ := store.GetObservation(ctx, task.ID)
+		t.Fatalf("expected task state %q after S0 ask_human hold, got %q (obs=%+v)", model.StateAwaitingReply, state, obs)
+	}
+	runs, err := store.ListQACheckRunsForTask(ctx, task.ID)
+	if err != nil || len(runs) != 1 || runs[0].Stage != "S0" || runs[0].Verdict != "hold" {
+		t.Fatalf("expected single S0 check run with verdict='hold', got %+v (err=%v)", runs, err)
+	}
+}
+
