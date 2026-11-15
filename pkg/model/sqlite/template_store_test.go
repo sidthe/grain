@@ -347,3 +347,71 @@ func TestSchedulesUsingTemplate(t *testing.T) {
 		t.Fatalf("schedules using template-2 = %+v, want none", got)
 	}
 }
+
+func TestSchema150QAFlowRefMigrationAndRoundTrip(t *testing.T) {
+	t.Parallel()
+	if model.SchemaVersion != 150 {
+		t.Fatalf("SchemaVersion = %d, want 150", model.SchemaVersion)
+	}
+	store, _, ctx := openStore(t)
+
+	tmpl := template("template-qa")
+	tmpl.QAFlowRef = "golden-v3@1"
+	if err := store.PutTemplate(ctx, tmpl); err != nil {
+		t.Fatalf("PutTemplate: %v", err)
+	}
+	gotTmpl, err := store.GetTemplate(ctx, "template-qa")
+	if err != nil || gotTmpl == nil || gotTmpl.QAFlowRef != "golden-v3@1" {
+		t.Fatalf("GetTemplate QAFlowRef = %+v, %v; want golden-v3@1", gotTmpl, err)
+	}
+
+	sc := schedule("sched-qa", now)
+	sc.QAFlowRef = "v4-2@1"
+	if err := store.PutSchedule(ctx, sc); err != nil {
+		t.Fatalf("PutSchedule: %v", err)
+	}
+	gotSched, err := store.GetSchedule(ctx, "sched-qa")
+	if err != nil || gotSched == nil || gotSched.QAFlowRef != "v4-2@1" {
+		t.Fatalf("GetSchedule QAFlowRef = %+v, %v; want v4-2@1", gotSched, err)
+	}
+
+	suite := model.Suite{
+		ID:        "suite-qa",
+		Name:      "QA Suite",
+		Mode:      model.SuiteCount,
+		Count:     1,
+		Items:     []model.SuiteItem{{TemplateID: "template-qa"}},
+		QAFlowRef: "v4-3@1",
+		CreatedAt: now,
+	}
+	if err := store.PutSuite(ctx, suite); err != nil {
+		t.Fatalf("PutSuite: %v", err)
+	}
+	gotSuite, err := store.GetSuite(ctx, "suite-qa")
+	if err != nil || gotSuite == nil || gotSuite.QAFlowRef != "v4-3@1" {
+		t.Fatalf("GetSuite QAFlowRef = %+v, %v; want v4-3@1", gotSuite, err)
+	}
+
+	repo := model.RepoRef{Owner: "acme", Name: "qa-repo"}
+	if err := store.PutRepoConfig(ctx, model.RepoConfig{Repo: repo, QAFlowRef: "golden-v3@1"}); err != nil {
+		t.Fatalf("PutRepoConfig: %v", err)
+	}
+	gotRC, err := store.RepoConfig(ctx, repo)
+	if err != nil || gotRC == nil || gotRC.QAFlowRef != "golden-v3@1" {
+		t.Fatalf("RepoConfig QAFlowRef = %+v, %v; want golden-v3@1", gotRC, err)
+	}
+	effRC := model.EffectiveRepoConfigFor(model.Config{}, gotRC)
+	if effRC.QAFlowRef != "golden-v3@1" {
+		t.Fatalf("EffectiveRepoConfigFor QAFlowRef = %+v; want golden-v3@1", effRC)
+	}
+
+	tk := task("task-qa", true)
+	tk.QAFlowRef = "v4-2@1"
+	if err := store.PutTask(ctx, tk); err != nil {
+		t.Fatalf("PutTask: %v", err)
+	}
+	gotTask, err := store.GetTask(ctx, "task-qa")
+	if err != nil || gotTask == nil || gotTask.QAFlowRef != "v4-2@1" {
+		t.Fatalf("GetTask QAFlowRef = %+v, %v; want v4-2@1", gotTask, err)
+	}
+}

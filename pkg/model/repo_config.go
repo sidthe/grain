@@ -15,12 +15,19 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 )
+
+// RepoConfig reads repo's own configuration, or nil (with no error) when the
+// repo has none.
+func (s *Store) RepoConfig(ctx context.Context, repo RepoRef) (*RepoConfig, error) {
+	return s.GetRepoConfig(ctx, repo)
+}
 
 // RepoConfig is one repo's own configuration -- the per-repo layer of
 // what Config already says for the whole deployment (grain/task-24,
@@ -774,6 +781,7 @@ type RepoConfig struct {
 	// while opening pull requests on `gke-labs/kube-agents`). Empty opens
 	// pull requests against Repo itself.
 	UpstreamRepo string
+	QAFlowRef    string `json:"qaFlowRef,omitempty"`
 }
 
 // IssueImport is RepoConfig.IssueImport. Its zero value imports nothing.
@@ -901,7 +909,8 @@ func (c RepoConfig) Empty() bool {
 		len(c.PortTypes) == 0 && len(c.DeclaredPortTypes) == 0 &&
 		c.Skills.IsZero() && c.DeclaredSkills.IsZero() &&
 		c.GitCredential == "" && c.IssueImport.Empty() &&
-		c.UpstreamRepo == ""
+		c.UpstreamRepo == "" &&
+		c.QAFlowRef == ""
 }
 
 // EffectiveSkills folds the operator's Skills and the repository's DeclaredSkills.

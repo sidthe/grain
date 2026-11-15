@@ -92,7 +92,7 @@ func TestComposeScheduleTaskInlineContentIsAllTheSchedules(t *testing.T) {
 		NothingNeededAction: model.LayerSchedule,
 		AutoMerge:           model.LayerSchedule, AutoApproveProposals: model.LayerSchedule, Approved: model.LayerSchedule,
 		Interactive: model.LayerSchedule, KeepRunning: model.LayerSchedule,
-		Admission: model.LayerDeployment, Hosting: model.LayerDeployment,
+		Admission: model.LayerDeployment, Hosting: model.LayerDeployment, QAFlowRef: model.LayerDeployment,
 	}
 	if comp.Sources != want {
 		t.Errorf("sources = %+v, want %+v", comp.Sources, want)
@@ -405,5 +405,37 @@ func TestCompositionTaskCarriesWhatWasComposed(t *testing.T) {
 	unapproved.Approved = false
 	if task := unapproved.Task("task-10", model.SuitePrincipal, model.ReasonSuite, now); task.Approval != nil {
 		t.Errorf("approval = %+v, want none for an unapproved composition", task.Approval)
+	}
+}
+
+func TestComposeQAFlowRefPrecedenceAndTaskPropagation(t *testing.T) {
+	now := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	tmpl := composeTemplate()
+	tmpl.QAFlowRef = "golden-v3@1"
+
+	// Template alone sets QAFlowRef from LayerTemplate.
+	tComp := model.ComposeTemplateTask(tmpl, nil, model.RepoRef{Owner: "acme", Name: "widgets"}, "main", true)
+	if tComp.QAFlowRef != "golden-v3@1" || tComp.Sources.QAFlowRef != model.LayerTemplate {
+		t.Fatalf("template compose QAFlowRef = %q (%q), want golden-v3@1 (template)", tComp.QAFlowRef, tComp.Sources.QAFlowRef)
+	}
+	if task := tComp.Task("t-1", model.SchedulePrincipal, model.ReasonSchedule, now); task.QAFlowRef != "golden-v3@1" {
+		t.Fatalf("task.QAFlowRef = %q, want golden-v3@1", task.QAFlowRef)
+	}
+
+	// Schedule without QAFlowRef inherits Template.QAFlowRef.
+	sched := composeSchedule()
+	sComp := model.ComposeScheduleTask(sched, &tmpl)
+	if sComp.QAFlowRef != "golden-v3@1" || sComp.Sources.QAFlowRef != model.LayerTemplate {
+		t.Fatalf("schedule->template QAFlowRef = %q (%q), want golden-v3@1 (template)", sComp.QAFlowRef, sComp.Sources.QAFlowRef)
+	}
+
+	// Schedule with QAFlowRef overrides Template.QAFlowRef.
+	sched.QAFlowRef = "v4-2@1"
+	sCompOverride := model.ComposeScheduleTask(sched, &tmpl)
+	if sCompOverride.QAFlowRef != "v4-2@1" || sCompOverride.Sources.QAFlowRef != model.LayerSchedule {
+		t.Fatalf("schedule override QAFlowRef = %q (%q), want v4-2@1 (schedule)", sCompOverride.QAFlowRef, sCompOverride.Sources.QAFlowRef)
+	}
+	if task := sCompOverride.Task("t-2", model.SchedulePrincipal, model.ReasonSchedule, now); task.QAFlowRef != "v4-2@1" {
+		t.Fatalf("schedule task.QAFlowRef = %q, want v4-2@1", task.QAFlowRef)
 	}
 }

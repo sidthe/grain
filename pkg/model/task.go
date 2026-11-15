@@ -2280,6 +2280,7 @@ type Task struct {
 	// empty, so a firing that sets only TemplateID is recorded too, and a
 	// task rewritten on redispatch keeps whatever was recorded at filing.
 	SourceTemplateID string
+	QAFlowRef        string `json:"qaFlowRef,omitempty"`
 	// Owner is the account responsible for this task (attribution.design.md):
 	// fixed at creation from the filer / on-behalf-of / schedule owner /
 	// deployment fallback, inherited along DerivedFrom, and reassignable by

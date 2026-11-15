@@ -2508,6 +2508,7 @@ type CreateTaskRequest struct {
 	// hostd host work runs on is the model connection's or the capability
 	// server's, not the task's.
 	Hostd      string `json:"hostd,omitempty"`
+	QAFlowRef  string `json:"qaFlowRef,omitempty"`
 	ProposedBy string `json:"proposedBy,omitempty"`
 	// HoldForApproval is propose_task's own `hold_for_approval`: file
 	// this proposal for a person to approve even if ProposedBy's
@@ -2879,6 +2880,14 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 			return Task{}, err
 		} else if existing != nil {
 			return c.Task(ctx, existing.ID)
+		}
+	}
+	if strings.TrimSpace(req.QAFlowRef) != "" {
+		if strings.TrimSpace(req.ProposedBy) != "" || c.requestActor(ctx).Actor.Kind == model.PrincipalAgent {
+			return Task{}, forbiddenErrorf("an agent cannot set qaFlowRef")
+		}
+		if a := accessRoleFromContext(ctx); a != nil && !a.Full {
+			return Task{}, forbiddenErrorf("%s cannot set qaFlowRef", a.label())
 		}
 	}
 	req, err := c.fromTemplate(ctx, req)
@@ -3755,6 +3764,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		AgentBackendID:       strings.TrimSpace(req.AgentBackendID),
 		Model:                chosenModel,
 		ModelSource:          modelSourceOfRequest(req, chosenModel),
+		QAFlowRef:            strings.TrimSpace(req.QAFlowRef),
 		PromptExtension:      strings.TrimSpace(req.PromptExtension),
 		Skills:               chosenSkills,
 		ReviewTemplateID:     reviewTemplateID,

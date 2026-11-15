@@ -228,7 +228,8 @@ type Schedule struct {
 	// Model is the model every firing asks for (model.Schedule.Model):
 	// this schedule's own choice, which beats its template's. Empty for
 	// a schedule that chose none.
-	Model string `json:"model,omitempty"`
+	Model     string `json:"model,omitempty"`
+	QAFlowRef string `json:"qaFlowRef,omitempty"`
 	// TemplateID and TemplateName are set when this schedule fires from
 	// a Template (bwsalmon/agents#516) rather than its own inline
 	// content -- Title/Description/AutoMerge/Reads/Writes/Capabilities/
@@ -480,6 +481,7 @@ func scheduleFrom(s model.Schedule, templateName, suiteName string) Schedule {
 		Admission:            string(s.Admission),
 		Hosting:              string(s.Hosting),
 		Model:                s.Model,
+		QAFlowRef:            s.QAFlowRef,
 		CustomFields:         customFieldValues(s.CustomFields),
 		Capabilities:         []string{},
 		Recurrence:           recurrenceFrom(s.Recurrence),
@@ -768,6 +770,7 @@ type CreateScheduleRequest struct {
 	// a templateId as much as with inline content -- and refused with a
 	// suiteId, whose runs file each template as it stands.
 	Model      string     `json:"model"`
+	QAFlowRef  string     `json:"qaFlowRef,omitempty"`
 	TemplateID string     `json:"templateId"`
 	SuiteID    string     `json:"suiteId"`
 	Recurrence Recurrence `json:"recurrence"`
@@ -1159,6 +1162,7 @@ func (c *Client) scheduleFromRequest(ctx context.Context, req CreateScheduleRequ
 		return model.Schedule{}, "", "", err
 	}
 	sched.Model = chosenModel
+	sched.QAFlowRef = strings.TrimSpace(req.QAFlowRef)
 	sched.Target = target
 	sched.Base = req.Base
 	if firing != nil {
@@ -1709,6 +1713,7 @@ type UpdateScheduleRequest struct {
 	// it is not content -- and on one of grain's own schedules, whose
 	// model is the deployment's to choose like its cadence.
 	Model      *string     `json:"model,omitempty"`
+	QAFlowRef  *string     `json:"qaFlowRef,omitempty"`
 	TemplateID *string     `json:"templateId,omitempty"`
 	SuiteID    *string     `json:"suiteId,omitempty"`
 	Recurrence *Recurrence `json:"recurrence,omitempty"`
@@ -2099,6 +2104,9 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 				return errSuiteScheduleModel
 			}
 			s.Model = *chosenModel
+		}
+		if req.QAFlowRef != nil {
+			s.QAFlowRef = strings.TrimSpace(*req.QAFlowRef)
 		}
 		if s.SuiteID != nil {
 			// A suite-backed schedule carries no content of its own to

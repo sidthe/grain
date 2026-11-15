@@ -2245,6 +2245,14 @@ func (s *Server) filingEscalation(ctx context.Context, held []string, set APIGra
 				}
 				return errors.New("an agent cannot set proposalKey directly")
 			}
+		case "qaflowref", "qa_flow_ref", "qaflow":
+			var ref string
+			if json.Unmarshal(raw, &ref) == nil && strings.TrimSpace(ref) != "" {
+				if opts.role != nil {
+					return fmt.Errorf("%s cannot set %s directly", opts.role.label(), key)
+				}
+				return errors.New("an agent cannot set qaFlowRef directly")
+			}
 		case "tags":
 			var ts []string
 			if json.Unmarshal(raw, &ts) == nil && len(ts) > 0 {

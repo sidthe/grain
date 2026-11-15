@@ -687,6 +687,7 @@ func templateSchema() Schema {
 			{Keys: []Key{{Name: "push", In: Repo}}},
 
 			// The bookkeeping.
+			{Model: "QAFlowRef", Keys: []Key{settingsOnly("qa-flow", Authority)}, Columns: []string{"qa_flow_ref"}},
 			{Model: "ID", Keys: []Key{settingsOnly("id", Identity)}, Columns: []string{"id"}},
 			{Model: "CreatedAt", Keys: []Key{settingsOnly("created-at", Kept)}, Columns: []string{"created_at"}},
 		},
@@ -749,6 +750,7 @@ func suiteSchema() Schema {
 			// tell them which.
 			{Keys: []Key{nowhere("target", Reach), nowhere("repo", Reach)}},
 
+			{Model: "QAFlowRef", Keys: []Key{settingsOnly("qa-flow", Authority)}, Columns: []string{"qa_flow_ref"}},
 			{Model: "ID", Keys: []Key{settingsOnly("id", Identity)}, Columns: []string{"id"}},
 			{Model: "CreatedAt", Keys: []Key{settingsOnly("created-at", Kept)}, Columns: []string{"created_at"}},
 		},
@@ -898,6 +900,7 @@ func scheduleSchema() Schema {
 			// schedule's survive a re-read of the file precisely because
 			// the file does not carry them.
 			{Model: "ID", Keys: []Key{settingsOnly("id", Identity)}, Columns: []string{"id"}},
+			{Model: "QAFlowRef", Keys: []Key{settingsOnly("qa-flow", Authority)}, Columns: []string{"qa_flow_ref"}},
 			{Model: "NextRunAt", Keys: []Key{settingsOnly("next-run-at", Kept)}, Columns: []string{"next_run_at"}},
 			{Model: "LastRunAt", Keys: []Key{settingsOnly("last-run-at", Kept)}, Columns: []string{"last_run_at"}},
 			{Model: "CreatedAt", Keys: []Key{settingsOnly("created-at", Kept)}, Columns: []string{"created_at"}},
@@ -1234,6 +1237,11 @@ func RepoSettingsSchema() Schema {
 				Model:   "UpstreamRepo",
 				Keys:    []Key{settingsOnly("upstream-repo", Authority)},
 				Columns: []string{"upstream_repo"},
+			},
+			{
+				Model:   "QAFlowRef",
+				Keys:    []Key{settingsOnly("qa-flow", Authority)},
+				Columns: []string{"qa_flow_ref"},
 			},
 
 			// Which repository these settings are about. Grain read the
