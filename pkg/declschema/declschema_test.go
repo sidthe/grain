@@ -22,6 +22,7 @@ package declschema_test
 import (
 	"reflect"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -318,6 +319,22 @@ func TestEveryDeclarationKindHasASchema(t *testing.T) {
 		}
 	}
 }
+
+func TestQAFlowRefIsSettingsOnlyWithAuthorityReason(t *testing.T) {
+	for _, s := range declschema.All() {
+		refusals := s.RepoRefusals()
+		if got := refusals["qa-flow"]; got != declschema.Authority {
+			t.Errorf("%s: qa-flow repo refusal = %q, want %q", s.Kind, got, declschema.Authority)
+		}
+		if slices.Contains(s.Keys(declschema.Repo), "qa-flow") {
+			t.Errorf("%s: qa-flow must not be accepted in declschema.Repo", s.Kind)
+		}
+		if !slices.Contains(s.Keys(declschema.Settings), "qa-flow") {
+			t.Errorf("%s: qa-flow must be accepted in declschema.Settings", s.Kind)
+		}
+	}
+}
+
 
 // The settings schema is one of All -- so every guard above covers it --
 // and deliberately not one of Declarations, which is the list the

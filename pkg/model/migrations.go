@@ -1139,6 +1139,17 @@ var Migrations = []Migration{
 			"ALTER TABLE `task_qa_check_run` ADD COLUMN `repaired_in_next_sha` INTEGER NOT NULL DEFAULT 0",
 		},
 	},
+	{
+		Version:     150,
+		Description: "add operator-only qa_flow_ref to template, suite, schedule, repo_config, and task",
+		Statements: []string{
+			"ALTER TABLE `template` ADD COLUMN `qa_flow_ref` TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE `suite` ADD COLUMN `qa_flow_ref` TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE `schedule` ADD COLUMN `qa_flow_ref` TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE `repo_config` ADD COLUMN `qa_flow_ref` TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE `task` ADD COLUMN `qa_flow_ref` TEXT NOT NULL DEFAULT ''",
+		},
+	},
 }
 
 // schema99AutoUpgradeReleaseTable is auto_upgrade_release as schema 99

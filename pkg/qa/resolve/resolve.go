@@ -175,6 +175,12 @@ func ActiveQAResolutionForTask(ctx context.Context, store *model.Store, taskID s
 		}
 	}
 
+	if res, err := resolveOperatorFlowBinding(ctx, store, *task); err != nil {
+		return nil, qaCfg, err
+	} else if res != nil {
+		return res, qaCfg, nil
+	}
+
 	// Step 3: Sticky legacy assignment from task_qa_assignment.
 	assign, err := store.EarliestQAAssignment(ctx, root)
 	if err != nil {
@@ -241,6 +247,12 @@ func EnsureQAResolutionAtDispatchWithConfig(
 		if res != nil {
 			return res, qaCfg, nil
 		}
+	}
+
+	if res, err := resolveOperatorFlowBinding(ctx, store, task); err != nil {
+		return nil, qaCfg, err
+	} else if res != nil {
+		return res, qaCfg, nil
 	}
 
 	// Step 2: Sticky legacy assignment; pre-existing work trees with prior runs are excluded from new rollout.
@@ -323,4 +335,81 @@ func resolveLegacyAssignment(ctx context.Context, store *model.Store, assign mod
 		Source: "legacy",
 		ArmID:  assign.Arm,
 	}
+}
+
+// ComposeTightenOnly enforces non-negotiable QA floors on a resolved FlowSpec:
+// StagingIsolation is always true, and RuleTestIntegrityGuard and
+// RuleStrictConfigDecoder are always Enabled: true with Severity: "blocking".
+func ComposeTightenOnly(spec qa.FlowSpec) qa.FlowSpec {
+	spec.StagingIsolation = true
+	rules := make([]qa.RuleSpec, len(spec.Rules))
+	copy(rules, spec.Rules)
+	for _, floorID := range []string{qa.RuleTestIntegrityGuard, qa.RuleStrictConfigDecoder} {
+		found := false
+		for i := range rules {
+			if rules[i].ID == floorID {
+				rules[i].Enabled = true
+				rules[i].Severity = "blocking"
+				found = true
+			}
+		}
+		if !found {
+			rules = append(rules, qa.RuleSpec{
+				ID:       floorID,
+				Stage:    "S3",
+				Severity: "blocking",
+				Enabled:  true,
+			})
+		}
+	}
+	spec.Rules = rules
+	return spec
+}
+
+func resolveOperatorFlowBinding(ctx context.Context, store *model.Store, task model.Task) (*Resolution, error) {
+	if ref := strings.TrimSpace(task.QAFlowRef); ref != "" {
+		spec, hash, err := LookupFlowSpec(ctx, store, ref)
+		if err != nil {
+			return nil, err
+		}
+		if spec != nil {
+			enforced := ComposeTightenOnly(*spec)
+			return &Resolution{
+				Source:      "process",
+				ArmID:       model.QAArmTreatment,
+				FlowID:      ref,
+				FlowHash:    hash,
+				QAEngineRev: qa.QAEngineRev,
+				Spec:        &enforced,
+				Shadow:      false,
+			}, nil
+		}
+	}
+	if store != nil && task.Target != nil && *task.Target != (model.RepoRef{}) {
+		repoCfg, err := store.RepoConfig(ctx, *task.Target)
+		if err != nil {
+			return nil, err
+		}
+		if repoCfg != nil {
+			if ref := strings.TrimSpace(repoCfg.QAFlowRef); ref != "" {
+				spec, hash, err := LookupFlowSpec(ctx, store, ref)
+				if err != nil {
+					return nil, err
+				}
+				if spec != nil {
+					enforced := ComposeTightenOnly(*spec)
+					return &Resolution{
+						Source:      "repo",
+						ArmID:       model.QAArmTreatment,
+						FlowID:      ref,
+						FlowHash:    hash,
+						QAEngineRev: qa.QAEngineRev,
+						Spec:        &enforced,
+						Shadow:      false,
+					}, nil
+				}
+			}
+		}
+	}
+	return nil, nil
 }

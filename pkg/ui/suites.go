@@ -63,6 +63,7 @@ type Suite struct {
 	RequireApproval      bool      `json:"requireApproval"`
 	AutoMerge            bool      `json:"autoMerge"`
 	AutoApproveProposals bool      `json:"autoApproveProposals"`
+	QAFlowRef            string    `json:"qaFlowRef,omitempty"`
 	CreatedAt            time.Time `json:"createdAt"`
 	// DeclaredIn is where this suite came from when a repository
 	// declares it rather than somebody here creating it --
@@ -93,6 +94,7 @@ func suiteFrom(s model.Suite, names map[string]string) Suite {
 		RequireApproval:      s.RequireApproval,
 		AutoMerge:            s.AutoMerge,
 		AutoApproveProposals: s.AutoApproveProposals,
+		QAFlowRef:            s.QAFlowRef,
 		CreatedAt:            s.CreatedAt,
 	}
 	out.Revision = suiteRevision(out)
@@ -233,6 +235,7 @@ type CreateSuiteRequest struct {
 	RequireApproval      bool     `json:"requireApproval"`
 	AutoMerge            *bool    `json:"autoMerge"`
 	AutoApproveProposals bool     `json:"autoApproveProposals"`
+	QAFlowRef            string   `json:"qaFlowRef,omitempty"`
 }
 
 // CreateSuite files a new suite template straight into the store.
@@ -273,6 +276,7 @@ func (c *Client) CreateSuite(ctx context.Context, req CreateSuiteRequest) (Suite
 		RequireApproval:      req.RequireApproval,
 		AutoMerge:            autoMerge,
 		AutoApproveProposals: req.AutoApproveProposals,
+		QAFlowRef:            strings.TrimSpace(req.QAFlowRef),
 		CreatedAt:            c.now(),
 	}
 	if err := suite.Validate(); err != nil {
@@ -324,6 +328,7 @@ func draftSuite(req CreateSuiteRequest) model.Suite {
 		MaxPasses:       req.MaxPasses,
 		RequireApproval: req.RequireApproval,
 		AutoMerge:       autoMerge,
+		QAFlowRef:       strings.TrimSpace(req.QAFlowRef),
 	}
 	switch mode := model.SuiteMode(req.Mode); mode {
 	case model.SuiteCount, model.SuiteUntilClean:
@@ -345,6 +350,7 @@ type UpdateSuiteRequest struct {
 	RequireApproval      *bool     `json:"requireApproval,omitempty"`
 	AutoMerge            *bool     `json:"autoMerge,omitempty"`
 	AutoApproveProposals *bool     `json:"autoApproveProposals,omitempty"`
+	QAFlowRef            *string   `json:"qaFlowRef,omitempty"`
 	// Revision, given, is the suite's Revision as the caller last read
 	// it, and the edit is refused (staleEditError) if the suite has been
 	// saved since. Absent applies the edit regardless.
@@ -416,6 +422,9 @@ func (c *Client) UpdateSuite(ctx context.Context, id string, req UpdateSuiteRequ
 	}
 	if req.AutoApproveProposals != nil {
 		merged.AutoApproveProposals = *req.AutoApproveProposals
+	}
+	if req.QAFlowRef != nil {
+		merged.QAFlowRef = strings.TrimSpace(*req.QAFlowRef)
 	}
 	if err := merged.Validate(); err != nil {
 		return Suite{}, &ValidationError{err: err}

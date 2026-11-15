@@ -2256,6 +2256,16 @@ func (s *Server) filingEscalation(ctx context.Context, held []string, set APIGra
 				}
 				return errors.New("an agent cannot set task tags directly")
 			}
+		case "qaflowref", "qa_flow_ref", "qa-flow":
+			if hasQAFlowRefField(pattern, raw) {
+				if opts.role != nil {
+					if !set.Allows("qa:admin", repo) && !set.Allows("settings:write", repo) {
+						return fmt.Errorf("%s cannot set %s: setting qaFlowRef requires an operator", opts.role.label(), key)
+					}
+					continue
+				}
+				return errors.New("an agent cannot set or override qaFlowRef")
+			}
 		case "reviewers":
 			if opts.role == nil && hasReviewersField(pattern, raw) {
 				return errAgentReviewers
@@ -2740,6 +2750,21 @@ func hasReviewersField(pattern string, raw json.RawMessage) bool {
 		return strings.TrimSpace(one) != ""
 	}
 	return len(strings.TrimSpace(string(raw))) > 0
+}
+
+func hasQAFlowRefField(pattern string, raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return false
+	}
+	if strings.HasPrefix(pattern, "PATCH ") || strings.HasPrefix(pattern, "PUT ") {
+		return true
+	}
+	var one string
+	if json.Unmarshal(raw, &one) == nil {
+		return strings.TrimSpace(one) != ""
+	}
+	return len(trimmed) > 0
 }
 
 // agentMayWrite reports whether the acting task's own runs may push to

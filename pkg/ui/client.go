@@ -2552,6 +2552,9 @@ type CreateTaskRequest struct {
 	// (qa-alloc:<key>, bench-spec:<id>) supplied by an operator filing work.
 	// Refused to agents and proposed tasks; internal tags are rejected.
 	Tags []string `json:"tags,omitempty"`
+	// QAFlowRef is the operator-only QA flow reference bound to this task.
+	// Refused to agents and proposed tasks.
+	QAFlowRef string `json:"qaFlowRef,omitempty"`
 
 	// modelFromTemplate is the model fromTemplate filled Model in with,
 	// "" when it filled in none. Never read off the wire: CreateTask
@@ -2879,6 +2882,17 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 			return Task{}, err
 		} else if existing != nil {
 			return c.Task(ctx, existing.ID)
+		}
+	}
+	if strings.TrimSpace(req.QAFlowRef) != "" {
+		if req.ProposedBy != "" || c.requestActor(ctx).Actor.Kind == model.PrincipalAgent {
+			return Task{}, validationErrorf("an agent or proposed task cannot set qaFlowRef")
+		}
+		if _, isAgent := agentCallFromContext(ctx); isAgent {
+			return Task{}, forbiddenErrorf("an agent cannot set qaFlowRef")
+		}
+		if externalTokenFromContext(ctx) != nil {
+			return Task{}, forbiddenErrorf("an external agent cannot set qaFlowRef")
 		}
 	}
 	req, err := c.fromTemplate(ctx, req)
@@ -3760,6 +3774,7 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		ReviewTemplateID:     reviewTemplateID,
 		TemplateID:           filedFrom,
 		SourceTemplateID:     strings.TrimSpace(req.TemplateID),
+		QAFlowRef:            strings.TrimSpace(req.QAFlowRef),
 		Owner:                resolvedOwner,
 		Creator:              cmp.Or(strings.TrimSpace(req.Author), strings.TrimSpace(req.Creator)),
 		Proposer:             c.proposerForNewTask(ctx, resolvedOwner, sessionBehalf, proposedBy),
