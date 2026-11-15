@@ -2533,6 +2533,9 @@ type CreateTaskRequest struct {
 	// filed for a human wakes back into proposed.
 	DeferredUntil *time.Time `json:"deferredUntil,omitempty"`
 
+	// GoalMode configures autonomous multi-pass Goal Mode posture on the task.
+	GoalMode *model.GoalModeConfig `json:"goalMode,omitempty"`
+
 	// modelFromTemplate is the model fromTemplate filled Model in with,
 	// "" when it filled in none. Never read off the wire: CreateTask
 	// compares it with the model it settles on to record
@@ -3761,6 +3764,9 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	if err != nil {
 		return Task{}, err
 	}
+	if req.GoalMode != nil && req.GoalMode.Enabled && strings.TrimSpace(req.ProposedBy) == "" {
+		req.Interactive = false
+	}
 	task := model.Task{
 		ID:                   id,
 		Intent:               model.IntentImplement,
@@ -3824,6 +3830,15 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 	}
 	model.SetFoundIn(&task, foundIn)
 	model.ApplyDerivedFoundIn(&task)
+	if req.GoalMode != nil {
+		if err := model.SetGoalMode(&task, req.GoalMode); err != nil {
+			return Task{}, err
+		}
+	} else if proposedBy != nil {
+		if gm, ok := model.GoalModeOf(*proposedBy); ok && gm.Enabled {
+			_ = model.SetGoalMode(&task, &gm)
+		}
+	}
 	if req.DeclineAutoMerge && !req.AutoMerge {
 		model.DeclineAutoMerge(&task, model.PrincipalString(c.requestActor(ctx).Actor))
 	}
@@ -5282,6 +5297,8 @@ type UpdateTaskRequest struct {
 	// PriorityDispatch is a deprecated one-release alias that maps true to
 	// bypass admission and false back to standard admission.
 	PriorityDispatch *bool `json:"priorityDispatch,omitempty"`
+	// GoalMode updates or disables autonomous Goal Mode posture on the task.
+	GoalMode *model.GoalModeConfig `json:"goalMode,omitempty"`
 }
 
 // UnmarshalJSON accepts both camelCase and snake_case spellings for common
@@ -6142,6 +6159,11 @@ func (c *Client) UpdateTask(ctx context.Context, id string, req UpdateTaskReques
 				newLinks = append(newLinks, model.Link{Kind: model.LinkGoogleChat, Target: space})
 			}
 			task.Links = newLinks
+		}
+		if req.GoalMode != nil {
+			if err := model.SetGoalMode(task, req.GoalMode); err != nil {
+				return err
+			}
 		}
 		if req.Designs != nil || req.Context != nil {
 			var newLinks []model.Link

@@ -115,6 +115,7 @@ var defaultClosingTools = []string{
 	"propose_config_change",
 	"open_pull_request",
 	"add_review_comment",
+	"complete_goal",
 }
 
 // defaultClosingCalls are the conditional tool-call rules that close a
