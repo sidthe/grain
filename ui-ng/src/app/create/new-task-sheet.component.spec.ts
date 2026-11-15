@@ -734,4 +734,19 @@ describe("NewTaskSheetComponent", () => {
       },
     });
   });
+
+  it("enforces bottom scroll padding and flex-shrink protection on .sheet-body above .sheet-foot", async () => {
+    const f = await render(new FakeApi());
+    await open(f);
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const css = readFileSync(
+      resolve(__dirname, "./new-task-sheet.component.css"),
+      "utf8",
+    );
+    expect(css).toContain("padding: 12px 24px 32px;");
+    expect(css).toContain("scroll-padding-bottom: 32px;");
+    expect(css).toContain(".sheet-body > * {\n  flex-shrink: 0;\n}");
+    expect(Buffer.byteLength(css, "utf8")).toBeLessThan(8000);
+  });
 });

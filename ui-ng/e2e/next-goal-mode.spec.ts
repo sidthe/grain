@@ -55,7 +55,8 @@ test.describe("Autonomous Goal Mode (/next/)", () => {
     );
     expect(await axe()).toEqual([]);
 
-    // 3. Customize budget & file the autonomous goal task against grain demo.
+    // 3. Customize budget, verify .sheet-body scrolls cleanly clear of .sheet-foot,
+    // and file the autonomous goal task against grain demo.
     await page.getByTestId("nt-max-passes").fill("6");
     await page.getByTestId("nt-wall-clock").fill("90");
     await page
@@ -64,6 +65,22 @@ test.describe("Autonomous Goal Mode (/next/)", () => {
     await page
       .getByTestId("nt-description")
       .fill("Implement and verify PKCE device code polling end to end.");
+
+    const sheetBody = sheet.locator(".sheet-body");
+    const sheetFoot = sheet.locator(".sheet-foot");
+    await sheetBody.evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    const bodyBox = await sheetBody.boundingBox();
+    const footBox = await sheetFoot.boundingBox();
+    const moreBtnBox = await page.getByTestId("more-options").boundingBox();
+    expect(bodyBox).not.toBeNull();
+    expect(footBox).not.toBeNull();
+    expect(moreBtnBox).not.toBeNull();
+    expect(bodyBox!.y + bodyBox!.height).toBeLessThanOrEqual(footBox!.y + 1);
+    expect(moreBtnBox!.y + moreBtnBox!.height).toBeLessThanOrEqual(
+      footBox!.y - 16,
+    );
 
     const createReqPromise = page.waitForRequest(
       (req) =>
@@ -94,6 +111,24 @@ test.describe("Autonomous Goal Mode (/next/)", () => {
     const createdTask = (await createRes.json()) as { id: string };
     const taskId = createdTask.id;
     await expect(sheet).toBeHidden();
+
+    // Verify the active snackbar does not intersect the bottom status bar or Shortcuts button.
+    const snackbar = page.getByTestId("snackbar");
+    await expect(snackbar).toBeVisible();
+    const snackBox = await snackbar.boundingBox();
+    const bottomBar = page.locator(".bottom-bar");
+    const shortcutsBtn = page.getByTestId("shortcuts-toggle");
+    expect(snackBox).not.toBeNull();
+    if (await bottomBar.isVisible()) {
+      const barBox = await bottomBar.boundingBox();
+      const shortBox = await shortcutsBtn.boundingBox();
+      expect(barBox).not.toBeNull();
+      expect(shortBox).not.toBeNull();
+      expect(snackBox!.y + snackBox!.height).toBeLessThanOrEqual(barBox!.y - 8);
+      expect(snackBox!.y + snackBox!.height).toBeLessThanOrEqual(
+        shortBox!.y - 8,
+      );
+    }
 
     // 4. Enrich GET /api/tasks/{id} with recorded assumptions & verified scorecard
     // so we can verify the full Goal Scorecard, Revise loop, and Switch to supervised.
