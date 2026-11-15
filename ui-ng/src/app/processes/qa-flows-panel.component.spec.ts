@@ -87,7 +87,7 @@ describe("QaFlowsPanelComponent", () => {
 
     // Prepare draft preserves floor checks ignoring draft state
     const draft = comp.prepareDraft();
-    expect(draft.checks["golden:test-integrity-guard"]).toBeUndefined(); // Backend enforces floors, so we don't need to send them unless we want to, wait, my prepareDraft specifically continues for floors
+    expect(draft.checks["golden:test-integrity-guard"]).toBeUndefined();
   });
 
   it("fork / new version", async () => {
@@ -238,5 +238,167 @@ describe("QaFlowsPanelComponent", () => {
     // The effect should select the version
     fixture.detectChanges();
     expect(comp.selectedHash()).toBe("h1");
+  });
+
+  it("renders 30/70 8-stage studio workbench in read mode with toolbar, prompt budget meter, and client 8-stage projection", () => {
+    const fixture = TestBed.createComponent(QaFlowsPanelComponent);
+    const comp = fixture.componentInstance;
+    comp.selectedDetail.set({
+      key: "engineering-workflow-v4",
+      version: 1,
+      hash: "sha256:v4001",
+      label: "8-Stage Engineering Workflow (V4)",
+      summary: "Full 8-stage AI software workflow with readability packs",
+      schema: "grain.dev/qa-flow/v4",
+      builtIn: true,
+      qaEngineRev: 4,
+      declarationV4: {
+        schema: "grain.dev/qa-flow/v4",
+        key: "engineering-workflow-v4",
+        version: 1,
+        label: "8-Stage Engineering Workflow (V4)",
+        decompose: { enabled: true, "max-subtasks": 5, "require-tdd": true },
+        context: {
+          enabled: true,
+          "require-design-doc": true,
+          "blast-radius-preview": true,
+        },
+        "readability-packs": [
+          {
+            id: "go",
+            label: "Go Readability Pack",
+            enabled: true,
+            globs: ["**/*.go"],
+            text: "Wrap returned errors with %w.",
+            "max-bytes": 900,
+          },
+          {
+            id: "ts-angular",
+            label: "TypeScript & Angular Pack",
+            enabled: true,
+            globs: ["ui-ng/**/*.ts"],
+            text: "Use standalone OnPush components.",
+            "max-bytes": 900,
+          },
+        ],
+        "pr-contract": {
+          enabled: true,
+          "conventional-commits": true,
+          "max-subject-chars": 72,
+          "required-sections": ["Summary", "Testing"],
+          "audit-lint-suppressions": true,
+        },
+      },
+    });
+    fixture.detectChanges();
+
+    const root = fixture.nativeElement as HTMLElement;
+    expect(
+      root.querySelector('[data-testid="qa-studio-toolbar"]'),
+    ).toBeTruthy();
+    expect(root.querySelector('[data-testid="qa-prompt-budget"]')).toBeTruthy();
+    expect(
+      root.querySelector('[data-testid="qa-schema-pill"]')?.textContent?.trim(),
+    ).toBe("v4");
+
+    const stageTree = root.querySelector('[data-testid="qa-stage-tree"]');
+    expect(stageTree).toBeTruthy();
+    expect(stageTree?.querySelectorAll(".qa-stage-group").length).toBe(8);
+    expect(stageTree?.textContent).toContain("1 · Goal & Subtask Breakdown");
+    expect(stageTree?.textContent).toContain("8 · Scorecard & Merge Triage");
+    expect(
+      root.querySelector('[data-testid="qa-step-inspector"]'),
+    ).toBeTruthy();
+  });
+
+  it("publishes a V4 flow version preserving stages, readability packs, skill steps, PR contract, and custom checks", async () => {
+    const fixture = TestBed.createComponent(QaFlowsPanelComponent);
+    const comp = fixture.componentInstance;
+    comp.selectedDetail.set({
+      key: "engineering-workflow-v4",
+      version: 1,
+      hash: "sha256:v4001",
+      label: "8-Stage Engineering Workflow (V4)",
+      summary: "V4 workflow",
+      schema: "grain.dev/qa-flow/v4",
+      qaEngineRev: 4,
+      declarationV4: {
+        schema: "grain.dev/qa-flow/v4",
+        key: "engineering-workflow-v4",
+        version: 1,
+        decompose: { enabled: true, "max-subtasks": 5, "require-tdd": true },
+        context: {
+          enabled: true,
+          "require-design-doc": true,
+          "blast-radius-preview": true,
+        },
+        "skill-steps": [
+          {
+            id: "step:tdd",
+            label: "TDD Step",
+            stage: "3-implementation",
+            enabled: true,
+            globs: ["**/*.go"],
+            text: "Write tests before implementation.",
+          },
+        ],
+        "readability-packs": [
+          {
+            id: "go",
+            label: "Go Readability Pack",
+            enabled: true,
+            globs: ["**/*.go"],
+            text: "Wrap errors with %w.",
+            "max-bytes": 900,
+          },
+        ],
+        "pr-contract": {
+          enabled: true,
+          "conventional-commits": true,
+          "max-subject-chars": 72,
+          "required-sections": ["Summary", "Testing"],
+          "audit-lint-suppressions": true,
+        },
+        "custom-checks": [
+          {
+            id: "custom:no-fmt-print",
+            kind: "pattern",
+            severity: "warn",
+            forbid: "fmt\\.Print",
+            fixtures: {
+              fail: [{ name: "bad", added: ["fmt.Println(1)"] }],
+              pass: [{ name: "good", added: ["log.Info(1)"] }],
+            },
+          },
+        ],
+      },
+    });
+
+    comp.newVersion();
+    fixture.detectChanges();
+
+    const prepared = comp.prepareDraft();
+    expect(prepared.schema).toBe("grain.dev/qa-flow/v4");
+    expect(prepared.decompose).toBeTruthy();
+    expect(prepared.context).toBeTruthy();
+    expect(prepared.readabilityPacks?.length).toBeGreaterThanOrEqual(4);
+    expect(prepared.skillSteps?.length).toBe(1);
+    expect(prepared.prContract).toBeTruthy();
+    expect(prepared.customChecks?.length).toBe(1);
+
+    api.post.mockResolvedValueOnce({ hash: "sha256:v4002" });
+    comp.confirmPublish();
+    comp.onConfirmDone(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(api.post).toHaveBeenCalledWith(
+      "POST /api/qa/flow-versions",
+      undefined,
+      expect.objectContaining({
+        declaration: expect.objectContaining({
+          schema: "grain.dev/qa-flow/v4",
+          key: "engineering-workflow-v4",
+        }),
+      }),
+    );
   });
 });
