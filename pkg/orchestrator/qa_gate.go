@@ -140,11 +140,12 @@ func OpenPullRequestForTaskWithQA(
 
 	s3Passed, s3Ran, blastTier, s3Summary := false, false, qa.BlastT1, ""
 	var s3ChangedFiles []string
+	var mirrorWS *checks.MirrorWorkspace
 	if headSHA != "" {
 		s3Passed, s3Ran, blastTier, s3Summary, s3ChangedFiles = loadRecordedS3OutcomeWithFiles(ctx, store, task.ID, headSHA)
 	}
 	if headSHA != "" && (!s3Ran || (!s3Passed && strings.TrimSpace(opts.CallerNotes) != "")) {
-		rep, ran, s3Err := runMirrorS3IfConfigured(ctx, store, task, assign, false, checkBranch, opts.CallerNotes)
+		rep, ws, ran, s3Err := runMirrorS3WithWorkspace(ctx, store, task, assign, false, checkBranch, opts.CallerNotes)
 		if s3Err != nil {
 			if rt := LiveQARuntime(); rt != nil && rt.DataDir != "" {
 				return PullRequestStatus{}, fmt.Errorf("orchestrator: running pre-PR S3 checks on %s: %w", checkBranch, s3Err)
@@ -155,6 +156,7 @@ func OpenPullRequestForTaskWithQA(
 			blastTier = rep.BlastTier
 			headSHA = rep.HeadSHA
 			s3ChangedFiles = rep.ChangedFiles
+			mirrorWS = ws
 			if !rep.Passed {
 				s3Summary = rep.FormatAgentFailure()
 			}
@@ -209,7 +211,7 @@ func OpenPullRequestForTaskWithQA(
 			BlastTier:    blastTier,
 			ChangedFiles: s3ChangedFiles,
 		}
-		executeCustomStages(ctx, store, task, "", assign, nil, nil, &s4CustomRep, false, "s4")
+		executeCustomStages(ctx, store, task, "", assign, mirrorWS, nil, &s4CustomRep, false, "s4")
 		if !s4CustomRep.Passed {
 			return PullRequestStatus{}, fmt.Errorf("%s", nonEmptySummary(s4CustomRep.FormatAgentFailure(), "post-S4 custom stage checks failed"))
 		}
@@ -307,7 +309,7 @@ func salvageQAStageIfPresent(
 	}
 
 	// 1. Check whether in-sandbox S3 already evaluated headSHA; otherwise run S3 over shallow mirror.
-	s3Passed, s3Ran, blastTier, s3Summary := loadRecordedS3Outcome(ctx, store, task.ID, headSHA)
+	s3Passed, s3Ran, blastTier, s3Summary, s3ChangedFiles := loadRecordedS3OutcomeWithFiles(ctx, store, task.ID, headSHA)
 	var mirrorWS *checks.MirrorWorkspace
 	var s3HazardSites map[string][]int
 	if !s3Ran {
@@ -317,6 +319,7 @@ func salvageQAStageIfPresent(
 			s3Passed = rep.Passed
 			blastTier = rep.BlastTier
 			s3HazardSites = rep.HazardSites
+			s3ChangedFiles = rep.ChangedFiles
 			mirrorWS = ws
 			if !rep.Passed {
 				s3Summary = rep.FormatAgentFailure()
@@ -406,9 +409,10 @@ func salvageQAStageIfPresent(
 
 	if len(flow.CustomStages) > 0 {
 		s4CustomRep := checks.Report{
-			Passed:    true,
-			HeadSHA:   headSHA,
-			BlastTier: blastTier,
+			Passed:       true,
+			HeadSHA:      headSHA,
+			BlastTier:    blastTier,
+			ChangedFiles: s3ChangedFiles,
 		}
 		executeCustomStages(ctx, store, task, "", assign, mirrorWS, nil, &s4CustomRep, false, "s4")
 		if !s4CustomRep.Passed {
@@ -803,10 +807,23 @@ func executeCustomStages(
 		return
 	}
 	spec := *assign.Spec
-	if headFiles == nil && ws != nil {
-		headFiles = readWorkspaceHeadFiles(ctx, ws, rep.ChangedFiles)
+	ensureWS := func() *checks.MirrorWorkspace {
+		if ws != nil {
+			return ws
+		}
+		rt := LiveQARuntime()
+		if rt != nil && rt.DataDir != "" && rt.ResolveRemote != nil && task.Target != nil {
+			if remoteURL, bearer, rErr := rt.ResolveRemote(ctx, *task.Target); rErr == nil && remoteURL != "" {
+				branch := model.QAStageBranchName(task.ID)
+				opened, oErr := checks.OpenMirrorWorkspace(ctx, filepath.Join(rt.DataDir, "qa-repos"), remoteURL, bearer, task.Base, branch)
+				if oErr != nil || opened == nil {
+					opened, _ = checks.OpenMirrorWorkspace(ctx, filepath.Join(rt.DataDir, "qa-repos"), remoteURL, bearer, task.Base, task.BranchName())
+				}
+				ws = opened
+			}
+		}
+		return ws
 	}
-	evaluateFlowCustomChecks(ctx, spec, ws, rep.ChangedFiles, headFiles, "", rep)
 
 	comp := qa.AssessTaskComplexity(qa.ComplexityInput{
 		Title:       task.Title,
@@ -843,6 +860,14 @@ func executeCustomStages(
 		switch strings.ToLower(strings.TrimSpace(stg.Kind)) {
 		case "deterministic_batch", "isolated_sandbox_check", "":
 			if len(stg.CheckIDs) > 0 {
+				curWS := ensureWS()
+				if curWS != nil && baseSHA == "" {
+					baseSHA = curWS.BaseSHA
+				}
+				if headFiles == nil && curWS != nil {
+					headFiles = readWorkspaceHeadFiles(ctx, curWS, rep.ChangedFiles)
+				}
+				evaluateFlowCustomChecks(ctx, spec, curWS, rep.ChangedFiles, headFiles, "", rep)
 				for _, cr := range rep.Results {
 					if !slices.Contains(stg.CheckIDs, cr.CheckID) {
 						continue
@@ -873,8 +898,11 @@ func executeCustomStages(
 			if rt != nil && rt.RunIsolatedPrompt != nil {
 				skillText := resolveCustomStageSkillText(spec, stg.SkillRef)
 				var rawDiff string
-				if ws != nil {
-					rawDiff, _ = ws.BaseHeadDiff(ctx)
+				if curWS := ensureWS(); curWS != nil {
+					if baseSHA == "" {
+						baseSHA = curWS.BaseSHA
+					}
+					rawDiff, _ = curWS.BaseHeadDiff(ctx)
 				}
 				prompt := skillText + "\n\nTask title: " + task.Title + "\n\nTask body:\n" + task.Body
 				if strings.TrimSpace(rawDiff) != "" {
@@ -1926,10 +1954,14 @@ func EvaluateAndApplyQATriage(
 	var s3Reasons []string
 	var s3Files []string
 	var s3Tampered bool
+	var customStageHeld bool
 	if runs, rErr := store.ListQACheckRunsForTask(ctx, task.ID); rErr == nil {
 		for _, r := range runs {
 			if r.Stage == "S5" && r.CommitSHA == headSHA && headSHA != "" {
 				return
+			}
+			if (headSHA == "" || r.CommitSHA == headSHA) && !r.Shadow && r.Verdict == "hold" && r.Stage != "S0" {
+				customStageHeld = true
 			}
 			if r.Stage == "S3" && (headSHA == "" || r.CommitSHA == headSHA) && !r.Shadow {
 				if r.BlastTier != "" {
@@ -2021,12 +2053,12 @@ func EvaluateAndApplyQATriage(
 		AutoMergeTiers:             autoTiers,
 		RequireHumanTiers:          humTiers,
 		Assessment:                 risk,
-		TrustBoundaryRequiresHuman: risk.TrustBoundaryHit || len(trustboundary.Classify(prFiles)) > 0,
+		TrustBoundaryRequiresHuman: risk.TrustBoundaryHit || len(trustboundary.Classify(prFiles)) > 0 || hasTaskLink(task, model.LinkSecurityHold),
 		MergeRulesRequireHuman:     mergeRulesRequireHuman,
 		GateTriggerMatched:         gateTriggerMatched,
 		FilesTruncated:             len(prFiles) >= github.PullRequestFilesCap,
 		CIRedOrPending:             ciRedOrPending,
-		HasUnresolvedFindings:      !s3Passed || hasTaskLink(task, model.LinkQAHold) || hasTaskLink(task, model.LinkReviewFindings),
+		HasUnresolvedFindings:      !s3Passed || customStageHeld || hasTaskLink(task, model.LinkQAHold) || hasTaskLink(task, model.LinkReviewFindings),
 		OperatorAutoMergeEnabled:   task.AutoMerge,
 	}
 
@@ -2107,7 +2139,7 @@ func evaluateMergeRulesRequireHuman(ctx context.Context, store *model.Store, tas
 		return true
 	}
 	for _, r := range model.HumanReviewReasons(task) {
-		if r.Source == model.HumanReviewHumanOnly {
+		if r.Source != model.HumanReviewQATriage {
 			return true
 		}
 	}
@@ -2117,8 +2149,9 @@ func evaluateMergeRulesRequireHuman(ctx context.Context, store *model.Store, tas
 		}
 	}
 	if store != nil && task.Target != nil {
+		known := len(prFiles) > 0 && len(prFiles) < github.PullRequestFilesCap
 		if rules, err := store.MergeRulesOf(ctx, *task.Target); err == nil && rules != nil && !rules.Empty() {
-			eff := rules.Effective(prFiles, len(prFiles) < github.PullRequestFilesCap, model.CIModeNone)
+			eff := rules.Effective(prFiles, known, model.CIModeNone)
 			if eff.AutoMergeNever {
 				return true
 			}
@@ -2134,10 +2167,11 @@ func evaluateGateTriggerMatched(ctx context.Context, store *model.Store, task mo
 	if qa.MatchesAnyGlob([]string{".grain/triggers/**"}, prFiles) {
 		return true
 	}
-	if store != nil && task.Target != nil && len(prFiles) > 0 {
+	if store != nil && task.Target != nil {
+		known := len(prFiles) > 0 && len(prFiles) < github.PullRequestFilesCap
 		if triggers, err := store.PathTriggersOf(ctx, *task.Target); err == nil {
 			for _, rt := range triggers {
-				if rt.Trigger.Gate && len(rt.Trigger.Match(prFiles)) > 0 {
+				if rt.Trigger.Gate && (!known || len(rt.Trigger.Match(prFiles)) > 0) {
 					return true
 				}
 			}

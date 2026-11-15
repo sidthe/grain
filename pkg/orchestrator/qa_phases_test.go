@@ -497,6 +497,79 @@ func TestEvaluateAndApplyQATriageSafetyFloorsMergeRulesTriggersAndCI(t *testing.
 	}
 	orchestrator.EvaluateAndApplyQATriage(ctx, store, nil, tCI, assign, "cccc3333", []string{"pkg/util/str.go"}, true)
 	assertRequireHumanDecision(t, tCI.ID)
+
+	// 4. CustomStage hold floor: an active custom human_gate check run on headSHA must never be cleared by S5 auto_merge.
+	tGate := model.Task{ID: "floor-custom-gate", Title: "Leaf helper", Target: &repoCI, AutoMerge: false}
+	model.AddHumanReviewReason(&tGate, model.HumanReviewReason{
+		Source:   model.HumanReviewQATriage,
+		Category: model.HumanReviewRisk,
+		Reason:   "Custom stage stage-human-gate requires human review",
+	})
+	tGate.Links = append(tGate.Links, model.Link{Kind: model.LinkQATriageHold, Target: "stage-human-gate"})
+	if err := store.PutTask(ctx, tGate); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecordQACheckRun(ctx, model.QACheckRun{
+		TaskID:    tGate.ID,
+		CommitSHA: "dddd4444",
+		Stage:     "stage-human-gate",
+		CheckID:   "stage-human-gate",
+		Arm:       model.QAArmTreatment,
+		Verdict:   "hold",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	orchestrator.EvaluateAndApplyQATriage(ctx, store, nil, tGate, assign, "dddd4444", []string{"pkg/util/str.go"}, true)
+	assertRequireHumanDecision(t, tGate.ID)
+	gotGate, err := store.GetTask(ctx, tGate.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(model.HumanReviewReasons(*gotGate)) == 0 {
+		t.Fatalf("expected custom human_gate hold to remain intact after S5 triage, links=%+v", gotGate.Links)
+	}
+}
+
+func TestExecutePostCloneWorkflowPhasesRejectsSymlinkEscape(t *testing.T) {
+	store, ctx := openTestStore(t)
+
+	outsideDir := t.TempDir()
+	secretFile := filepath.Join(outsideDir, "secret.go")
+	if err := os.WriteFile(secretFile, []byte("package secret\nfunc TOP_SECRET_HOST_TOKEN() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	worktree := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(worktree, "pkg", "safe"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, "pkg", "safe", "ok.go"), []byte("package safe\nfunc SafeHelper() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secretFile, filepath.Join(worktree, "pkg", "safe", "leak.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	spec := &qa.FlowSpec{
+		Context: qa.ContextDiscoveryDecl{
+			Enabled:        true,
+			IncludeCallers: true,
+			MaxTokens:      1500,
+			ExtraPaths:     []string{"pkg/safe/ok.go", "pkg/safe/leak.go", "././../secret.go"},
+		},
+	}
+	task := model.Task{
+		ID:    "symlink-escape-1",
+		Title: "Update pkg/safe/ok.go and pkg/safe/leak.go",
+		Body:  "Check symlink containment.",
+	}
+	out := orchestrator.ExecutePostCloneWorkflowPhases(ctx, store, task, worktree, spec, "exp-sec", "golden-v4", "sha256:sec", "base")
+	if strings.Contains(out, "TOP_SECRET_HOST_TOKEN") {
+		t.Fatalf("symlink target outside worktree leaked into prompt:\n%s", out)
+	}
+	if !strings.Contains(out, "SafeHelper") {
+		t.Fatalf("expected regular in-worktree file summary in prompt:\n%s", out)
+	}
 }
 
 func TestNoUberProxyInOrchestratorRunGo(t *testing.T) {

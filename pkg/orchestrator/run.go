@@ -3488,8 +3488,12 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 	}
 	if qaAssignment != nil && qaAssignment.IsEnforcedTreatment() && model.TaskEligibleForQAStaging(task) && qaAssignment.Spec != nil && checkoutErr == nil && prepErr == nil {
 		worktreeDir := prepared.Dir
-		if worktreeDir != "" && sandboxRoot != "" && !filepath.IsAbs(worktreeDir) {
-			worktreeDir = filepath.Join(sandboxRoot, worktreeDir)
+		if worktreeDir != "" && !filepath.IsAbs(worktreeDir) {
+			if sandboxRoot != "" {
+				worktreeDir = filepath.Join(sandboxRoot, worktreeDir)
+			} else {
+				worktreeDir = ""
+			}
 		}
 		qaSkillPrompt = ExecutePostCloneWorkflowPhases(ctx, store, task, worktreeDir, qaAssignment.Spec, qaAssignment.ExperimentID, qaAssignment.ArmID, qaAssignment.FlowHash, qaSkillPrompt)
 	}

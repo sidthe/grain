@@ -74,7 +74,32 @@ func ExecutePreCloneQAPhase(
 			if intentGuidance == "" {
 				intentGuidance = "Extract 2 to 6 testable WHEN ... SHALL acceptance criteria and explicit non-goals strictly from the task title and body."
 			}
-			prompt := intentGuidance + "\n\nTask title: " + task.Title + "\n\nTask body:\n" + task.Body
+			var alreadyHeld bool
+			var commentsContext string
+			if store != nil {
+				if priorRuns, rErr := store.ListQACheckRunsForTask(ctx, task.ID); rErr == nil {
+					for _, pr := range priorRuns {
+						if pr.Stage == "S0" && pr.Verdict == "hold" {
+							alreadyHeld = true
+							break
+						}
+					}
+				}
+				if comments, cErr := store.Comments(ctx, task.ID); cErr == nil && len(comments) > 0 {
+					var cb strings.Builder
+					for _, c := range comments {
+						body := strings.TrimSpace(c.Body)
+						if body != "" {
+							cb.WriteString("\n- ")
+							cb.WriteString(body)
+						}
+					}
+					if cb.Len() > 0 {
+						commentsContext = "\n\nConversation / Clarification Replies:" + cb.String()
+					}
+				}
+			}
+			prompt := intentGuidance + "\n\nTask title: " + task.Title + "\n\nTask body:\n" + task.Body + commentsContext
 			runCtx, cancel := context.WithTimeout(ctx, timeout)
 			start := time.Now()
 			out, inTok, outTok, err := rt.RunIsolatedPrompt(runCtx, task, task.ID+"-qa-s0", prompt, spec.S0IntentConfig.MaxTokens)
@@ -103,7 +128,7 @@ func ExecutePreCloneQAPhase(
 			} else {
 				checklist := strings.TrimSpace(out)
 				if strings.Contains(strings.ToLower(checklist), "status: needs_clarification") {
-					if strings.EqualFold(strings.TrimSpace(spec.S0IntentConfig.OnClarification), "ask_human") {
+					if strings.EqualFold(strings.TrimSpace(spec.S0IntentConfig.OnClarification), "ask_human") && !alreadyHeld {
 						cr.Verdict = "hold"
 						if store != nil {
 							_, _ = store.RecordQACheckRun(ctx, cr, nil)
@@ -432,7 +457,15 @@ func discoverRepoAndCallerContext(worktreeDir string, task model.Task, spec *qa.
 
 	targetDirs := map[string]bool{}
 	seenVerified := map[string]bool{}
+	var realWorktreeRoot string
 	if strings.TrimSpace(worktreeDir) != "" {
+		if rRoot, rErr := filepath.EvalSymlinks(worktreeDir); rErr == nil {
+			if rInfo, sErr := os.Stat(rRoot); sErr == nil && rInfo.IsDir() {
+				realWorktreeRoot = rRoot
+			}
+		}
+	}
+	if realWorktreeRoot != "" {
 		for _, cand := range allCandidatePaths {
 			if time.Now().After(deadline) {
 				break
@@ -440,6 +473,9 @@ func discoverRepoAndCallerContext(worktreeDir string, task model.Task, spec *qa.
 			if strings.ContainsAny(cand, "*?[") {
 				matches, _ := filepath.Glob(filepath.Join(worktreeDir, filepath.FromSlash(cand)))
 				for _, m := range matches {
+					if !isSafeWorktreePath(realWorktreeRoot, m) {
+						continue
+					}
 					if rel, rErr := filepath.Rel(worktreeDir, m); rErr == nil {
 						relSlash := cleanRepoRelPath(filepath.ToSlash(rel))
 						if relSlash != "" && !seenVerified[relSlash] {
@@ -451,19 +487,24 @@ func discoverRepoAndCallerContext(worktreeDir string, task model.Task, spec *qa.
 				continue
 			}
 			full := filepath.Join(worktreeDir, filepath.FromSlash(cand))
-			if info, err := os.Stat(full); err == nil {
-				if !seenVerified[cand] {
-					seenVerified[cand] = true
-					verifiedPaths = append(verifiedPaths, cand)
-				}
-				if info.IsDir() {
-					targetDirs[cand] = true
-				} else if d := path.Dir(cand); d != "." && d != "" {
-					targetDirs[d] = true
+			if isSafeWorktreePath(realWorktreeRoot, full) {
+				if info, err := os.Stat(full); err == nil {
+					if !seenVerified[cand] {
+						seenVerified[cand] = true
+						verifiedPaths = append(verifiedPaths, cand)
+					}
+					if info.IsDir() {
+						targetDirs[cand] = true
+					} else if d := path.Dir(cand); d != "." && d != "" {
+						targetDirs[d] = true
+					}
 				}
 			} else if d := path.Dir(cand); d != "." && d != "" {
-				if dInfo, dErr := os.Stat(filepath.Join(worktreeDir, filepath.FromSlash(d))); dErr == nil && dInfo.IsDir() {
-					targetDirs[d] = true
+				dFull := filepath.Join(worktreeDir, filepath.FromSlash(d))
+				if isSafeWorktreePath(realWorktreeRoot, dFull) {
+					if dInfo, dErr := os.Stat(dFull); dErr == nil && dInfo.IsDir() {
+						targetDirs[d] = true
+					}
 				}
 			}
 		}
@@ -501,12 +542,15 @@ func discoverRepoAndCallerContext(worktreeDir string, task model.Task, spec *qa.
 			fmt.Fprintf(&b, "- %s\n", sd)
 		}
 	}
-	if strings.TrimSpace(worktreeDir) != "" && len(verifiedPaths) > 0 && time.Now().Before(deadline) {
+	if realWorktreeRoot != "" && len(verifiedPaths) > 0 && time.Now().Before(deadline) {
 		for _, vp := range verifiedPaths {
 			if time.Now().After(deadline) || b.Len() >= maxBytes-256 {
 				break
 			}
 			full := filepath.Join(worktreeDir, filepath.FromSlash(vp))
+			if !isSafeWorktreePath(realWorktreeRoot, full) {
+				continue
+			}
 			info, err := os.Stat(full)
 			if err != nil || info.IsDir() || info.Size() > 64*1024 {
 				continue
@@ -547,6 +591,10 @@ func extractFileHeadline(content string, maxBytes int) string {
 }
 
 func findSiblingImporterDirs(worktreeDir string, targetDirs map[string]bool, deadline time.Time) []string {
+	realWorktreeRoot, rErr := filepath.EvalSymlinks(worktreeDir)
+	if rErr != nil || realWorktreeRoot == "" {
+		return nil
+	}
 	var targets []string
 	for d := range targetDirs {
 		targets = append(targets, d)
@@ -557,6 +605,9 @@ func findSiblingImporterDirs(worktreeDir string, targetDirs map[string]bool, dea
 	_ = filepath.WalkDir(worktreeDir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || time.Now().After(deadline) {
 			return filepath.SkipDir
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
 		}
 		if d.IsDir() {
 			name := d.Name()
@@ -569,6 +620,9 @@ func findSiblingImporterDirs(worktreeDir string, targetDirs map[string]bool, dea
 		isGo := strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go")
 		isTS := strings.HasSuffix(name, ".ts") || strings.HasSuffix(name, ".tsx") || strings.HasSuffix(name, ".js") || strings.HasSuffix(name, ".jsx")
 		if !isGo && !isTS {
+			return nil
+		}
+		if !isSafeWorktreePath(realWorktreeRoot, p) {
 			return nil
 		}
 		rel, rErr := filepath.Rel(worktreeDir, p)
@@ -674,10 +728,46 @@ func looksLikeRepoPath(s string) bool {
 
 func cleanRepoRelPath(p string) string {
 	p = strings.TrimSpace(filepath.ToSlash(p))
-	p = strings.TrimPrefix(p, "./")
-	p = strings.TrimPrefix(p, "/")
-	if p == "" || p == "." || strings.HasPrefix(p, "..") || strings.Contains(p, "/../") {
+	if strings.ContainsRune(p, 0) || strings.ContainsRune(p, '\\') {
 		return ""
 	}
+	for strings.HasPrefix(p, "./") || strings.HasPrefix(p, "/") {
+		if strings.HasPrefix(p, "./") {
+			p = strings.TrimPrefix(p, "./")
+		} else {
+			p = strings.TrimPrefix(p, "/")
+		}
+	}
+	p = strings.TrimSuffix(p, "/")
+	if p == "" || p == "." {
+		return ""
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return ""
+		}
+	}
 	return p
+}
+
+func isSafeWorktreePath(realWorktreeRoot, candidateFull string) bool {
+	if realWorktreeRoot == "" || candidateFull == "" {
+		return false
+	}
+	fi, err := os.Lstat(candidateFull)
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	realCand, err := filepath.EvalSymlinks(candidateFull)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(realWorktreeRoot, realCand)
+	if err != nil {
+		return false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	return true
 }
