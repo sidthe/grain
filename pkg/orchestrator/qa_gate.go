@@ -810,6 +810,9 @@ func executeCustomStages(
 							BlastScore:     rep.BlastScore,
 							ComplexityTier: string(comp.Tier),
 						}, chkModelFindings)
+						if !shadow && cVerdict == "pass" && rep.HeadSHA != "" {
+							_ = store.MarkPriorQACheckRunsRepaired(ctx, task.ID, cc.ID, rep.HeadSHA)
+						}
 						continue
 					}
 					for _, cr := range rep.Results {
@@ -825,7 +828,7 @@ func executeCustomStages(
 				}
 
 			case "isolated_critic":
-				if rt != nil && rt.RunIsolatedPrompt != nil {
+				if !shadow && assign.ArmID != model.QAArmControl && rt != nil && rt.RunIsolatedPrompt != nil {
 					skillText := resolveCustomStageSkillText(flow, stg.SkillRef)
 					tSec := stg.TimeoutSeconds
 					if tSec <= 0 {
@@ -950,6 +953,9 @@ func executeCustomStages(
 				BlastScore:     rep.BlastScore,
 				ComplexityTier: string(comp.Tier),
 			}, stageFindings)
+			if !shadow && stageVerdict == "pass" && rep.HeadSHA != "" {
+				_ = store.MarkPriorQACheckRunsRepaired(ctx, task.ID, stg.ID, rep.HeadSHA)
+			}
 		}
 	}
 }

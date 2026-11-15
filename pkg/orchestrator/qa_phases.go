@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/qa"
+	"github.com/ai-on-gke/grain/pkg/safepath"
 )
 
 // PreCloneQAResult holds the result of pre-clone S0 EARS intent extraction.
@@ -125,6 +127,17 @@ func ExecutePreCloneQAPhase(
 	finalPrompt := currentPrompt
 	s0Enabled := spec.S0Intent || spec.S0IntentConfig.Enabled
 	if s0Enabled && !comp.HasDesignItem && matchesComplexityTier(spec.S0IntentConfig.Complexities, comp.Tier) {
+		var priorS0Hold bool
+		if store != nil && task.ID != "" {
+			if runs, rErr := store.ListQACheckRunsForTask(ctx, task.ID); rErr == nil {
+				for _, r := range runs {
+					if r.Stage == "S0" && r.Verdict == "hold" {
+						priorS0Hold = true
+						break
+					}
+				}
+			}
+		}
 		timeout := time.Duration(spec.S0IntentConfig.MaxSeconds) * time.Second
 		if timeout <= 0 || timeout > 30*time.Second {
 			timeout = 30 * time.Second
@@ -172,7 +185,7 @@ func ExecutePreCloneQAPhase(
 					"output":          checklist,
 				})
 				cr.DetailJSON = string(detailBytes)
-				if onClarify == "ask_human" {
+				if onClarify == "ask_human" && !priorS0Hold {
 					cr.Verdict = "hold"
 					needsClarification = true
 				} else {
@@ -458,13 +471,32 @@ func ExecutePreDispatchQAPhases(ctx context.Context, store *model.Store, task mo
 	return ExecutePostCloneWorkflowPhases(ctx, store, task, "", spec, expID, armID, flowHash, pre.Prompt)
 }
 
+func cleanRelativeRepoPath(raw string) (string, bool) {
+	p := strings.TrimSpace(raw)
+	p = strings.Trim(p, "`'\".,:;()[]{}")
+	p = filepath.ToSlash(p)
+	if p == "" || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "http://") || strings.HasPrefix(p, "https://") {
+		return "", false
+	}
+	p = strings.TrimPrefix(p, "./")
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return "", false
+		}
+	}
+	cleaned := path.Clean(p)
+	if cleaned == "" || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.HasPrefix(cleaned, "/") {
+		return "", false
+	}
+	return cleaned, true
+}
+
 func extractCandidatePaths(task model.Task, spec *qa.FlowSpec, worktreeDir string) []string {
 	seen := make(map[string]bool)
 	var out []string
 	add := func(raw string) {
-		p := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(raw)), "./")
-		p = strings.Trim(p, "`'\".,:;()[]{}")
-		if p == "" || p == "." || strings.HasPrefix(p, "http://") || strings.HasPrefix(p, "https://") {
+		p, ok := cleanRelativeRepoPath(raw)
+		if !ok {
 			return
 		}
 		if !seen[p] {
@@ -473,19 +505,32 @@ func extractCandidatePaths(task model.Task, spec *qa.FlowSpec, worktreeDir strin
 		}
 	}
 
+	var realWorktree string
+	if strings.TrimSpace(worktreeDir) != "" {
+		if resolved, err := safepath.Within(worktreeDir, "."); err == nil {
+			realWorktree = resolved
+		}
+	}
+
 	text := task.Title + "\n" + task.Body
 	for _, m := range pathTokenRe.FindAllString(text, -1) {
 		add(m)
 	}
 	for _, m := range dirTokenRe.FindAllString(text, -1) {
-		if worktreeDir != "" {
-			if _, err := os.Stat(filepath.Join(worktreeDir, m)); err == nil {
-				add(m)
-				continue
+		rel, ok := cleanRelativeRepoPath(m)
+		if !ok {
+			continue
+		}
+		if realWorktree != "" {
+			if target, err := safepath.Within(realWorktree, rel); err == nil {
+				if info, lErr := os.Lstat(target); lErr == nil && info.Mode()&os.ModeSymlink == 0 {
+					add(rel)
+					continue
+				}
 			}
 		}
-		if strings.HasPrefix(m, "pkg/") || strings.HasPrefix(m, "cmd/") || strings.HasPrefix(m, "ui/") || strings.HasPrefix(m, "ui-ng/") || strings.HasPrefix(m, "internal/") || strings.HasPrefix(m, "tests/") {
-			add(m)
+		if strings.HasPrefix(rel, "pkg/") || strings.HasPrefix(rel, "cmd/") || strings.HasPrefix(rel, "ui/") || strings.HasPrefix(rel, "ui-ng/") || strings.HasPrefix(rel, "internal/") || strings.HasPrefix(rel, "tests/") {
+			add(rel)
 		}
 	}
 	for _, w := range task.Writes {
@@ -519,22 +564,47 @@ func discoverPostCloneCodebaseContext(
 	}
 	maxChars := maxTokens * 4
 
+	realRoot, err := safepath.Within(worktreeDir, ".")
+	if err != nil {
+		return "", nil, nil
+	}
+	root, err := os.OpenRoot(realRoot)
+	if err != nil {
+		return "", nil, nil
+	}
+	defer func() { _ = root.Close() }()
+
 	seenExist := make(map[string]bool)
 	targetDirs := make(map[string]bool)
 	targetBasenames := make(map[string]bool)
 
+	isSafeRegularFile := func(rel string) (string, bool) {
+		cleanRel, ok := cleanRelativeRepoPath(rel)
+		if !ok {
+			return "", false
+		}
+		if _, sErr := safepath.Within(realRoot, cleanRel); sErr != nil {
+			return "", false
+		}
+		info, lErr := root.Lstat(cleanRel)
+		if lErr != nil || !info.Mode().IsRegular() {
+			return "", false
+		}
+		return cleanRel, true
+	}
+
 	addExistingFile := func(rel string) {
-		rel = strings.TrimPrefix(filepath.ToSlash(filepath.Clean(rel)), "./")
-		if rel == "" || rel == "." || seenExist[rel] {
+		cleanRel, ok := isSafeRegularFile(rel)
+		if !ok || seenExist[cleanRel] {
 			return
 		}
-		seenExist[rel] = true
-		existingPaths = append(existingPaths, rel)
-		dir := filepath.ToSlash(filepath.Dir(rel))
+		seenExist[cleanRel] = true
+		existingPaths = append(existingPaths, cleanRel)
+		dir := path.Dir(cleanRel)
 		if dir != "" && dir != "." {
 			targetDirs[dir] = true
 		}
-		base := strings.TrimSuffix(filepath.Base(rel), filepath.Ext(rel))
+		base := strings.TrimSuffix(path.Base(cleanRel), path.Ext(cleanRel))
 		if base != "" {
 			targetBasenames[base] = true
 		}
@@ -544,17 +614,23 @@ func discoverPostCloneCodebaseContext(
 		if time.Now().After(deadline) {
 			break
 		}
-		rel := strings.TrimPrefix(filepath.ToSlash(filepath.Clean(cp)), "./")
-		if rel == "" || rel == "." || strings.HasPrefix(rel, "..") {
+		rel, ok := cleanRelativeRepoPath(cp)
+		if !ok {
 			continue
 		}
-		abs := filepath.Join(worktreeDir, rel)
-		info, err := os.Stat(abs)
-		if err != nil {
+		abs, sErr := safepath.Within(realRoot, rel)
+		if sErr != nil {
+			continue
+		}
+		info, err := root.Lstat(rel)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		if info.Mode().IsRegular() {
+			addExistingFile(rel)
 			continue
 		}
 		if !info.IsDir() {
-			addExistingFile(rel)
 			continue
 		}
 		targetDirs[rel] = true
@@ -564,7 +640,7 @@ func discoverPostCloneCodebaseContext(
 		}
 		addedInDir := 0
 		for _, ent := range entries {
-			if ent.IsDir() {
+			if ent.IsDir() || ent.Type()&fs.ModeSymlink != 0 {
 				continue
 			}
 			name := ent.Name()
@@ -572,10 +648,13 @@ func discoverPostCloneCodebaseContext(
 				continue
 			}
 			if strings.HasSuffix(name, ".go") || strings.HasSuffix(name, ".ts") || strings.HasSuffix(name, ".py") || strings.HasSuffix(name, ".md") {
-				addExistingFile(filepath.ToSlash(filepath.Join(rel, name)))
-				addedInDir++
-				if addedInDir >= 3 {
-					break
+				childRel := path.Join(rel, name)
+				if _, ok := isSafeRegularFile(childRel); ok {
+					addExistingFile(childRel)
+					addedInDir++
+					if addedInDir >= 3 {
+						break
+					}
 				}
 			}
 		}
@@ -585,14 +664,20 @@ func discoverPostCloneCodebaseContext(
 	if len(existingPaths) == 0 && !time.Now().After(deadline) {
 		candidateBases := make(map[string]bool)
 		for _, cp := range candidatePaths {
-			b := filepath.Base(cp)
-			if b != "" && b != "." {
+			b := path.Base(filepath.ToSlash(cp))
+			if b != "" && b != "." && b != ".." {
 				candidateBases[b] = true
 			}
 		}
-		_ = filepath.WalkDir(worktreeDir, func(p string, d fs.DirEntry, err error) error {
+		_ = fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, err error) error {
 			if err != nil || time.Now().After(deadline) {
 				return fs.SkipAll
+			}
+			if d.Type()&fs.ModeSymlink != 0 {
+				if d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
 			}
 			if d.IsDir() {
 				name := d.Name()
@@ -602,9 +687,7 @@ func discoverPostCloneCodebaseContext(
 				return nil
 			}
 			if len(candidateBases) > 0 && candidateBases[d.Name()] {
-				if rel, rErr := filepath.Rel(worktreeDir, p); rErr == nil {
-					addExistingFile(rel)
-				}
+				addExistingFile(rel)
 			}
 			return nil
 		})
@@ -614,9 +697,15 @@ func discoverPostCloneCodebaseContext(
 	if (len(targetDirs) > 0 || len(targetBasenames) > 0) && !time.Now().After(deadline) {
 		importerSet := make(map[string]bool)
 		scannedFiles := 0
-		_ = filepath.WalkDir(worktreeDir, func(p string, d fs.DirEntry, err error) error {
+		_ = fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, err error) error {
 			if err != nil || time.Now().After(deadline) || scannedFiles >= 300 {
 				return fs.SkipAll
+			}
+			if d.Type()&fs.ModeSymlink != 0 {
+				if d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
 			}
 			if d.IsDir() {
 				name := d.Name()
@@ -631,16 +720,16 @@ func discoverPostCloneCodebaseContext(
 			if !isGo && !isTS {
 				return nil
 			}
-			rel, rErr := filepath.Rel(worktreeDir, p)
-			if rErr != nil {
+			cleanRel, ok := isSafeRegularFile(rel)
+			if !ok {
 				return nil
 			}
-			relDir := filepath.ToSlash(filepath.Dir(rel))
+			relDir := path.Dir(cleanRel)
 			if targetDirs[relDir] || importerSet[relDir] {
 				return nil
 			}
 			scannedFiles++
-			raw, rErr := os.ReadFile(p)
+			raw, rErr := root.ReadFile(cleanRel)
 			if rErr != nil {
 				return nil
 			}
@@ -662,7 +751,7 @@ func discoverPostCloneCodebaseContext(
 				for _, m := range tsImportLineRe.FindAllStringSubmatch(snippet, -1) {
 					imp := m[1]
 					for td := range targetDirs {
-						baseDir := filepath.Base(td)
+						baseDir := path.Base(td)
 						if strings.Contains(imp, td) || (baseDir != "" && baseDir != "." && strings.Contains(imp, baseDir)) {
 							importerSet[relDir] = true
 							break
@@ -702,12 +791,16 @@ func discoverPostCloneCodebaseContext(
 		if time.Now().After(deadline) || b.Len() >= maxChars-128 {
 			break
 		}
-		raw, err := os.ReadFile(filepath.Join(worktreeDir, rel))
+		cleanRel, ok := isSafeRegularFile(rel)
+		if !ok {
+			continue
+		}
+		raw, err := root.ReadFile(cleanRel)
 		if err != nil {
 			continue
 		}
 		snippet := extractBoundedFileHeader(string(raw), 18, 800)
-		entry := fmt.Sprintf("--- %s ---\n%s\n", rel, snippet)
+		entry := fmt.Sprintf("--- %s ---\n%s\n", cleanRel, snippet)
 		if b.Len()+len(entry)+32 > maxChars {
 			remaining := maxChars - b.Len() - 32
 			if remaining > 64 {

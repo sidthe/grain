@@ -43,6 +43,7 @@ import (
 	"github.com/ai-on-gke/grain/pkg/mcp"
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/runhost"
+	"github.com/ai-on-gke/grain/pkg/safepath"
 	"github.com/ai-on-gke/grain/pkg/staterepo"
 )
 
@@ -3496,12 +3497,10 @@ func RunDispatch(ctx context.Context, store *model.Store, framework agent.Framew
 		}
 	}
 	if checkoutErr == nil && prepErr == nil && qaAssignment != nil && qaAssignment.IsEnforcedTreatment() && model.TaskEligibleForQAStaging(task) && qaAssignment.Spec != nil {
-		worktreeDir := prepared.Dir
-		if worktreeDir != "" && !filepath.IsAbs(worktreeDir) {
-			if sandboxRoot != "" {
-				worktreeDir = filepath.Join(sandboxRoot, worktreeDir)
-			} else if prepared.Root != "" {
-				worktreeDir = filepath.Join(prepared.Root, worktreeDir)
+		var worktreeDir string
+		if sandboxRoot != "" && prepared.Dir != "" && !prepared.StateRepo {
+			if resolved, sErr := safepath.Within(sandboxRoot, prepared.Dir); sErr == nil {
+				worktreeDir = resolved
 			}
 		}
 		qaSkillPrompt = ExecutePostCloneWorkflowPhases(ctx, store, task, worktreeDir, qaAssignment.Spec, qaAssignment.ExperimentID, qaAssignment.ArmID, qaAssignment.FlowHash, qaSkillPrompt)

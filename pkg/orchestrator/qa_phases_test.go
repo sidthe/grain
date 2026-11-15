@@ -525,3 +525,96 @@ func TestRunGoContainsNoInternalProxyProductName(t *testing.T) {
 		t.Fatalf("expected generic wording 'an authenticating reverse proxy' in pkg/orchestrator/run.go")
 	}
 }
+
+func TestPostCloneWorkflowPhasesConfinesSymlinksAndTraversal(t *testing.T) {
+	store, ctx := openTestStore(t)
+
+	outsideDir := t.TempDir()
+	secretFile := filepath.Join(outsideDir, "secret.go")
+	const secretMarker = "SUPER_SECRET_HOST_CREDENTIAL_DO_NOT_LEAK"
+	if err := os.WriteFile(secretFile, []byte("package secret\nconst Token = \""+secretMarker+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outsideSub := filepath.Join(outsideDir, "hostpkg")
+	if err := os.MkdirAll(outsideSub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outsideSub, "leak.go"), []byte("package hostpkg\nimport \"example.com/repo/pkg/safe\"\nconst K = \""+secretMarker+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	worktreeDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(worktreeDir, "pkg", "safe"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, "pkg", "safe", "ok.go"), []byte("package safe\nfunc OK() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Symlinked file and symlinked directory inside worktree pointing outside worktreeDir.
+	if err := os.Symlink(secretFile, filepath.Join(worktreeDir, "pkg", "safe", "symlink_secret.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideSub, filepath.Join(worktreeDir, "pkg", "linked_outside")); err != nil {
+		t.Fatal(err)
+	}
+
+	spec := &qa.FlowSpec{
+		Context: qa.ContextDiscoveryDecl{
+			Enabled:        true,
+			MaxTokens:      1500,
+			IncludeCallers: true,
+			ExtraPaths:     []string{"../secret.go", "/etc/passwd", "pkg/linked_outside/leak.go", "pkg/safe/symlink_secret.go"},
+		},
+	}
+	task := model.Task{
+		ID:    "task-symlink-confine",
+		Title: "Inspect pkg/safe/ok.go and pkg/safe/symlink_secret.go",
+		Body:  "Check ../../secret.go and ../hostpkg/leak.go and pkg/linked_outside/leak.go.",
+	}
+
+	out := orchestrator.ExecutePostCloneWorkflowPhases(ctx, store, task, worktreeDir, spec, "exp-sec", "golden-v4", "sha256:sec", "base-prompt")
+	if strings.Contains(out, secretMarker) {
+		t.Fatalf("symlink escape leaked host file contents into prompt:\n%s", out)
+	}
+	if strings.Contains(out, "symlink_secret.go") || strings.Contains(out, "linked_outside") || strings.Contains(out, "hostpkg") || strings.Contains(out, "../") {
+		t.Fatalf("symlink or traversal path leaked into prompt:\n%s", out)
+	}
+	if !strings.Contains(out, "pkg/safe/ok.go") {
+		t.Fatalf("expected legitimate in-tree file pkg/safe/ok.go in prompt, got:\n%s", out)
+	}
+}
+
+func TestPreCloneS0AskHumanDoesNotReparkAfterPriorHold(t *testing.T) {
+	store, ctx := openTestStore(t)
+
+	prev := orchestrator.LiveQARuntime()
+	t.Cleanup(func() { orchestrator.SetLiveQARuntime(prev) })
+
+	orchestrator.SetLiveQARuntime(&orchestrator.QARuntime{
+		RunIsolatedPrompt: func(_ context.Context, _ model.Task, _ string, _ string, _ int) (string, int64, int64, error) {
+			return "STATUS: NEEDS_CLARIFICATION\nQuestion: Which endpoint should be updated?", 30, 15, nil
+		},
+	})
+
+	spec := &qa.FlowSpec{
+		S0Intent: true,
+		S0IntentConfig: qa.S0IntentDecl{
+			Enabled:         true,
+			Complexities:    []string{"low", "medium", "high"},
+			MaxSeconds:      10,
+			MaxTokens:       8000,
+			OnClarification: "ask_human",
+		},
+	}
+	task := model.Task{ID: "task-s0-once", Title: "Update endpoint", Body: "Fix the response payload"}
+
+	res1 := orchestrator.ExecutePreCloneQAPhase(ctx, store, task, spec, "exp-1", "golden-v4", "sha256:v4", "base")
+	if !res1.NeedsClarification {
+		t.Fatalf("expected first S0 pass to request clarification hold")
+	}
+
+	res2 := orchestrator.ExecutePreCloneQAPhase(ctx, store, task, spec, "exp-1", "golden-v4", "sha256:v4", "base")
+	if res2.NeedsClarification {
+		t.Fatalf("expected second S0 pass after prior hold not to re-park the task in an infinite loop")
+	}
+}
