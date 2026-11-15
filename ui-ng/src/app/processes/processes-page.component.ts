@@ -34,7 +34,8 @@ import {
   viewChild,
 } from "@angular/core";
 import { Router, RouterLink } from "@angular/router";
-import type { QAFlowSpec } from "../api/models";
+import type { RouteKey } from "../api/generated-routes";
+import { GrainApi } from "../api/grain-api.service";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
 import { TaskFeedStore } from "../services/task-feed.service";
@@ -61,6 +62,7 @@ import {
   type DeclarationAcceptanceView,
   type ProcessTab,
   type Recurrence,
+  type RepoDeclarationsStatus,
   type RepoWorkflow,
   type Schedule,
   type Suite,
@@ -676,72 +678,6 @@ type SuitesPaneView = "suites" | "runs";
                                 >Inspect .grain/ declarations & workflows</span
                               >
                             }
-                          </div>
-                        </button>
-                      </li>
-                    }
-                  </ul>
-                }
-              }
-
-              @case ("quality") {
-                @if (!store.qaFlowsLoaded()) {
-                  <div class="empty-state" data-testid="quality-flows-loading">
-                    <p>Loading quality flow packages…</p>
-                  </div>
-                } @else if (!store.canReadGlobalSettings()) {
-                  <div class="empty-state" data-testid="quality-flows-denied">
-                    <p>
-                      Deployment-wide <code>settings:read</code> permission is
-                      required to inspect quality control flow packages.
-                    </p>
-                  </div>
-                } @else if (filteredQaFlows().length === 0) {
-                  <div class="empty-state" data-testid="quality-flows-empty">
-                    <p>No quality control flow packages match this filter.</p>
-                  </div>
-                } @else {
-                  <ul class="proc-list" data-testid="quality-flows-list">
-                    @for (fl of filteredQaFlows(); track fl.id) {
-                      @let active = isActiveQaFlow(fl.id);
-                      <li class="proc-li">
-                        <button
-                          type="button"
-                          class="proc-row"
-                          [class.is-selected]="selectedQaFlow()?.id === fl.id"
-                          [attr.aria-current]="
-                            selectedQaFlow()?.id === fl.id ? 'true' : null
-                          "
-                          [attr.data-testid]="'qa-flow-row-' + fl.id"
-                          (click)="selectQaFlow(fl.id, true)"
-                          (keydown.space)="
-                            selectQaFlow(fl.id, true); $event.preventDefault()
-                          "
-                        >
-                          <div class="proc-row-top">
-                            <span
-                              [class]="
-                                active
-                                  ? 'status-pill healthy'
-                                  : 'status-pill neutral'
-                              "
-                            >
-                              <g-status-icon
-                                [tone]="active ? 'healthy' : 'neutral'"
-                                [kind]="active ? 'healthy' : 'neutral'"
-                              />
-                              {{ active ? activeQaBadgeLabel() : "Available" }}
-                            </span>
-                            <span class="proc-row-title mono">{{ fl.id }}</span>
-                          </div>
-                          <div class="proc-row-sub">
-                            <span>{{ enabledRuleCount(fl) }} active rules</span>
-                            <span
-                              >·
-                              {{
-                                fl.enableS4 ? "S3 + T2/T3 S4" : "S3 only"
-                              }}</span
-                            >
                           </div>
                         </button>
                       </li>
@@ -1528,43 +1464,36 @@ type SuitesPaneView = "suites" | "runs";
                       Discovered <code>.grain/</code> files
                     </h3>
                     <ul class="proc-kv-list">
-                      @for (p of status?.templates ?? []; track p) {
-                        <li class="proc-kv-item">
-                          <code class="tabular">{{ p }}</code>
-                          <span class="ci-provider-tag">template</span>
+                      @for (df of discoveredDeclFiles(status); track df.path) {
+                        <li class="proc-kv-item" style="flex-wrap: wrap">
+                          <code class="tabular">{{ df.path }}</code>
+                          <div class="headline-actions">
+                            <span class="ci-provider-tag">{{ df.kind }}</span>
+                            <button
+                              type="button"
+                              class="btn-text"
+                              data-testid="decl-inline-yaml-toggle"
+                              [attr.aria-expanded]="
+                                inlineYamlPath() === df.path
+                              "
+                              (click)="toggleInlineYaml(repo, df.path)"
+                            >
+                              {{
+                                inlineYamlPath() === df.path
+                                  ? "Hide YAML"
+                                  : "View YAML"
+                              }}
+                            </button>
+                          </div>
+                          @if (inlineYamlPath() === df.path) {
+                            <pre
+                              class="comp-body-well"
+                              data-testid="decl-inline-yaml"
+                              >{{ inlineYamlText() }}</pre>
+                          }
                         </li>
                       }
-                      @for (p of status?.suites ?? []; track p) {
-                        <li class="proc-kv-item">
-                          <code class="tabular">{{ p }}</code>
-                          <span class="ci-provider-tag">suite</span>
-                        </li>
-                      }
-                      @for (p of status?.schedules ?? []; track p) {
-                        <li class="proc-kv-item">
-                          <code class="tabular">{{ p }}</code>
-                          <span class="ci-provider-tag">schedule</span>
-                        </li>
-                      }
-                      @for (p of status?.triggers ?? []; track p) {
-                        <li class="proc-kv-item">
-                          <code class="tabular">{{ p }}</code>
-                          <span class="ci-provider-tag">trigger</span>
-                        </li>
-                      }
-                      @if (status?.mergeRules) {
-                        <li class="proc-kv-item">
-                          <code class="tabular">{{ status!.mergeRules }}</code>
-                          <span class="ci-provider-tag">merge-rules</span>
-                        </li>
-                      }
-                      @if (
-                        !status?.templates?.length &&
-                        !status?.suites?.length &&
-                        !status?.schedules?.length &&
-                        !status?.triggers?.length &&
-                        !status?.mergeRules
-                      ) {
+                      @if (discoveredDeclFiles(status).length === 0) {
                         <li class="muted">
                           No <code>.grain/</code> declaration files synced on
                           the default branch yet.
@@ -1604,28 +1533,55 @@ type SuitesPaneView = "suites" | "runs";
                     } @else {
                       <ul class="proc-kv-list">
                         @for (wf of wfResp!.workflows; track wf.path) {
-                          <li class="proc-kv-item">
+                          <li class="proc-kv-item" style="flex-wrap: wrap">
                             <div>
                               <strong>{{ wf.name || wf.path }}</strong>
                               <span class="muted tabular">
                                 · {{ wf.path }}</span
                               >
                             </div>
-                            <button
-                              type="button"
-                              class="btn-text"
-                              [attr.data-testid]="'decl-inspect-wf-' + wf.path"
-                              (click)="openWorkflowEditor(repo, wf)"
-                            >
-                              {{
-                                access.can(
-                                  "PUT /api/repos/{owner}/{name}/workflows",
-                                  repo
-                                )
-                                  ? "Inspect / Edit"
-                                  : "Inspect"
-                              }}
-                            </button>
+                            <div class="headline-actions">
+                              <button
+                                type="button"
+                                class="btn-text"
+                                data-testid="decl-inline-yaml-toggle"
+                                [attr.aria-expanded]="
+                                  inlineYamlPath() === wf.path
+                                "
+                                (click)="
+                                  toggleInlineYaml(repo, wf.path, wf.text)
+                                "
+                              >
+                                {{
+                                  inlineYamlPath() === wf.path
+                                    ? "Hide YAML"
+                                    : "View YAML"
+                                }}
+                              </button>
+                              <button
+                                type="button"
+                                class="btn-text"
+                                [attr.data-testid]="
+                                  'decl-inspect-wf-' + wf.path
+                                "
+                                (click)="openWorkflowEditor(repo, wf)"
+                              >
+                                {{
+                                  access.can(
+                                    "PUT /api/repos/{owner}/{name}/workflows",
+                                    repo
+                                  )
+                                    ? "Inspect / Edit"
+                                    : "Inspect"
+                                }}
+                              </button>
+                            </div>
+                            @if (inlineYamlPath() === wf.path) {
+                              <pre
+                                class="comp-body-well"
+                                data-testid="decl-inline-yaml"
+                                >{{ inlineYamlText() }}</pre>
+                            }
                           </li>
                         }
                       </ul>
@@ -1636,135 +1592,6 @@ type SuitesPaneView = "suites" | "runs";
                     <p>
                       Select a repository to inspect its <code>.grain/</code>
                       declarations, sync errors, and workflow overrides.
-                    </p>
-                  </div>
-                }
-              }
-
-              @case ("quality") {
-                @if (selectedQaFlow(); as fl) {
-                  <div class="proc-insp-head">
-                    <div class="proc-insp-top">
-                      <div class="headline-cluster">
-                        <button
-                          type="button"
-                          class="btn-text proc-mobile-back"
-                          data-testid="qa-mobile-back"
-                          (click)="closeMobileQaDetail()"
-                        >
-                          ← Back
-                        </button>
-                        <h2
-                          class="proc-insp-title"
-                          data-testid="qa-flow-insp-title"
-                        >
-                          {{ fl.label }}
-                        </h2>
-                      </div>
-                      @if (store.canReadGlobalSettings()) {
-                        <a
-                          routerLink="/settings/tasks"
-                          class="btn-tonal"
-                          style="flex-shrink: 0"
-                          data-testid="qa-configure-rollout-link"
-                        >
-                          Configure rollout
-                        </a>
-                      }
-                    </div>
-                  </div>
-
-                  <div class="proc-card" data-testid="qa-flow-detail-card">
-                    <p class="muted" style="margin: 0">
-                      {{ fl.summary }}
-                    </p>
-
-                    <div class="proc-meta-row" style="margin-top: 8px">
-                      <span class="tabular">
-                        Staging branch isolation:
-                        <strong>{{
-                          fl.stagingIsolation
-                            ? "refs/heads/grain-qa-stage/{task-id}"
-                            : "off"
-                        }}</strong>
-                      </span>
-                      <span class="tabular">
-                        Coding contract:
-                        <strong>{{
-                          fl.injectSkill ? fl.skillBytes + " bytes" : "0 bytes"
-                        }}</strong>
-                      </span>
-                      <span class="tabular">
-                        S4 fresh-context verifier:
-                        <strong>{{
-                          fl.enableS4
-                            ? "T2/T3 diffs (max " +
-                              fl.maxS4RepairRounds +
-                              " round)"
-                            : "disabled"
-                        }}</strong>
-                      </span>
-                    </div>
-                  </div>
-
-                  <div class="proc-card" data-testid="qa-flow-rules-card">
-                    <h3 class="section-title">Stage checks &amp; invariants</h3>
-                    <ul class="proc-kv-list">
-                      @for (rule of fl.rules; track rule.id) {
-                        <li
-                          class="proc-kv-item"
-                          style="flex-direction: column; align-items: stretch; gap: 6px"
-                          [attr.data-testid]="'qa-rule-card-' + rule.id"
-                        >
-                          <div class="proc-qa-rule-head">
-                            <span
-                              [class]="
-                                rule.enabled
-                                  ? 'status-pill healthy'
-                                  : 'status-pill neutral'
-                              "
-                            >
-                              <g-status-icon
-                                [tone]="rule.enabled ? 'healthy' : 'neutral'"
-                                [kind]="rule.enabled ? 'healthy' : 'neutral'"
-                              />
-                              {{ rule.enabled ? rule.severity : "disabled" }}
-                            </span>
-                            <strong>{{ rule.label }}</strong>
-                            <code class="mono muted">{{ rule.id }}</code>
-                            <span
-                              class="ci-provider-tag"
-                              [gTip]="
-                                rule.stage === 'S3'
-                                  ? 'Stage S3 — sub-second deterministic AST & diff check'
-                                  : 'Stage S4 — 1-round fresh-context orthogonal diff verifier on T2/T3 changes'
-                              "
-                              >{{ rule.stage }}</span
-                            >
-                          </div>
-                          <p class="muted" style="margin: 0; font-size: 13px">
-                            {{ rule.summary }}
-                          </p>
-                          @if (rule.targetPaths.length > 0) {
-                            <div class="muted" style="font-size: 12px">
-                              Applies to:
-                              <code class="mono">{{
-                                rule.targetPaths.join(", ")
-                              }}</code>
-                            </div>
-                          }
-                        </li>
-                      }
-                    </ul>
-                  </div>
-                } @else if (filteredQaFlows().length > 0) {
-                  <div
-                    class="empty-state"
-                    data-testid="qa-flow-empty-inspector"
-                  >
-                    <p>
-                      Select a quality control flow package to inspect its
-                      checks.
                     </p>
                   </div>
                 }
@@ -1932,7 +1759,7 @@ type SuitesPaneView = "suites" | "runs";
             <label class="field">
               <span>Task prompt</span>
               <textarea
-                rows="3"
+                rows="8"
                 data-testid="sched-desc-input"
                 placeholder="Check outdated packages and open a PR if needed."
                 [value]="sDraftDesc()"
@@ -2391,7 +2218,7 @@ type SuitesPaneView = "suites" | "runs";
         <label class="field">
           <span>Prompt body</span>
           <textarea
-            rows="4"
+            rows="8"
             data-testid="tmpl-desc-input"
             placeholder="Upgrade {{ '{{pkg}}' }} and run tests."
             [value]="tDraftDesc()"
@@ -2848,6 +2675,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly store = inject(ProcessesStore);
   protected readonly access = inject(AccessService);
   protected readonly filter = inject(ViewFilter);
+  private readonly api = inject(GrainApi);
   private readonly taskFeed = inject(TaskFeedStore);
   private readonly router = inject(Router);
   private readonly snackbar = inject(SnackbarService);
@@ -2890,7 +2718,8 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly selectedSuiteId = signal<string | null>(null);
   protected readonly selectedSuiteRunId = signal<number | null>(null);
   protected readonly selectedDeclRepo = signal<string | null>(null);
-  protected readonly selectedQaFlowId = signal<string | null>(null);
+  protected readonly inlineYamlPath = signal<string | null>(null);
+  protected readonly inlineYamlText = signal("");
   protected readonly mobileDetailOpen = signal(false);
 
   protected readonly scheduleComposition = signal<Composition | null>(null);
@@ -3090,21 +2919,6 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       .filter((r) => !q || r.toLowerCase().includes(q));
   });
 
-  protected readonly filteredQaFlows = computed<QAFlowSpec[]>(() => {
-    const q = this.filter.query().trim().toLowerCase();
-    return this.store.qaFlows().filter((f) => {
-      if (!q) return true;
-      return `${f.id} ${f.label} ${f.summary}`.toLowerCase().includes(q);
-    });
-  });
-
-  protected readonly selectedQaFlow = computed<QAFlowSpec | null>(() => {
-    const visible = this.filteredQaFlows();
-    if (visible.length === 0) return null;
-    const id = this.selectedQaFlowId();
-    return visible.find((f) => f.id === id) ?? visible[0] ?? null;
-  });
-
   protected readonly selectedSchedule = computed(() => {
     const id = this.selectedScheduleId();
     return this.store.schedules().find((s) => s.id === id) ?? null;
@@ -3152,7 +2966,6 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       const tmpls = this.filteredTemplates();
       const suites = this.filteredSuites();
       const repos = this.filteredDeclRepos();
-      const qaFlows = this.filteredQaFlows();
       untracked(() => {
         if (!loaded) return;
         const isDesktop = (this.doc.defaultView?.innerWidth ?? 1280) >= 600;
@@ -3178,34 +2991,6 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
           repos[0]
         ) {
           this.selectDeclRepo(repos[0], false);
-        } else if (tab === "quality" && qaFlows.length > 0) {
-          const wanted = this.flow()?.trim();
-          const targetId =
-            wanted && qaFlows.some((f) => f.id === wanted)
-              ? wanted
-              : (this.selectedQaFlowId() ?? qaFlows[0].id);
-          if (this.selectedQaFlowId() !== targetId) {
-            this.selectedQaFlowId.set(targetId);
-          }
-        }
-      });
-    });
-
-    effect(() => {
-      const flowParam = this.flow()?.trim();
-      const tab = this.activeTab();
-      untracked(() => {
-        if (tab !== "quality") return;
-        const isDesktop = (this.doc.defaultView?.innerWidth ?? 1280) >= 600;
-        if (flowParam) {
-          this.selectedQaFlowId.set(flowParam);
-          if (!isDesktop) {
-            this.mobileDetailOpen.set(true);
-          }
-        } else if (isDesktop) {
-          this.selectedQaFlowId.set(this.filteredQaFlows()[0]?.id ?? null);
-        } else {
-          this.mobileDetailOpen.set(false);
         }
       });
     });
@@ -3288,40 +3073,6 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     }
   }
 
-  protected selectQaFlow(id: string, fromClick: boolean): void {
-    this.selectedQaFlowId.set(id);
-    if (fromClick) {
-      this.mobileDetailOpen.set(true);
-      void this.router.navigate([], {
-        queryParams: { flow: id },
-        queryParamsHandling: "merge",
-      });
-    }
-  }
-
-  protected closeMobileQaDetail(): void {
-    this.mobileDetailOpen.set(false);
-    void this.router.navigate([], {
-      queryParams: { flow: null },
-      queryParamsHandling: "merge",
-    });
-  }
-
-  protected enabledRuleCount(flow: QAFlowSpec): number {
-    return (flow.rules ?? []).filter((r) => r.enabled).length;
-  }
-
-  protected isActiveQaFlow(id: string): boolean {
-    const r = this.store.qaRollout();
-    return !!(r?.enabled && r.flowId === id);
-  }
-
-  protected activeQaBadgeLabel(): string {
-    const r = this.store.qaRollout();
-    if (!r?.enabled) return "Available";
-    return `Active (${r.rolloutPct}%)`;
-  }
-
   protected schedBadge = scheduleStatusBadge;
   protected tmplBadge = templateSourceBadge;
   protected cadenceOf = formatCadence;
@@ -3402,8 +3153,86 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
 
   protected selectDeclRepo(repo: string, fromClick: boolean): void {
     this.selectedDeclRepo.set(repo);
+    this.inlineYamlPath.set(null);
+    this.inlineYamlText.set("");
     if (fromClick) this.mobileDetailOpen.set(true);
     void this.store.loadRepoInspect(repo);
+  }
+
+  protected discoveredDeclFiles(
+    status: RepoDeclarationsStatus | null | undefined,
+  ): { path: string; kind: string }[] {
+    if (!status) return [];
+    const out: { path: string; kind: string }[] = [];
+    for (const p of status.templates ?? []) {
+      out.push({ path: p, kind: "template" });
+    }
+    for (const p of status.suites ?? []) {
+      out.push({ path: p, kind: "suite" });
+    }
+    for (const p of status.schedules ?? []) {
+      out.push({ path: p, kind: "schedule" });
+    }
+    for (const p of status.triggers ?? []) {
+      out.push({ path: p, kind: "trigger" });
+    }
+    if (status.mergeRules) {
+      out.push({ path: status.mergeRules, kind: "merge-rules" });
+    }
+    return out;
+  }
+
+  protected async toggleInlineYaml(
+    repo: string,
+    filePath: string,
+    fallbackText?: string,
+  ): Promise<void> {
+    if (this.inlineYamlPath() === filePath) {
+      this.inlineYamlPath.set(null);
+      this.inlineYamlText.set("");
+      return;
+    }
+    this.inlineYamlPath.set(filePath);
+    this.inlineYamlText.set("Loading…");
+    try {
+      if (typeof this.api.getText === "function") {
+        const txt = await this.api.getText(
+          "GET /api/fs/repo/{path...}" as unknown as RouteKey,
+          { path: filePath },
+        );
+        if (this.inlineYamlPath() === filePath && txt) {
+          this.inlineYamlText.set(txt);
+          return;
+        }
+      }
+    } catch {
+      // Fall back to stored workflow text or src namespace when repo fs route is unavailable.
+    }
+    if (this.inlineYamlPath() !== filePath) return;
+    const rwMap = this.store.repoWorkflows();
+    const storedWf =
+      fallbackText ||
+      rwMap[repo]?.workflows?.find((w) => w.path === filePath)?.text;
+    if (storedWf) {
+      this.inlineYamlText.set(storedWf);
+      return;
+    }
+    try {
+      if (typeof this.api.getText === "function") {
+        const srcTxt = await this.api.getText("GET /api/fs/src/{path...}", {
+          path: filePath,
+        });
+        if (this.inlineYamlPath() === filePath && srcTxt) {
+          this.inlineYamlText.set(srcTxt);
+          return;
+        }
+      }
+    } catch {
+      // Ignore fallback error.
+    }
+    if (this.inlineYamlPath() === filePath) {
+      this.inlineYamlText.set(`# ${repo}/${filePath}`);
+    }
   }
 
   protected scheduledTasksFor(s: Schedule) {
