@@ -279,11 +279,23 @@ class FakeProcessesApi {
       {
         title: "Audit deps",
         fields: [
+          { name: "title", values: ["Audit deps"], source: "schedule" },
           { name: "repo", values: ["acme/widgets"], source: "schedule" },
           { name: "autoMerge", values: ["on"], source: "schedule" },
+          {
+            name: "body",
+            values: ["Check outdated dependencies.\nOpen a PR when needed."],
+            source: "schedule",
+          },
         ],
       },
     ],
+  };
+
+  yamlFiles: Record<string, string> = {
+    "acme/widgets/.grain/templates/release-notes.yml":
+      "name: release-notes\ntitle: Draft release notes for {{version}}\n",
+    "acme/widgets/.grain/workflows/ci.yml": "name: CI\non: [push]\n",
   };
 
   scheduleRunResult: ScheduleRun = {
@@ -542,6 +554,12 @@ class FakeProcessesApi {
       this.schedules = this.schedules.filter((s) => s.id !== params?.["id"]);
     }
     return Promise.resolve({});
+  };
+
+  getText = (route: string, params?: Record<string, unknown>) => {
+    this.calls.push({ method: "GET", route, params });
+    const p = String(params?.["path"] ?? "");
+    return Promise.resolve(this.yamlFiles[p] ?? `# YAML for ${p}\n`);
   };
 }
 
@@ -1115,5 +1133,59 @@ describe("ProcessesPageComponent (D-9)", () => {
     expect(
       root.querySelector('[data-testid="qa-flow-detail-card"]')!.textContent,
     ).toContain("disabled");
+  });
+
+  it("toggles inline read-only YAML preview on Repo Workflows & Declarations via GET /api/fs/repo/{path...} and renders 8-row prompt textareas", async () => {
+    const harness = await RouterTestingHarness.create(
+      "/processes/declarations",
+    );
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    expect(root.querySelector('[data-testid="decl-inline-yaml"]')).toBeNull();
+
+    const toggleBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="decl-inline-yaml-toggle"]',
+    )!;
+    expect(toggleBtn).not.toBeNull();
+    expect(toggleBtn.textContent).toContain("View YAML");
+
+    toggleBtn.click();
+    await flush(harness);
+
+    expect(toggleBtn.textContent).toContain("Hide YAML");
+    expect(
+      api.calls.some(
+        (c) =>
+          c.route === "GET /api/fs/repo/{path...}" &&
+          (c.params as { path?: string })?.path ===
+            "acme/widgets/.grain/templates/release-notes.yml",
+      ),
+    ).toBe(true);
+
+    const yamlPre = root.querySelector<HTMLElement>(
+      '[data-testid="decl-inline-yaml"]',
+    )!;
+    expect(yamlPre).not.toBeNull();
+    expect(yamlPre.tagName).toBe("PRE");
+    expect(yamlPre.classList.contains("comp-body-well")).toBe(true);
+    expect(yamlPre.textContent).toContain(
+      "title: Draft release notes for {{version}}",
+    );
+
+    toggleBtn.click();
+    await flush(harness);
+    expect(toggleBtn.textContent).toContain("View YAML");
+    expect(root.querySelector('[data-testid="decl-inline-yaml"]')).toBeNull();
+
+    // Verify schedule and template dialogs use rows="8" for prompt textareas
+    await harness.navigateByUrl("/processes/schedules?new=1");
+    await flush(harness);
+    const schedRoot = harness.routeNativeElement!;
+    expect(
+      schedRoot
+        .querySelector('[data-testid="sched-desc-input"]')
+        ?.getAttribute("rows"),
+    ).toBe("8");
   });
 });
