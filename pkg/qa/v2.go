@@ -90,16 +90,16 @@ type FlowDeclarationV2 struct {
 }
 
 type FlowDeclarationV3 struct {
-	Schema           string               `json:"schema" yaml:"schema"`
-	Key              string               `json:"key" yaml:"key"`
-	Extends          string               `json:"extends,omitempty" yaml:"extends,omitempty"`
-	Label            string               `json:"label,omitempty" yaml:"label,omitempty"`
-	Summary          string               `json:"summary,omitempty" yaml:"summary,omitempty"`
-	Skills           V3SkillsDecl         `json:"skills,omitempty" yaml:"skills,omitempty"`
-	Stages           V3StagesDecl         `json:"stages,omitempty" yaml:"stages,omitempty"`
-	Checks           map[string]CheckDecl `json:"checks,omitempty" yaml:"checks,omitempty"`
-	CustomChecks     []CustomCheckDecl    `json:"custom-checks,omitempty" yaml:"custom-checks,omitempty"`
-	Verifier         VerifierDecl         `json:"verifier,omitempty" yaml:"verifier,omitempty"`
+	Schema       string               `json:"schema" yaml:"schema"`
+	Key          string               `json:"key" yaml:"key"`
+	Extends      string               `json:"extends,omitempty" yaml:"extends,omitempty"`
+	Label        string               `json:"label,omitempty" yaml:"label,omitempty"`
+	Summary      string               `json:"summary,omitempty" yaml:"summary,omitempty"`
+	Skills       V3SkillsDecl         `json:"skills,omitempty" yaml:"skills,omitempty"`
+	Stages       V3StagesDecl         `json:"stages,omitempty" yaml:"stages,omitempty"`
+	Checks       map[string]CheckDecl `json:"checks,omitempty" yaml:"checks,omitempty"`
+	CustomChecks []CustomCheckDecl    `json:"custom-checks,omitempty" yaml:"custom-checks,omitempty"`
+	Verifier     VerifierDecl         `json:"verifier,omitempty" yaml:"verifier,omitempty"`
 }
 
 type V3SkillsDecl struct {
@@ -119,10 +119,11 @@ type V3StagesDecl struct {
 }
 
 type S0IntentDecl struct {
-	Enabled      bool     `json:"enabled,omitempty" yaml:"enabled,omitempty"`
-	Complexities []string `json:"complexities,omitempty" yaml:"complexities,omitempty"`
-	MaxSeconds   int      `json:"max-seconds,omitempty" yaml:"max-seconds,omitempty"`
-	MaxTokens    int      `json:"max-tokens,omitempty" yaml:"max-tokens,omitempty"`
+	Enabled         bool     `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Complexities    []string `json:"complexities,omitempty" yaml:"complexities,omitempty"`
+	MaxSeconds      int      `json:"max-seconds,omitempty" yaml:"max-seconds,omitempty"`
+	MaxTokens       int      `json:"max-tokens,omitempty" yaml:"max-tokens,omitempty"`
+	OnClarification string   `json:"on-clarification,omitempty" yaml:"on-clarification,omitempty"`
 }
 
 type S1RiskDecl struct {
@@ -140,20 +141,21 @@ type S2PlanCriticDecl struct {
 
 // FlowVersionBundle pairs a materialized FlowDeclarationV2 with its canonical hash, version metadata, and executable FlowSpec.
 type FlowVersionBundle struct {
-	Hash          string              `json:"hash"`
-	Key           string              `json:"key"`
-	Version       int                 `json:"version"`
-	ParentHash    string              `json:"parentHash,omitempty"`
-	Label         string              `json:"label"`
-	Summary       string              `json:"summary"`
-	BuiltIn       bool                `json:"builtIn"`
-	QAEngineRev   int                 `json:"qaEngineRev"`
-	SchemaVer     string              `json:"schemaVer,omitempty"`
-	SourceYAML    string              `json:"sourceYaml,omitempty"`
-	Declaration   FlowDeclarationV2   `json:"declaration"`
-	DeclarationV3 *FlowDeclarationV3  `json:"declarationV3,omitempty"`
-	SpecJSON      string              `json:"specJson"`
-	Resolved      FlowSpec            `json:"resolved"`
+	Hash          string             `json:"hash"`
+	Key           string             `json:"key"`
+	Version       int                `json:"version"`
+	ParentHash    string             `json:"parentHash,omitempty"`
+	Label         string             `json:"label"`
+	Summary       string             `json:"summary"`
+	BuiltIn       bool               `json:"builtIn"`
+	QAEngineRev   int                `json:"qaEngineRev"`
+	SchemaVer     string             `json:"schemaVer,omitempty"`
+	SourceYAML    string             `json:"sourceYaml,omitempty"`
+	Declaration   FlowDeclarationV2  `json:"declaration"`
+	DeclarationV3 *FlowDeclarationV3 `json:"declarationV3,omitempty"`
+	DeclarationV4 *FlowDeclarationV4 `json:"declarationV4,omitempty"`
+	SpecJSON      string             `json:"specJson"`
+	Resolved      FlowSpec           `json:"resolved"`
 }
 
 const goldenV2YAML = `schema: grain.dev/qa-flow/v2
@@ -302,6 +304,15 @@ var allBuiltInRuleCatalog = []RuleSpec{
 		TargetPaths: []string{"**/*.go"},
 		Enabled:     false,
 	},
+	{
+		ID:          RulePRDescriptionContract,
+		Label:       "PR description & subject-line contract",
+		Stage:       "S3",
+		Severity:    "warn",
+		Summary:     "Enforces PR subject-line length caps, required description sections (Summary, Verification), and flags unannotated lint/type-check suppression directives in added lines.",
+		TargetPaths: []string{"**/*"},
+		Enabled:     false,
+	},
 }
 
 var (
@@ -386,29 +397,32 @@ func BuiltInFlowVersions() []FlowVersionBundle {
 	v1Bundle.Hash = fmt.Sprintf("builtin:%s@1#%d", model.QAFlowGoldenV1Minimal, QAEngineRev)
 
 	lookup := map[string]FlowVersionBundle{
-		v1Bundle.Hash:                        v1Bundle,
-		model.QAFlowGoldenV1Minimal:          v1Bundle,
-		model.QAFlowGoldenV1Minimal + "@1":   v1Bundle,
+		v1Bundle.Hash:                                   v1Bundle,
+		model.QAFlowGoldenV1Minimal:                     v1Bundle,
+		model.QAFlowGoldenV1Minimal + "@1":              v1Bundle,
 		"builtin:" + model.QAFlowGoldenV1Minimal + "@1": v1Bundle,
 	}
 
 	out := []FlowVersionBundle{v1Bundle}
-	for _, rawYAML := range []string{goldenV2YAML, goldenV2SkillOnlyYAML, goldenV2ChecksOnlyYAML, goldenV3YAML} {
+	for _, rawYAML := range []string{goldenV2YAML, goldenV2SkillOnlyYAML, goldenV2ChecksOnlyYAML, goldenV3YAML, engineeringWorkflowV4YAML} {
 		anyDecl, pErr := ParseFlowDeclaration([]byte(rawYAML))
 		if pErr != nil {
 			panic(fmt.Sprintf("qa: invalid built-in yaml: %v", pErr))
 		}
-		
+
 		var b FlowVersionBundle
 		var cErr error
 		var key string
-		
+
 		lfunc := func(ref string) (FlowVersionBundle, bool) {
 			v, ok := lookup[ref]
 			return v, ok
 		}
-		
+
 		switch d := anyDecl.(type) {
+		case *FlowDeclarationV4:
+			key = d.Key
+			b, cErr = ResolveFlowDeclarationV4(*d, 1, rawYAML, "", true, lfunc)
 		case *FlowDeclarationV3:
 			key = d.Key
 			b, cErr = ResolveFlowDeclarationV3(*d, 1, rawYAML, "", true, lfunc)
@@ -487,9 +501,10 @@ func ResolveFlowDeclarationV2(decl FlowDeclarationV2, version int, sourceYAML st
 }
 
 var allowedCheckParams = map[string][]string{
-	RuleSiblingExportHazard: {"resolve"},
-	RuleMutationHardening:   {"mutants", "max-seconds"},
-	RuleBoundaryFuzz:        {"max-seconds"},
+	RuleSiblingExportHazard:   {"resolve"},
+	RuleMutationHardening:     {"mutants", "max-seconds"},
+	RuleBoundaryFuzz:          {"max-seconds"},
+	RulePRDescriptionContract: {"max-subject-chars", "required-sections", "audit-lint-suppressions"},
 }
 
 func compileBundle(decl FlowDeclarationV2, version int, sourceYAML string, explicitParentHash string, builtIn bool, lookup ParentLookupFunc) (FlowVersionBundle, error) {
@@ -597,7 +612,11 @@ func compileBundle(decl FlowDeclarationV2, version int, sourceYAML string, expli
 	knownRules := make(map[string]RuleSpec, len(allBuiltInRuleCatalog))
 	for _, r := range allBuiltInRuleCatalog {
 		knownRules[r.ID] = r
-		bc := base.Checks[r.ID]
+		bc, inBase := base.Checks[r.ID]
+		_, inDecl := decl.Checks[r.ID]
+		if r.ID == RulePRDescriptionContract && !inBase && !inDecl {
+			continue
+		}
 		en := r.Enabled
 		if bc.Enabled != nil {
 			en = *bc.Enabled
@@ -719,12 +738,15 @@ func compileBundle(decl FlowDeclarationV2, version int, sourceYAML string, expli
 	// Build executable FlowSpec.
 	rules := make([]RuleSpec, 0, len(allBuiltInRuleCatalog)+1)
 	for _, cat := range allBuiltInRuleCatalog {
-		mc := mat.Checks[cat.ID]
 		r := cat
-		r.Enabled = mc.Enabled != nil && *mc.Enabled
-		r.Severity = mc.Severity
-		if len(mc.Params) > 0 {
-			r.Params = cloneParams(mc.Params)
+		if mc, ok := mat.Checks[cat.ID]; ok {
+			r.Enabled = mc.Enabled != nil && *mc.Enabled
+			if mc.Severity != "" {
+				r.Severity = mc.Severity
+			}
+			if len(mc.Params) > 0 {
+				r.Params = cloneParams(mc.Params)
+			}
 		}
 		rules = append(rules, r)
 	}

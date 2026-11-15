@@ -157,18 +157,35 @@ func ComputeDeclarationDiff(ref, cand *FlowVersionBundle) DeclarationDiff {
 			if cand.Resolved.EnableS4 {
 				diff.AddedStages = append(diff.AddedStages, "s4")
 			}
-			if cand.DeclarationV3 != nil {
-				if cand.DeclarationV3.Stages.S0Intent.Enabled {
-					diff.AddedStages = append(diff.AddedStages, "s0-intent")
+			if cand.Resolved.S0Intent {
+				diff.AddedStages = append(diff.AddedStages, "s0-intent")
+			}
+			if cand.Resolved.Decompose.Enabled && cand.Resolved.Decompose.Mode != "off" {
+				diff.AddedStages = append(diff.AddedStages, "s0-decompose")
+			}
+			if cand.Resolved.Context.Enabled {
+				diff.AddedStages = append(diff.AddedStages, "s1-context")
+			}
+			if cand.Resolved.S2PlanCritic {
+				diff.AddedStages = append(diff.AddedStages, "s2-plan-critic")
+			}
+			if cand.Resolved.PRContract.Enabled && cand.Resolved.PRContract.Mode != "off" {
+				diff.AddedStages = append(diff.AddedStages, "s3-pr")
+			}
+			for _, stg := range cand.Resolved.CustomStages {
+				diff.AddedStages = append(diff.AddedStages, stg.ID)
+			}
+			for _, chk := range cand.Resolved.CustomChecks {
+				diff.AddedCustomChecks = append(diff.AddedCustomChecks, chk.ID)
+			}
+			for _, pack := range cand.Resolved.ReadabilityPacks {
+				if pack.Enabled {
+					diff.ChangedSkills = append(diff.ChangedSkills, "pack:"+pack.ID)
 				}
-				if cand.DeclarationV3.Stages.S2PlanCritic.Enabled {
-					diff.AddedStages = append(diff.AddedStages, "s2-plan-critic")
-				}
-				for _, stg := range cand.DeclarationV3.Stages.Custom {
-					diff.AddedStages = append(diff.AddedStages, stg.ID)
-				}
-				for _, chk := range cand.DeclarationV3.CustomChecks {
-					diff.AddedCustomChecks = append(diff.AddedCustomChecks, chk.ID)
+			}
+			for _, step := range cand.Resolved.SkillSteps {
+				if step.Enabled {
+					diff.ChangedSkills = append(diff.ChangedSkills, "step:"+step.ID)
 				}
 			}
 		}
@@ -201,11 +218,31 @@ func ComputeDeclarationDiff(ref, cand *FlowVersionBundle) DeclarationDiff {
 	} else if ref.Resolved.S0Intent && !cand.Resolved.S0Intent {
 		diff.RemovedStages = append(diff.RemovedStages, "s0-intent")
 	}
+	refDecomp := ref.Resolved.Decompose.Enabled && ref.Resolved.Decompose.Mode != "off"
+	candDecomp := cand.Resolved.Decompose.Enabled && cand.Resolved.Decompose.Mode != "off"
+	if !refDecomp && candDecomp {
+		diff.AddedStages = append(diff.AddedStages, "s0-decompose")
+	} else if refDecomp && !candDecomp {
+		diff.RemovedStages = append(diff.RemovedStages, "s0-decompose")
+	}
+	if !ref.Resolved.Context.Enabled && cand.Resolved.Context.Enabled {
+		diff.AddedStages = append(diff.AddedStages, "s1-context")
+	} else if ref.Resolved.Context.Enabled && !cand.Resolved.Context.Enabled {
+		diff.RemovedStages = append(diff.RemovedStages, "s1-context")
+	}
 	if !ref.Resolved.S2PlanCritic && cand.Resolved.S2PlanCritic {
 		diff.AddedStages = append(diff.AddedStages, "s2-plan-critic")
 	} else if ref.Resolved.S2PlanCritic && !cand.Resolved.S2PlanCritic {
 		diff.RemovedStages = append(diff.RemovedStages, "s2-plan-critic")
 	}
+	refPR := ref.Resolved.PRContract.Enabled && ref.Resolved.PRContract.Mode != "off"
+	candPR := cand.Resolved.PRContract.Enabled && cand.Resolved.PRContract.Mode != "off"
+	if !refPR && candPR {
+		diff.AddedStages = append(diff.AddedStages, "s3-pr")
+	} else if refPR && !candPR {
+		diff.RemovedStages = append(diff.RemovedStages, "s3-pr")
+	}
+	diff.ChangedSkills = append(diff.ChangedSkills, diffV4PacksAndSteps(ref.Resolved, cand.Resolved)...)
 
 	refCustomStages := make(map[string]bool)
 	candCustomStages := make(map[string]bool)
@@ -266,6 +303,13 @@ func ComputeDeclarationDiff(ref, cand *FlowVersionBundle) DeclarationDiff {
 		}
 	}
 
+	if ref.Resolved.EnableS4 != cand.Resolved.EnableS4 ||
+		fmt.Sprintf("%v", ref.Resolved.VerifierTiers) != fmt.Sprintf("%v", cand.Resolved.VerifierTiers) ||
+		ref.Resolved.MaxS4RepairRounds != cand.Resolved.MaxS4RepairRounds ||
+		ref.Resolved.VerifierChecklist != cand.Resolved.VerifierChecklist {
+		diff.ChangedVerifier = true
+	}
+
 	if ref.Resolved.S5MergeTriage.Mode != cand.Resolved.S5MergeTriage.Mode {
 		diff.ChangedTriage = true
 	}
@@ -278,15 +322,19 @@ func ParseFlowDeclaration(raw []byte) (any, error) {
 	if len(trimmed) == 0 {
 		return nil, fmt.Errorf("qa: empty flow declaration")
 	}
+	trimmed = normalizeJSONFlowDeclarationBytes(trimmed)
 
-	var peek struct {
-		Schema string `yaml:"schema"`
-	}
+	var peek map[string]any
 	if err := yaml.Unmarshal(trimmed, &peek); err != nil {
 		return nil, fmt.Errorf("qa: checking flow schema: %w", err)
 	}
+	schemaStr, _ := peek["schema"].(string)
 
-	if peek.Schema == FlowSchemaV3 {
+	if schemaStr == FlowSchemaV4 {
+		return ParseFlowDeclarationV4(trimmed)
+	}
+
+	if schemaStr == FlowSchemaV3 {
 		var decl FlowDeclarationV3
 		dec := yaml.NewDecoder(bytes.NewReader(trimmed))
 		dec.KnownFields(true)
@@ -299,7 +347,7 @@ func ParseFlowDeclaration(raw []byte) (any, error) {
 		return &decl, nil
 	}
 
-	if peek.Schema == "" || peek.Schema == FlowSchemaV2 {
+	if schemaStr == "" || schemaStr == FlowSchemaV2 {
 		var decl FlowDeclarationV2
 		dec := yaml.NewDecoder(bytes.NewReader(trimmed))
 		dec.KnownFields(true)
@@ -313,7 +361,7 @@ func ParseFlowDeclaration(raw []byte) (any, error) {
 		return &decl, nil
 	}
 
-	return nil, fmt.Errorf("qa: unsupported flow schema %q", peek.Schema)
+	return nil, fmt.Errorf("qa: unsupported flow schema %q", schemaStr)
 }
 
 func ResolveFlowDeclarationV3(decl FlowDeclarationV3, version int, sourceYAML string, explicitParentHash string, builtIn bool, lookup ParentLookupFunc) (FlowVersionBundle, error) {
@@ -344,6 +392,8 @@ func ResolveFlowDeclarationV3(decl FlowDeclarationV3, version int, sourceYAML st
 			}
 			if !decl.Stages.S0Intent.Enabled && len(decl.Stages.S0Intent.Complexities) == 0 && pv3.Stages.S0Intent.Enabled {
 				decl.Stages.S0Intent = pv3.Stages.S0Intent
+			} else if decl.Stages.S0Intent.OnClarification == "" && pv3.Stages.S0Intent.OnClarification != "" {
+				decl.Stages.S0Intent.OnClarification = pv3.Stages.S0Intent.OnClarification
 			}
 			if len(decl.Stages.S1Risk.Overrides) == 0 && len(pv3.Stages.S1Risk.Overrides) > 0 {
 				decl.Stages.S1Risk.Overrides = pv3.Stages.S1Risk.Overrides
@@ -394,6 +444,11 @@ func ResolveFlowDeclarationV3(decl FlowDeclarationV3, version int, sourceYAML st
 		if len(normalizeSkillText(sk.Text)) > capB {
 			return FlowVersionBundle{}, fmt.Errorf("qa: skills.%s exceeds max-bytes %d", name, capB)
 		}
+	}
+
+	// Validate S0 intent on-clarification if specified.
+	if oc := strings.TrimSpace(decl.Stages.S0Intent.OnClarification); oc != "" && oc != "warn" && oc != "ask_human" {
+		return FlowVersionBundle{}, fmt.Errorf("qa: invalid s0-intent on-clarification %q (want warn or ask_human)", oc)
 	}
 
 	// Validate S5 triage mode if specified.
@@ -501,6 +556,8 @@ func ResolveAnyFlowDeclaration(raw []byte, version int, lookup ParentLookupFunc)
 		return FlowVersionBundle{}, err
 	}
 	switch d := anyDecl.(type) {
+	case *FlowDeclarationV4:
+		return ResolveFlowDeclarationV4(*d, version, string(raw), "", false, lookup)
 	case *FlowDeclarationV3:
 		return ResolveFlowDeclarationV3(*d, version, string(raw), "", false, lookup)
 	case *FlowDeclarationV2:
