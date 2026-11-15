@@ -13,10 +13,10 @@
 // limitations under the License.
 
 import { ComponentFixture, TestBed } from "@angular/core/testing";
-import { vi } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { GrainApi } from "../api/grain-api.service";
 import { SnackbarService } from "../services/snackbar.service";
-import type { FlowDeclarationV3 } from "./qa-flows.models";
+import type { FlowDeclarationV3, FlowDeclarationV4 } from "./qa-flows.models";
 import { QaV3StudioComponent } from "./qa-v3-studio.component";
 
 const ROUTE_RESPONSES: Readonly<Record<string, unknown>> = {
@@ -227,5 +227,177 @@ describe("QaV3StudioComponent", () => {
 
     expect(showSpy).toHaveBeenCalledWith("Adopted flow sha256:adopted123");
     expect(root.querySelector('[data-testid="qa-v3-adopt-dialog"]')).toBeNull();
+  });
+
+  it("renders all 8 Software Lifecycle Stages and filters by search query and kind chips", () => {
+    const root = fixture.nativeElement as HTMLElement;
+
+    const stageGroups = root.querySelectorAll(
+      '[data-testid="qa-stage-tree"] .qa-stage-group',
+    );
+    expect(stageGroups.length).toBe(8);
+    expect(root.textContent).toContain("1 · Goal & Subtask Breakdown");
+    expect(root.textContent).toContain("3 · Plan & Fresh Critique");
+    expect(root.textContent).toContain("4 · Coding & Readability Rules");
+    expect(root.textContent).toContain("8 · Scorecard & Merge Triage");
+
+    // Filter by kind chip: Sub-agents
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="qa-kind-filter-agents"]',
+      )!
+      .click();
+    fixture.detectChanges();
+
+    const subagentStages = root.querySelectorAll(
+      '[data-testid="qa-stage-tree"] .qa-stage-group',
+    );
+    expect(subagentStages.length).toBeGreaterThanOrEqual(2);
+    expect(subagentStages.length).toBeLessThan(8);
+
+    // Reset to All and filter by search query
+    root
+      .querySelector<HTMLButtonElement>('[data-testid="qa-kind-filter-all"]')!
+      .click();
+    const searchInput = root.querySelector<HTMLInputElement>(
+      '[data-testid="qa-step-search"]',
+    )!;
+    searchInput.value = "ts-angular";
+    searchInput.dispatchEvent(new Event("input"));
+    fixture.detectChanges();
+
+    const searchedSteps = root.querySelectorAll(".qa-step-node");
+    expect(searchedSteps.length).toBe(1);
+    expect(searchedSteps[0].textContent).toContain("ts-angular");
+  });
+
+  it("inspects and edits Readability Packs, PR Contract, and Custom Checks in the 70% inspector", () => {
+    const declV4: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      "readability-packs": [
+        {
+          id: "ts-angular",
+          enabled: true,
+          activation: "always",
+          globs: ["ui-ng/**/*.ts"],
+          "custom-text": "Use standalone OnPush components and signal inputs.",
+        },
+      ],
+      "pr-contract": {
+        enabled: true,
+        mode: "blocking",
+        "max-subject-chars": 72,
+        "required-sections": ["Summary", "Testing"],
+        "audit-lint-suppressions": true,
+      },
+      "custom-checks": [
+        {
+          id: "custom:no-console-log",
+          kind: "pattern",
+          severity: "blocking",
+          "forbid-added": "console\\.log",
+          fixtures: {
+            fail: [{ name: "leftover console.log", diff: "+console.log(x)" }],
+            pass: [{ name: "clean code", diff: "+const x = 1;" }],
+          },
+        },
+      ],
+    };
+
+    fixture.componentRef.setInput("declV4", declV4);
+    fixture.detectChanges();
+
+    const root = fixture.nativeElement as HTMLElement;
+
+    // Select ts-angular readability pack
+    const packNode = root.querySelector<HTMLButtonElement>(
+      '[data-testid="qa-step-node-pack:ts-angular"]',
+    )!;
+    expect(packNode).toBeTruthy();
+    packNode.click();
+    fixture.detectChanges();
+
+    const packInspector = root.querySelector(
+      '[data-testid="qa-readability-pack-inspector"]',
+    );
+    expect(packInspector).toBeTruthy();
+    const packText = root.querySelector<HTMLTextAreaElement>(
+      '[data-testid="qa-pack-custom-text"]',
+    )!;
+    expect(packText.value).toContain("Use standalone OnPush components");
+
+    // Select PR contract step in Stage 6
+    const prNode = root.querySelector<HTMLButtonElement>(
+      '[data-testid="qa-step-node-pr:contract"]',
+    )!;
+    expect(prNode).toBeTruthy();
+    prNode.click();
+    fixture.detectChanges();
+
+    expect(
+      root.querySelector('[data-testid="qa-pr-contract-inspector"]'),
+    ).toBeTruthy();
+    const prSectionsInput = root.querySelector<HTMLInputElement>(
+      '[data-testid="qa-pr-sections-input"]',
+    )!;
+    expect(prSectionsInput.value).toContain("Summary, Testing");
+
+    // Select custom check step in Stage 5
+    const customCheckNode = root.querySelector<HTMLButtonElement>(
+      '[data-testid="qa-step-node-custom:no-console-log"]',
+    )!;
+    expect(customCheckNode).toBeTruthy();
+    customCheckNode.click();
+    fixture.detectChanges();
+
+    expect(
+      root.querySelector('[data-testid="qa-selected-step-card"]')?.textContent,
+    ).toContain("custom:no-console-log");
+  });
+
+  it("evaluates Fail trap and Clean pass fixtures via the 1-click Inline Fixture Self-Test Runner", async () => {
+    const declV4: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      "custom-checks": [
+        {
+          id: "custom:forbid-debugger",
+          kind: "pattern",
+          severity: "blocking",
+          "forbid-added": "\\bdebugger\\b",
+          fixtures: {
+            fail: [{ name: "debugger statement", diff: "+debugger;" }],
+            pass: [{ name: "clean statement", diff: "+return 42;" }],
+          },
+        },
+      ],
+    };
+
+    fixture.componentRef.setInput("declV4", declV4);
+    fixture.detectChanges();
+
+    const root = fixture.nativeElement as HTMLElement;
+    const runBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="qa-run-fixtures-btn"]',
+    )!;
+    expect(runBtn).toBeTruthy();
+
+    runBtn.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const resultsBox = root.querySelector(
+      '[data-testid="qa-fixture-test-result"]',
+    );
+    expect(resultsBox).toBeTruthy();
+    expect(resultsBox?.textContent).toContain("Fail trap: PASS");
+    expect(resultsBox?.textContent).toContain("Clean pass: PASS");
+    expect(resultsBox?.textContent).toContain("debugger statement");
+    expect(resultsBox?.textContent).toContain("clean statement");
+    expect(postSpy).toHaveBeenCalledWith(
+      "POST /api/qa/flow-versions",
+      undefined,
+      expect.objectContaining({ yaml: expect.stringContaining("qa-flow/v4") }),
+      "dryRun=1",
+    );
   });
 });
