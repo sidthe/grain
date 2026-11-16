@@ -50,6 +50,9 @@ func CheckPRDescriptionContract(pd ParsedDiff, subject, body string, contract qa
 	}
 
 	if trimmedBody := strings.TrimSpace(body); trimmedBody != "" && len(contract.RequiredSections) > 0 {
+		if len(trimmedBody) > 65536 {
+			trimmedBody = trimmedBody[:65536]
+		}
 		lowerBody := strings.ToLower(trimmedBody)
 		for _, sec := range contract.RequiredSections {
 			secTrim := strings.TrimSpace(sec)

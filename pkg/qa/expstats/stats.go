@@ -51,15 +51,15 @@ func sumMean(obs []ClusterObs) float64 {
 
 func ClusterRatioEstimate(treat, ctrl []ClusterObs, better string, nBoot int, seed int64) (delta, ciLow, ciHigh float64) {
 	rng := mathrand.New(mathrand.NewPCG(uint64(seed), 1))
-	
+
 	treatRatio := sumRatio(treat)
 	ctrlRatio := sumRatio(ctrl)
-	
+
 	actualDelta := treatRatio - ctrlRatio
 	if better == "lower" {
 		actualDelta = -actualDelta
 	}
-	
+
 	deltas := make([]float64, nBoot)
 	for i := 0; i < nBoot; i++ {
 		tBoot := make([]ClusterObs, len(treat))
@@ -72,40 +72,40 @@ func ClusterRatioEstimate(treat, ctrl []ClusterObs, better string, nBoot int, se
 		}
 		tRatio := sumRatio(tBoot)
 		cRatio := sumRatio(cBoot)
-		
+
 		d := tRatio - cRatio
 		if better == "lower" {
 			d = -d
 		}
 		deltas[i] = d
 	}
-	
+
 	sort.Float64s(deltas)
-	
+
 	// Percentile CI (simple). BCa is complex, instructions say "percentile/BCa", we can just do percentile.
 	lowIdx := int(math.Floor(0.025 * float64(nBoot)))
 	highIdx := int(math.Ceil(0.975 * float64(nBoot)))
 	if highIdx >= nBoot {
 		highIdx = nBoot - 1
 	}
-	
+
 	return actualDelta, deltas[lowIdx], deltas[highIdx]
 }
 
 func ClusterPermutationTest(treat, ctrl []ClusterObs, stratifiedSegments bool, nPerm int, seed int64) float64 {
 	rng := mathrand.New(mathrand.NewPCG(uint64(seed), 1))
-	
+
 	allObs := append([]ClusterObs{}, treat...)
 	allObs = append(allObs, ctrl...)
-	
+
 	treatRatio := sumRatio(treat)
 	ctrlRatio := sumRatio(ctrl)
 	actualDiff := math.Abs(treatRatio - ctrlRatio)
-	
+
 	if actualDiff == 0 {
 		return 1.0
 	}
-	
+
 	// Pre-group by segment if stratified
 	segments := make(map[string][]ClusterObs)
 	if stratifiedSegments {
@@ -115,7 +115,7 @@ func ClusterPermutationTest(treat, ctrl []ClusterObs, stratifiedSegments bool, n
 	} else {
 		segments[""] = allObs
 	}
-	
+
 	treatSizes := make(map[string]int)
 	if stratifiedSegments {
 		for _, o := range treat {
@@ -128,27 +128,27 @@ func ClusterPermutationTest(treat, ctrl []ClusterObs, stratifiedSegments bool, n
 	greaterOrEqual := 0
 	for i := 0; i < nPerm; i++ {
 		var pTreat, pCtrl []ClusterObs
-		
+
 		for seg, obs := range segments {
 			shuffled := make([]ClusterObs, len(obs))
 			copy(shuffled, obs)
 			rng.Shuffle(len(shuffled), func(i, j int) {
 				shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
 			})
-			
+
 			tSize := treatSizes[seg]
 			pTreat = append(pTreat, shuffled[:tSize]...)
 			pCtrl = append(pCtrl, shuffled[tSize:]...)
 		}
-		
+
 		pTreatRatio := sumRatio(pTreat)
 		pCtrlRatio := sumRatio(pCtrl)
-		
+
 		if math.Abs(pTreatRatio-pCtrlRatio) >= actualDiff {
 			greaterOrEqual++
 		}
 	}
-	
+
 	return float64(greaterOrEqual) / float64(nPerm)
 }
 
@@ -187,7 +187,7 @@ func PairedCorrelation(x, y []float64) float64 {
 
 func PairedSignFlipTest(diffs []float64, nPerm int, seed int64) (meanDiff, ciLow, ciHigh, pValue, pearsonRho float64) {
 	rng := mathrand.New(mathrand.NewPCG(uint64(seed), 1))
-	
+
 	var sumDiff float64
 	for _, d := range diffs {
 		sumDiff += d
@@ -198,13 +198,13 @@ func PairedSignFlipTest(diffs []float64, nPerm int, seed int64) (meanDiff, ciLow
 	}
 	meanDiff = sumDiff / float64(n)
 	actualAbsSum := math.Abs(sumDiff)
-	
+
 	var greaterOrEqual int
 	exact := n <= 16
 	var numPerms int
-	
+
 	var bootMeans []float64
-	
+
 	if exact {
 		numPerms = 1 << n
 		for i := 0; i < numPerms; i++ {
@@ -236,9 +236,9 @@ func PairedSignFlipTest(diffs []float64, nPerm int, seed int64) (meanDiff, ciLow
 			}
 		}
 	}
-	
+
 	pValue = float64(greaterOrEqual) / float64(numPerms)
-	
+
 	// Bootstrap CI for the mean diff
 	nBoot := 10000
 	for i := 0; i < nBoot; i++ {
@@ -251,7 +251,7 @@ func PairedSignFlipTest(diffs []float64, nPerm int, seed int64) (meanDiff, ciLow
 	sort.Float64s(bootMeans)
 	ciLow = bootMeans[int(float64(nBoot)*0.025)]
 	ciHigh = bootMeans[int(float64(nBoot)*0.975)]
-	
+
 	return meanDiff, ciLow, ciHigh, pValue, 0 // correlation handled by caller? Wait.
 }
 
@@ -271,7 +271,7 @@ func HolmAdjust(pValues []float64) []float64 {
 	sort.Slice(pvs, func(i, j int) bool {
 		return pvs[i].p < pvs[j].p
 	})
-	
+
 	adj := make([]float64, n)
 	for i := 0; i < n; i++ {
 		a := pvs[i].p * float64(n-i)
@@ -305,7 +305,7 @@ func BHAdjust(pValues []float64) []float64 {
 	sort.Slice(pvs, func(i, j int) bool {
 		return pvs[i].p > pvs[j].p // Step-up: start from largest
 	})
-	
+
 	adj := make([]float64, n)
 	minQ := 1.0
 	for i := 0; i < n; i++ {
@@ -334,7 +334,7 @@ func ExactMultinomialSRM(counts map[string]int, weights map[string]float64) floa
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	
+
 	for _, k := range keys {
 		totalCounts += counts[k]
 		totalWeight += weights[k]
@@ -342,14 +342,14 @@ func ExactMultinomialSRM(counts map[string]int, weights map[string]float64) floa
 	if totalCounts == 0 || totalWeight == 0 {
 		return 1.0
 	}
-	
+
 	if len(counts) == 2 {
 		// Exact binomial for 2 arms
 		k1 := keys[0]
 		n := totalCounts
 		x := counts[k1]
 		p := weights[k1] / totalWeight
-		
+
 		// Two-sided p-value: sum probabilities <= P(X=x)
 		logProb := func(k int) float64 {
 			return logChoose(n, k) + float64(k)*math.Log(p) + float64(n-k)*math.Log(1-p)
@@ -367,7 +367,7 @@ func ExactMultinomialSRM(counts map[string]int, weights map[string]float64) floa
 		}
 		return pSum
 	}
-	
+
 	// Chi-square for >= 3 arms
 	var chiSq float64
 	for _, k := range keys {
@@ -411,7 +411,7 @@ func ModelMixBalanceTest(byArm map[string]map[string]int) (pValue float64, flagg
 	var total int
 	rowTotals := make(map[string]int)
 	colTotals := make(map[string]int)
-	
+
 	for arm, models := range byArm {
 		for model, count := range models {
 			rowTotals[arm] += count
@@ -419,11 +419,11 @@ func ModelMixBalanceTest(byArm map[string]map[string]int) (pValue float64, flagg
 			total += count
 		}
 	}
-	
+
 	if total == 0 {
 		return 1.0, false
 	}
-	
+
 	var chiSq float64
 	for arm, models := range byArm {
 		for model, count := range models {
@@ -434,15 +434,15 @@ func ModelMixBalanceTest(byArm map[string]map[string]int) (pValue float64, flagg
 			}
 		}
 	}
-	
+
 	df := (len(rowTotals) - 1) * (len(colTotals) - 1)
 	if df <= 0 {
 		return 1.0, false
 	}
-	
+
 	// Wilson-Hilferty
 	z := math.Sqrt(9.0*float64(df)/2.0) * (math.Pow(chiSq/float64(df), 1.0/3.0) - 1.0 + 2.0/(9.0*float64(df)))
 	pValue = 0.5 * math.Erfc(z/math.Sqrt2)
-	
+
 	return pValue, pValue < 0.01
 }

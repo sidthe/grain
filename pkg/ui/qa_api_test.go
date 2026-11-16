@@ -129,12 +129,12 @@ func TestQAFlowsTaskQAAndFeedbackEndpoints(t *testing.T) {
 		t.Fatalf("RecordTaskQACheckRuns: %v", err)
 	}
 
-	// 3. GET /api/tasks/101/qa reads assignment, checkRuns, and findings.
+	// 3. GET /api/tasks/101/qa reads assignment, armId, checkRuns, and findings.
 	taskQA, err := client.TaskQA(ctx, "101")
 	if err != nil {
 		t.Fatalf("TaskQA(101): %v", err)
 	}
-	if !taskQA.Enabled || taskQA.Assignment == nil || taskQA.Assignment.Arm != model.QAArmTreatment {
+	if !taskQA.Enabled || taskQA.Assignment == nil || taskQA.Assignment.Arm != model.QAArmTreatment || taskQA.ArmID != model.QAArmTreatment {
 		t.Fatalf("unexpected taskQA assignment: %+v", taskQA)
 	}
 	if len(taskQA.CheckRuns) != 1 || len(taskQA.Findings) != 1 {

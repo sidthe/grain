@@ -178,6 +178,7 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
   await expect(stageTree).toBeVisible();
   await expect(stepInspector).toBeVisible();
   await expect(promptBudget).toBeVisible();
+  await expect(page.getByTestId("qa-mobile-back")).toBeHidden();
 
   const v4Row = page.getByTestId("qa-flow-row-engineering-workflow-v4");
   const v3Row = page.getByTestId("qa-flow-row-golden-v3");

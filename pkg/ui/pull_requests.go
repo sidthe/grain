@@ -89,8 +89,8 @@ type PullRequests interface {
 
 // OpenPullRequestOptions carries optional pre-PR quality check metadata when opening a pull request.
 type OpenPullRequestOptions struct {
-	CallerNotes          string
-	AllowHoldAfterS3Cap  bool
+	CallerNotes         string
+	AllowHoldAfterS3Cap bool
 }
 
 // PullRequestsWithOptions is an optional extension on PullRequests for deployments that run pre-PR QA gates.

@@ -112,6 +112,9 @@ func EvaluateCustomCheck(check CustomCheckDecl, ctx CustomCheckContext) ([]Custo
 	case "pattern":
 		var forbid, require *regexp.Regexp
 		if check.ForbidAdded != "" {
+			if len(check.ForbidAdded) > 512 {
+				return nil, fmt.Errorf("forbid-added regex exceeds 512 bytes")
+			}
 			re, err := regexp.Compile(check.ForbidAdded)
 			if err != nil {
 				return nil, fmt.Errorf("invalid forbid-added regex: %w", err)
@@ -119,6 +122,9 @@ func EvaluateCustomCheck(check CustomCheckDecl, ctx CustomCheckContext) ([]Custo
 			forbid = re
 		}
 		if check.RequireAdded != "" {
+			if len(check.RequireAdded) > 512 {
+				return nil, fmt.Errorf("require-added regex exceeds 512 bytes")
+			}
 			re, err := regexp.Compile(check.RequireAdded)
 			if err != nil {
 				return nil, fmt.Errorf("invalid require-added regex: %w", err)

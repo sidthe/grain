@@ -43,9 +43,7 @@
 .qa-flows-panel .qa-toolbar-identity,
 .qa-flows-panel .qa-toolbar-badges,
 .qa-flows-panel .qa-toolbar-right,
-.qa-flows-panel .detail-actions,
 .qa-flows-panel .qa-flow-strip,
-.qa-flows-panel .qa-flows-list,
 .qa-flows-panel .qa-draft-meta-fields,
 .qa-flows-panel .editor-actions,
 .qa-flows-panel .dialog-actions {
@@ -53,6 +51,32 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.qa-flows-panel .detail-actions,
+.qa-flows-panel .qa-flows-list {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow-x: auto;
+  flex-wrap: nowrap;
+  scrollbar-width: thin;
+  padding-bottom: 4px;
+  max-width: 100%;
+}
+
+.qa-flows-panel .detail-actions > * {
+  flex-shrink: 0;
+}
+
+.qa-flows-panel .qa-mobile-back[hidden] {
+  display: none !important;
+}
+
+@media (min-width: 900px) {
+  .qa-flows-panel .qa-mobile-back {
+    display: none !important;
+  }
 }
 
 .qa-flows-panel .qa-toolbar-title {
@@ -102,6 +126,7 @@
 .qa-flows-panel .flow-item {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 6px;
   padding: 4px 10px;
   border-radius: 8px;
@@ -139,7 +164,13 @@
   font-weight: 600;
 }
 
+.qa-flows-panel .qa-draft-meta-fields label:last-child {
+  flex: 1 1 260px;
+}
+
 .qa-flows-panel .qa-draft-meta-fields input {
+  width: 100%;
+  box-sizing: border-box;
   padding: 5px 8px;
   border-radius: 6px;
   border: 1px solid var(--md-sys-color-outline);

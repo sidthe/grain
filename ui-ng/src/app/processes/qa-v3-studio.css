@@ -181,6 +181,11 @@
   padding: 20px 24px;
 }
 
+.qa-v3-studio .qa-inspector-tabs {
+  border-bottom: 1px solid var(--md-sys-color-outline-variant);
+  margin-bottom: 0;
+}
+
 .qa-v3-studio .qa-flow-summary-bar,
 .qa-v3-studio .qa-contract-grid {
   display: grid;

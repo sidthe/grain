@@ -18,7 +18,6 @@ import {
   type OnDestroy,
   ViewEncapsulation,
   computed,
-  effect,
   inject,
   signal,
   viewChild,
@@ -227,47 +226,53 @@ import { QaV3StudioComponent } from "./qa-v3-studio.component";
         </div>
 
         <!-- FLOW PACKAGE QUICK-SELECT STRIP -->
-        <div
-          class="qa-flows-list"
-          role="navigation"
-          aria-label="Quality flow versions"
-          data-testid="quality-flows-list"
-        >
-          @for (group of groupedVersions(); track group.key) {
-            @for (v of group.versions; track v.hash) {
-              <button
-                type="button"
-                class="flow-item"
-                [attr.data-testid]="
-                  v.hash === group.latestActiveHash
-                    ? 'qa-flow-row-' + group.key
-                    : null
-                "
-                [class.selected]="v.hash === selectedHash()"
-                [attr.aria-current]="v.hash === selectedHash() ? 'true' : null"
-                (click)="selectVersion(v.hash, true)"
-              >
-                <span class="s-mono">{{ group.key }}&#64;{{ v.version }}</span>
-                @if (
-                  qaEnabled() &&
-                  activeFlowId() === v.key &&
-                  v.hash === group.latestActiveHash
-                ) {
-                  <span class="badge active-badge"
-                    >Active ({{ activeRolloutPct() }}%)</span
+        @if (!isEditing()) {
+          <div
+            class="qa-flows-list"
+            role="navigation"
+            aria-label="Quality flow versions"
+            data-testid="quality-flows-list"
+          >
+            @for (group of groupedVersions(); track group.key) {
+              @for (v of group.versions; track v.hash) {
+                <button
+                  type="button"
+                  class="flow-item"
+                  [attr.data-testid]="
+                    v.hash === group.latestActiveHash
+                      ? 'qa-flow-row-' + group.key
+                      : null
+                  "
+                  [class.selected]="v.hash === selectedHash()"
+                  [attr.aria-current]="
+                    v.hash === selectedHash() ? 'true' : null
+                  "
+                  (click)="selectVersion(v.hash, true)"
+                >
+                  <span class="s-mono"
+                    >{{ group.key }}&#64;{{ v.version }}</span
                   >
-                } @else if (v.hash === group.latestActiveHash) {
-                  <span class="badge active-badge">Available</span>
-                }
-                @if (v.builtIn) {
-                  <span class="badge builtin-badge">Built-in</span>
-                } @else {
-                  <span class="badge custom-badge">Custom</span>
-                }
-              </button>
+                  @if (
+                    qaEnabled() &&
+                    activeFlowId() === v.key &&
+                    v.hash === group.latestActiveHash
+                  ) {
+                    <span class="badge active-badge"
+                      >Active ({{ activeRolloutPct() }}%)</span
+                    >
+                  } @else if (v.hash === group.latestActiveHash) {
+                    <span class="badge active-badge">Available</span>
+                  }
+                  @if (v.builtIn) {
+                    <span class="badge builtin-badge">Built-in</span>
+                  } @else {
+                    <span class="badge custom-badge">Custom</span>
+                  }
+                </button>
+              }
             }
-          }
-        </div>
+          </div>
+        }
 
         <!-- IN-PLACE DRAFT EDITING DIRTY BAR -->
         @if (isEditing()) {
@@ -393,23 +398,23 @@ export class QaFlowsPanelComponent implements OnDestroy {
 
   readonly maxPromptBudgetBytes = MAX_PROMPT_BUDGET_BYTES;
 
-  versions = signal<QAFlowVersionItem[]>([]);
-  selectedHash = signal<string | null>(null);
-  selectedDetail = signal<QAFlowVersionDetail | null>(null);
-  qaEnabled = signal(false);
-  activeFlowId = signal("");
-  activeRolloutPct = signal(0);
-  mobileInspectorOpen = signal(false);
+  readonly versions = signal<QAFlowVersionItem[]>([]);
+  readonly selectedHash = signal<string | null>(null);
+  readonly selectedDetail = signal<QAFlowVersionDetail | null>(null);
+  readonly qaEnabled = signal(false);
+  readonly activeFlowId = signal("");
+  readonly activeRolloutPct = signal(0);
+  readonly mobileInspectorOpen = signal(false);
 
-  isEditing = signal(false);
-  isFork = signal(false);
-  showParentDiff = signal(false);
-  jumpSection = signal("basics");
+  readonly isEditing = signal(false);
+  readonly isFork = signal(false);
+  readonly showParentDiff = signal(false);
+  readonly jumpSection = signal("basics");
 
-  dryRunResult = signal<QADryRunResponse | null>(null);
-  confirmRequest = signal<ConfirmRequest | null>(null);
+  readonly dryRunResult = signal<QADryRunResponse | null>(null);
+  readonly confirmRequest = signal<ConfirmRequest | null>(null);
 
-  draftDeclaration = signal<FlowDeclarationV2>({
+  readonly draftDeclaration = signal<FlowDeclarationV2>({
     schema: "grain.dev/qa-flow/v2",
     key: "",
     label: "",
@@ -427,13 +432,15 @@ export class QaFlowsPanelComponent implements OnDestroy {
     },
   });
 
-  draftChecks = signal<
+  readonly draftChecks = signal<
     Record<
       string,
       { enabled: boolean; severity: string; params?: Record<string, unknown> }
     >
   >({});
-  draftCheckParams = signal<Record<string, Record<string, unknown>>>({});
+  readonly draftCheckParams = signal<Record<string, Record<string, unknown>>>(
+    {},
+  );
 
   readonly verifierTiers = ["T1", "T2", "T3"];
 
@@ -448,20 +455,22 @@ export class QaFlowsPanelComponent implements OnDestroy {
     "golden:boundary-fuzz",
   ];
 
-  canAdmin = computed(() => this.access.can("POST /api/qa/flow-versions"));
+  readonly canAdmin = computed(() =>
+    this.access.can("POST /api/qa/flow-versions"),
+  );
 
-  draftSkillBytes = computed(() =>
+  readonly draftSkillBytes = computed(() =>
     this.byteCount(this.draftDeclaration().skill?.text || ""),
   );
 
-  skillByteOverflow = computed(
+  readonly skillByteOverflow = computed(
     () =>
       this.isEditing() &&
       this.draftSkillBytes() >
         (this.draftDeclaration().skill?.maxBytes || MAX_PROMPT_BUDGET_BYTES),
   );
 
-  activePromptBytes = computed(() => {
+  readonly activePromptBytes = computed(() => {
     const st = this.studio();
     if (st) {
       const studioBytes = st.activePromptBytes();
@@ -482,18 +491,18 @@ export class QaFlowsPanelComponent implements OnDestroy {
     );
   });
 
-  promptBudgetPct = computed(() =>
+  readonly promptBudgetPct = computed(() =>
     Math.min(
       100,
       Math.round((this.activePromptBytes() / MAX_PROMPT_BUDGET_BYTES) * 100),
     ),
   );
 
-  promptBudgetOverflow = computed(
+  readonly promptBudgetOverflow = computed(
     () => this.activePromptBytes() > MAX_PROMPT_BUDGET_BYTES,
   );
 
-  flowSwitcherOptions = computed<PillOption[]>(() => {
+  readonly flowSwitcherOptions = computed<PillOption[]>(() => {
     const opts: PillOption[] = [];
     for (const group of this.groupedVersions()) {
       for (const v of group.versions) {
@@ -506,7 +515,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
     return opts;
   });
 
-  groupedVersions = computed(() => {
+  readonly groupedVersions = computed(() => {
     const list = this.versions();
     const groups = new Map<string, QAFlowVersionItem[]>();
     for (const v of list) {
@@ -526,7 +535,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
       .sort((a, b) => a.key.localeCompare(b.key));
   });
 
-  diffFiles = computed(() => {
+  readonly diffFiles = computed(() => {
     const detail = this.selectedDetail();
     let oldT = detail ? this.readonlySkillText(detail) : "";
     let newT =
@@ -582,17 +591,6 @@ export class QaFlowsPanelComponent implements OnDestroy {
 
   constructor() {
     void this.loadVersions();
-
-    effect(() => {
-      const qm = this.route.snapshot?.queryParamMap;
-      const targetParam = qm?.get("from") || qm?.get("flow");
-      if (targetParam && this.versions().length > 0 && !this.selectedHash()) {
-        const resolvedHash = this.resolveVersionParam(targetParam);
-        if (resolvedHash) {
-          void this.selectVersion(resolvedHash);
-        }
-      }
-    });
 
     const qpObs = (
       this.route as unknown as {
@@ -886,7 +884,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
       },
     };
 
-    const draft = JSON.parse(JSON.stringify(base)) as FlowDeclarationV2;
+    const draft = structuredClone(base);
     if (
       detail.schemaVer === "grain.dev/qa-flow/v4" ||
       detail.declarationV4 ||
@@ -1033,8 +1031,8 @@ export class QaFlowsPanelComponent implements OnDestroy {
   }
 
   prepareDraft(): FlowDeclarationV2 & Partial<FlowDeclarationV4> {
-    const draft = JSON.parse(
-      JSON.stringify(this.draftDeclaration()),
+    const draft = structuredClone(
+      this.draftDeclaration(),
     ) as FlowDeclarationV2 & Partial<FlowDeclarationV4>;
     delete draft.declarationV3;
     delete draft.declarationV4;

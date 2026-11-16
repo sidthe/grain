@@ -40,11 +40,13 @@ type QAFlowsResponse struct {
 
 // TaskQAResponse is returned by GET /api/tasks/{id}/qa.
 type TaskQAResponse struct {
-	TaskID     string              `json:"taskId"`
-	Enabled    bool                `json:"enabled"`
-	Assignment *model.QAAssignment `json:"assignment,omitempty"`
-	CheckRuns  []model.QACheckRun  `json:"checkRuns"`
-	Findings   []model.QAFinding   `json:"findings"`
+	TaskID       string              `json:"taskId"`
+	Enabled      bool                `json:"enabled"`
+	ExperimentID string              `json:"experimentId,omitempty"`
+	ArmID        string              `json:"armId,omitempty"`
+	Assignment   *model.QAAssignment `json:"assignment,omitempty"`
+	CheckRuns    []model.QACheckRun  `json:"checkRuns"`
+	Findings     []model.QAFinding   `json:"findings"`
 }
 
 // RecordQACheckRunEntry carries one in-sandbox S3 check run and its findings from `grain mcpserver`.
@@ -239,6 +241,16 @@ func (s *Server) handleGetTaskQA(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	var expID, armID string
+	if res != nil {
+		expID = res.ExperimentID
+		armID = res.ArmID
+	} else if resolve.RegistryResolver != nil {
+		if regRes, rErr := resolve.RegistryResolver(ctx, s.tasks.Store, *task, model.ResolveQARootOrigin(task.WorkOrigin, task.ID), qaCfg); rErr == nil && regRes != nil {
+			expID = regRes.ExperimentID
+			armID = regRes.ArmID
+		}
+	}
 	var assign *model.QAAssignment
 	if res != nil || qaCfg.EpochOrDefault() >= 1 {
 		assign, _ = s.tasks.Store.QAAssignment(ctx, model.ResolveQARootOrigin(task.WorkOrigin, task.ID), qaCfg.EpochOrDefault())
@@ -269,11 +281,13 @@ func (s *Server) handleGetTaskQA(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, TaskQAResponse{
-		TaskID:     taskID,
-		Enabled:    enabled,
-		Assignment: assign,
-		CheckRuns:  runs,
-		Findings:   findings,
+		TaskID:       taskID,
+		Enabled:      enabled,
+		ExperimentID: expID,
+		ArmID:        armID,
+		Assignment:   assign,
+		CheckRuns:    runs,
+		Findings:     findings,
 	})
 }
 
