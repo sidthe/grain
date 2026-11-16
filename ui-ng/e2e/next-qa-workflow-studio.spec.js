@@ -98,6 +98,10 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
   expect(widthRatio).toBeGreaterThanOrEqual(0.85);
 
   // Verify Software workflow (<g-pill-select data-testid="process-qa-flow-select">) inside Schedule edit drawer.
+  await page
+    .getByRole("button", { name: /Release Qualification/ })
+    .first()
+    .click();
   await page.getByTestId("sched-edit-btn").click();
   const flowSelectBtn = page.getByTestId("process-qa-flow-select");
   await expect(flowSelectBtn).toBeVisible();
@@ -121,6 +125,10 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
   // Verify Template and Suite drawers also bind and reset qaFlowRef cleanly.
   await page.getByTestId("proc-tab-templates").click();
   await expect(page).toHaveURL(/\/next\/processes\/templates/);
+  await page
+    .getByRole("button", { name: /release-qualification/i })
+    .first()
+    .click();
   await page.getByTestId("tmpl-edit-btn").click();
   await page.getByTestId("process-qa-flow-select").click();
   await page.getByTestId("process-qa-flow-select-opt-golden-v3@1").click();
@@ -136,6 +144,10 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
 
   await page.getByTestId("proc-tab-suites").click();
   await expect(page).toHaveURL(/\/next\/processes\/suites/);
+  await page
+    .getByRole("button", { name: /Release Qualification Suite/i })
+    .first()
+    .click();
   await page.getByTestId("suite-edit-btn").click();
   await page.getByTestId("process-qa-flow-select").click();
   await page.getByTestId("process-qa-flow-select-opt-golden-v2@1").click();

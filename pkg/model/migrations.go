@@ -1066,7 +1066,13 @@ var Migrations = []Migration{
 		},
 	},
 	{
-		Version:     147,
+		Version: 147,
+		Description: "have every repository's declarations read again, writing back the grants a schedule file " +
+			"declares that a firing from before 144 wrote its template's over (grain/task-5360)",
+		Up: rereadDeclarations,
+	},
+	{
+		Version:     148,
 		Description: "add qa_flow_version to track quality-control execution flow snapshots and task_origin_ref index",
 		Statements: []string{
 			"CREATE TABLE IF NOT EXISTS `qa_flow_version` (" +
@@ -1089,7 +1095,7 @@ var Migrations = []Migration{
 		},
 	},
 	{
-		Version:     148,
+		Version:     149,
 		Description: "add qa_experiment and qa_enrollment tables and provenance columns on task_qa_check_run",
 		Statements: []string{
 			qaExperimentTable,
@@ -1124,7 +1130,7 @@ var Migrations = []Migration{
 		},
 	},
 	{
-		Version:     149,
+		Version:     150,
 		Description: "add schema_ver and source provenance to qa_flow_version, and blast/complexity/triage tracking to task_qa_check_run",
 		Statements: []string{
 			"ALTER TABLE `qa_flow_version` ADD COLUMN `schema_ver` TEXT NOT NULL DEFAULT 'grain.dev/qa-flow/v2'",
@@ -1140,7 +1146,7 @@ var Migrations = []Migration{
 		},
 	},
 	{
-		Version:     150,
+		Version:     151,
 		Description: "add operator-only qa_flow_ref to template, suite, schedule, repo_config, and task",
 		Statements: []string{
 			"ALTER TABLE `template` ADD COLUMN `qa_flow_ref` TEXT NOT NULL DEFAULT ''",

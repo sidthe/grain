@@ -331,3 +331,11 @@ g-telemetry-page .ops-toolbar {
 .tel-tip-row.is-muted {
   color: var(--md-sys-color-on-surface-variant);
 }
+
+/* A paused scope's local reset, on the line its Paused pill sits on so a
+   table of paused scopes grows no taller. */
+.usage-scope-reset {
+  margin-left: 6px;
+  font-size: 12px;
+  white-space: nowrap;
+}
