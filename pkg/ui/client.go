@@ -2843,6 +2843,25 @@ func (c *Client) defaultTaskHosting(ctx context.Context, target *model.RepoRef) 
 	return model.NormalizeHosting(h), nil
 }
 
+// refuseNonOperatorQAFlowRef refuses a qaFlowRef write from anyone but a
+// full-access operator: proposed tasks, agents (in-process or external), and
+// restricted access roles cannot bind or rebind a QA flow.
+func (c *Client) refuseNonOperatorQAFlowRef(ctx context.Context, proposedBy string) error {
+	if proposedBy != "" || c.requestActor(ctx).Actor.Kind == model.PrincipalAgent {
+		return validationErrorf("an agent or proposed task cannot set qaFlowRef")
+	}
+	if _, isAgent := agentCallFromContext(ctx); isAgent {
+		return forbiddenErrorf("an agent cannot set qaFlowRef")
+	}
+	if externalTokenFromContext(ctx) != nil {
+		return forbiddenErrorf("an external agent cannot set qaFlowRef")
+	}
+	if role := accessRoleFromContext(ctx); role != nil && !role.Full {
+		return forbiddenErrorf("setting qaFlowRef requires an operator")
+	}
+	return nil
+}
+
 // No GitHub issue is created, and none is needed: Store.NewTaskID
 // allocates identity, so a task exists the moment this returns. That is
 // the whole inversion in one method -- this used to open an issue and let
@@ -2876,22 +2895,6 @@ func (c *Client) defaultTaskHosting(ctx context.Context, target *model.RepoRef) 
 // sandboxes have no shape of their own, rather than filed and then
 // discovered at sandbox setup -- refuseIgnoredSandboxShape has why, and
 // UpdateTask applies the same rule to an edit.
-func (c *Client) refuseNonOperatorQAFlowRef(ctx context.Context, proposedBy string) error {
-	if proposedBy != "" || c.requestActor(ctx).Actor.Kind == model.PrincipalAgent {
-		return validationErrorf("an agent or proposed task cannot set qaFlowRef")
-	}
-	if _, isAgent := agentCallFromContext(ctx); isAgent {
-		return forbiddenErrorf("an agent cannot set qaFlowRef")
-	}
-	if externalTokenFromContext(ctx) != nil {
-		return forbiddenErrorf("an external agent cannot set qaFlowRef")
-	}
-	if role := accessRoleFromContext(ctx); role != nil && !role.Full {
-		return forbiddenErrorf("setting qaFlowRef requires an operator")
-	}
-	return nil
-}
-
 func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, error) {
 	if req.ProposalKey != "" {
 		if existing, err := c.Store.TaskWithTag(ctx, req.ProposalKey); err != nil {

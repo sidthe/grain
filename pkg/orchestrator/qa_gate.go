@@ -389,9 +389,33 @@ func salvageQAStageIfPresent(
 	// 2b. Run any post-S4 custom stages (insert-after: s4) that have not yet run for headSHA.
 	if hasUnrecordedCustomStageForSlot(ctx, store, task.ID, headSHA, flow, "s4") {
 		if mirrorWS == nil {
-			if rt := LiveQARuntime(); rt != nil && rt.DataDir != "" && rt.ResolveRemote != nil {
-				if remoteURL, bearer, rErr := rt.ResolveRemote(ctx, *task.Target); rErr == nil && remoteURL != "" {
-					mirrorWS, _ = checks.OpenMirrorWorkspace(ctx, filepath.Join(rt.DataDir, "qa-repos"), remoteURL, bearer, task.Base, checkBranch)
+			if rt := LiveQARuntime(); rt != nil && rt.DataDir != "" {
+				// A live runtime that cannot open the mirror must not let post-S4 custom
+				// stages pass vacuously over an empty diff: hold the promoted PR instead,
+				// matching the pre-PR mirror-error path above.
+				var openErr error
+				if rt.ResolveRemote == nil {
+					openErr = fmt.Errorf("no remote resolver configured")
+				} else if remoteURL, bearer, rErr := rt.ResolveRemote(ctx, *task.Target); rErr != nil {
+					openErr = rErr
+				} else if remoteURL == "" {
+					openErr = fmt.Errorf("empty remote URL")
+				} else {
+					mirrorWS, openErr = checks.OpenMirrorWorkspace(ctx, filepath.Join(rt.DataDir, "qa-repos"), remoteURL, bearer, task.Base, checkBranch)
+				}
+				if mirrorWS == nil {
+					if openErr == nil {
+						openErr = fmt.Errorf("mirror workspace unavailable")
+					}
+					if stageExists {
+						if _, err := promoteQAStageBranch(client, *task.Target, stageBranch, task.BranchName(), headSHA); err != nil {
+							return true, err
+						}
+					}
+					if err := holdTaskForQA(ctx, store, task.ID, headSHA, fmt.Sprintf("post-S4 custom stage mirror error: %v", openErr), now); err != nil {
+						return true, err
+					}
+					return false, nil
 				}
 			}
 		}
