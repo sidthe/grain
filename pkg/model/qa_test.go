@@ -52,6 +52,81 @@ func TestQAConfigDefaultsAndValidation(t *testing.T) {
 	if _, err := model.NormalizeQAConfig(model.QAConfig{Enabled: true, FlowID: "unknown-flow", RolloutPct: 50}); err == nil {
 		t.Errorf("expected unknown flowId error")
 	}
+
+	wantIDs := []string{
+		model.QAFlowGoldenV1Minimal,
+		model.QAFlowEngineeringWorkflowV4,
+		model.QAFlowGoldenV3Enforced,
+		model.QAFlowGoldenV3,
+		model.QAFlowGoldenV2,
+		model.QAFlowDeterministicS3Only,
+		model.QAFlowRepoCustom,
+	}
+	if got := model.QAFlowIDs(); !reflect.DeepEqual(got, wantIDs) {
+		t.Fatalf("QAFlowIDs() = %v, want %v", got, wantIDs)
+	}
+	for _, validID := range []string{
+		model.QAFlowGoldenV1Minimal,
+		model.QAFlowGoldenV1Minimal + "@1",
+		model.QAFlowEngineeringWorkflowV4,
+		model.QAFlowEngineeringWorkflowV4 + "@1",
+		model.QAFlowGoldenV3Enforced,
+		model.QAFlowGoldenV3Enforced + "@1",
+		model.QAFlowGoldenV3,
+		model.QAFlowGoldenV3 + "@1",
+		model.QAFlowGoldenV2,
+		model.QAFlowGoldenV2 + "@1",
+		model.QAFlowGoldenV2ChecksOnly,
+		model.QAFlowGoldenV2ChecksOnly + "@1",
+		model.QAFlowGoldenV2SkillOnly,
+		model.QAFlowGoldenV2SkillOnly + "@1",
+		model.QAFlowDeterministicS3Only,
+		model.QAFlowRepoCustom,
+	} {
+		if !model.ValidQAFlowID(validID) {
+			t.Errorf("ValidQAFlowID(%q) = false, want true", validID)
+		}
+		norm, err := model.NormalizeQAConfig(model.QAConfig{Enabled: true, FlowID: validID, RolloutPct: 25})
+		if err != nil || norm.FlowID != validID {
+			t.Errorf("NormalizeQAConfig(%q) = (%+v, %v), want FlowID=%q", validID, norm, err, validID)
+		}
+	}
+	for _, invalidID := range []string{"", "nonexistent-flow", "golden-v3@2", "golden-v3@1@1"} {
+		if model.ValidQAFlowID(invalidID) {
+			t.Errorf("ValidQAFlowID(%q) = true, want false", invalidID)
+		}
+	}
+
+	// Custom validator support (plus nil fallback to ValidQAFlowID) and stored round-trip.
+	customNorm, err := model.NormalizeQAConfigWithValidator(
+		model.QAConfig{Enabled: true, FlowID: "team-custom-flow", RolloutPct: 40},
+		func(id string) bool { return id == "team-custom-flow" },
+	)
+	if err != nil || customNorm.FlowID != "team-custom-flow" {
+		t.Fatalf("NormalizeQAConfigWithValidator custom = (%+v, %v)", customNorm, err)
+	}
+	if _, err := model.NormalizeQAConfigWithValidator(
+		model.QAConfig{Enabled: true, FlowID: "team-custom-flow", RolloutPct: 40},
+		nil,
+	); err == nil {
+		t.Fatalf("expected nil validator to fall back to ValidQAFlowID")
+	}
+	customAdv, err := model.AdvanceQAConfigWithValidator(
+		customNorm,
+		model.QAConfig{Enabled: true, FlowID: "team-custom-flow@2", RolloutPct: 40},
+		func(id string) bool { return id == "team-custom-flow@2" },
+	)
+	if err != nil || customAdv.FlowID != "team-custom-flow@2" || customAdv.RegimeID != 2 {
+		t.Fatalf("AdvanceQAConfigWithValidator = (%+v, %v), want FlowID=team-custom-flow@2 RegimeID=2", customAdv, err)
+	}
+	encCustom := model.EncodeQAConfig(customAdv)
+	decCustom, err := model.DecodeQAConfig(encCustom)
+	if err != nil || !customAdv.Equal(decCustom) {
+		t.Fatalf("DecodeQAConfig(%q) = (%+v, %v), want %+v", encCustom, decCustom, err, customAdv)
+	}
+	if _, err := model.DecodeQAConfig(`{"enabled":true,"rolloutPct":20,"unknownKey":1}`); err == nil {
+		t.Fatalf("expected DecodeQAConfig to reject unknown JSON keys")
+	}
 }
 
 func TestQAConfigAdvanceBumpsRegimeAndPreservesExplicitShadowFalse(t *testing.T) {

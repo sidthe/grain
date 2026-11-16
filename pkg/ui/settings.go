@@ -39,6 +39,7 @@ import (
 	"github.com/ai-on-gke/grain/pkg/iapreconciler"
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/pkgcache"
+	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 	"github.com/ai-on-gke/grain/pkg/sandboximage"
 	"github.com/ai-on-gke/grain/pkg/upgrade"
 )
@@ -1221,7 +1222,7 @@ func (c *Client) settingsFrom(ctx context.Context, cfg model.Config, repoConfigs
 		RepairTemplateID:                   cfg.RepairTemplateID,
 		QAEnabled:                          cfg.QA.Enabled,
 		QAFlowID:                           cfg.QA.FlowIDOrDefault(),
-		QAFlowIDs:                          model.QAFlowIDs(),
+		QAFlowIDs:                          c.qaFlowIDs(ctx),
 		QARolloutPct:                       cfg.QA.RolloutPct,
 		QAShadowOnControl:                  cfg.QA.ShadowOnControlEnabled(),
 		QAEpoch:                            cfg.QA.EpochOrDefault(),
@@ -1489,7 +1490,7 @@ func (c *Client) GetSettings(ctx context.Context) (Settings, error) {
 			AutoMergeByDefault:                 def.AutoMergeByDefault,
 			QAEnabled:                          def.QA.Enabled,
 			QAFlowID:                           def.QA.FlowIDOrDefault(),
-			QAFlowIDs:                          model.QAFlowIDs(),
+			QAFlowIDs:                          c.qaFlowIDs(ctx),
 			QARolloutPct:                       def.QA.RolloutPct,
 			QAShadowOnControl:                  def.QA.ShadowOnControlEnabled(),
 			QAEpoch:                            def.QA.EpochOrDefault(),
@@ -2464,7 +2465,9 @@ func (c *Client) plannedConfig(ctx context.Context, req UpdateSettingsRequest) (
 			}
 			nextQA.Epoch = *req.QAEpoch
 		}
-		advanced, err := model.AdvanceQAConfig(before.QA, nextQA)
+		advanced, err := model.AdvanceQAConfigWithValidator(before.QA, nextQA, func(flow string) bool {
+			return c.validQAFlowID(ctx, flow)
+		})
 		if err != nil {
 			return model.Config{}, validationErrorf("qa: %v", err)
 		}
@@ -2717,6 +2720,66 @@ func autoUpgradeTimeOrDefault(at string) string {
 		return at
 	}
 	return model.DefaultAutoUpgradeTime
+}
+
+func (c *Client) qaFlowIDs(ctx context.Context) []string {
+	ids := model.QAFlowIDs()
+	if c.Store == nil {
+		return ids
+	}
+	versions, err := c.Store.ListQAFlowVersions(ctx, "", 50)
+	if err != nil {
+		return ids
+	}
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		seen[id] = true
+	}
+	for _, fv := range versions {
+		key := strings.TrimSpace(fv.Key)
+		if key == "" || fv.RetiredAt != nil || seen[key] {
+			continue
+		}
+		seen[key] = true
+		ids = append(ids, key)
+	}
+	return ids
+}
+
+func (c *Client) validQAFlowID(ctx context.Context, flow string) bool {
+	trimmed := strings.TrimSpace(flow)
+	if trimmed == "" {
+		return false
+	}
+	if model.ValidQAFlowID(trimmed) {
+		return true
+	}
+	if c.Store == nil || !hasActiveStoredQAFlowVersion(ctx, c.Store, trimmed) {
+		return false
+	}
+	spec, _, err := resolve.LookupFlowSpec(ctx, c.Store, trimmed)
+	return err == nil && spec != nil
+}
+
+func hasActiveStoredQAFlowVersion(ctx context.Context, store *model.Store, ref string) bool {
+	if before, after, hasAt := strings.Cut(ref, "@"); hasAt {
+		vNum, err := strconv.Atoi(after)
+		if err != nil || vNum <= 0 {
+			return false
+		}
+		fv, err := store.GetQAFlowVersionByKeyVersion(ctx, before, vNum)
+		return err == nil && fv.RetiredAt == nil
+	}
+	if fv, err := store.GetQAFlowVersion(ctx, ref); err == nil {
+		return fv.RetiredAt == nil
+	}
+	list, err := store.ListQAFlowVersions(ctx, ref, 50)
+	if err != nil || len(list) == 0 {
+		return false
+	}
+	return slices.ContainsFunc(list, func(v model.QAFlowVersion) bool {
+		return v.RetiredAt == nil
+	})
 }
 
 func (c *Client) PlanSettings(ctx context.Context, req UpdateSettingsRequest) (Settings, error) {

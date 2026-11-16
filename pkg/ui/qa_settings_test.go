@@ -15,11 +15,15 @@
 package ui_test
 
 import (
+	"encoding/json"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ai-on-gke/grain/pkg/model"
+	"github.com/ai-on-gke/grain/pkg/qa"
 	"github.com/ai-on-gke/grain/pkg/ui"
 )
 
@@ -103,5 +107,144 @@ func TestQASettingsShipOffPlanCleanlyAndBumpRegimeOnRolloutChange(t *testing.T) 
 	epoch1 := 1
 	if _, err := c.PlanSettings(ctx, ui.UpdateSettingsRequest{QAEpoch: &epoch1}); err == nil || !strings.Contains(err.Error(), "epoch cannot decrease") {
 		t.Fatalf("expected epoch downgrade rejection, got %v", err)
+	}
+}
+
+func TestQASettingsAcceptV4VersionedAndStoredCustomFlowsAndRejectRetired(t *testing.T) {
+	t.Parallel()
+	c, st, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	baseSpec, ok := qa.LookupFlow(model.DefaultQAFlowID)
+	if !ok {
+		t.Fatalf("qa.LookupFlow(%q) not found", model.DefaultQAFlowID)
+	}
+	baseSpec.ID = "custom-team-flow@1"
+	specBytes, err := json.Marshal(baseSpec)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	if err := st.InsertQAFlowVersion(ctx, model.QAFlowVersion{
+		Hash:      "sha256:custom-team-flow-v1",
+		Key:       "custom-team-flow",
+		Version:   1,
+		Label:     "Custom Team Flow",
+		SpecJSON:  string(specBytes),
+		CreatedAt: now,
+		CreatedBy: "operator",
+	}); err != nil {
+		t.Fatalf("InsertQAFlowVersion active: %v", err)
+	}
+	// Duplicate version under the same key to verify QAFlowIDs deduplication.
+	if err := st.InsertQAFlowVersion(ctx, model.QAFlowVersion{
+		Hash:      "sha256:custom-team-flow-v2",
+		Key:       "custom-team-flow",
+		Version:   2,
+		Label:     "Custom Team Flow v2",
+		SpecJSON:  string(specBytes),
+		CreatedAt: now.Add(time.Minute),
+		CreatedBy: "operator",
+	}); err != nil {
+		t.Fatalf("InsertQAFlowVersion v2: %v", err)
+	}
+
+	retiredAt := now.Add(2 * time.Minute)
+	if err := st.InsertQAFlowVersion(ctx, model.QAFlowVersion{
+		Hash:      "sha256:retired-custom-flow-v1",
+		Key:       "retired-custom-flow",
+		Version:   1,
+		Label:     "Retired Custom Flow",
+		SpecJSON:  string(specBytes),
+		CreatedAt: now,
+		RetiredAt: &retiredAt,
+		CreatedBy: "operator",
+	}); err != nil {
+		t.Fatalf("InsertQAFlowVersion retired: %v", err)
+	}
+
+	cur, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings: %v", err)
+	}
+	if cur.QAFlowIDs[0] != model.QAFlowGoldenV1Minimal {
+		t.Fatalf("QAFlowIDs[0] = %q, want %q", cur.QAFlowIDs[0], model.QAFlowGoldenV1Minimal)
+	}
+	customCount := 0
+	for _, id := range cur.QAFlowIDs {
+		if id == "custom-team-flow" {
+			customCount++
+		}
+		if id == "retired-custom-flow" {
+			t.Fatalf("retired custom flow leaked into QAFlowIDs: %v", cur.QAFlowIDs)
+		}
+	}
+	if customCount != 1 {
+		t.Fatalf("expected custom-team-flow once in QAFlowIDs, got %d (%v)", customCount, cur.QAFlowIDs)
+	}
+	if !slices.Contains(cur.QAFlowIDs, model.QAFlowEngineeringWorkflowV4) {
+		t.Fatalf("expected %q in QAFlowIDs, got %v", model.QAFlowEngineeringWorkflowV4, cur.QAFlowIDs)
+	}
+
+	enable := true
+	for _, validFlow := range []string{
+		model.QAFlowEngineeringWorkflowV4,
+		model.QAFlowGoldenV3 + "@1",
+		"custom-team-flow",
+		"custom-team-flow@1",
+	} {
+		flow := validFlow
+		t.Run("accept_"+flow, func(t *testing.T) {
+			planned, err := c.PlanSettings(ctx, ui.UpdateSettingsRequest{
+				QAEnabled: &enable,
+				QAFlowID:  &flow,
+			})
+			if err != nil {
+				t.Fatalf("PlanSettings(%q): %v", flow, err)
+			}
+			if planned.QAFlowID != flow {
+				t.Fatalf("PlanSettings QAFlowID = %q, want %q", planned.QAFlowID, flow)
+			}
+			saved, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{
+				QAEnabled: &enable,
+				QAFlowID:  &flow,
+			})
+			if err != nil {
+				t.Fatalf("UpdateSettings(%q): %v", flow, err)
+			}
+			if saved.QAFlowID != flow {
+				t.Fatalf("UpdateSettings QAFlowID = %q, want %q", saved.QAFlowID, flow)
+			}
+			fetched, err := c.GetSettings(ctx)
+			if err != nil || fetched.QAFlowID != flow {
+				t.Fatalf("GetSettings after saving %q = (%q, %v)", flow, fetched.QAFlowID, err)
+			}
+		})
+	}
+
+	// Retire custom-team-flow@2 and verify custom-team-flow@2 is now rejected while @1 remains valid,
+	// and nonexistent-flow + retired-custom-flow are rejected.
+	if err := st.RetireQAFlowVersion(ctx, "sha256:custom-team-flow-v2", now.Add(3*time.Minute)); err != nil {
+		t.Fatalf("RetireQAFlowVersion: %v", err)
+	}
+	for _, badFlow := range []string{
+		"nonexistent-flow",
+		"retired-custom-flow",
+		"retired-custom-flow@1",
+		"sha256:retired-custom-flow-v1",
+		"custom-team-flow@2",
+	} {
+		flow := badFlow
+		t.Run("reject_"+flow, func(t *testing.T) {
+			if _, err := c.PlanSettings(ctx, ui.UpdateSettingsRequest{QAFlowID: &flow}); err == nil || !strings.Contains(err.Error(), "flowId") {
+				t.Fatalf("PlanSettings(%q) expected flowId error, got %v", flow, err)
+			}
+			if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{QAFlowID: &flow}); err == nil || !strings.Contains(err.Error(), "flowId") {
+				t.Fatalf("UpdateSettings(%q) expected flowId error, got %v", flow, err)
+			}
+		})
 	}
 }

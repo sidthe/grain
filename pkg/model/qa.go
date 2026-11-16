@@ -27,9 +27,15 @@ import (
 
 // Built-in quality control flow package identifiers.
 const (
-	QAFlowGoldenV1Minimal     = "golden-v1-minimal"
-	QAFlowDeterministicS3Only = "deterministic-s3-only"
-	QAFlowRepoCustom          = "repo-custom"
+	QAFlowGoldenV1Minimal       = "golden-v1-minimal"
+	QAFlowEngineeringWorkflowV4 = "engineering-workflow-v4"
+	QAFlowGoldenV3Enforced      = "golden-v3-enforced"
+	QAFlowGoldenV3              = "golden-v3"
+	QAFlowGoldenV2              = "golden-v2"
+	QAFlowGoldenV2ChecksOnly    = "golden-v2-checks-only"
+	QAFlowGoldenV2SkillOnly     = "golden-v2-skill-only"
+	QAFlowDeterministicS3Only   = "deterministic-s3-only"
+	QAFlowRepoCustom            = "repo-custom"
 
 	DefaultQAFlowID = QAFlowGoldenV1Minimal
 )
@@ -124,6 +130,10 @@ func (s *Store) ActiveQAAssignmentForTask(ctx context.Context, taskID string) (*
 func QAFlowIDs() []string {
 	return []string{
 		QAFlowGoldenV1Minimal,
+		QAFlowEngineeringWorkflowV4,
+		QAFlowGoldenV3Enforced,
+		QAFlowGoldenV3,
+		QAFlowGoldenV2,
 		QAFlowDeterministicS3Only,
 		QAFlowRepoCustom,
 	}
@@ -131,7 +141,15 @@ func QAFlowIDs() []string {
 
 // ValidQAFlowID reports whether id names a supported quality control flow package.
 func ValidQAFlowID(id string) bool {
-	return slices.Contains(QAFlowIDs(), strings.TrimSpace(id))
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" {
+		return false
+	}
+	base := strings.TrimSuffix(trimmed, "@1")
+	if slices.Contains(QAFlowIDs(), base) {
+		return true
+	}
+	return base == QAFlowGoldenV2ChecksOnly || base == QAFlowGoldenV2SkillOnly
 }
 
 // QAConfig configures the deployment-wide quality control engine and single-instance
@@ -219,16 +237,26 @@ func (c QAConfig) Equal(o QAConfig) bool {
 // NormalizeQAConfig validates and canonicalizes cfg. A completely zero QAConfig stays zero
 // so untouched deployments write "" in grain_config.qa.
 func NormalizeQAConfig(cfg QAConfig) (QAConfig, error) {
+	return NormalizeQAConfigWithValidator(cfg, nil)
+}
+
+// NormalizeQAConfigWithValidator validates and canonicalizes cfg using validFlow when non-nil
+// (falling back to ValidQAFlowID when validFlow is nil).
+func NormalizeQAConfigWithValidator(cfg QAConfig, validFlow func(string) bool) (QAConfig, error) {
 	if cfg.IsZero() {
 		return QAConfig{}, nil
 	}
 	if cfg.RolloutPct < 0 || cfg.RolloutPct > 100 {
 		return QAConfig{}, fmt.Errorf("rolloutPct must be between 0 and 100 (got %d)", cfg.RolloutPct)
 	}
+	checkFlow := validFlow
+	if checkFlow == nil {
+		checkFlow = ValidQAFlowID
+	}
 	flow := strings.TrimSpace(cfg.FlowID)
 	if flow == "" {
 		flow = DefaultQAFlowID
-	} else if !ValidQAFlowID(flow) {
+	} else if !checkFlow(flow) {
 		return QAConfig{}, fmt.Errorf("flowId must be one of %s (got %q)", strings.Join(QAFlowIDs(), ", "), flow)
 	}
 	epoch := cfg.Epoch
@@ -254,6 +282,12 @@ func NormalizeQAConfig(cfg QAConfig) (QAConfig, error) {
 // RegimeID automatically when an existing configuration changes rollout parameters so A/B
 // telemetry segments cleanly across rollout percentage or flow changes.
 func AdvanceQAConfig(prev, next QAConfig) (QAConfig, error) {
+	return AdvanceQAConfigWithValidator(prev, next, nil)
+}
+
+// AdvanceQAConfigWithValidator validates next against prev using validFlow when non-nil
+// (falling back to ValidQAFlowID when validFlow is nil).
+func AdvanceQAConfigWithValidator(prev, next QAConfig, validFlow func(string) bool) (QAConfig, error) {
 	if next.IsZero() && prev.IsZero() {
 		return QAConfig{}, nil
 	}
@@ -265,7 +299,7 @@ func AdvanceQAConfig(prev, next QAConfig) (QAConfig, error) {
 	if next.RegimeID < prev.RegimeIDOrDefault() {
 		next.RegimeID = prev.RegimeIDOrDefault()
 	}
-	norm, err := NormalizeQAConfig(next)
+	norm, err := NormalizeQAConfigWithValidator(next, validFlow)
 	if err != nil {
 		return QAConfig{}, err
 	}
@@ -282,9 +316,27 @@ func AdvanceQAConfig(prev, next QAConfig) (QAConfig, error) {
 	return norm, nil
 }
 
+func validStoredQAFlowRef(id string) bool {
+	trimmed := strings.TrimSpace(id)
+	if trimmed == "" || len(trimmed) > 256 {
+		return false
+	}
+	if ValidQAFlowID(trimmed) {
+		return true
+	}
+	for _, r := range trimmed {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '-' || r == '_' || r == '.' || r == '@' || r == ':' || r == '#' || r == '/' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // EncodeQAConfig serializes cfg as compact JSON for grain_config.qa, or "" when zero.
 func EncodeQAConfig(cfg QAConfig) string {
-	norm, err := NormalizeQAConfig(cfg)
+	norm, err := NormalizeQAConfigWithValidator(cfg, validStoredQAFlowRef)
 	if err != nil || norm.IsZero() {
 		return ""
 	}
@@ -304,10 +356,15 @@ func DecodeQAConfig(raw string) (QAConfig, error) {
 		return QAConfig{}, nil
 	}
 	var cfg QAConfig
-	if err := json.Unmarshal([]byte(s), &cfg); err != nil {
+	dec := json.NewDecoder(strings.NewReader(s))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
 		return QAConfig{}, fmt.Errorf("decoding grain_config.qa: %w", err)
 	}
-	norm, err := NormalizeQAConfig(cfg)
+	if dec.More() {
+		return QAConfig{}, fmt.Errorf("decoding grain_config.qa: trailing data")
+	}
+	norm, err := NormalizeQAConfigWithValidator(cfg, validStoredQAFlowRef)
 	if err != nil {
 		return QAConfig{}, fmt.Errorf("invalid grain_config.qa: %w", err)
 	}
