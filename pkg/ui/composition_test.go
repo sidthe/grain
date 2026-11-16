@@ -925,5 +925,57 @@ func TestQAFlowRefCompositionAndUICrudRoundTrip(t *testing.T) {
 	}); err == nil {
 		t.Fatal("expected CreateTask with ProposedBy and QAFlowRef to be refused, got nil")
 	}
-}
 
+	// Agent principal in context is refused across Template, Schedule, Suite, and RepoSettings QAFlowRef writes.
+	agentCtx := ui.WithPrincipal(ctx, model.Principal{Kind: model.PrincipalAgent, ID: "agent-run-1"})
+	if _, err := c.CreateTemplate(agentCtx, ui.CreateTemplateRequest{
+		Name:      "agent-tmpl",
+		Title:     "Agent tmpl",
+		QAFlowRef: "bypass-flow",
+	}); err == nil {
+		t.Fatal("expected agent CreateTemplate with QAFlowRef to be refused")
+	}
+	bypassFlow := "bypass-flow"
+	if _, err := c.UpdateTemplate(agentCtx, tmpl.ID, ui.UpdateTemplateRequest{QAFlowRef: &bypassFlow}); err == nil {
+		t.Fatal("expected agent UpdateTemplate with QAFlowRef to be refused")
+	}
+	if _, err := c.CreateSchedule(agentCtx, ui.CreateScheduleRequest{
+		Title:      "Agent sched",
+		Repo:       "acme/widgets",
+		QAFlowRef:  "bypass-flow",
+		Recurrence: everyDay,
+	}); err == nil {
+		t.Fatal("expected agent CreateSchedule with QAFlowRef to be refused")
+	}
+	if _, err := c.UpdateSchedule(agentCtx, sched.ID, ui.UpdateScheduleRequest{QAFlowRef: &bypassFlow}); err == nil {
+		t.Fatal("expected agent UpdateSchedule with QAFlowRef to be refused")
+	}
+	if _, err := c.CreateSuite(agentCtx, ui.CreateSuiteRequest{
+		Name:        "Agent suite",
+		TemplateIDs: []string{tmpl.ID},
+		Mode:        "count",
+		Count:       1,
+		QAFlowRef:   "bypass-flow",
+	}); err == nil {
+		t.Fatal("expected agent CreateSuite with QAFlowRef to be refused")
+	}
+	if _, err := c.UpdateSuite(agentCtx, suite.ID, ui.UpdateSuiteRequest{QAFlowRef: &bypassFlow}); err == nil {
+		t.Fatal("expected agent UpdateSuite with QAFlowRef to be refused")
+	}
+	if _, err := c.SetRepoSettings(agentCtx, "acme/widgets", ui.SetRepoSettingsRequest{QAFlowRef: &bypassFlow}); err == nil {
+		t.Fatal("expected agent SetRepoSettings with QAFlowRef to be refused")
+	}
+
+	// Detaching a schedule from a template when schedule.QAFlowRef is empty preserves the template's QAFlowRef.
+	sched, err = c.UpdateSchedule(ctx, sched.ID, ui.UpdateScheduleRequest{QAFlowRef: &empty})
+	if err != nil {
+		t.Fatalf("clear schedule QAFlowRef: %v", err)
+	}
+	detachedSched, err := c.UpdateSchedule(ctx, sched.ID, ui.UpdateScheduleRequest{TemplateID: &empty})
+	if err != nil {
+		t.Fatalf("detach schedule template: %v", err)
+	}
+	if detachedSched.QAFlowRef != "strict-v2" {
+		t.Fatalf("detached schedule QAFlowRef = %q, want strict-v2 (inherited from detached template)", detachedSched.QAFlowRef)
+	}
+}

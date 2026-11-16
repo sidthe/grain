@@ -2843,6 +2843,25 @@ func (c *Client) defaultTaskHosting(ctx context.Context, target *model.RepoRef) 
 	return model.NormalizeHosting(h), nil
 }
 
+// refuseNonOperatorQAFlowRef refuses a qaFlowRef write from anyone but a
+// full-access operator: proposed tasks, agents (in-process or external), and
+// restricted access roles cannot bind or rebind a QA flow.
+func (c *Client) refuseNonOperatorQAFlowRef(ctx context.Context, proposedBy string) error {
+	if proposedBy != "" || c.requestActor(ctx).Actor.Kind == model.PrincipalAgent {
+		return validationErrorf("an agent or proposed task cannot set qaFlowRef")
+	}
+	if _, isAgent := agentCallFromContext(ctx); isAgent {
+		return forbiddenErrorf("an agent cannot set qaFlowRef")
+	}
+	if externalTokenFromContext(ctx) != nil {
+		return forbiddenErrorf("an external agent cannot set qaFlowRef")
+	}
+	if role := accessRoleFromContext(ctx); role != nil && !role.Full {
+		return forbiddenErrorf("setting qaFlowRef requires an operator")
+	}
+	return nil
+}
+
 // No GitHub issue is created, and none is needed: Store.NewTaskID
 // allocates identity, so a task exists the moment this returns. That is
 // the whole inversion in one method -- this used to open an issue and let
@@ -2885,14 +2904,8 @@ func (c *Client) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, e
 		}
 	}
 	if strings.TrimSpace(req.QAFlowRef) != "" {
-		if req.ProposedBy != "" || c.requestActor(ctx).Actor.Kind == model.PrincipalAgent {
-			return Task{}, validationErrorf("an agent or proposed task cannot set qaFlowRef")
-		}
-		if _, isAgent := agentCallFromContext(ctx); isAgent {
-			return Task{}, forbiddenErrorf("an agent cannot set qaFlowRef")
-		}
-		if externalTokenFromContext(ctx) != nil {
-			return Task{}, forbiddenErrorf("an external agent cannot set qaFlowRef")
+		if err := c.refuseNonOperatorQAFlowRef(ctx, req.ProposedBy); err != nil {
+			return Task{}, err
 		}
 	}
 	req, err := c.fromTemplate(ctx, req)

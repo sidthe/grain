@@ -45,6 +45,7 @@
 .qa-flows-panel .qa-toolbar-right,
 .qa-flows-panel .detail-actions,
 .qa-flows-panel .qa-flow-strip,
+.qa-flows-panel .qa-flows-list,
 .qa-flows-panel .qa-draft-meta-fields,
 .qa-flows-panel .editor-actions,
 .qa-flows-panel .dialog-actions {
@@ -181,7 +182,7 @@
 .qa-flows-panel .modal-backdrop-right {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: color-mix(in srgb, var(--md-sys-color-scrim) 50%, transparent);
   z-index: 100;
   display: flex;
   align-items: flex-start;
@@ -235,6 +236,12 @@
   font-size: 13px;
   background: var(--md-sys-color-surface-container-lowest);
   color: var(--md-sys-color-on-surface);
+}
+
+@media (max-width: 899.95px) {
+  .qa-flows-panel .qa-studio-toolbar {
+    padding: 10px 14px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

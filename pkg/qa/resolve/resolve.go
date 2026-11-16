@@ -17,6 +17,7 @@ package resolve
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -337,54 +338,431 @@ func resolveLegacyAssignment(ctx context.Context, store *model.Store, assign mod
 	}
 }
 
-// ComposeTightenOnly enforces non-negotiable QA floors on a resolved FlowSpec:
+func severityRank(s string) int {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "blocking":
+		return 3
+	case "warn":
+		return 2
+	case "shadow":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func triageModeRank(m string) int {
+	switch strings.ToLower(strings.TrimSpace(m)) {
+	case "enforced":
+		return 3
+	case "shadow":
+		return 2
+	case "off":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func tierRank(t string) int {
+	switch strings.ToUpper(strings.TrimSpace(t)) {
+	case "T3":
+		return 3
+	case "T2":
+		return 2
+	case "T1":
+		return 1
+	default:
+		return 0
+	}
+}
+
+func unionStrings(base, extra []string) []string {
+	if len(base) == 0 && len(extra) == 0 {
+		return nil
+	}
+	out := slices.Clone(base)
+	for _, s := range extra {
+		if !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func floorRuleTemplate(ruleID string) qa.RuleSpec {
+	switch ruleID {
+	case qa.RuleTestIntegrityGuard:
+		return qa.RuleSpec{
+			ID:          qa.RuleTestIntegrityGuard,
+			Label:       "Test integrity & non-tautological assertion guard",
+			Stage:       "S3",
+			Severity:    "blocking",
+			Summary:     "Blocks net test file deletion, unannotated skips or focused tests, net test-case drops alongside production edits, and newly added tests with zero failure or assertion calls.",
+			TargetPaths: []string{"**/*_test.go", "**/*.spec.ts", "**/*.spec.js"},
+			Enabled:     true,
+		}
+	case qa.RuleStrictConfigDecoder:
+		return qa.RuleSpec{
+			ID:          qa.RuleStrictConfigDecoder,
+			Label:       "Type-aware strict YAML/JSON configuration decoder",
+			Stage:       "S3",
+			Severity:    "blocking",
+			Summary:     "Requires KnownFields(true) or DisallowUnknownFields() when decoding YAML/JSON into Go structs while ignoring structural yaml.Node, map, raw message, or interface targets.",
+			TargetPaths: []string{"pkg/**/*.go", "internal/**/*.go", "cmd/**/*.go"},
+			Enabled:     true,
+		}
+	default:
+		return qa.RuleSpec{
+			ID:       ruleID,
+			Stage:    "S3",
+			Severity: "blocking",
+			Enabled:  true,
+		}
+	}
+}
+
+// ComposeTightenOnly enforces non-negotiable QA floors on a resolved FlowSpec
+// and optionally merges one or more overlay specs using tighten-only semantics
+// (an overlay can enable stages/checks or raise severities/triage modes, but can
+// never disable an enabled stage/check or lower a severity/triage floor).
 // StagingIsolation is always true, and RuleTestIntegrityGuard and
 // RuleStrictConfigDecoder are always Enabled: true with Severity: "blocking".
-func ComposeTightenOnly(spec qa.FlowSpec) qa.FlowSpec {
-	spec.StagingIsolation = true
+func ComposeTightenOnly(spec qa.FlowSpec, overlays ...qa.FlowSpec) qa.FlowSpec {
 	rules := make([]qa.RuleSpec, len(spec.Rules))
-	copy(rules, spec.Rules)
+	for i := range spec.Rules {
+		rules[i] = spec.Rules[i]
+		rules[i].TargetPaths = slices.Clone(spec.Rules[i].TargetPaths)
+		if spec.Rules[i].Params != nil {
+			paramsCopy := make(map[string]any, len(spec.Rules[i].Params))
+			for k, v := range spec.Rules[i].Params {
+				paramsCopy[k] = v
+			}
+			rules[i].Params = paramsCopy
+		}
+	}
+	spec.Rules = rules
+	spec.VerifierTiers = slices.Clone(spec.VerifierTiers)
+	spec.StrictDecoderPaths = slices.Clone(spec.StrictDecoderPaths)
+	spec.RiskOverrides = slices.Clone(spec.RiskOverrides)
+	spec.CustomStages = slices.Clone(spec.CustomStages)
+	spec.CustomChecks = slices.Clone(spec.CustomChecks)
+	spec.ReadabilityPacks = slices.Clone(spec.ReadabilityPacks)
+	spec.SkillSteps = slices.Clone(spec.SkillSteps)
+	spec.S5MergeTriage.AutoMergeTiers = slices.Clone(spec.S5MergeTriage.AutoMergeTiers)
+	spec.S5MergeTriage.RequireHumanTiers = slices.Clone(spec.S5MergeTriage.RequireHumanTiers)
+
+	for _, ov := range overlays {
+		spec.StopNudge = spec.StopNudge || ov.StopNudge
+		spec.InjectSkill = spec.InjectSkill || ov.InjectSkill
+		if strings.TrimSpace(spec.SkillText) == "" && strings.TrimSpace(ov.SkillText) != "" {
+			spec.SkillText = ov.SkillText
+		}
+		if ov.SkillBytes > spec.SkillBytes {
+			spec.SkillBytes = ov.SkillBytes
+		}
+		if strings.TrimSpace(spec.IntentSkillText) == "" && strings.TrimSpace(ov.IntentSkillText) != "" {
+			spec.IntentSkillText = ov.IntentSkillText
+		}
+		if strings.TrimSpace(spec.PlanCriticSkillText) == "" && strings.TrimSpace(ov.PlanCriticSkillText) != "" {
+			spec.PlanCriticSkillText = ov.PlanCriticSkillText
+		}
+		if strings.TrimSpace(spec.VerifierSkillText) == "" && strings.TrimSpace(ov.VerifierSkillText) != "" {
+			spec.VerifierSkillText = ov.VerifierSkillText
+		}
+		if strings.TrimSpace(spec.SecuritySkillText) == "" && strings.TrimSpace(ov.SecuritySkillText) != "" {
+			spec.SecuritySkillText = ov.SecuritySkillText
+		}
+
+		// S0 Intent tighten-only
+		if ov.S0Intent || ov.S0IntentConfig.Enabled {
+			spec.S0Intent = true
+			spec.S0IntentConfig.Enabled = true
+		}
+		if spec.S0Intent {
+			spec.S0IntentConfig.Enabled = true
+		}
+		spec.S0IntentConfig.Complexities = unionStrings(spec.S0IntentConfig.Complexities, ov.S0IntentConfig.Complexities)
+		if ov.S0IntentConfig.MaxSeconds > spec.S0IntentConfig.MaxSeconds {
+			spec.S0IntentConfig.MaxSeconds = ov.S0IntentConfig.MaxSeconds
+		}
+		if ov.S0IntentConfig.MaxTokens > spec.S0IntentConfig.MaxTokens {
+			spec.S0IntentConfig.MaxTokens = ov.S0IntentConfig.MaxTokens
+		}
+		if ov.S0IntentConfig.OnClarification == "park" || (spec.S0IntentConfig.OnClarification == "" && ov.S0IntentConfig.OnClarification != "") {
+			spec.S0IntentConfig.OnClarification = ov.S0IntentConfig.OnClarification
+		}
+
+		// S2 Plan Critic tighten-only
+		if ov.S2PlanCritic || ov.S2PlanCriticConfig.Enabled {
+			spec.S2PlanCritic = true
+			spec.S2PlanCriticConfig.Enabled = true
+		}
+		if spec.S2PlanCritic {
+			spec.S2PlanCriticConfig.Enabled = true
+		}
+		spec.S2PlanCriticConfig.Complexities = unionStrings(spec.S2PlanCriticConfig.Complexities, ov.S2PlanCriticConfig.Complexities)
+		spec.S2PlanCriticConfig.Tiers = unionStrings(spec.S2PlanCriticConfig.Tiers, ov.S2PlanCriticConfig.Tiers)
+		if ov.S2PlanCriticConfig.MaxSeconds > spec.S2PlanCriticConfig.MaxSeconds {
+			spec.S2PlanCriticConfig.MaxSeconds = ov.S2PlanCriticConfig.MaxSeconds
+		}
+		if ov.S2PlanCriticConfig.MaxTokens > spec.S2PlanCriticConfig.MaxTokens {
+			spec.S2PlanCriticConfig.MaxTokens = ov.S2PlanCriticConfig.MaxTokens
+		}
+		if ov.S2PlanCriticConfig.MaxBounces > spec.S2PlanCriticConfig.MaxBounces {
+			spec.S2PlanCriticConfig.MaxBounces = ov.S2PlanCriticConfig.MaxBounces
+		}
+
+		// S4 Verifier tighten-only
+		if ov.EnableS4 {
+			spec.EnableS4 = true
+		}
+		spec.VerifierTiers = unionStrings(spec.VerifierTiers, ov.VerifierTiers)
+		if ov.MaxS4RepairRounds > spec.MaxS4RepairRounds {
+			spec.MaxS4RepairRounds = ov.MaxS4RepairRounds
+		}
+		if ov.MaxS4Seconds > spec.MaxS4Seconds {
+			spec.MaxS4Seconds = ov.MaxS4Seconds
+		}
+		if ov.MaxS4Tokens > spec.MaxS4Tokens {
+			spec.MaxS4Tokens = ov.MaxS4Tokens
+		}
+		if strings.TrimSpace(spec.VerifierChecklist) == "" && strings.TrimSpace(ov.VerifierChecklist) != "" {
+			spec.VerifierChecklist = ov.VerifierChecklist
+		}
+		spec.StrictDecoderPaths = unionStrings(spec.StrictDecoderPaths, ov.StrictDecoderPaths)
+
+		// V4 Decompose, Context, PRContract tighten-only
+		if ov.Decompose.Enabled && ov.Decompose.Mode != "off" {
+			spec.Decompose.Enabled = true
+			if spec.Decompose.Mode == "" || spec.Decompose.Mode == "off" || ov.Decompose.Mode == "propose_tasks" {
+				spec.Decompose.Mode = ov.Decompose.Mode
+			}
+			spec.Decompose.Complexities = unionStrings(spec.Decompose.Complexities, ov.Decompose.Complexities)
+			if ov.Decompose.MaxSubtasks > spec.Decompose.MaxSubtasks {
+				spec.Decompose.MaxSubtasks = ov.Decompose.MaxSubtasks
+			}
+			if spec.Decompose.TargetDiffLines == 0 || (ov.Decompose.TargetDiffLines > 0 && ov.Decompose.TargetDiffLines < spec.Decompose.TargetDiffLines) {
+				spec.Decompose.TargetDiffLines = ov.Decompose.TargetDiffLines
+			}
+		}
+		if ov.Context.Enabled {
+			spec.Context.Enabled = true
+		}
+		spec.Context.IncludeCallers = spec.Context.IncludeCallers || ov.Context.IncludeCallers
+		spec.Context.IncludeMemory = spec.Context.IncludeMemory || ov.Context.IncludeMemory
+		if ov.Context.MaxTokens > spec.Context.MaxTokens {
+			spec.Context.MaxTokens = ov.Context.MaxTokens
+		}
+		spec.Context.ExtraPaths = unionStrings(spec.Context.ExtraPaths, ov.Context.ExtraPaths)
+
+		if ov.PRContract.Enabled && ov.PRContract.Mode != "off" {
+			spec.PRContract.Enabled = true
+			if severityRank(ov.PRContract.Mode) > severityRank(spec.PRContract.Mode) {
+				spec.PRContract.Mode = ov.PRContract.Mode
+			}
+			spec.PRContract.RequiredSections = unionStrings(spec.PRContract.RequiredSections, ov.PRContract.RequiredSections)
+			spec.PRContract.AuditLintSuppressions = spec.PRContract.AuditLintSuppressions || ov.PRContract.AuditLintSuppressions
+			if spec.PRContract.MaxSubjectChars == 0 || (ov.PRContract.MaxSubjectChars > 0 && ov.PRContract.MaxSubjectChars < spec.PRContract.MaxSubjectChars) {
+				spec.PRContract.MaxSubjectChars = ov.PRContract.MaxSubjectChars
+			}
+			if strings.TrimSpace(spec.PRContract.GuidanceText) == "" && strings.TrimSpace(ov.PRContract.GuidanceText) != "" {
+				spec.PRContract.GuidanceText = ov.PRContract.GuidanceText
+			}
+		}
+
+		// Rules tighten-only
+		for _, orule := range ov.Rules {
+			idx := -1
+			for i := range spec.Rules {
+				if spec.Rules[i].ID == orule.ID {
+					idx = i
+					break
+				}
+			}
+			if idx < 0 {
+				cloned := orule
+				cloned.TargetPaths = slices.Clone(orule.TargetPaths)
+				if orule.Params != nil {
+					p := make(map[string]any, len(orule.Params))
+					for k, v := range orule.Params {
+						p[k] = v
+					}
+					cloned.Params = p
+				}
+				spec.Rules = append(spec.Rules, cloned)
+				continue
+			}
+			r := &spec.Rules[idx]
+			r.Enabled = r.Enabled || orule.Enabled
+			if severityRank(orule.Severity) > severityRank(r.Severity) {
+				r.Severity = orule.Severity
+			}
+			if strings.TrimSpace(r.Label) == "" {
+				r.Label = orule.Label
+			}
+			if strings.TrimSpace(r.Stage) == "" {
+				r.Stage = orule.Stage
+			}
+			if strings.TrimSpace(r.Summary) == "" {
+				r.Summary = orule.Summary
+			}
+			r.TargetPaths = unionStrings(r.TargetPaths, orule.TargetPaths)
+			if len(orule.Params) > 0 {
+				if r.Params == nil {
+					r.Params = make(map[string]any, len(orule.Params))
+				}
+				for k, v := range orule.Params {
+					if _, exists := r.Params[k]; !exists {
+						r.Params[k] = v
+					}
+				}
+			}
+		}
+
+		// RiskOverrides tighten-only (append non-duplicate overrides)
+		for _, oro := range ov.RiskOverrides {
+			spec.RiskOverrides = append(spec.RiskOverrides, oro)
+		}
+
+		// CustomChecks tighten-only
+		for _, occ := range ov.CustomChecks {
+			found := false
+			for i := range spec.CustomChecks {
+				if spec.CustomChecks[i].ID == occ.ID {
+					if severityRank(occ.Severity) > severityRank(spec.CustomChecks[i].Severity) {
+						spec.CustomChecks[i].Severity = occ.Severity
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				spec.CustomChecks = append(spec.CustomChecks, occ)
+			}
+		}
+
+		// CustomStages tighten-only
+		for _, ocs := range ov.CustomStages {
+			found := false
+			for i := range spec.CustomStages {
+				if spec.CustomStages[i].ID == ocs.ID {
+					spec.CustomStages[i].CheckIDs = unionStrings(spec.CustomStages[i].CheckIDs, ocs.CheckIDs)
+					spec.CustomStages[i].WhenPaths = unionStrings(spec.CustomStages[i].WhenPaths, ocs.WhenPaths)
+					if tierRank(ocs.MinTier) < tierRank(spec.CustomStages[i].MinTier) && strings.TrimSpace(ocs.MinTier) != "" {
+						// Lower minTier means the stage runs on more tiers (tighter coverage).
+						spec.CustomStages[i].MinTier = ocs.MinTier
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				spec.CustomStages = append(spec.CustomStages, ocs)
+			}
+		}
+
+		// ReadabilityPacks & SkillSteps tighten-only
+		for _, op := range ov.ReadabilityPacks {
+			found := false
+			for i := range spec.ReadabilityPacks {
+				if spec.ReadabilityPacks[i].ID == op.ID {
+					spec.ReadabilityPacks[i].Enabled = spec.ReadabilityPacks[i].Enabled || op.Enabled
+					found = true
+					break
+				}
+			}
+			if !found {
+				spec.ReadabilityPacks = append(spec.ReadabilityPacks, op)
+			}
+		}
+		for _, os := range ov.SkillSteps {
+			found := false
+			for i := range spec.SkillSteps {
+				if spec.SkillSteps[i].ID == os.ID {
+					spec.SkillSteps[i].Enabled = spec.SkillSteps[i].Enabled || os.Enabled
+					found = true
+					break
+				}
+			}
+			if !found {
+				spec.SkillSteps = append(spec.SkillSteps, os)
+			}
+		}
+
+		// S5MergeTriage tighten-only
+		if triageModeRank(ov.S5MergeTriage.Mode) > triageModeRank(spec.S5MergeTriage.Mode) {
+			spec.S5MergeTriage.Mode = ov.S5MergeTriage.Mode
+		}
+		spec.S5MergeTriage.RequireHumanTiers = unionStrings(spec.S5MergeTriage.RequireHumanTiers, ov.S5MergeTriage.RequireHumanTiers)
+		if len(spec.S5MergeTriage.AutoMergeTiers) == 0 {
+			spec.S5MergeTriage.AutoMergeTiers = slices.Clone(ov.S5MergeTriage.AutoMergeTiers)
+		} else if len(ov.S5MergeTriage.AutoMergeTiers) > 0 {
+			var intersected []string
+			for _, t := range spec.S5MergeTriage.AutoMergeTiers {
+				if slices.Contains(ov.S5MergeTriage.AutoMergeTiers, t) {
+					intersected = append(intersected, t)
+				}
+			}
+			spec.S5MergeTriage.AutoMergeTiers = intersected
+		}
+	}
+
+	// Ensure any tier in RequireHumanTiers is removed from AutoMergeTiers (tighten-only human gate).
+	if len(spec.S5MergeTriage.RequireHumanTiers) > 0 && len(spec.S5MergeTriage.AutoMergeTiers) > 0 {
+		var filteredAuto []string
+		for _, t := range spec.S5MergeTriage.AutoMergeTiers {
+			if !slices.Contains(spec.S5MergeTriage.RequireHumanTiers, t) {
+				filteredAuto = append(filteredAuto, t)
+			}
+		}
+		spec.S5MergeTriage.AutoMergeTiers = filteredAuto
+	}
+
+	// Enforce mandatory global floors unconditionally.
+	spec.StagingIsolation = true
 	for _, floorID := range []string{qa.RuleTestIntegrityGuard, qa.RuleStrictConfigDecoder} {
+		tmpl := floorRuleTemplate(floorID)
 		found := false
-		for i := range rules {
-			if rules[i].ID == floorID {
-				rules[i].Enabled = true
-				rules[i].Severity = "blocking"
+		for i := range spec.Rules {
+			if spec.Rules[i].ID == floorID {
+				spec.Rules[i].Enabled = true
+				spec.Rules[i].Severity = "blocking"
+				if strings.TrimSpace(spec.Rules[i].Stage) == "" {
+					spec.Rules[i].Stage = tmpl.Stage
+				}
+				if strings.TrimSpace(spec.Rules[i].Label) == "" {
+					spec.Rules[i].Label = tmpl.Label
+				}
+				if strings.TrimSpace(spec.Rules[i].Summary) == "" {
+					spec.Rules[i].Summary = tmpl.Summary
+				}
+				if len(spec.Rules[i].TargetPaths) == 0 {
+					spec.Rules[i].TargetPaths = slices.Clone(tmpl.TargetPaths)
+				}
 				found = true
 			}
 		}
 		if !found {
-			rules = append(rules, qa.RuleSpec{
-				ID:       floorID,
-				Stage:    "S3",
-				Severity: "blocking",
-				Enabled:  true,
-			})
+			spec.Rules = append(spec.Rules, tmpl)
 		}
 	}
-	spec.Rules = rules
+	if spec.EnableS4 {
+		for i := range spec.Rules {
+			if spec.Rules[i].ID == qa.RuleS4OrthogonalVerifier {
+				spec.Rules[i].Enabled = true
+				if strings.TrimSpace(spec.Rules[i].Severity) == "" {
+					spec.Rules[i].Severity = "blocking"
+				}
+			}
+		}
+	}
 	return spec
 }
 
 func resolveOperatorFlowBinding(ctx context.Context, store *model.Store, task model.Task) (*Resolution, error) {
-	if ref := strings.TrimSpace(task.QAFlowRef); ref != "" {
-		spec, hash, err := LookupFlowSpec(ctx, store, ref)
-		if err != nil {
-			return nil, err
-		}
-		if spec != nil {
-			enforced := ComposeTightenOnly(*spec)
-			return &Resolution{
-				Source:      "process",
-				ArmID:       model.QAArmTreatment,
-				FlowID:      ref,
-				FlowHash:    hash,
-				QAEngineRev: qa.QAEngineRev,
-				Spec:        &enforced,
-				Shadow:      false,
-			}, nil
-		}
-	}
+	var repoSpec *qa.FlowSpec
+	var repoRef, repoHash string
 	if store != nil && task.Target != nil && *task.Target != (model.RepoRef{}) {
 		repoCfg, err := store.RepoConfig(ctx, *task.Target)
 		if err != nil {
@@ -397,19 +775,48 @@ func resolveOperatorFlowBinding(ctx context.Context, store *model.Store, task mo
 					return nil, err
 				}
 				if spec != nil {
-					enforced := ComposeTightenOnly(*spec)
-					return &Resolution{
-						Source:      "repo",
-						ArmID:       model.QAArmTreatment,
-						FlowID:      ref,
-						FlowHash:    hash,
-						QAEngineRev: qa.QAEngineRev,
-						Spec:        &enforced,
-						Shadow:      false,
-					}, nil
+					repoSpec = spec
+					repoRef = ref
+					repoHash = hash
 				}
 			}
 		}
+	}
+
+	if ref := strings.TrimSpace(task.QAFlowRef); ref != "" {
+		spec, hash, err := LookupFlowSpec(ctx, store, ref)
+		if err != nil {
+			return nil, err
+		}
+		if spec != nil {
+			var enforced qa.FlowSpec
+			if repoSpec != nil {
+				enforced = ComposeTightenOnly(*spec, *repoSpec)
+			} else {
+				enforced = ComposeTightenOnly(*spec)
+			}
+			return &Resolution{
+				Source:      "process",
+				ArmID:       model.QAArmTreatment,
+				FlowID:      ref,
+				FlowHash:    hash,
+				QAEngineRev: qa.QAEngineRev,
+				Spec:        &enforced,
+				Shadow:      false,
+			}, nil
+		}
+	}
+	if repoSpec != nil {
+		enforced := ComposeTightenOnly(*repoSpec)
+		return &Resolution{
+			Source:      "repo",
+			ArmID:       model.QAArmTreatment,
+			FlowID:      repoRef,
+			FlowHash:    repoHash,
+			QAEngineRev: qa.QAEngineRev,
+			Spec:        &enforced,
+			Shadow:      false,
+		}, nil
 	}
 	return nil, nil
 }

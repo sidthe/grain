@@ -197,6 +197,21 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
   );
   await expect(page.getByTestId("qa-schema-pill")).toContainText("v3");
 
+  // Verify 30/70 desktop split geometry and zero horizontal overflow at 1440x900.
+  const desktopTreeBox = await stageTree.boundingBox();
+  const desktopInspBox = await stepInspector.boundingBox();
+  expect(desktopTreeBox).not.toBeNull();
+  expect(desktopInspBox).not.toBeNull();
+  expect(desktopTreeBox.x + desktopTreeBox.width).toBeLessThanOrEqual(
+    desktopInspBox.x + 2,
+  );
+  const desktopStudioOverflow = await page.evaluate(
+    () =>
+      document.documentElement.scrollWidth -
+      document.documentElement.clientWidth,
+  );
+  expect(desktopStudioOverflow).toBeLessThanOrEqual(0);
+
   const axeStudio = await new AxeBuilder({ page })
     .disableRules(["color-contrast"])
     .analyze();
@@ -205,4 +220,22 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
       ["serious", "critical"].includes(v.impact ?? ""),
     ),
   ).toEqual([]);
+
+  // Verify single-column vertical stack and zero horizontal overflow on 390x844 phone viewport.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(stageTree).toBeVisible();
+  await expect(stepInspector).toBeVisible();
+  const phoneTreeBox = await stageTree.boundingBox();
+  const phoneInspBox = await stepInspector.boundingBox();
+  expect(phoneTreeBox).not.toBeNull();
+  expect(phoneInspBox).not.toBeNull();
+  expect(phoneInspBox.y).toBeGreaterThanOrEqual(
+    phoneTreeBox.y + phoneTreeBox.height - 2,
+  );
+  const phoneStudioOverflow = await page.evaluate(
+    () =>
+      document.documentElement.scrollWidth -
+      document.documentElement.clientWidth,
+  );
+  expect(phoneStudioOverflow).toBeLessThanOrEqual(0);
 });

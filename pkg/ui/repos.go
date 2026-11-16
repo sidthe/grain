@@ -1216,6 +1216,11 @@ func (c *Client) SetRepoCIMode(ctx context.Context, repo string, mode string) (R
 
 // SetRepoSettings updates multiple repository settings in one request.
 func (c *Client) SetRepoSettings(ctx context.Context, repo string, req SetRepoSettingsRequest) (RepoDefaults, error) {
+	if req.QAFlowRef != nil {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, ""); err != nil {
+			return RepoDefaults{}, err
+		}
+	}
 	parsed, err := c.parseRepo(repo)
 	if err != nil {
 		return RepoDefaults{}, validationErrorf("repo: %v", err)

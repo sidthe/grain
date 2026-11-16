@@ -825,6 +825,11 @@ func (c *Client) CreateSchedule(ctx context.Context, req CreateScheduleRequest) 
 			return Schedule{}, err
 		}
 	}
+	if strings.TrimSpace(req.QAFlowRef) != "" {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, ""); err != nil {
+			return Schedule{}, err
+		}
+	}
 	if err := c.checkSettingsWritable(ctx, "schedule"); err != nil {
 		return Schedule{}, err
 	}
@@ -1748,6 +1753,11 @@ type UpdateScheduleRequest struct {
 // (Enabled is not a cadence), which is what makes a pause a pause
 // rather than a reset.
 func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateScheduleRequest) (Schedule, error) {
+	if req.QAFlowRef != nil {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, ""); err != nil {
+			return Schedule{}, err
+		}
+	}
 	if req.Recurrence != nil && req.Recurrence.Kind == string(model.RecurrenceGitRef) && !(req.Enabled != nil && !*req.Enabled) {
 		r, err := parseRecurrence(*req.Recurrence)
 		if err != nil {
@@ -2140,6 +2150,9 @@ func (c *Client) UpdateSchedule(ctx context.Context, id string, req UpdateSchedu
 				// as inline content of its own -- the rest of that content
 				// is already on the row as its display cache.
 				*s = withScheduleTemplateSettings(*s, existingTemplate)
+				if req.QAFlowRef == nil && strings.TrimSpace(s.QAFlowRef) == "" && existingTemplate != nil && strings.TrimSpace(existingTemplate.QAFlowRef) != "" {
+					s.QAFlowRef = strings.TrimSpace(existingTemplate.QAFlowRef)
+				}
 				s.TemplateID = nil
 			}
 			if req.Title != nil {

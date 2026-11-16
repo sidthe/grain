@@ -207,6 +207,26 @@ func TestEvaluateAndApplyQATriageEnforcesHoldOnT2AndPreservesT1AutoMerge(t *test
 			t.Fatalf("control task must never get LinkQATriageHold watermark")
 		}
 	}
+
+	// 4. Treatment T1 task with LinkSecurityHold fails closed and withdraws AutoMerge.
+	secTask := model.Task{
+		ID:        "t1-sec-hold",
+		Title:     "T1 task with active security hold",
+		Target:    &repo,
+		AutoMerge: true,
+		Links:     []model.Link{{Kind: model.LinkSecurityHold, Target: "trust-boundary"}},
+	}
+	if err := store.PutTask(ctx, secTask); err != nil {
+		t.Fatalf("PutTask secTask: %v", err)
+	}
+	orchestrator.EvaluateAndApplyQATriage(ctx, store, nil, secTask, assign, "4444444444444444", []string{"pkg/util/math.go"}, true)
+	gotSec, err := store.GetTask(ctx, secTask.ID)
+	if err != nil {
+		t.Fatalf("GetTask secTask: %v", err)
+	}
+	if gotSec.AutoMerge {
+		t.Fatalf("expected LinkSecurityHold to withdraw AutoMerge under enforced S5 triage")
+	}
 }
 
 func TestPreCloneS0ClarificationHoldParksTaskWithoutClone(t *testing.T) {

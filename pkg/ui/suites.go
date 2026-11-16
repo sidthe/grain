@@ -240,6 +240,11 @@ type CreateSuiteRequest struct {
 
 // CreateSuite files a new suite template straight into the store.
 func (c *Client) CreateSuite(ctx context.Context, req CreateSuiteRequest) (Suite, error) {
+	if strings.TrimSpace(req.QAFlowRef) != "" {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, ""); err != nil {
+			return Suite{}, err
+		}
+	}
 	if err := c.checkSettingsWritable(ctx, "suite"); err != nil {
 		return Suite{}, err
 	}
@@ -359,6 +364,11 @@ type UpdateSuiteRequest struct {
 
 // UpdateSuite edits a suite's fields in place.
 func (c *Client) UpdateSuite(ctx context.Context, id string, req UpdateSuiteRequest) (Suite, error) {
+	if req.QAFlowRef != nil {
+		if err := c.refuseNonOperatorQAFlowRef(ctx, ""); err != nil {
+			return Suite{}, err
+		}
+	}
 	if err := c.checkSettingsWritable(ctx, "suite"); err != nil {
 		return Suite{}, err
 	}
