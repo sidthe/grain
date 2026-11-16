@@ -28,8 +28,16 @@ jobs:
       - go.sum
       - pkg/model/**
       - pkg/mcp/**
-      - pkg/agent/**
-      - pkg/orchestrator/**
+      - pkg/agent/*.go
+      - pkg/agent/antigravity/**
+      - pkg/agent/claude/**
+      - pkg/agent/credcheck/**
+      - pkg/agent/hookpolicy/**
+      - pkg/agent/sessionstore/**
+      - pkg/agent/stoprule/**
+      - pkg/orchestrator/orchestrator.go
+      - pkg/orchestrator/host_sandbox_release_test.go
+      - pkg/orchestrator/goal_mode*.go
       - pkg/daemon/**
       - pkg/ui/**
       - tests/hygiene/**
@@ -42,15 +50,17 @@ jobs:
           trap 'rm -rf "$CI_TMP"' EXIT
           export TMPDIR="$CI_TMP" GOTMPDIR="$CI_TMP"
           export GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=safe.bareRepository GIT_CONFIG_VALUE_0=all GIT_CONFIG_KEY_1=init.defaultRefFormat GIT_CONFIG_VALUE_1=files
-          bad_fmt=$(gofmt -l pkg/model pkg/mcp pkg/agent pkg/orchestrator pkg/daemon pkg/ui tests/hygiene)
+          orch_files="pkg/orchestrator/orchestrator.go"
+          if [ -f pkg/orchestrator/host_sandbox_release_test.go ]; then orch_files="$orch_files pkg/orchestrator/host_sandbox_release_test.go"; fi
+          bad_fmt=$(gofmt -l pkg/model pkg/mcp pkg/agent pkg/daemon pkg/ui tests/hygiene $orch_files)
           if [ -n "$bad_fmt" ]; then
             echo "gofmt needed on:"
             echo "$bad_fmt"
             exit 1
           fi
           go vet ./pkg/model ./pkg/mcp ./pkg/agent/... ./pkg/orchestrator ./pkg/daemon ./pkg/ui ./tests/hygiene
-          go test -count=1 ./pkg/model ./pkg/mcp ./pkg/agent/... ./pkg/ui ./tests/hygiene
-          go test -count=1 -run 'Goal|StopRule|Sandbox' ./pkg/orchestrator
+          go test -count=1 ./pkg/model ./pkg/mcp ./pkg/agent ./pkg/agent/antigravity/... ./pkg/agent/claude/... ./pkg/agent/credcheck ./pkg/agent/hookpolicy ./pkg/agent/sessionstore ./pkg/agent/stoprule ./pkg/ui ./tests/hygiene
+          go test -count=1 -run 'Goal|StopRule|HostSandbox|RemoveSandbox' ./pkg/orchestrator
 
   ui-ng:
     capabilities: []
