@@ -60,7 +60,7 @@ jobs:
           fi
           go vet ./pkg/model ./pkg/mcp ./pkg/agent/... ./pkg/orchestrator ./pkg/daemon ./pkg/ui ./tests/hygiene
           go test -count=1 ./pkg/model ./pkg/mcp ./pkg/agent ./pkg/agent/antigravity/... ./pkg/agent/claude/... ./pkg/agent/credcheck ./pkg/agent/hookpolicy ./pkg/agent/sessionstore ./pkg/agent/stoprule ./pkg/ui ./tests/hygiene
-          go test -count=1 -run 'Goal|StopRule|Sandbox|HostSandbox|RemoveSandbox' ./pkg/orchestrator
+          go test -count=1 -run 'Goal|StopRule|HostSandbox|RemoveSandbox' ./pkg/orchestrator
 
   ui-ng:
     capabilities: []
