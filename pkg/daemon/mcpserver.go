@@ -2018,7 +2018,7 @@ func (f *daemonProposalFiler) FileProposal(ctx context.Context, p mcp.ProposedTa
 		Goal:                p.Goal,
 		NoPort:              p.NoPort,
 		FixesBaseBranch:     p.FixesBaseBranch,
-		Origin:              p.Origin,
+		WorkOrigin:          p.Origin,
 		DeferredUntil:       p.NotBefore,
 		HoldForApproval:     p.HoldForApproval,
 	})
