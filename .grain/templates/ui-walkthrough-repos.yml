@@ -8,75 +8,84 @@ body: |
 
   ## Coverage
 
-  - Open Repos from the rail and from a direct URL; inspect counts,
-    search/sort, long-name layout (confirming the Blocked chip stays
-    visible first on busy rows, Add repo locks while an add is in flight
-    and stays on screen at phone width), and reorder repositories through
-    pointer and keyboard/tap affordances.
-  - Open a repo row and return to the list. Follow its task count into
-    the filtered task list (confirming case-insensitive repo matching and
-    that a removed repository's page still counts its remaining tasks,
-    including closed work), then return with browser navigation.
-  - File a task from the repo page and verify repo preselection and
-    persistence.
-  - Walk the repo page's tabs (Overview, CI, Merge queue, Agents,
-    Branches, Releases, Advanced), each of which rides in the URL as
-    `/repos/<owner>/<name>/settings/<tab>` (keeping the selected tab in
-    view on a phone) through reload and Back/Forward, and reach them
-    also from Settings → Repositories, whose rows show each repository's
-    base branch, declarations, CI mode and git connection. Inspect and
-    safely edit: on Overview, the summary, issue-import status, overlap
-    re-check card and recent CI runs; on CI, CI mode, Watch default
-    branch, CI workflows and CI capabilities (including the built-in
-    `release` server's methods and capability policy verdicts judged for
-    that repo); on Agents, Default capabilities, Upstream repository for
-    fork-to-upstream pull requests, Prompt extension (alongside the
-    read-only deployment and `.grain/settings.yml` layers), Setup command,
-    and GitHub issue import (enable switch, queue-at-once switch with its
-    trust warning, source repository, label, interval, and Import issues
-    now reporting read/imported/skipped counts and saying it read nothing
-    when the source repository cannot be listed); on Branches, Add branch;
-    on Advanced, declaration syncing, trigger files, extra push refs and
-    warnings, the read-only Ports table when paired branches exist, and
-    Remove repository (refusing config-repo removal or stranding).
-    Confirm a refused repo setting's banner clears as soon as that
-    setting saves cleanly, config-repo-locked or role-restricted repo
-    settings render read-only with their explanation, reload and verify
-    saved values, and confirm leaving with an unsaved workflow,
-    issue-import, upstream-repo, prompt or setup edit asks first.
-  - Merge queue: switch the repository's CI mode between GitHub, grain
-    and none (and toggle work ownership) and verify the base-gate
-    warnings on the overview and the Releases pane appear, refresh
-    without a reload, read correctly, link straight to CI Mode and clear
-    once fixed; edit the merge queue settings (Require branches up to
-    date, Merge when green and clean -- confirming its copy makes no
-    ordering claim -- Base-branch repair PRs may merge without a human --
-    confirming turning it on asks for confirmation on both Repo → Merge
-    queue and Settings → Repositories while turning it off does not --
-    and Unfixable checks); inspect the merge queue's overlap re-check
+  - Repos (`/next/repos`, from the rail after CI and from a direct URL):
+    every repository the deployment knows (the config repo, target repos,
+    repos with configuration of their own), each row's open work by state
+    with Blocked first and its activity dot; search and sort in `?q=` and
+    `?sort=` through reload and Back/Forward; long names at phone width.
+    Reorder rows by pointer drag and from the handle's keyboard (Space,
+    arrows, Home/End, `Escape`, announced), and confirm the order is
+    shared with the classic `/repos` list. Use Add repo: discovery
+    suggestions and the status line, a Clone URL for a host no connection
+    covers, the lock while adding (`Adding…` / `Added`), and the
+    confirmation before a first add narrows an unrestricted allowlist,
+    naming the repos that fall off and what would be stranded.
+  - Follow a row's `N open` link into `/next/tasks?repo=` (case-insensitive
+    repo matching; counts are open work only) and back, open a row into
+    its repo page and use the page's back link to return to Repos. Confirm
+    that a removed repository's remaining tasks still show, and file a
+    task from the repo page with the repository preselected.
+  - Repo page tabs (`/next/repos/<owner>/<name>/<tab>`, and the host form
+    `/next/repos/<host>/<owner>/<name>/<tab>`): Overview, CI & Workflows,
+    Merge Queue, Agents & Grants, Branches, Releases and Advanced, each
+    through reload and Back/Forward, the selected tab kept in view on a
+    phone, and the classic `/repos/<owner>/<name>/settings/<tab>` address
+    landing on the same repository and tab. Reach them also from
+    Settings → Repositories (`/next/settings/repositories`).
+  - Inspect and safely edit each tab: Overview's summary and GitHub issue
+    import (Enable issue importer, Queue imported tasks at once with its
+    trust warning, Issue label filter, Source repository, and Import
+    issues now reporting
+    read/imported/skipped counts or saying it read nothing); CI &
+    Workflows' CI mode (only the modes the server accepts), Watch default
+    branch and the workflows; Agents & Grants' default capabilities,
+    Standing prompt extension and Sandbox setup command; Branches' Add
+    branch (a refused name shown on the box). Confirm leaving with an
+    unsaved edit asks first, refused saves show their banner and clear on
+    the next clean save, and config-repo-locked or role-restricted
+    settings render read-only with their reason.
+  - Advanced tab (`/next/repos/<owner>/<name>/advanced`): the `.grain/`
+    declarations switch with the last read's status (commit, counts, a
+    failed read and what still runs from the last good commit, warnings),
+    the Trigger files (linked from `/next/processes` trigger rows), Extra
+    push refs (May also push), the Ports pairing and per-direction table,
+    and Remove repository -- its confirmation names what removal strands
+    and whether taking the only allowed repo off unrestricts the
+    deployment, then lands on `/next/repos`; the config repo and an
+    off-allowlist repo show no Remove and say why, and a role without
+    `repos:write` sees the switch and Remove disabled. Remove only a
+    throwaway repository. At phone width its tables stay inside the
+    screen.
+  - Merge Queue tab and Settings → Repositories: Require branch up to
+    date before merge, Merge on green (its copy makes no ordering claim),
+    Base-branch repair PRs may merge without a human (turning it on asks
+    first in both places; turning it off does not); save, reload and
+    confirm both places read the same values.
+  - Releases tab: the release list and the release workflow switch,
+    create a release (a refused name reported inline on its box and
+    cleared on edit), Cut new RC, Promote current RC, Merge back and
+    Delete -- each asks before acting and says why when greyed out --
+    and the qualification status, candidates and decisions it shows.
+  - Classic-only repository surfaces (walk on the classic UI until
+    `/next/` has them, and say so in the report): the compare page
+    (`/repos/<owner>/<name>/compare/<base>...<head>`, branch names with
+    slashes or `#`, the diff, a direct link and reload, an unknown ref);
+    per-release URLs (an unknown release falling back to the newest with
+    an in-place explanation); the qualification plan editor (unsaved-edit
+    guard, config-repo read-only notice) and release trains; Work
+    ownership (the Standing work on this deployment switch and per-item
+    overrides); the base-gate warnings on Overview and Releases when CI
+    mode is GitHub or none (linking to CI Mode and clearing once fixed);
+    the CI capabilities card (the `release` server's methods and policy
+    verdicts); Unfixable checks and the merge queue's overlap re-check
     panel (standing chip, elapsed time against max age, CI run and task
-    links) on the repo page and on the task page.
-  - Compare branches: pick a base and head on the repo page and open the
-    pull request page (`/repos/<owner>/<name>/compare/<base>...<head>`,
-    including branch names with slashes or `#`),
-    choosing from the repository's own branches; inspect the diff, a
-    direct link and reload, and an unknown ref. (Repository memory is on
-    Settings → Memory, covered by the settings walkthrough.)
-  - Walk through Releases: Work ownership (the Standing work on this
-    deployment switch and per-item overrides across schedules and the
-    release) alongside releases, qualification plans (including their
-    unsaved-edit guard and config-repo read-only notice) and release
-    trains, including direct URLs (and an unknown release URL falling
-    back to the newest release with an in-place explanation),
-    status/history, task links, create/edit controls (confirming a
-    refused release name is reported inline on its box and clears on
-    edit or create rather than lingering as a toast), Cut new RC and
-    Promote current RC (and the reason shown when either is greyed out),
-    and whatever validation and confirmations the demo exposes.
+    links) on the repo and task pages; the issue-import interval and the
+    Upstream repository for fork-to-upstream pull requests; and Settings →
+    Repositories' declarations and git-connection columns.
   - If GitHub-derived branches, issue import, release state, or train
     execution is unavailable in the demo, intercept only that external
     boundary with realistic success, empty, loading and failure
-    responses; do not replace Grain's own API or its React UI.
+    responses; do not replace Grain's own API or either UI.
 
   ## Walkthrough protocol
 
