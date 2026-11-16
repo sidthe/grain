@@ -207,10 +207,6 @@ g-task-detail .task-page.is-pane .task-layout {
   grid-template-columns: minmax(0, 1fr);
 }
 
-g-task-detail .task-page.is-pane .task-tabs [data-testid="task-tab-details"] {
-  display: inline-flex;
-}
-
 g-task-detail .task-page.is-pane .task-tabs {
   flex-wrap: wrap;
   row-gap: 2px;

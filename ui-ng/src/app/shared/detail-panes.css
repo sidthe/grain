@@ -25,6 +25,33 @@
   min-width: 0;
 }
 
+.g-pane-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.g-pane-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.g-pane-tool-btn {
+  min-height: 28px;
+  padding: 0 8px;
+  font-size: 12px;
+}
+
+.g-pane-tool-icon {
+  width: 28px;
+  height: 28px;
+  font-size: 15px;
+}
+
 .g-pane-title {
   margin: 0;
   font-size: 12px;

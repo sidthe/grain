@@ -18,6 +18,7 @@ g-task-detail {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  container: task-page / inline-size;
 }
 
 .task-header {
@@ -68,6 +69,10 @@ g-task-detail {
   min-height: 0;
 }
 
+.task-layout.is-details-tab {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .task-main {
   display: flex;
   flex-direction: column;
@@ -79,10 +84,6 @@ g-task-detail {
   margin-top: 0;
   padding: 0 20px;
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
-}
-
-.task-tabs [data-testid="task-tab-details"] {
-  display: none;
 }
 
 .task-tab-body {
@@ -263,15 +264,12 @@ g-task-detail {
   background: var(--md-sys-color-surface-container);
 }
 
-@media (max-width: 1079.95px) {
+@container task-page (max-width: 1060px) {
   .task-layout {
     grid-template-columns: minmax(0, 1fr);
   }
   .task-aside {
     display: none;
-  }
-  .task-tabs [data-testid="task-tab-details"] {
-    display: inline-flex;
   }
 }
 
