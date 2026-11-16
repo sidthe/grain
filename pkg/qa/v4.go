@@ -1316,6 +1316,9 @@ func normalizeJSONFlowValue(v any, parentKey string) any {
 	case map[string]any:
 		out := make(map[string]any, len(val))
 		for k, item := range val {
+			if parentKey == "" && (k == "version" || k == "declarationV3" || k == "declarationV4") {
+				continue
+			}
 			mapped := k
 			if parentKey != "checks" {
 				if yamlKey, ok := jsonFlowCamelToYAMLKey[k]; ok {
@@ -1323,6 +1326,25 @@ func normalizeJSONFlowValue(v any, parentKey string) any {
 				}
 			}
 			out[mapped] = normalizeJSONFlowValue(item, mapped)
+		}
+		if parentKey == "" {
+			if s, _ := out["schema"].(string); strings.TrimSpace(s) == "" {
+				ext, _ := out["extends"].(string)
+				if _, hasDecomp := out["decompose"]; hasDecomp ||
+					out["context"] != nil ||
+					out["readability-packs"] != nil ||
+					out["skill-steps"] != nil ||
+					out["pr-contract"] != nil ||
+					strings.HasPrefix(ext, "golden-v4") ||
+					strings.HasPrefix(ext, "engineering-workflow-v4") {
+					out["schema"] = FlowSchemaV4
+				} else if out["skills"] != nil ||
+					out["stages"] != nil ||
+					out["custom-checks"] != nil ||
+					strings.HasPrefix(ext, "golden-v3") {
+					out["schema"] = FlowSchemaV3
+				}
+			}
 		}
 		return out
 	case []any:

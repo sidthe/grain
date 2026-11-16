@@ -400,8 +400,79 @@ describe("QaV3StudioComponent", () => {
     expect(postSpy).toHaveBeenCalledWith(
       "POST /api/qa/flow-versions",
       undefined,
-      expect.objectContaining({ yaml: expect.stringContaining("qa-flow/v4") }),
+      expect.objectContaining({
+        yaml: expect.stringContaining('forbid-added: "\\\\bdebugger\\\\b"'),
+      }),
       "dryRun=1",
     );
+  });
+
+  it("detects failing diff fixtures honestly, exports full V4 YAML, and resets state on flow switch", async () => {
+    const declV4: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      decompose: {
+        enabled: false,
+        mode: "propose_dag",
+        "max-subtasks": 6,
+      },
+      "skill-steps": [
+        {
+          id: "step:custom-coding-1",
+          label: "Check error wrapping",
+          stage: "coding",
+          enabled: true,
+          globs: ["pkg/**/*.go"],
+          "max-bytes": 500,
+          text: "Wrap errors with %w.",
+        },
+      ],
+      "custom-checks": [
+        {
+          id: "custom:strict-debugger",
+          kind: "pattern",
+          severity: "blocking",
+          paths: ["ui-ng/src/**/*.ts"],
+          "forbid-added": "\\bdebugger\\b",
+          fixtures: {
+            fail: [
+              { name: "missing debugger in fail trap", diff: "+const a = 1;" },
+            ],
+            pass: [{ name: "accidental debugger in pass", diff: "+debugger;" }],
+          },
+        },
+      ],
+    };
+
+    fixture.componentRef.setInput("declV4", declV4);
+    fixture.detectChanges();
+
+    await fixture.componentInstance.runFixtureSelfTest();
+    fixture.detectChanges();
+
+    const rep = fixture.componentInstance.fixtureReport();
+    expect(rep?.passed).toBe(false);
+    expect(rep?.failTrapOk).toBe(false);
+    expect(rep?.cleanPassOk).toBe(false);
+
+    const yaml = fixture.componentInstance.buildYaml();
+    expect(yaml).toContain("skill-steps:");
+    expect(yaml).toContain("step:custom-coding-1");
+    expect(yaml).toContain('paths: ["ui-ng/src/**/*.ts"]');
+    expect(yaml).toContain('forbid-added: "\\\\bdebugger\\\\b"');
+
+    // Switching to a V3 declaration resets V4 decompose, skillSteps, and fixtureReport
+    const declV3: FlowDeclarationV3 = {
+      schema: "grain.dev/qa-flow/v3",
+      stages: {
+        "s0-intent": { enabled: true },
+      },
+    };
+    fixture.componentRef.setInput("declV4", undefined);
+    fixture.componentRef.setInput("decl", declV3);
+    fixture.detectChanges();
+
+    expect(fixture.componentInstance.fixtureReport()).toBeNull();
+    expect(fixture.componentInstance.skillSteps().length).toBe(0);
+    expect(fixture.componentInstance.decomposeMode()).toBe("slice_plan");
   });
 });

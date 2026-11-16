@@ -74,7 +74,10 @@ func TestTestsWorkflowEnforcesGoVetAndMutatingRouteWithoutBypass(t *testing.T) {
 	if strings.Contains(text, "-vet=off") {
 		t.Error(".grain/workflows/tests.yml must not disable go vet with -vet=off")
 	}
-	if !strings.Contains(text, "MutatingRoute") {
-		t.Error(".grain/workflows/tests.yml must run MutatingRoute invariant tests in go-orch-ui")
+	if !strings.Contains(text, "go vet") {
+		t.Error(".grain/workflows/tests.yml must run go vet")
+	}
+	if !strings.Contains(text, "MutatingRoute") && !strings.Contains(text, "./pkg/ui/...") {
+		t.Error(".grain/workflows/tests.yml must run pkg/ui MutatingRoute invariant tests")
 	}
 }

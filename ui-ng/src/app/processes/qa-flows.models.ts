@@ -101,6 +101,7 @@ export interface WorkflowStageView {
 export interface CustomCheckFixtureItem {
   readonly name?: string;
   readonly file?: string;
+  readonly diff?: string;
   readonly "added-lines"?: readonly string[];
   readonly addedLines?: readonly string[];
   readonly "changed-files"?: readonly string[];
@@ -1129,10 +1130,83 @@ export function computeActivePromptBytes(
   return total > 0 ? total : fallbackSkillBytes;
 }
 
+function parseFixtureDiff(diff: string): { file?: string; lines: string[] } {
+  const rawLines = diff.split(/\r?\n/);
+  let file: string | undefined;
+  const added: string[] = [];
+  let hasPlusPrefix = false;
+  for (const l of rawLines) {
+    if (l.startsWith("+++ b/")) {
+      file = l.slice("+++ b/".length).trim();
+      continue;
+    }
+    if (
+      l.startsWith("+++ ") ||
+      l.startsWith("--- ") ||
+      l.startsWith("@@") ||
+      l.startsWith("diff --git ")
+    ) {
+      continue;
+    }
+    if (l.startsWith("+")) {
+      hasPlusPrefix = true;
+      added.push(l.slice(1));
+    }
+  }
+  if (!hasPlusPrefix) {
+    for (const l of rawLines) {
+      if (l.trim() !== "") {
+        added.push(l);
+      }
+    }
+  }
+  return { file, lines: added };
+}
+
+function matchesGlobPattern(glob: string, target: string): boolean {
+  const g = glob.trim();
+  const t = target.trim();
+  if (!g || g === "**/*" || g === "*") return true;
+  if (g === t) return true;
+  const reStr =
+    "^" +
+    g
+      .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+      .replace(/\*\*\//g, "(?:.+/)?")
+      .replace(/\*\*/g, ".*")
+      .replace(/\*/g, "[^/]*") +
+    "$";
+  try {
+    return new RegExp(reStr).test(t);
+  } catch {
+    return t.includes(g);
+  }
+}
+
+function matchesFixturePathScope(
+  file: string | undefined,
+  paths?: readonly string[],
+  exclude?: readonly string[],
+): boolean {
+  if (!file) return true;
+  if (paths && paths.length > 0) {
+    const matched = paths.some((p) => matchesGlobPattern(p, file));
+    if (!matched) return false;
+  }
+  if (exclude && exclude.length > 0) {
+    const excluded = exclude.some((p) => matchesGlobPattern(p, file));
+    if (excluded) return false;
+  }
+  return true;
+}
+
 export function evaluateFixturesClientSide(check: {
   id: string;
   engine: string;
+  paths?: readonly string[];
+  exclude?: readonly string[];
   forbidAdded?: string;
+  requireAdded?: string;
   whenChanged?: readonly string[];
   requireChanged?: readonly string[];
   maxChangedLines?: number;
@@ -1164,35 +1238,83 @@ export function evaluateFixturesClientSide(check: {
 
   const cases: FixtureCaseResult[] = [];
   const evalSingle = (item: CustomCheckFixtureItem, expectFinding: boolean) => {
-    const lines = item["added-lines"] ?? item.addedLines ?? [];
-    const files = item["changed-files"] ?? item.changedFiles ?? [];
-    let triggered = expectFinding;
+    const diffParsed = item.diff
+      ? parseFixtureDiff(item.diff)
+      : { file: undefined, lines: [] as string[] };
+    const explicitLines = item["added-lines"] ?? item.addedLines;
+    const lines =
+      explicitLines && explicitLines.length > 0
+        ? explicitLines
+        : diffParsed.lines.length > 0
+          ? diffParsed.lines
+          : item.content
+            ? item.content.split(/\r?\n/)
+            : [];
+    const file = item.file || diffParsed.file;
+    const explicitFiles = item["changed-files"] ?? item.changedFiles;
+    const files =
+      explicitFiles && explicitFiles.length > 0
+        ? explicitFiles
+        : file
+          ? [file]
+          : [];
+    const inScope = matchesFixturePathScope(file, check.paths, check.exclude);
 
-    if (check.engine === "pattern" && check.forbidAdded && lines.length > 0) {
-      try {
-        const re = new RegExp(check.forbidAdded);
-        triggered = lines.some((l) => re.test(l));
-      } catch {
-        triggered = false;
+    let triggered = false;
+    if (!inScope) {
+      triggered = false;
+    } else if (check.engine === "pattern") {
+      if (check.forbidAdded || check.requireAdded) {
+        if (check.forbidAdded && lines.length > 0) {
+          try {
+            const re = new RegExp(check.forbidAdded);
+            triggered = lines.some((l) => re.test(l));
+          } catch {
+            triggered = false;
+          }
+        }
+        if (!triggered && check.requireAdded && lines.length > 0) {
+          try {
+            const re = new RegExp(check.requireAdded);
+            triggered = !lines.some((l) => re.test(l));
+          } catch {
+            triggered = false;
+          }
+        }
+      } else if (lines.length > 0) {
+        triggered = lines.some((l) => /console\.log\(/.test(l));
+      } else {
+        triggered = expectFinding;
       }
-    } else if (
-      check.engine === "companion" &&
-      (check.whenChanged?.length ?? 0) > 0 &&
-      files.length > 0
-    ) {
-      const hasWhen = files.some((f) =>
-        (check.whenChanged ?? []).some((w) => f.includes(w) || w === f),
-      );
-      const hasReq = files.some((f) =>
-        (check.requireChanged ?? []).some((r) => f.includes(r) || r === f),
-      );
-      triggered = hasWhen && !hasReq;
-    } else if (
-      check.engine === "diff-budget" &&
-      (check.maxChangedLines ?? 0) > 0 &&
-      lines.length > 0
-    ) {
-      triggered = lines.length > (check.maxChangedLines ?? 0);
+    } else if (check.engine === "companion") {
+      if ((check.whenChanged?.length ?? 0) > 0 && files.length > 0) {
+        const hasWhen = files.some((f) =>
+          (check.whenChanged ?? []).some(
+            (w) => matchesGlobPattern(w, f) || f.includes(w) || w === f,
+          ),
+        );
+        const hasReq = files.some((f) =>
+          (check.requireChanged ?? []).some(
+            (r) => matchesGlobPattern(r, f) || f.includes(r) || r === f,
+          ),
+        );
+        triggered = hasWhen && !hasReq;
+      } else if (files.length === 0 && (check.whenChanged?.length ?? 0) === 0) {
+        triggered = expectFinding;
+      }
+    } else if (check.engine === "diff-budget") {
+      if ((check.maxChangedLines ?? 0) > 0 || (check.maxFiles ?? 0) > 0) {
+        const overLines =
+          (check.maxChangedLines ?? 0) > 0 &&
+          lines.length > (check.maxChangedLines ?? 0);
+        const overFiles =
+          (check.maxFiles ?? 0) > 0 && files.length > (check.maxFiles ?? 0);
+        triggered = overLines || overFiles;
+      } else {
+        triggered = expectFinding;
+      }
+    } else {
+      triggered = expectFinding;
     }
 
     const ok = expectFinding ? triggered : !triggered;

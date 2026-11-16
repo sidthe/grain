@@ -667,9 +667,9 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                               t.name || t.title || t.id
                             }}</span>
                             @if ((t.fields ?? []).length > 0) {
-                              <span class="ci-provider-tag tabular"
-                                >{{ (t.fields ?? []).length }} params</span
-                              >
+                              <span class="ci-provider-tag tabular">{{
+                                countOf((t.fields ?? []).length, "param")
+                              }}</span>
                             }
                           </div>
                           <div class="proc-row-sub">
@@ -817,9 +817,9 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                               }
                             </div>
                             <div class="proc-row-sub">
-                              <span class="tabular"
-                                >{{ st.items.length }} templates</span
-                              >
+                              <span class="tabular">{{
+                                countOf(st.items.length, "template")
+                              }}</span>
                               @if (st.autoMerge) {
                                 <span>· auto-merge</span>
                               }
@@ -899,8 +899,12 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                               >
                               <span class="tabular"
                                 >·
-                                {{ sr.taskCount ?? sr.tasks?.length ?? 0 }}
-                                tasks</span
+                                {{
+                                  countOf(
+                                    sr.taskCount ?? sr.tasks?.length ?? 0,
+                                    "task"
+                                  )
+                                }}</span
                               >
                             </div>
                           </button>
@@ -1128,9 +1132,16 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                       </p>
                     }
                     @if (s.suppressed; as sup) {
-                      <div class="banner banner-error" style="margin: 6px 0 0">
-                        Suppressed — {{ suppressionLabel(sup.reason) }}:
-                        {{ sup.detail || "Previous firing is still open." }}
+                      <div
+                        class="banner banner-error"
+                        style="margin: 6px 0 0"
+                        data-testid="sched-suppressed-banner"
+                      >
+                        <!-- The server's Detail sentence follows the reason
+                             when it sent one; without one the reason stands
+                             alone rather than borrowing another reason's. -->
+                        Suppressed — {{ suppressionLabel(sup.reason)
+                        }}{{ sup.detail ? ": " + sup.detail : "." }}
                         @if (sup.taskId) {
                           —
                           <a [routerLink]="['/task', sup.taskId]"
@@ -1223,11 +1234,15 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                            out (model.Schedule); schedNextRunOf labels it. -->
                         @if (schedNextRunOf(s); as nr) {
                           <dt>Next run</dt>
-                          <dd class="tabular">{{ nr }}</dd>
+                          <dd class="tabular" data-testid="sched-next-run">
+                            {{ stamp(nr) }}
+                          </dd>
                         }
                         @if (s.lastRunAt) {
                           <dt>Last run</dt>
-                          <dd class="tabular">{{ s.lastRunAt }}</dd>
+                          <dd class="tabular" data-testid="sched-last-run">
+                            {{ stamp(s.lastRunAt) }}
+                          </dd>
                         }
                       </dl>
                     </section>
@@ -1606,7 +1621,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                       <h3 class="section-title">
                         Pass {{ p.pass }}
                         <span class="muted tabular"
-                          >({{ p.items.length }} tasks)</span
+                          >({{ countOf(p.items.length, "task") }})</span
                         >
                       </h3>
                       <ul class="proc-kv-list">
@@ -1837,7 +1852,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                       }
                       @if (status?.checkedAt) {
                         <span class="tabular"
-                          >Checked: {{ status!.checkedAt }}</span
+                          >Checked: {{ stamp(status!.checkedAt!) }}</span
                         >
                       }
                     </div>
@@ -1845,7 +1860,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                     @if (status?.error) {
                       <p
                         class="banner banner-error"
-                        style="margin: 6px 0 0"
+                        style="margin: 6px 0 0; white-space: pre-line"
                         data-testid="decl-sync-error"
                       >
                         Sync / validation error: {{ status!.error }}
@@ -2923,9 +2938,11 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
             <input
               type="number"
               min="1"
+              [attr.max]="maxSuitePasses"
+              step="1"
               data-testid="suite-count-input"
               [value]="stDraftCount()"
-              (input)="stDraftCount.set(+$any($event.target).value || 1)"
+              (input)="stDraftCount.set(+$any($event.target).value)"
             />
           </label>
         } @else {
@@ -2934,9 +2951,11 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
             <input
               type="number"
               min="1"
+              [attr.max]="maxSuitePasses"
+              step="1"
               data-testid="suite-max-passes-input"
               [value]="stDraftMaxPasses()"
-              (input)="stDraftMaxPasses.set(+$any($event.target).value || 3)"
+              (input)="stDraftMaxPasses.set(+$any($event.target).value)"
             />
           </label>
         }
@@ -3383,6 +3402,8 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly stDraftMode = signal("count");
   protected readonly stDraftCount = signal(1);
   protected readonly stDraftMaxPasses = signal(3);
+  // model.MaxSuitePasses: the most passes a suite may run.
+  protected readonly maxSuitePasses = 100;
   protected readonly stDraftTemplateIds = signal<string[]>([]);
   protected readonly stDraftRequireApproval = signal(false);
   protected readonly stDraftAutoMerge = signal(true);
@@ -3980,6 +4001,11 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       queryParams: { sort: sort === "custom" ? null : sort },
       queryParamsHandling: "merge",
     });
+  }
+
+  // countOf is "1 task", "2 tasks": a count with its noun.
+  protected countOf(n: number, noun: string): string {
+    return `${n} ${noun}${n === 1 ? "" : "s"}`;
   }
 
   protected stamp(at: string): string {
@@ -4959,13 +4985,36 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     );
   }
 
+  // suitePassesProblem says what is wrong with the pass count the dialog
+  // holds -- the one its stopping mode reads -- before it is sent: the
+  // field keeps what was typed rather than swapping in a default, so a 0,
+  // an empty field or a fraction is refused here, in the server's own
+  // range (model.MaxSuitePasses), instead of being saved as 1 or 3.
+  protected suitePassesProblem(): string | null {
+    const untilClean = this.stDraftMode() === "until_clean";
+    const n = untilClean ? this.stDraftMaxPasses() : this.stDraftCount();
+    if (Number.isInteger(n) && n >= 1 && n <= this.maxSuitePasses) {
+      return null;
+    }
+    const what = untilClean ? "Maximum passes" : "Number of passes";
+    return `${what} must be a whole number from 1 to ${this.maxSuitePasses}.`;
+  }
+
   private buildSuiteCreatePayload(): CreateSuiteRequest {
+    // suitePassesProblem checks the mode's own number; the other one is
+    // sent too but read by nobody, so a stale 0 or 2.5 left in it goes as
+    // its default rather than failing the request's decoding.
+    const untilClean = this.stDraftMode() === "until_clean";
+    const whole = (n: number, dflt: number) =>
+      Number.isInteger(n) && n >= 1 ? n : dflt;
     const req: CreateSuiteRequest = {
       name: this.stDraftName().trim(),
       templateIds: this.stDraftTemplateIds(),
       mode: this.stDraftMode(),
-      count: this.stDraftCount(),
-      maxPasses: this.stDraftMaxPasses(),
+      count: untilClean ? whole(this.stDraftCount(), 1) : this.stDraftCount(),
+      maxPasses: untilClean
+        ? this.stDraftMaxPasses()
+        : whole(this.stDraftMaxPasses(), 3),
       requireApproval: this.stDraftRequireApproval(),
       autoMerge: this.stDraftAutoMerge(),
     };
@@ -4977,7 +5026,8 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   protected async previewSuiteDraft(): Promise<void> {
-    this.dialogError.set(null);
+    this.dialogError.set(this.suitePassesProblem());
+    if (this.dialogError()) return;
     try {
       const comp = await this.store.previewDraftSuite(
         this.buildSuiteCreatePayload(),
@@ -4990,7 +5040,8 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
 
   protected async saveSuiteDialog(): Promise<void> {
     if (this.submitting() || !this.canSaveSuite()) return;
-    this.dialogError.set(null);
+    this.dialogError.set(this.suitePassesProblem());
+    if (this.dialogError()) return;
     this.submitting.set(true);
     try {
       const editing = this.editingSuite();

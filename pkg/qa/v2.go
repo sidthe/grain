@@ -454,6 +454,9 @@ func LookupBuiltInOrRegisteredVersion(ref string) (FlowVersionBundle, bool) {
 	if ref == "" {
 		return FlowVersionBundle{}, false
 	}
+	if ref == "golden-v4-composable" || ref == "golden-v4-composable@1" {
+		ref = "engineering-workflow-v4@1"
+	}
 	all := BuiltInFlowVersions()
 	for _, b := range all {
 		if b.Hash == ref || fmt.Sprintf("%s@%d", b.Key, b.Version) == ref || fmt.Sprintf("builtin:%s@%d", b.Key, b.Version) == ref {

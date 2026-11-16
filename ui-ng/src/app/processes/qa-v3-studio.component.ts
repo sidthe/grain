@@ -891,6 +891,25 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
                         data-testid="qa-skill-step-inspector"
                       >
                         <div class="qa-form-row">
+                          <label
+                            [attr.for]="'sk-enabled-' + skStep.id"
+                            class="qa-inline-check"
+                          >
+                            <input
+                              [id]="'sk-enabled-' + skStep.id"
+                              type="checkbox"
+                              data-testid="qa-skill-step-enabled-checkbox"
+                              [checked]="skStep.enabled"
+                              [disabled]="!editing()"
+                              (change)="
+                                updateSkillStepEnabled(
+                                  skStep.id,
+                                  checkedValue($event)
+                                )
+                              "
+                            />
+                            Enable step
+                          </label>
                           <div>
                             <label [attr.for]="'sk-label-' + skStep.id"
                               >Step label</label
@@ -926,6 +945,16 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
                               "
                             />
                           </div>
+                          @if (editing()) {
+                            <button
+                              type="button"
+                              class="btn-text danger"
+                              data-testid="qa-remove-skill-step-btn"
+                              (click)="removeSkillStep(skStep.id)"
+                            >
+                              Remove step
+                            </button>
+                          }
                         </div>
                         <label [attr.for]="'sk-text-' + skStep.id"
                           >Skill step instructions (Markdown)</label
@@ -957,14 +986,25 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
                           Compare with parent
                         </label>
                       </div>
-                      <div
-                        class="s-mono skill-text-readonly"
-                        tabindex="0"
-                        role="region"
-                        aria-label="Coding skill markdown"
-                      >
-                        {{ step.text }}
-                      </div>
+                      @if (editing() && step.id === "s2:coding-skill") {
+                        <textarea
+                          rows="6"
+                          class="s-mono"
+                          data-testid="qa-coding-skill-textarea"
+                          aria-label="Coding skill markdown"
+                          [value]="codingSkillText() || step.text"
+                          (input)="codingSkillText.set(textValue($event))"
+                        ></textarea>
+                      } @else {
+                        <div
+                          class="s-mono skill-text-readonly"
+                          tabindex="0"
+                          role="region"
+                          aria-label="Coding skill markdown"
+                        >
+                          {{ step.text }}
+                        </div>
+                      }
                     }
                   </div>
                 }
@@ -1100,6 +1140,107 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
                               "
                             />
                           </div>
+                          <div>
+                            <label [attr.for]="'chk-paths-' + check.uid"
+                              >Scope paths</label
+                            >
+                            <input
+                              [id]="'chk-paths-' + check.uid"
+                              type="text"
+                              class="s-mono"
+                              data-testid="qa-check-paths-input"
+                              [value]="check.paths"
+                              [disabled]="!editing()"
+                              (input)="
+                                updateCheckField(
+                                  check.uid,
+                                  'paths',
+                                  textValue($event)
+                                )
+                              "
+                            />
+                          </div>
+                          @if (check.engine === "pattern") {
+                            <div>
+                              <label [attr.for]="'chk-forbid-' + check.uid"
+                                >Forbid added regex</label
+                              >
+                              <input
+                                [id]="'chk-forbid-' + check.uid"
+                                type="text"
+                                class="s-mono"
+                                data-testid="qa-check-forbid-added-input"
+                                [value]="check.forbidAdded"
+                                [disabled]="!editing()"
+                                (input)="
+                                  updateCheckField(
+                                    check.uid,
+                                    'forbidAdded',
+                                    textValue($event)
+                                  )
+                                "
+                              />
+                            </div>
+                          } @else if (check.engine === "diff-budget") {
+                            <div>
+                              <label [attr.for]="'chk-maxlines-' + check.uid"
+                                >Max changed lines</label
+                              >
+                              <input
+                                [id]="'chk-maxlines-' + check.uid"
+                                type="number"
+                                class="s-num"
+                                data-testid="qa-check-max-lines-input"
+                                [value]="check.maxChangedLines"
+                                [disabled]="!editing()"
+                                (input)="
+                                  updateCheckMaxLines(
+                                    check.uid,
+                                    numValue($event)
+                                  )
+                                "
+                              />
+                            </div>
+                          } @else if (check.engine === "companion") {
+                            <div>
+                              <label [attr.for]="'chk-when-' + check.uid"
+                                >When changed</label
+                              >
+                              <input
+                                [id]="'chk-when-' + check.uid"
+                                type="text"
+                                class="s-mono"
+                                [value]="check.whenChanged"
+                                [disabled]="!editing()"
+                                (input)="
+                                  updateCheckField(
+                                    check.uid,
+                                    'whenChanged',
+                                    textValue($event)
+                                  )
+                                "
+                              />
+                            </div>
+                            <div>
+                              <label [attr.for]="'chk-req-' + check.uid"
+                                >Require changed</label
+                              >
+                              <input
+                                [id]="'chk-req-' + check.uid"
+                                type="text"
+                                class="s-mono"
+                                [value]="check.requireChanged"
+                                [disabled]="!editing()"
+                                (input)="
+                                  updateCheckField(
+                                    check.uid,
+                                    'requireChanged',
+                                    textValue($event)
+                                  )
+                                "
+                              />
+                            </div>
+                          }
                           <div class="qa-field-grow">
                             <label [attr.for]="'chk-msg-' + check.uid"
                               >Finding message</label
@@ -1200,6 +1341,7 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
                         <g-pill-select
                           ariaLabel="Insert after"
                           [value]="stage.insertAfter"
+                          [disabled]="!editing()"
                           (valueChange)="
                             updateStageInsertAfter(stage.uid, $event)
                           "
@@ -1790,6 +1932,8 @@ export class QaV3StudioComponent {
     d3?: FlowDeclarationV3,
     d4?: FlowDeclarationV4,
   ): void {
+    this.fixtureReport.set(null);
+    this.dryRunResult.set(null);
     const stages = d4?.stages ?? d3?.stages;
     const s0 = stages?.["s0-intent"];
     this.s0Intent.set(
@@ -1821,6 +1965,11 @@ export class QaV3StudioComponent {
           d4.decompose["target-diff-lines"] ??
           400,
       );
+    } else {
+      this.decomposeEnabled.set(true);
+      this.decomposeMode.set("slice_plan");
+      this.decomposeMaxSubtasks.set(4);
+      this.decomposeTargetDiffLines.set(400);
     }
 
     if (d4?.context) {
@@ -1834,6 +1983,11 @@ export class QaV3StudioComponent {
       this.contextMaxTokens.set(
         d4.context.maxTokens ?? d4.context["max-tokens"] ?? 12000,
       );
+    } else {
+      this.contextEnabled.set(true);
+      this.contextIncludeCallers.set(true);
+      this.contextIncludeMemory.set(true);
+      this.contextMaxTokens.set(12000);
     }
 
     const sk = d4?.skill ?? det?.declaration?.skill;
@@ -1842,6 +1996,8 @@ export class QaV3StudioComponent {
       this.codingSkillText.set(sk.text || "");
     } else if (det) {
       this.codingSkillText.set(det.sourceYaml || det.summary || "");
+    } else {
+      this.codingSkillText.set("");
     }
 
     const rawPacks = d4?.readabilityPacks ?? d4?.["readability-packs"];
@@ -1859,6 +2015,16 @@ export class QaV3StudioComponent {
           };
         }),
       );
+    } else {
+      this.readabilityPacks.set(
+        BUILT_IN_READABILITY_PACK_IDS.map((id) => ({
+          id,
+          enabled: true,
+          activation: "auto",
+          globs: [],
+          customText: "",
+        })),
+      );
     }
 
     const rawSteps = d4?.skillSteps ?? d4?.["skill-steps"];
@@ -1874,6 +2040,8 @@ export class QaV3StudioComponent {
           text: s.text || "",
         })),
       );
+    } else {
+      this.skillSteps.set([]);
     }
 
     const pr = d4?.prContract ?? d4?.["pr-contract"];
@@ -1887,6 +2055,8 @@ export class QaV3StudioComponent {
       const secs = pr.requiredSections ?? pr["required-sections"];
       if (secs?.length) {
         this.prRequiredSections.set(secs.join(", "));
+      } else {
+        this.prRequiredSections.set("Summary, Verification");
       }
       this.prAuditLint.set(
         pr.auditLintSuppressions ?? pr["audit-lint-suppressions"] ?? true,
@@ -1894,6 +2064,12 @@ export class QaV3StudioComponent {
       if (pr.guidanceText ?? pr["guidance-text"]) {
         this.prGuidanceText.set(pr.guidanceText ?? pr["guidance-text"] ?? "");
       }
+    } else {
+      this.prEnabled.set(true);
+      this.prMode.set("warn");
+      this.prMaxSubjectChars.set(72);
+      this.prRequiredSections.set("Summary, Verification");
+      this.prAuditLint.set(true);
     }
 
     const cStages = (stages?.custom ?? []).map((cs) => ({
@@ -2156,6 +2332,19 @@ export class QaV3StudioComponent {
     );
   }
 
+  updateSkillStepEnabled(stepId: string, enabled: boolean): void {
+    this.skillSteps.update((list) =>
+      list.map((s) => (s.id === stepId ? { ...s, enabled } : s)),
+    );
+  }
+
+  removeSkillStep(stepId: string): void {
+    this.skillSteps.update((list) => list.filter((s) => s.id !== stepId));
+    if (this.selectedStepId() === stepId) {
+      this.selectedStepId.set(null);
+    }
+  }
+
   protected updateStageId(uid: number, id: string): void {
     this.customStages.update((list) =>
       list.map((s) => (s.uid === uid ? { ...s, id } : s)),
@@ -2234,6 +2423,22 @@ export class QaV3StudioComponent {
   updateCheckMeta(uid: number, field: "id" | "message", val: string): void {
     this.customChecks.update((list) =>
       list.map((c) => (c.uid === uid ? { ...c, [field]: val } : c)),
+    );
+  }
+
+  updateCheckField(
+    uid: number,
+    field: "paths" | "forbidAdded" | "whenChanged" | "requireChanged",
+    val: string,
+  ): void {
+    this.customChecks.update((list) =>
+      list.map((c) => (c.uid === uid ? { ...c, [field]: val } : c)),
+    );
+  }
+
+  updateCheckMaxLines(uid: number, maxChangedLines: number): void {
+    this.customChecks.update((list) =>
+      list.map((c) => (c.uid === uid ? { ...c, maxChangedLines } : c)),
     );
   }
 
@@ -2320,6 +2525,7 @@ export class QaV3StudioComponent {
     const det = this.detail();
     const customStages = this.exportCustomStages();
     const customChecks = this.exportCustomChecks();
+    const skillText = this.codingSkillText().trim();
     return {
       schema: "grain.dev/qa-flow/v4",
       key: meta?.key || det?.key || "engineering-workflow-v4",
@@ -2330,6 +2536,15 @@ export class QaV3StudioComponent {
         "engineering-workflow-v4@1",
       label: meta?.label || det?.label || "Engineering Workflow V4",
       summary: meta?.summary || det?.summary || "",
+      ...(skillText
+        ? {
+            skill: {
+              mode: this.codingSkillMode() || "replace",
+              text: skillText,
+              maxBytes: 4096,
+            },
+          }
+        : {}),
       stages: {
         "s0-intent": { enabled: this.s0Intent() },
         "s2-plan-critic": { enabled: this.s2PlanCritic() },
@@ -2386,7 +2601,39 @@ export class QaV3StudioComponent {
     let customChecksYaml = "";
     for (let i = 0; i < checks.length; i++) {
       const c = checks[i];
-      customChecksYaml += `  - id: ${c.id || `custom:check-${i}`}\n    kind: ${c.engine}\n    severity: ${c.severity}\n    message: "Failed"\n    fixtures:\n      pass: ${c.passJson.replace(/\n/g, "")}\n      fail: ${c.failJson.replace(/\n/g, "")}\n`;
+      const paths = c.paths
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const whenChanged = c.whenChanged
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const requireChanged = c.requireChanged
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      customChecksYaml += `  - id: ${JSON.stringify(c.id || `custom:check-${i}`)}\n`;
+      customChecksYaml += `    label: ${JSON.stringify(c.label || c.id || `Custom check ${i}`)}\n`;
+      customChecksYaml += `    kind: ${c.engine}\n`;
+      customChecksYaml += `    severity: ${c.severity}\n`;
+      customChecksYaml += `    message: ${JSON.stringify(c.message || "Failed")}\n`;
+      if (paths.length > 0) {
+        customChecksYaml += `    paths: ${JSON.stringify(paths)}\n`;
+      }
+      if (c.forbidAdded) {
+        customChecksYaml += `    forbid-added: ${JSON.stringify(c.forbidAdded)}\n`;
+      }
+      if (whenChanged.length > 0) {
+        customChecksYaml += `    when-changed: ${JSON.stringify(whenChanged)}\n`;
+      }
+      if (requireChanged.length > 0) {
+        customChecksYaml += `    require-changed: ${JSON.stringify(requireChanged)}\n`;
+      }
+      if (c.maxChangedLines > 0) {
+        customChecksYaml += `    max-changed-lines: ${c.maxChangedLines}\n`;
+      }
+      customChecksYaml += `    fixtures:\n      pass: ${c.passJson.replace(/\n/g, "")}\n      fail: ${c.failJson.replace(/\n/g, "")}\n`;
     }
     let customStagesYaml = "";
     for (const s of this.customStages()) {
@@ -2395,7 +2642,25 @@ export class QaV3StudioComponent {
     let packsYaml = "";
     for (const p of this.readabilityPacks()) {
       packsYaml += `  - id: ${p.id}\n    enabled: ${p.enabled}\n    activation: ${p.activation || "auto"}\n`;
+      if (p.globs && p.globs.length > 0) {
+        packsYaml += `    globs: ${JSON.stringify(p.globs)}\n`;
+      }
+      if (p.customText) {
+        packsYaml += `    custom-text: ${JSON.stringify(p.customText)}\n`;
+      }
     }
+    let stepsYaml = "";
+    for (const s of this.skillSteps()) {
+      stepsYaml += `  - id: ${JSON.stringify(s.id)}\n    label: ${JSON.stringify(s.label || s.id)}\n    stage: ${s.stage || "coding"}\n    enabled: ${s.enabled}\n    max-bytes: ${s.maxBytes || 600}\n`;
+      if (s.globs && s.globs.length > 0) {
+        stepsYaml += `    globs: ${JSON.stringify(s.globs)}\n`;
+      }
+      stepsYaml += `    text: ${JSON.stringify(s.text || "")}\n`;
+    }
+    const prSections = this.prRequiredSections()
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
     const stagesSection = customStagesYaml
       ? `  custom:\n${customStagesYaml}`
       : "";
@@ -2403,7 +2668,8 @@ export class QaV3StudioComponent {
       ? `custom-checks:\n${customChecksYaml}`
       : "";
     const packsSection = packsYaml ? `readability-packs:\n${packsYaml}` : "";
-    return `schema: "grain.dev/qa-flow/v4"\nkey: ${this.detail()?.key || "draft-v4-preview"}\nextends: golden-v3@1\nlabel: Draft V4 preview\ndecompose:\n  enabled: ${this.decomposeEnabled()}\n  mode: ${this.decomposeMode()}\ncontext:\n  enabled: ${this.contextEnabled()}\n  include-callers: ${this.contextIncludeCallers()}\n  include-memory: ${this.contextIncludeMemory()}\n  max-tokens: ${this.contextMaxTokens()}\n${packsSection}pr-contract:\n  enabled: ${this.prEnabled()}\n  mode: ${this.prMode()}\n  max-subject-chars: ${this.prMaxSubjectChars()}\nstages:\n  s0-intent:\n    enabled: ${this.s0Intent()}\n  s2-plan-critic:\n    enabled: ${this.s2PlanCritic()}\n  s5-merge-triage:\n    mode: ${this.s5Triage()}\n${stagesSection}${checksSection}`;
+    const stepsSection = stepsYaml ? `skill-steps:\n${stepsYaml}` : "";
+    return `schema: "grain.dev/qa-flow/v4"\nkey: ${this.detail()?.key || "draft-v4-preview"}\nextends: golden-v3@1\nlabel: Draft V4 preview\ndecompose:\n  enabled: ${this.decomposeEnabled()}\n  mode: ${this.decomposeMode()}\n  max-subtasks: ${this.decomposeMaxSubtasks()}\n  target-diff-lines: ${this.decomposeTargetDiffLines()}\ncontext:\n  enabled: ${this.contextEnabled()}\n  include-callers: ${this.contextIncludeCallers()}\n  include-memory: ${this.contextIncludeMemory()}\n  max-tokens: ${this.contextMaxTokens()}\n${packsSection}${stepsSection}pr-contract:\n  enabled: ${this.prEnabled()}\n  mode: ${this.prMode()}\n  max-subject-chars: ${this.prMaxSubjectChars()}\n  required-sections: ${JSON.stringify(prSections)}\n  audit-lint-suppressions: ${this.prAuditLint()}\nstages:\n  s0-intent:\n    enabled: ${this.s0Intent()}\n  s2-plan-critic:\n    enabled: ${this.s2PlanCritic()}\n  s5-merge-triage:\n    mode: ${this.s5Triage()}\n${stagesSection}${checksSection}`;
   }
 
   async runFixtureSelfTest(): Promise<void> {
@@ -2415,6 +2681,10 @@ export class QaV3StudioComponent {
       const report = evaluateFixturesClientSide({
         id: target.id,
         engine: target.engine,
+        paths: target.paths
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
         forbidAdded: target.forbidAdded,
         whenChanged: target.whenChanged
           .split(",")

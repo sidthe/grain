@@ -528,8 +528,29 @@ export class QaFlowsPanelComponent implements OnDestroy {
 
   diffFiles = computed(() => {
     const detail = this.selectedDetail();
-    const oldT = detail ? this.readonlySkillText(detail) : "";
-    const newT = this.draftDeclaration().skill?.text || "";
+    let oldT = detail ? this.readonlySkillText(detail) : "";
+    let newT =
+      this.studio()?.codingSkillText() ||
+      this.draftDeclaration().skill?.text ||
+      "";
+    if (!this.isEditing() && detail) {
+      const parentRef =
+        detail.parentHash ||
+        detail.declarationV4?.extends ||
+        detail.declaration?.extends ||
+        detail.lineage?.[0]?.hash ||
+        "";
+      const parentVer = parentRef
+        ? this.versions().find(
+            (v) =>
+              v.hash === parentRef ||
+              `${v.key}@${v.version}` === parentRef ||
+              v.key === parentRef,
+          )
+        : undefined;
+      oldT = parentVer ? this.readonlySkillText(parentVer) : "";
+      newT = this.readonlySkillText(detail);
+    }
     if (oldT === newT) return [];
 
     const lines: DiffPreviewLine[] = [];
@@ -1050,6 +1071,9 @@ export class QaFlowsPanelComponent implements OnDestroy {
         summary: draft.summary,
       });
       draft.schema = "grain.dev/qa-flow/v4";
+      if (v4.skill) {
+        draft.skill = v4.skill;
+      }
       draft.stages = v4.stages;
       draft.decompose = v4.decompose;
       draft.context = v4.context;
@@ -1058,6 +1082,9 @@ export class QaFlowsPanelComponent implements OnDestroy {
       draft.prContract = v4.prContract;
       if (v4.customChecks?.length) {
         draft.customChecks = v4.customChecks;
+      } else {
+        delete draft.customChecks;
+        delete draft["custom-checks"];
       }
     }
 

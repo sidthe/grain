@@ -54,6 +54,7 @@ type CustomCheckFixture struct {
 	AddedLines   []string `json:"added-lines,omitempty" yaml:"added-lines,omitempty"`
 	ChangedFiles []string `json:"changed-files,omitempty" yaml:"changed-files,omitempty"`
 	Content      string   `json:"content,omitempty" yaml:"content,omitempty"`
+	Diff         string   `json:"diff,omitempty" yaml:"diff,omitempty"`
 }
 
 type CustomCheckFinding struct {
@@ -126,7 +127,7 @@ func EvaluateCustomCheck(check CustomCheckDecl, ctx CustomCheckContext) ([]Custo
 		}
 
 		for file, lines := range ctx.AddedLines {
-			if !matchPath(file, check.Paths, check.Exclude) {
+			if file != "" && !matchPath(file, check.Paths, check.Exclude) {
 				continue
 			}
 			foundRequire := false
@@ -164,6 +165,9 @@ func EvaluateCustomCheck(check CustomCheckDecl, ctx CustomCheckContext) ([]Custo
 				matchedFiles++
 				linesAdded += len(ctx.AddedLines[file])
 			}
+		}
+		if len(ctx.ChangedFiles) == 0 && len(ctx.AddedLines[""]) > 0 {
+			linesAdded += len(ctx.AddedLines[""])
 		}
 		if check.MaxFiles > 0 && matchedFiles > check.MaxFiles {
 			findings = append(findings, CustomCheckFinding{
@@ -393,21 +397,57 @@ func validateJSONSchema(data interface{}, schema map[string]interface{}, depth i
 	return nil
 }
 
+func parseDiffFixture(diff string) (file string, added []string) {
+	rawLines := strings.Split(diff, "\n")
+	hasPlusPrefix := false
+	for _, l := range rawLines {
+		if strings.HasPrefix(l, "+++ b/") {
+			file = strings.TrimSpace(strings.TrimPrefix(l, "+++ b/"))
+			continue
+		}
+		if strings.HasPrefix(l, "+++ ") || strings.HasPrefix(l, "--- ") || strings.HasPrefix(l, "@@") || strings.HasPrefix(l, "diff --git ") {
+			continue
+		}
+		if strings.HasPrefix(l, "+") {
+			hasPlusPrefix = true
+			added = append(added, l[1:])
+		}
+	}
+	if !hasPlusPrefix {
+		for _, l := range rawLines {
+			if strings.TrimSpace(l) != "" {
+				added = append(added, l)
+			}
+		}
+	}
+	return file, added
+}
+
 func fixtureToContext(f CustomCheckFixture) CustomCheckContext {
 	ctx := CustomCheckContext{
 		ChangedFiles: f.ChangedFiles,
 		AddedLines:   map[string][]string{},
 	}
 	file := f.File
+	addedLines := f.AddedLines
+	if f.Diff != "" {
+		diffFile, diffAdded := parseDiffFixture(f.Diff)
+		if file == "" && diffFile != "" {
+			file = diffFile
+		}
+		if len(addedLines) == 0 {
+			addedLines = diffAdded
+		}
+	}
 	if file == "" && len(f.ChangedFiles) == 1 {
 		file = f.ChangedFiles[0]
 	}
-	if file != "" {
-		if len(ctx.ChangedFiles) == 0 {
+	if file != "" || len(addedLines) > 0 || f.Content != "" {
+		if len(ctx.ChangedFiles) == 0 && file != "" {
 			ctx.ChangedFiles = []string{file}
 		}
-		if len(f.AddedLines) > 0 {
-			ctx.AddedLines[file] = f.AddedLines
+		if len(addedLines) > 0 {
+			ctx.AddedLines[file] = addedLines
 		} else if f.Content != "" {
 			ctx.AddedLines[file] = strings.Split(f.Content, "\n")
 		}

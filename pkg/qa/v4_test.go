@@ -309,3 +309,46 @@ func TestFlowDeclarationV4InheritanceJSONDecodeAndValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveStudioExportedV4JSONWithDiffFixtures(t *testing.T) {
+	studioJSON := `{
+		"version": 1,
+		"key": "studio-v4-custom",
+		"extends": "golden-v4-composable",
+		"label": "Studio V4 Custom",
+		"decompose": {
+			"enabled": true,
+			"mode": "slice_plan",
+			"maxSubtasks": 4,
+			"targetDiffLines": 250
+		},
+		"customChecks": [
+			{
+				"id": "no-console-log",
+				"label": "No console.log",
+				"kind": "pattern",
+				"severity": "blocking",
+				"message": "Do not commit console.log",
+				"paths": ["src/**/*.ts"],
+				"forbidAdded": "console\\.log\\(",
+				"fixtures": {
+					"fail": [{"diff": "+console.log(x)"}],
+					"pass": [{"diff": "+logger.info(x)"}]
+				}
+			}
+		]
+	}`
+	bundle, err := ResolveAnyFlowDeclaration([]byte(studioJSON), 1, nil)
+	if err != nil {
+		t.Fatalf("ResolveAnyFlowDeclaration failed on Studio V4 JSON: %v", err)
+	}
+	if bundle.Key != "studio-v4-custom" {
+		t.Errorf("got key %q, want studio-v4-custom", bundle.Key)
+	}
+	if bundle.DeclarationV4 == nil || len(bundle.DeclarationV4.CustomChecks) != 1 {
+		t.Fatalf("expected 1 custom check on DeclarationV4, got %+v", bundle.DeclarationV4)
+	}
+	if got := bundle.DeclarationV4.CustomChecks[0].Paths; len(got) != 1 || got[0] != "src/**/*.ts" {
+		t.Errorf("got custom check paths %v, want [src/**/*.ts]", got)
+	}
+}
