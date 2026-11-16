@@ -224,7 +224,7 @@ func ComputeQASummary(in QASummaryInput) QASummary {
 		if reviewedTarget != "" && hasReviewerHead {
 			reviewerFixedTask[reviewedTarget] = true
 		}
-		if t.Origin.Reason == model.ReasonReview {
+		if t.Filing.Reason == model.ReasonReview {
 			if parentID := strings.TrimSpace(t.Parent()); parentID != "" {
 				if hasFixesLink || timingByTask[t.ID].PrOpenedAt != nil {
 					reviewerFixedTask[parentID] = true
@@ -783,7 +783,7 @@ func TaskEligibleForQARolloutMetric(t model.Task) bool {
 	if t.Interactive || t.HasPriorityDispatch() {
 		return false
 	}
-	if t.Origin.Reason == model.ReasonReview || slices.Contains(t.Tags, model.PathTriggerMarkerTag) {
+	if t.Filing.Reason == model.ReasonReview || slices.Contains(t.Tags, model.PathTriggerMarkerTag) {
 		return false
 	}
 	for _, l := range t.Links {

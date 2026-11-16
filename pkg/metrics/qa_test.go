@@ -512,7 +512,7 @@ func TestComputeQASummaryRepoIsolationNilPROpenedAtAndS4Cost(t *testing.T) {
 			Body:       "Review",
 			Target:     &allowedRepo,
 			WorkOrigin: "ws:multi",
-			Origin:     model.Origin{Reason: model.ReasonReview},
+			Filing:     model.Filing{Reason: model.ReasonReview},
 			Tags:       []string{model.PathTriggerMarkerTag},
 			Links: []model.Link{
 				{Kind: model.LinkProposedBy, Target: "t-allowed"},

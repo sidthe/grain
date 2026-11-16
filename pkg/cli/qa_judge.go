@@ -196,7 +196,7 @@ func runBlindJudgeBatch(
 		estTokens += int64(pktTokens*(raters+1) + 400*(raters+1))
 		totalChunks += len(chunks)
 
-		root := strings.TrimSpace(t.Origin)
+		root := strings.TrimSpace(t.WorkOrigin)
 		if root == "" {
 			root = "task:" + t.ID
 		}
