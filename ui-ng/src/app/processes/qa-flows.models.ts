@@ -587,10 +587,13 @@ export function buildClientWorkflowStagesView(
   ) {
     return item.stagesView.map((st) => {
       const canonicalLabel = CANONICAL_STAGE_LABELS[st.id] ?? st.label;
+      const normalizedSteps = (st.steps || []).map((s) =>
+        s.id === "s5:merge-triage" ? { ...s, lockedFloor: false } : s,
+      );
       if (st.id !== "s2-coding") {
-        return { ...st, label: canonicalLabel, steps: [...(st.steps || [])] };
+        return { ...st, label: canonicalLabel, steps: normalizedSteps };
       }
-      const steps = [...(st.steps || [])];
+      const steps = [...normalizedSteps];
       for (const packId of BUILT_IN_READABILITY_PACK_IDS) {
         const stepId = `pack:${packId}`;
         if (!steps.some((s) => s.id === stepId)) {
@@ -664,9 +667,12 @@ export function buildClientWorkflowStagesView(
   const skillText = injectSkillAllowed ? rawSkillText : "";
   const skillMode =
     options?.codingSkillMode ?? v4?.skill?.mode ?? v2?.skill?.mode ?? "replace";
-  const skillBytes = injectSkillAllowed
-    ? utf8ByteCount(skillText) || res?.skillBytes || 0
-    : 0;
+  const skillBytes =
+    !injectSkillAllowed || (options?.preferLiveDraft && skillMode === "inherit")
+      ? 0
+      : options?.codingSkillText !== undefined
+        ? utf8ByteCount(skillText)
+        : utf8ByteCount(skillText) || res?.skillBytes || 0;
 
   const rawPacks =
     options?.readabilityPacks ??
@@ -883,17 +889,22 @@ export function buildClientWorkflowStagesView(
   ];
 
   // Stage 4: s2-coding
+  const codingSkillActive =
+    injectSkillAllowed && (skillMode === "inherit" || skillBytes > 0);
   const codingSteps: WorkflowStepView[] = [
     {
       id: "coding:skill",
       label: "Core engineering coding contract",
       kind: "skill",
       stageId: "s2-coding",
-      enabled: injectSkillAllowed && skillBytes > 0,
-      mode: injectSkillAllowed && skillBytes > 0 ? skillMode : "off",
+      enabled: codingSkillActive,
+      mode: codingSkillActive ? skillMode : "off",
       scope: "**/*",
-      summary: `Primary coding skill contract (${skillBytes} bytes).`,
-      text: skillText,
+      summary:
+        skillMode === "inherit"
+          ? "Inherits primary coding skill contract from parent workflow."
+          : `Primary coding skill contract (${skillBytes} bytes).`,
+      text: skillMode === "inherit" ? "" : skillText,
       bytes: skillBytes,
     },
   ];
@@ -1040,7 +1051,7 @@ export function buildClientWorkflowStagesView(
       enabled: s5Enabled,
       mode: s5Mode,
       scope: "auto: T0, T1 · human: T2, T3",
-      lockedFloor: true,
+      lockedFloor: false,
       summary:
         "Routes clean green low-blast PRs to auto-merge when allowed and holds high-blast or trust-boundary changes for human review.",
     },
@@ -1233,6 +1244,95 @@ function matchesFixturePathScope(
   return true;
 }
 
+function validateClientJsonSchema(
+  data: unknown,
+  schema: Readonly<Record<string, unknown>>,
+  depth = 0,
+): boolean {
+  if (depth > 32) return false;
+  const expectedType = schema["type"];
+  if (typeof expectedType === "string") {
+    switch (expectedType) {
+      case "object":
+        if (typeof data !== "object" || data === null || Array.isArray(data)) {
+          return false;
+        }
+        break;
+      case "array":
+        if (!Array.isArray(data)) return false;
+        break;
+      case "string":
+        if (typeof data !== "string") return false;
+        break;
+      case "number":
+        if (typeof data !== "number" || Number.isNaN(data)) return false;
+        break;
+      case "integer":
+        if (typeof data !== "number" || !Number.isInteger(data)) return false;
+        break;
+      case "boolean":
+        if (typeof data !== "boolean") return false;
+        break;
+    }
+  }
+  if (typeof data === "object" && data !== null && !Array.isArray(data)) {
+    const rec = data as Record<string, unknown>;
+    const req = schema["required"];
+    if (Array.isArray(req)) {
+      for (const k of req) {
+        if (typeof k === "string" && !(k in rec)) return false;
+      }
+    }
+    const props = schema["properties"];
+    const propsObj =
+      typeof props === "object" && props !== null && !Array.isArray(props)
+        ? (props as Record<string, unknown>)
+        : null;
+    if (schema["additionalProperties"] === false && propsObj) {
+      for (const key of Object.keys(rec)) {
+        if (!(key in propsObj)) return false;
+      }
+    }
+    if (propsObj) {
+      for (const [k, sub] of Object.entries(propsObj)) {
+        if (
+          k in rec &&
+          typeof sub === "object" &&
+          sub !== null &&
+          !Array.isArray(sub)
+        ) {
+          if (
+            !validateClientJsonSchema(
+              rec[k],
+              sub as Readonly<Record<string, unknown>>,
+              depth + 1,
+            )
+          ) {
+            return false;
+          }
+        }
+      }
+    }
+  }
+  if (Array.isArray(data)) {
+    const items = schema["items"];
+    if (typeof items === "object" && items !== null && !Array.isArray(items)) {
+      for (const elem of data) {
+        if (
+          !validateClientJsonSchema(
+            elem,
+            items as Readonly<Record<string, unknown>>,
+            depth + 1,
+          )
+        ) {
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
 export function evaluateFixturesClientSide(check: {
   id: string;
   engine: string;
@@ -1244,6 +1344,7 @@ export function evaluateFixturesClientSide(check: {
   requireChanged?: readonly string[];
   maxChangedLines?: number;
   maxFiles?: number;
+  schemaJson?: Readonly<Record<string, unknown>>;
   failJson: string;
   passJson: string;
 }): FixtureSelfTestReport {
@@ -1343,6 +1444,19 @@ export function evaluateFixturesClientSide(check: {
         const overFiles =
           (check.maxFiles ?? 0) > 0 && files.length > (check.maxFiles ?? 0);
         triggered = overLines || overFiles;
+      } else {
+        triggered = expectFinding;
+      }
+    } else if (check.engine === "jsonschema") {
+      if (!check.schemaJson) {
+        triggered = true;
+      } else if (typeof item.content === "string" && item.content.length > 0) {
+        try {
+          const parsedData: unknown = JSON.parse(item.content);
+          triggered = !validateClientJsonSchema(parsedData, check.schemaJson);
+        } catch {
+          triggered = true;
+        }
       } else {
         triggered = expectFinding;
       }
@@ -1470,6 +1584,16 @@ export function schemaShortLabel(item: QAFlowVersionItem): string {
   return "v2";
 }
 
+export function compareFlowVersionsDesc(
+  a: QAFlowVersionItem,
+  b: QAFlowVersionItem,
+): number {
+  return (
+    b.version - a.version ||
+    Number(Boolean(a.builtIn)) - Number(Boolean(b.builtIn))
+  );
+}
+
 export function groupWorkflowFamilies(versions: readonly QAFlowVersionItem[]): {
   readonly primary: readonly WorkflowFamilyGroup[];
   readonly archived: readonly WorkflowFamilyGroup[];
@@ -1487,7 +1611,7 @@ export function groupWorkflowFamilies(versions: readonly QAFlowVersionItem[]): {
 
   const all: WorkflowFamilyGroup[] = [];
   for (const [key, list] of byKey.entries()) {
-    const sorted = [...list].sort((a, b) => b.version - a.version);
+    const sorted = [...list].sort(compareFlowVersionsDesc);
     const rep = sorted.find((v) => !v.retiredAt) ?? sorted[0];
     const isAllRetired = sorted.every((v) => Boolean(v.retiredAt));
     const isBenchmark = isBenchmarkOrAblationKey(key);
@@ -1693,6 +1817,97 @@ export function serializePatternFixtures(
     ]),
     passJson: JSON.stringify([
       { name: "allowed-example", "added-lines": [passLine] },
+    ]),
+  };
+}
+
+export function updateSinglePatternFixtureJson(
+  existingJson: string,
+  kind: "fail" | "pass",
+  line: string,
+  fallbackFile?: string,
+): string {
+  try {
+    const parsed: unknown = JSON.parse(existingJson || "[]");
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      const firstRaw =
+        typeof parsed[0] === "object" && parsed[0] !== null
+          ? (parsed[0] as Record<string, unknown>)
+          : {};
+      const updatedFirst: Record<string, unknown> = {};
+      if (typeof firstRaw["name"] === "string" && firstRaw["name"]) {
+        updatedFirst["name"] = firstRaw["name"];
+      } else {
+        updatedFirst["name"] =
+          kind === "fail" ? "caught-example" : "allowed-example";
+      }
+      if (typeof firstRaw["file"] === "string" && firstRaw["file"]) {
+        updatedFirst["file"] = firstRaw["file"];
+      } else if (kind === "fail" && fallbackFile) {
+        updatedFirst["file"] = fallbackFile;
+      }
+      updatedFirst["added-lines"] = [line];
+      return JSON.stringify([updatedFirst, ...parsed.slice(1)]);
+    }
+  } catch {
+    // Re-serialize cleanly below if existing JSON was malformed.
+  }
+  return JSON.stringify([
+    {
+      name: kind === "fail" ? "caught-example" : "allowed-example",
+      ...(kind === "fail" && fallbackFile ? { file: fallbackFile } : {}),
+      "added-lines": [line],
+    },
+  ]);
+}
+
+export function synthesizeJsonSchemaFixtures(
+  requiredKeysCsv: string,
+  pathsCsv: string,
+): {
+  readonly requiredKeys: readonly string[];
+  readonly schemaJson: Readonly<Record<string, unknown>>;
+  readonly sampleFile: string;
+  readonly failJson: string;
+  readonly passJson: string;
+} {
+  const requiredKeys = requiredKeysCsv
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const firstGlob =
+    pathsCsv
+      .split(",")
+      .map((s) => s.trim())
+      .find(Boolean) || "**/*.json";
+  const sampleFile = globToSamplePath(firstGlob);
+  const schemaJson: Readonly<Record<string, unknown>> =
+    requiredKeys.length > 0
+      ? { type: "object", required: requiredKeys }
+      : { type: "object" };
+  const validObj: Record<string, string> = {};
+  for (const k of requiredKeys) {
+    validObj[k] = "sample";
+  }
+  const failContent = requiredKeys.length > 0 ? "{}" : "123";
+  return {
+    requiredKeys,
+    schemaJson,
+    sampleFile,
+    failJson: JSON.stringify([
+      {
+        name:
+          requiredKeys.length > 0 ? "missing-required-keys" : "non-object-json",
+        file: sampleFile,
+        content: failContent,
+      },
+    ]),
+    passJson: JSON.stringify([
+      {
+        name: "valid-json-config",
+        file: sampleFile,
+        content: JSON.stringify(validObj),
+      },
     ]),
   };
 }

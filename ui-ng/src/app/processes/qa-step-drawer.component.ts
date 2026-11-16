@@ -44,6 +44,7 @@ import {
   substepHelpTip,
   synthesizeCompanionFixtures,
   synthesizeDiffBudgetFixtures,
+  synthesizeJsonSchemaFixtures,
   utf8ByteCount,
 } from "./qa-flows.models";
 
@@ -68,10 +69,16 @@ export interface EditableCustomCheck {
   readonly severity: "blocking" | "warn" | "shadow";
   readonly message: string;
   readonly paths: string;
+  readonly exclude: string;
   readonly forbidAdded: string;
+  readonly requireAdded: string;
   readonly whenChanged: string;
   readonly requireChanged: string;
   readonly maxChangedLines: number;
+  readonly maxFiles: number;
+  readonly allowWaiver: boolean;
+  readonly requiredKeys: string;
+  readonly schemaJson?: Readonly<Record<string, unknown>>;
   readonly failLine: string;
   readonly passLine: string;
   readonly passJson: string;
@@ -153,10 +160,11 @@ function readInputChecked(ev: Event): boolean {
           role="tab"
           class="tab-link"
           data-testid="qa-insp-tab-empirical"
+          gTip="Empirical stats &amp; historical PR dry-run"
           [attr.aria-selected]="inspectorTab() === 'empirical'"
           (click)="tabChange.emit('empirical')"
         >
-          Empirical stats &amp; dry-run
+          Stats &amp; dry-run
         </button>
         <button
           type="button"
@@ -378,13 +386,27 @@ function readInputChecked(ev: Event): boolean {
 
                 @if (!editing()) {
                   @if (step.lockedFloor) {
-                    <div class="qa-example-box">
+                    <div
+                      class="qa-example-box"
+                      data-testid="qa-locked-floor-card"
+                    >
                       <span class="qa-kv-label"
                         >Safety floor (always enforced)</span
                       >
                       <span class="qa-kv-val"
                         >This substep protects repository integrity and stays
                         blocking across custom workflows.</span
+                      >
+                    </div>
+                  } @else if (step.id === "s5:merge-triage") {
+                    <div class="qa-example-box">
+                      <span class="qa-kv-label"
+                        >Tighten-only blast-tier routing</span
+                      >
+                      <span class="qa-kv-val"
+                        >Merge triage mode (Off, Evaluate, or Enforced) is
+                        configurable; when enabled, T2/T3 human-review routing
+                        is tighten-only.</span
                       >
                     </div>
                   }
@@ -425,6 +447,11 @@ function readInputChecked(ev: Event): boolean {
                       } @else if (ccReadonly.engine === "diff-budget") {
                         <div class="qa-kv-val">
                           Max {{ ccReadonly.maxChangedLines }} added lines
+                        </div>
+                      } @else if (ccReadonly.engine === "jsonschema") {
+                        <div class="qa-kv-val s-mono">
+                          Required keys:
+                          {{ ccReadonly.requiredKeys || "object schema" }}
                         </div>
                       }
                     </div>
@@ -624,9 +651,11 @@ function readInputChecked(ev: Event): boolean {
                             (valueChange)="codingSkillModeChange.emit($event)"
                           />
                         </div>
-                        <span class="qa-kv-label s-num"
-                          >{{ byteCount(codingSkillText()) }} B</span
-                        >
+                        <span class="qa-kv-label s-num">{{
+                          codingSkillMode() === "inherit"
+                            ? "0 B (inherited)"
+                            : byteCount(codingSkillText()) + " B"
+                        }}</span>
                         <button
                           type="button"
                           class="btn-text"
@@ -639,19 +668,33 @@ function readInputChecked(ev: Event): boolean {
                           }}
                         </button>
                       </div>
-                      <div class="qa-field">
-                        <label for="codingSkillTextarea"
-                          >Coding contract (Markdown)</label
-                        >
-                        <textarea
-                          id="codingSkillTextarea"
-                          rows="6"
-                          class="s-mono"
-                          data-testid="qa-coding-skill-textarea"
-                          [value]="codingSkillText()"
-                          (input)="codingSkillTextChange.emit(textVal($event))"
-                        ></textarea>
-                      </div>
+                      @if (codingSkillMode() === "inherit") {
+                        <div class="qa-example-box">
+                          <span class="qa-kv-label"
+                            >Inheriting parent coding contract</span
+                          >
+                          <span class="qa-kv-val"
+                            >Switch inheritance mode to Replace or Append to
+                            supply custom coding instructions.</span
+                          >
+                        </div>
+                      } @else {
+                        <div class="qa-field">
+                          <label for="codingSkillTextarea"
+                            >Coding contract (Markdown)</label
+                          >
+                          <textarea
+                            id="codingSkillTextarea"
+                            rows="6"
+                            class="s-mono"
+                            data-testid="qa-coding-skill-textarea"
+                            [value]="codingSkillText()"
+                            (input)="
+                              codingSkillTextChange.emit(textVal($event))
+                            "
+                          ></textarea>
+                        </div>
+                      }
                     </div>
                   } @else if (pack) {
                     <div
@@ -909,7 +952,9 @@ function readInputChecked(ev: Event): boolean {
                       </div>
 
                       @if (
-                        cc.engine === "pattern" || cc.engine === "diff-budget"
+                        cc.engine === "pattern" ||
+                        cc.engine === "diff-budget" ||
+                        cc.engine === "jsonschema"
                       ) {
                         <div class="qa-field">
                           <label [attr.for]="'cc-paths-' + cc.uid"
@@ -921,11 +966,35 @@ function readInputChecked(ev: Event): boolean {
                             class="s-mono"
                             data-testid="qa-check-paths-input"
                             [value]="cc.paths"
-                            placeholder="pkg/**/*.go, ui-ng/src/**/*.ts"
+                            [placeholder]="
+                              cc.engine === 'jsonschema'
+                                ? '**/*.json'
+                                : 'pkg/**/*.go, ui-ng/src/**/*.ts'
+                            "
                             (input)="
                               customCheckFieldChange.emit({
                                 uid: cc.uid,
                                 field: 'paths',
+                                val: textVal($event),
+                              })
+                            "
+                          />
+                        </div>
+                        <div class="qa-field">
+                          <label [attr.for]="'cc-exclude-' + cc.uid"
+                            >Exclude globs (optional)</label
+                          >
+                          <input
+                            [id]="'cc-exclude-' + cc.uid"
+                            type="text"
+                            class="s-mono"
+                            data-testid="qa-check-exclude-input"
+                            [value]="cc.exclude"
+                            placeholder="**/*_test.go, **/*.spec.ts"
+                            (input)="
+                              customCheckFieldChange.emit({
+                                uid: cc.uid,
+                                field: 'exclude',
                                 val: textVal($event),
                               })
                             "
@@ -1195,6 +1264,76 @@ function readInputChecked(ev: Event): boolean {
                             </span>
                           </div>
                         </div>
+                      } @else if (cc.engine === "jsonschema") {
+                        @let schemaPreview = jsonSchemaPreview(cc);
+                        <div class="qa-field">
+                          <label [attr.for]="'cc-reqkeys-' + cc.uid"
+                            >Required top-level keys</label
+                          >
+                          <input
+                            [id]="'cc-reqkeys-' + cc.uid"
+                            type="text"
+                            class="s-mono"
+                            data-testid="qa-check-required-keys"
+                            [value]="cc.requiredKeys"
+                            placeholder="name, version"
+                            (input)="
+                              customCheckFieldChange.emit({
+                                uid: cc.uid,
+                                field: 'requiredKeys',
+                                val: textVal($event),
+                              })
+                            "
+                          />
+                        </div>
+                        <div
+                          class="qa-example-box"
+                          data-testid="qa-jsonschema-examples"
+                        >
+                          <span class="qa-drawer-eyebrow"
+                            >Auto-verified schema test cases</span
+                          >
+                          <div class="qa-example-row">
+                            <span class="qa-kv-val s-mono"
+                              >1. {{ schemaPreview.sampleFile }} missing
+                              required keys</span
+                            >
+                            <span
+                              [class]="
+                                'status-pill ' +
+                                (liveEval.failTrapOk ? 'healthy' : 'error')
+                              "
+                            >
+                              <g-status-icon
+                                [tone]="
+                                  liveEval.failTrapOk ? 'healthy' : 'error'
+                                "
+                              />
+                              {{
+                                liveEval.failTrapOk ? "Caught" : "Not caught"
+                              }}
+                            </span>
+                          </div>
+                          <div class="qa-example-row">
+                            <span class="qa-kv-val s-mono"
+                              >2. {{ schemaPreview.sampleFile }} with
+                              {{ cc.requiredKeys || "object" }}</span
+                            >
+                            <span
+                              [class]="
+                                'status-pill ' +
+                                (liveEval.cleanPassOk ? 'healthy' : 'error')
+                              "
+                            >
+                              <g-status-icon
+                                [tone]="
+                                  liveEval.cleanPassOk ? 'healthy' : 'error'
+                                "
+                              />
+                              {{ liveEval.cleanPassOk ? "Allowed" : "Blocked" }}
+                            </span>
+                          </div>
+                        </div>
                       }
 
                       <div class="qa-field-row">
@@ -1259,8 +1398,9 @@ function readInputChecked(ev: Event): boolean {
                           <input
                             [id]="'cs-timeout-' + cs.uid"
                             type="number"
-                            min="5"
-                            max="300"
+                            min="10"
+                            max="120"
+                            data-testid="qa-custom-stage-timeout"
                             [value]="cs.timeoutSeconds"
                             (input)="
                               customStageTimeoutChange.emit({
@@ -1438,16 +1578,44 @@ function readInputChecked(ev: Event): boolean {
                       </label>
                     </div>
                   } @else if (step.id === "s5:merge-triage") {
-                    <div class="qa-field">
-                      <span class="qa-field-label">Merge triage mode</span>
-                      <g-pill-select
-                        align="left"
-                        testid="qa-s5-triage-select"
-                        ariaLabel="Merge triage mode"
-                        [options]="s5TriageOptions"
-                        [value]="s5Triage()"
-                        (valueChange)="s5TriageChange.emit($event)"
-                      />
+                    <div class="qa-field-stack">
+                      <div class="qa-field">
+                        <span class="qa-field-label">Merge triage mode</span>
+                        <g-pill-select
+                          align="left"
+                          testid="qa-s5-triage-select"
+                          ariaLabel="Merge triage mode"
+                          [options]="s5TriageOptions"
+                          [value]="s5Triage()"
+                          (valueChange)="s5TriageChange.emit($event)"
+                        />
+                      </div>
+                      <div class="qa-example-box">
+                        <span class="qa-kv-label"
+                          >Tighten-only T2/T3 human review</span
+                        >
+                        <span class="qa-kv-val"
+                          >When merge triage is set to Evaluate or Enforced,
+                          high-blast T2/T3 changes always route to human
+                          review.</span
+                        >
+                      </div>
+                    </div>
+                  } @else if (
+                    step.id === "s1:blast-radius" || step.lockedFloor
+                  ) {
+                    <div
+                      class="qa-example-box"
+                      data-testid="qa-locked-floor-card"
+                    >
+                      <span class="qa-kv-label"
+                        >Safety floor (always enforced)</span
+                      >
+                      <span class="qa-kv-val"
+                        >Deterministic 0..100 blast-radius scoring always runs
+                        so downstream verifier and merge-triage gates receive
+                        accurate T0..T3 risk tiers.</span
+                      >
                     </div>
                   }
                 }
@@ -1848,7 +2016,13 @@ export class QaStepDrawerComponent {
   }>();
   readonly customCheckFieldChange = output<{
     uid: number;
-    field: "paths" | "forbidAdded" | "whenChanged" | "requireChanged";
+    field:
+      | "paths"
+      | "exclude"
+      | "forbidAdded"
+      | "whenChanged"
+      | "requireChanged"
+      | "requiredKeys";
     val: string;
   }>();
   readonly customCheckMaxLinesChange = output<{
@@ -2038,7 +2212,12 @@ export class QaStepDrawerComponent {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean),
+      exclude: cc.exclude
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean),
       forbidAdded: cc.forbidAdded,
+      requireAdded: cc.requireAdded,
       whenChanged: cc.whenChanged
         .split(",")
         .map((s) => s.trim())
@@ -2048,9 +2227,18 @@ export class QaStepDrawerComponent {
         .map((s) => s.trim())
         .filter(Boolean),
       maxChangedLines: cc.maxChangedLines,
+      maxFiles: cc.maxFiles,
+      schemaJson: cc.schemaJson,
       failJson: cc.failJson,
       passJson: cc.passJson,
     });
+  }
+
+  protected jsonSchemaPreview(cc: EditableCustomCheck): {
+    sampleFile: string;
+  } {
+    const syn = synthesizeJsonSchemaFixtures(cc.requiredKeys, cc.paths);
+    return { sampleFile: syn.sampleFile };
   }
 
   protected companionPreview(cc: EditableCustomCheck): {

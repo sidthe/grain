@@ -20,10 +20,17 @@ g-qa-step-drawer {
   position: sticky;
   top: 0;
   z-index: 3;
-  padding: 0 16px;
+  padding: 0 12px;
+  overflow-x: auto;
+  scrollbar-width: none;
   background: var(--md-sys-color-surface-container-low);
   border-bottom: 1px solid var(--md-sys-color-outline-variant);
   flex-shrink: 0;
+}
+
+.qa-inspector-tabs .tab-link {
+  padding-inline: 10px;
+  white-space: nowrap;
 }
 
 .qa-inspector-inner {
@@ -212,8 +219,12 @@ g-qa-step-drawer {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  flex: 1 1 150px;
+  flex: none;
   min-width: 0;
+}
+
+.qa-field-row > .qa-field {
+  flex: 1 1 150px;
 }
 
 .qa-field label,

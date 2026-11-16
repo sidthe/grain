@@ -22,6 +22,7 @@ import {
   input,
   output,
   signal,
+  untracked,
 } from "@angular/core";
 import { GrainApi } from "../api/grain-api.service";
 import type { DiffPreviewFile } from "../api/models";
@@ -53,12 +54,15 @@ import {
   extractPatternExampleLines,
   formatStageModeLabel,
   formatStepModeLabel,
+  globToSamplePath,
   serializePatternFixtures,
   stageModePillClass,
   stageModeTip,
   stepModePillClass,
   synthesizeCompanionFixtures,
   synthesizeDiffBudgetFixtures,
+  synthesizeJsonSchemaFixtures,
+  updateSinglePatternFixtureJson,
   utf8ByteCount,
 } from "./qa-flows.models";
 import {
@@ -120,10 +124,13 @@ function normalizeStringList(
 }
 
 function defaultFixturesForEngine(engine: CustomCheckEngine): {
+  paths: string;
   forbidAdded: string;
   whenChanged: string;
   requireChanged: string;
   maxChangedLines: number;
+  requiredKeys: string;
+  schemaJson?: Readonly<Record<string, unknown>>;
   failLine: string;
   passLine: string;
   failJson: string;
@@ -135,10 +142,12 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
       const requireChanged = "pkg/model/migrations.go";
       const syn = synthesizeCompanionFixtures(whenChanged, requireChanged);
       return {
+        paths: "",
         forbidAdded: "",
         whenChanged,
         requireChanged,
         maxChangedLines: 0,
+        requiredKeys: "",
         failLine: "",
         passLine: "",
         failJson: syn.failJson,
@@ -146,44 +155,53 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
       };
     }
     case "diff-budget": {
+      const paths = "pkg/**/*.go";
       const maxChangedLines = 250;
-      const syn = synthesizeDiffBudgetFixtures(maxChangedLines, "pkg/**/*.go");
+      const syn = synthesizeDiffBudgetFixtures(maxChangedLines, paths);
       return {
+        paths,
         forbidAdded: "",
         whenChanged: "",
         requireChanged: "",
         maxChangedLines,
+        requiredKeys: "",
         failLine: "",
         passLine: "",
         failJson: syn.failJson,
         passJson: syn.passJson,
       };
     }
-    case "jsonschema":
+    case "jsonschema": {
+      const paths = "**/*.json";
+      const requiredKeys = "name, version";
+      const syn = synthesizeJsonSchemaFixtures(requiredKeys, paths);
       return {
+        paths,
         forbidAdded: "",
         whenChanged: "",
         requireChanged: "",
         maxChangedLines: 0,
+        requiredKeys,
+        schemaJson: syn.schemaJson,
         failLine: "",
         passLine: "",
-        failJson: JSON.stringify([
-          { name: "invalid-schema", content: '{"bad":true}' },
-        ]),
-        passJson: JSON.stringify([
-          { name: "valid-schema", content: '{"schema":"v4"}' },
-        ]),
+        failJson: syn.failJson,
+        passJson: syn.passJson,
       };
+    }
     case "pattern":
     default: {
+      const paths = "pkg/**/*.go";
       const failLine = 'console.log("debug")';
       const passLine = "const ready = true;";
       const ser = serializePatternFixtures(failLine, passLine);
       return {
+        paths,
         forbidAdded: "console\\.log\\(",
         whenChanged: "",
         requireChanged: "",
         maxChangedLines: 0,
+        requiredKeys: "",
         failLine,
         passLine,
         failJson: ser.failJson,
@@ -407,7 +425,7 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
           [dryRunResult]="effectiveDryRun()"
           [fixtureReport]="fixtureReport()"
           [verifying]="verifying()"
-          [yamlPreview]="buildYaml()"
+          [yamlPreview]="yamlPreviewText()"
           [s0Intent]="s0Intent()"
           [decomposeEnabled]="decomposeEnabled()"
           [decomposeMode]="decomposeMode()"
@@ -458,7 +476,7 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
           (contextMaxTokensChange)="contextMaxTokens.set($event)"
           (s2PlanCriticChange)="s2PlanCritic.set($event)"
           (codingSkillModeChange)="updateCodingSkillMode($event)"
-          (codingSkillTextChange)="codingSkillText.set($event)"
+          (codingSkillTextChange)="updateCodingSkillText($event)"
           (packEnabledChange)="updatePackEnabled($event.id, $event.enabled)"
           (packActivationChange)="
             updatePackActivation($event.id, $event.activation)
@@ -682,8 +700,14 @@ export class QaV3StudioComponent {
   readonly embedded = input<boolean>(false);
   readonly isFork = input<boolean>(false);
   readonly draftKey = input<string>("");
+  readonly draftExtends = input<string>("");
   readonly draftLabel = input<string>("");
   readonly draftSummary = input<string>("");
+  readonly draftSkill = input<
+    | { mode: "inherit" | "append" | "replace"; text: string; maxBytes: number }
+    | undefined
+  >(undefined);
+  readonly delegateDryRun = input<boolean>(false);
   readonly builtinCheckOverrides = input<
     Readonly<Record<string, { enabled?: boolean; severity?: string }>>
   >({});
@@ -697,12 +721,17 @@ export class QaV3StudioComponent {
   readonly externalDryRun = input<QADryRunResponse | null>(null);
 
   readonly adopted = output<string>();
+  readonly dryRunReq = output<void>();
   readonly toggleParentDiffReq = output<void>();
   readonly enterDraftReq = output<void>();
   readonly stepSelected = output<string>();
   readonly draftKeyChange = output<string>();
   readonly draftLabelChange = output<string>();
   readonly draftSummaryChange = output<string>();
+  readonly skillChange = output<{
+    mode: "inherit" | "append" | "replace";
+    text: string;
+  }>();
   readonly builtinCheckToggle = output<{ id: string; enabled: boolean }>();
   readonly builtinCheckSeverity = output<{ id: string; severity: string }>();
 
@@ -920,8 +949,29 @@ export class QaV3StudioComponent {
   });
 
   readonly codingSkillBytes = computed(() =>
-    utf8ByteCount(this.codingSkillText()),
+    this.codingSkillMode() === "inherit"
+      ? 0
+      : utf8ByteCount(this.codingSkillText()),
   );
+
+  readonly hasV4Customizations = computed(
+    () =>
+      this.s0Intent() ||
+      this.decomposeEnabled() ||
+      this.contextEnabled() ||
+      this.s2PlanCritic() ||
+      this.s5Triage() !== "off" ||
+      this.readabilityPacks().some((p) => p.enabled) ||
+      this.skillSteps().length > 0 ||
+      this.prEnabled() ||
+      this.customChecks().length > 0 ||
+      this.customStages().length > 0,
+  );
+
+  readonly yamlPreviewText = computed(() => {
+    const src = this.detail()?.sourceYaml;
+    return !this.editing() && src ? src : this.buildYaml();
+  });
 
   readonly activePromptBytes = computed(() =>
     computeActivePromptBytes(this.workflowStages(), this.codingSkillBytes()),
@@ -978,6 +1028,21 @@ export class QaV3StudioComponent {
           this.dryRunResult.set(null);
         }
       }
+    });
+
+    effect(() => {
+      const ds = this.draftSkill();
+      const ed = this.editing();
+      untracked(() => {
+        if (ed && ds) {
+          if (this.codingSkillMode() !== ds.mode) {
+            this.codingSkillMode.set(ds.mode);
+          }
+          if (this.codingSkillText() !== ds.text) {
+            this.codingSkillText.set(ds.text);
+          }
+        }
+      });
     });
   }
 
@@ -1090,9 +1155,18 @@ export class QaV3StudioComponent {
     } else if (det?.resolved?.injectSkill === false) {
       this.codingSkillMode.set("replace");
       this.codingSkillText.set("");
+    } else if (
+      det &&
+      (det.parentHash ||
+        effectiveV4?.extends ||
+        effectiveV3?.extends ||
+        det.declaration?.extends)
+    ) {
+      this.codingSkillMode.set("inherit");
+      this.codingSkillText.set("");
     } else if (det) {
       this.codingSkillMode.set("replace");
-      this.codingSkillText.set(det.sourceYaml || det.summary || "");
+      this.codingSkillText.set(det.summary || "");
     } else {
       this.codingSkillText.set("");
     }
@@ -1195,7 +1269,10 @@ export class QaV3StudioComponent {
       insertAfter: (cs["insert-after"] ??
         cs.insertAfter ??
         "s3") as InsertAfterStage,
-      timeoutSeconds: cs["timeout-seconds"] ?? cs.timeoutSeconds ?? 30,
+      timeoutSeconds: Math.min(
+        120,
+        Math.max(10, cs["timeout-seconds"] ?? cs.timeoutSeconds ?? 30),
+      ),
     }));
     this.customStages.set(cStages);
 
@@ -1210,11 +1287,13 @@ export class QaV3StudioComponent {
         ? Object.values(rawChecks)
         : [];
     this.customChecks.set(
-      list.map((cc, idx) => {
+      list.map((cc) => {
+        const uid = this.nextUid++;
         const engine = cc.kind ?? cc.engine ?? "pattern";
         const def = defaultFixturesForEngine(engine);
         const forbidAdded =
           cc["forbid-added"] ?? cc.forbidAdded ?? cc.forbid ?? def.forbidAdded;
+        const requireAdded = cc["require-added"] ?? cc.requireAdded ?? "";
         const whenList = normalizeStringList(
           cc["when-changed"] ?? cc.whenChanged,
         );
@@ -1237,7 +1316,21 @@ export class QaV3StudioComponent {
         ).join(", ");
         const maxChangedLines =
           cc["max-changed-lines"] ?? cc.maxChangedLines ?? def.maxChangedLines;
+        const maxFiles = cc["max-files"] ?? cc.maxFiles ?? 0;
+        const allowWaiver = Boolean(cc["allow-waiver"] ?? cc.allowWaiver);
         const paths = normalizeStringList(cc.paths).join(", ");
+        const exclude = normalizeStringList(cc.exclude).join(", ");
+        const rawSchemaJson = cc["schema-json"] ?? cc.schemaJson;
+        const schemaReqArr = Array.isArray(rawSchemaJson?.["required"])
+          ? (rawSchemaJson["required"] as unknown[]).filter(
+              (k): k is string => typeof k === "string" && k.length > 0,
+            )
+          : [];
+        const requiredKeys =
+          schemaReqArr.length > 0 ? schemaReqArr.join(", ") : def.requiredKeys;
+        const schemaJson =
+          rawSchemaJson ??
+          (engine === "jsonschema" ? def.schemaJson : undefined);
 
         let failJson = cc.fixtures?.fail
           ? JSON.stringify(cc.fixtures.fail)
@@ -1253,6 +1346,13 @@ export class QaV3StudioComponent {
           const syn = synthesizeDiffBudgetFixtures(maxChangedLines, paths);
           failJson = syn.failJson;
           passJson = syn.passJson;
+        } else if (!cc.fixtures?.fail && engine === "jsonschema") {
+          const syn = synthesizeJsonSchemaFixtures(
+            requiredKeys,
+            paths || def.paths,
+          );
+          failJson = syn.failJson;
+          passJson = syn.passJson;
         }
 
         const patternLines =
@@ -1261,17 +1361,23 @@ export class QaV3StudioComponent {
             : { failLine: "", passLine: "" };
 
         return {
-          uid: this.nextUid++,
-          id: cc.id ?? `custom:check-${idx}`,
-          label: cc.label ?? cc.id ?? `Custom check ${idx}`,
+          uid,
+          id: cc.id ?? `custom:check-${uid}`,
+          label: cc.label ?? cc.id ?? `Custom check ${uid}`,
           engine,
           severity: cc.severity ?? "blocking",
           message: cc.message ?? "Custom check failed.",
           paths,
+          exclude,
           forbidAdded,
+          requireAdded,
           whenChanged,
           requireChanged,
           maxChangedLines,
+          maxFiles,
+          allowWaiver,
+          requiredKeys,
+          schemaJson,
           failLine: patternLines.failLine,
           passLine: patternLines.passLine,
           passJson,
@@ -1400,9 +1506,24 @@ export class QaV3StudioComponent {
   }
 
   protected updateCodingSkillMode(val: string): void {
-    this.codingSkillMode.set(
-      val === "append" || val === "inherit" ? val : "replace",
-    );
+    const mode: "replace" | "append" | "inherit" =
+      val === "append" || val === "inherit" ? val : "replace";
+    this.codingSkillMode.set(mode);
+    if (mode === "inherit") {
+      this.codingSkillText.set("");
+    }
+    this.skillChange.emit({
+      mode,
+      text: mode === "inherit" ? "" : this.codingSkillText(),
+    });
+  }
+
+  protected updateCodingSkillText(text: string): void {
+    this.codingSkillText.set(text);
+    this.skillChange.emit({
+      mode: this.codingSkillMode(),
+      text,
+    });
   }
 
   protected updateS5Triage(val: string): void {
@@ -1456,11 +1577,11 @@ export class QaV3StudioComponent {
       stageId === "s5-triage"
         ? "s2-coding"
         : stageId;
-    const idx = this.skillSteps().length + 1;
-    const id = `step:custom-${stg}-${idx}`;
+    const seq = this.nextUid++;
+    const id = `step:custom-${stg}-${seq}`;
     const newStep: SkillStepDecl = {
       id,
-      label: `Custom ${stg} skill ${idx}`,
+      label: `Custom ${stg} skill ${seq}`,
       stage: stg,
       enabled: true,
       globs: ["**/*"],
@@ -1527,21 +1648,24 @@ export class QaV3StudioComponent {
   }
 
   protected updateStageTimeout(uid: number, timeoutSeconds: number): void {
+    const clamped = Math.min(
+      120,
+      Math.max(10, Math.round(timeoutSeconds || 30)),
+    );
     this.customStages.update((list) =>
-      list.map((s) => (s.uid === uid ? { ...s, timeoutSeconds } : s)),
+      list.map((s) => (s.uid === uid ? { ...s, timeoutSeconds: clamped } : s)),
     );
   }
 
   addCustomStage(): void {
     const uid = this.nextUid++;
-    const idx = this.customStages().length;
-    const id = `custom:stage-${idx}`;
+    const id = `custom:stage-${uid}`;
     this.customStages.update((s) => [
       ...s,
       {
         uid,
         id,
-        label: `Custom critic stage ${idx + 1}`,
+        label: `Custom critic stage ${uid}`,
         insertAfter: "s3",
         timeoutSeconds: 30,
       },
@@ -1562,23 +1686,28 @@ export class QaV3StudioComponent {
 
   addCheck(engine: CustomCheckEngine): void {
     const uid = this.nextUid++;
-    const idx = this.customChecks().length;
-    const id = `custom:check-${idx}`;
+    const id = `custom:check-${uid}`;
     const def = defaultFixturesForEngine(engine);
     this.customChecks.update((c) => [
       ...c,
       {
         uid,
         id,
-        label: `Custom ${engine} check ${idx + 1}`,
+        label: `Custom ${engine} check ${uid}`,
         engine,
         severity: "blocking",
         message: "Custom check failed.",
-        paths: "pkg/**/*.go",
+        paths: def.paths,
+        exclude: "",
         forbidAdded: def.forbidAdded,
+        requireAdded: "",
         whenChanged: def.whenChanged,
         requireChanged: def.requireChanged,
         maxChangedLines: def.maxChangedLines,
+        maxFiles: 0,
+        allowWaiver: false,
+        requiredKeys: def.requiredKeys,
+        schemaJson: def.schemaJson,
         failLine: def.failLine,
         passLine: def.passLine,
         passJson: def.passJson,
@@ -1623,7 +1752,13 @@ export class QaV3StudioComponent {
 
   updateCheckField(
     uid: number,
-    field: "paths" | "forbidAdded" | "whenChanged" | "requireChanged",
+    field:
+      | "paths"
+      | "exclude"
+      | "forbidAdded"
+      | "whenChanged"
+      | "requireChanged"
+      | "requiredKeys",
     val: string,
   ): void {
     this.customChecks.update((list) =>
@@ -1643,6 +1778,21 @@ export class QaV3StudioComponent {
             next.paths,
           );
           return { ...next, failJson: syn.failJson, passJson: syn.passJson };
+        }
+        if (
+          next.engine === "jsonschema" &&
+          (field === "requiredKeys" || field === "paths")
+        ) {
+          const syn = synthesizeJsonSchemaFixtures(
+            next.requiredKeys,
+            next.paths,
+          );
+          return {
+            ...next,
+            schemaJson: syn.schemaJson,
+            failJson: syn.failJson,
+            passJson: syn.passJson,
+          };
         }
         return next;
       }),
@@ -1668,15 +1818,29 @@ export class QaV3StudioComponent {
     this.customChecks.update((list) =>
       list.map((c) => {
         if (c.uid !== uid) return c;
-        const failLine = kind === "fail" ? line : c.failLine;
-        const passLine = kind === "pass" ? line : c.passLine;
-        const ser = serializePatternFixtures(failLine, passLine);
+        const firstGlob = c.paths
+          .split(",")
+          .map((s) => s.trim())
+          .find(Boolean);
+        const fallbackFile = firstGlob
+          ? globToSamplePath(firstGlob)
+          : undefined;
+        if (kind === "fail") {
+          return {
+            ...c,
+            failLine: line,
+            failJson: updateSinglePatternFixtureJson(
+              c.failJson,
+              "fail",
+              line,
+              fallbackFile,
+            ),
+          };
+        }
         return {
           ...c,
-          failLine,
-          passLine,
-          failJson: ser.failJson,
-          passJson: ser.passJson,
+          passLine: line,
+          passJson: updateSinglePatternFixtureJson(c.passJson, "pass", line),
         };
       }),
     );
@@ -1725,6 +1889,10 @@ export class QaV3StudioComponent {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
+      const exclude = c.exclude
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
       const whenChanged = c.whenChanged
         .split(",")
         .map((s) => s.trim())
@@ -1740,7 +1908,9 @@ export class QaV3StudioComponent {
         severity: c.severity,
         message: c.message || "Failed",
         ...(paths.length > 0 ? { paths } : {}),
+        ...(exclude.length > 0 ? { exclude } : {}),
         ...(c.forbidAdded ? { "forbid-added": c.forbidAdded } : {}),
+        ...(c.requireAdded ? { "require-added": c.requireAdded } : {}),
         ...(whenChanged.length > 0 ? { "when-changed": whenChanged } : {}),
         ...(requireChanged.length > 0
           ? { "require-changed": requireChanged }
@@ -1748,6 +1918,9 @@ export class QaV3StudioComponent {
         ...(c.maxChangedLines > 0
           ? { "max-changed-lines": c.maxChangedLines }
           : {}),
+        ...(c.maxFiles > 0 ? { "max-files": c.maxFiles } : {}),
+        ...(c.allowWaiver ? { "allow-waiver": true } : {}),
+        ...(c.schemaJson ? { "schema-json": c.schemaJson } : {}),
         fixtures: {
           fail: failArr,
           pass: passArr,
@@ -1761,11 +1934,13 @@ export class QaV3StudioComponent {
     extends?: string;
     label?: string;
     summary?: string;
+    maxSkillBytes?: number;
   }): FlowDeclarationV4 {
     const det = this.detail();
     const customStages = this.exportCustomStages();
     const customChecks = this.exportCustomChecks();
-    const skillText = this.codingSkillText().trim();
+    const mode = this.codingSkillMode() || "replace";
+    const skillText = mode === "inherit" ? "" : this.codingSkillText().trim();
     return {
       schema: "grain.dev/qa-flow/v4",
       key: meta?.key || det?.key || "engineering-workflow-v4",
@@ -1776,15 +1951,11 @@ export class QaV3StudioComponent {
         "engineering-workflow-v4@1",
       label: meta?.label || det?.label || "Engineering workflow v4",
       summary: meta?.summary || det?.summary || "",
-      ...(skillText
-        ? {
-            skill: {
-              mode: this.codingSkillMode() || "replace",
-              text: skillText,
-              maxBytes: 4096,
-            },
-          }
-        : {}),
+      skill: {
+        mode,
+        text: skillText,
+        maxBytes: meta?.maxSkillBytes || 4096,
+      },
       stages: {
         "s0-intent": { enabled: this.s0Intent() },
         "s2-plan-critic": { enabled: this.s2PlanCritic() },
@@ -1854,6 +2025,10 @@ export class QaV3StudioComponent {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
+      const exclude = c.exclude
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
       const whenChanged = c.whenChanged
         .split(",")
         .map((s) => s.trim())
@@ -1870,8 +2045,14 @@ export class QaV3StudioComponent {
       if (paths.length > 0) {
         customChecksYaml += `    paths: ${JSON.stringify(paths)}\n`;
       }
+      if (exclude.length > 0) {
+        customChecksYaml += `    exclude: ${JSON.stringify(exclude)}\n`;
+      }
       if (c.forbidAdded) {
         customChecksYaml += `    forbid-added: ${JSON.stringify(c.forbidAdded)}\n`;
+      }
+      if (c.requireAdded) {
+        customChecksYaml += `    require-added: ${JSON.stringify(c.requireAdded)}\n`;
       }
       if (whenChanged.length > 0) {
         customChecksYaml += `    when-changed: ${JSON.stringify(whenChanged)}\n`;
@@ -1882,11 +2063,20 @@ export class QaV3StudioComponent {
       if (c.maxChangedLines > 0) {
         customChecksYaml += `    max-changed-lines: ${c.maxChangedLines}\n`;
       }
+      if (c.maxFiles > 0) {
+        customChecksYaml += `    max-files: ${c.maxFiles}\n`;
+      }
+      if (c.allowWaiver) {
+        customChecksYaml += `    allow-waiver: true\n`;
+      }
+      if (c.schemaJson) {
+        customChecksYaml += `    schema-json: ${JSON.stringify(c.schemaJson)}\n`;
+      }
       customChecksYaml += `    fixtures:\n      pass: ${c.passJson.replace(/\n/g, "")}\n      fail: ${c.failJson.replace(/\n/g, "")}\n`;
     }
     let customStagesYaml = "";
     for (const s of this.customStages()) {
-      customStagesYaml += `    - id: ${s.id}\n      label: ${s.label}\n      insert-after: ${s.insertAfter}\n      timeout-seconds: ${s.timeoutSeconds}\n`;
+      customStagesYaml += `    - id: ${JSON.stringify(s.id)}\n      label: ${JSON.stringify(s.label || s.id)}\n      insert-after: ${s.insertAfter}\n      timeout-seconds: ${Math.min(120, Math.max(10, s.timeoutSeconds))}\n`;
     }
     let packsYaml = "";
     for (const p of this.readabilityPacks()) {
@@ -1918,7 +2108,24 @@ export class QaV3StudioComponent {
       : "";
     const packsSection = packsYaml ? `readability-packs:\n${packsYaml}` : "";
     const stepsSection = stepsYaml ? `skill-steps:\n${stepsYaml}` : "";
-    return `schema: "grain.dev/qa-flow/v4"\nkey: ${this.detail()?.key || "draft-v4-preview"}\nextends: golden-v3@1\nlabel: Draft V4 preview\ndecompose:\n  enabled: ${this.decomposeEnabled()}\n  mode: ${this.decomposeMode()}\n  max-subtasks: ${this.decomposeMaxSubtasks()}\n  target-diff-lines: ${this.decomposeTargetDiffLines()}\ncontext:\n  enabled: ${this.contextEnabled()}\n  include-callers: ${this.contextIncludeCallers()}\n  include-memory: ${this.contextIncludeMemory()}\n  max-tokens: ${this.contextMaxTokens()}\n${packsSection}${stepsSection}pr-contract:\n  enabled: ${this.prEnabled()}\n  mode: ${this.prMode()}\n  max-subject-chars: ${this.prMaxSubjectChars()}\n  required-sections: ${JSON.stringify(prSections)}\n  audit-lint-suppressions: ${this.prAuditLint()}\nstages:\n  s0-intent:\n    enabled: ${this.s0Intent()}\n  s2-plan-critic:\n    enabled: ${this.s2PlanCritic()}\n  s5-merge-triage:\n    mode: ${this.s5Triage()}\n${stagesSection}${checksSection}`;
+    const det = this.detail();
+    const resolvedKey = this.editing()
+      ? this.draftKey() || det?.key || "draft-v4-preview"
+      : det?.key || "draft-v4-preview";
+    const resolvedExtends = this.editing()
+      ? this.draftExtends() ||
+        det?.hash ||
+        det?.declarationV4?.extends ||
+        det?.declaration?.extends ||
+        "golden-v3@1"
+      : det?.parentHash ||
+        det?.declarationV4?.extends ||
+        det?.declaration?.extends ||
+        "golden-v3@1";
+    const resolvedLabel = this.editing()
+      ? this.draftLabel() || det?.label || resolvedKey
+      : det?.label || resolvedKey;
+    return `schema: "grain.dev/qa-flow/v4"\nkey: ${JSON.stringify(resolvedKey)}\nextends: ${JSON.stringify(resolvedExtends)}\nlabel: ${JSON.stringify(resolvedLabel)}\ndecompose:\n  enabled: ${this.decomposeEnabled()}\n  mode: ${this.decomposeMode()}\n  max-subtasks: ${this.decomposeMaxSubtasks()}\n  target-diff-lines: ${this.decomposeTargetDiffLines()}\ncontext:\n  enabled: ${this.contextEnabled()}\n  include-callers: ${this.contextIncludeCallers()}\n  include-memory: ${this.contextIncludeMemory()}\n  max-tokens: ${this.contextMaxTokens()}\n${packsSection}${stepsSection}pr-contract:\n  enabled: ${this.prEnabled()}\n  mode: ${this.prMode()}\n  max-subject-chars: ${this.prMaxSubjectChars()}\n  required-sections: ${JSON.stringify(prSections)}\n  audit-lint-suppressions: ${this.prAuditLint()}\nstages:\n  s0-intent:\n    enabled: ${this.s0Intent()}\n  s2-plan-critic:\n    enabled: ${this.s2PlanCritic()}\n  s5-merge-triage:\n    mode: ${this.s5Triage()}\n${stagesSection}${checksSection}`;
   }
 
   async runFixtureSelfTest(): Promise<void> {
@@ -1934,7 +2141,12 @@ export class QaV3StudioComponent {
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean),
+        exclude: target.exclude
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean),
         forbidAdded: target.forbidAdded,
+        requireAdded: target.requireAdded,
         whenChanged: target.whenChanged
           .split(",")
           .map((s) => s.trim())
@@ -1944,6 +2156,8 @@ export class QaV3StudioComponent {
           .map((s) => s.trim())
           .filter(Boolean),
         maxChangedLines: target.maxChangedLines,
+        maxFiles: target.maxFiles,
+        schemaJson: target.schemaJson,
         failJson: target.failJson,
         passJson: target.passJson,
       });
@@ -1965,6 +2179,10 @@ export class QaV3StudioComponent {
 
   async verifyDryRun(): Promise<void> {
     if (this.verifying()) return;
+    if (this.delegateDryRun()) {
+      this.dryRunReq.emit();
+      return;
+    }
     this.verifying.set(true);
     try {
       const checks = this.customChecks();

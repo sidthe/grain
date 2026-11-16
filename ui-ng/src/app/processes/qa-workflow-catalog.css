@@ -196,6 +196,7 @@ g-qa-workflow-catalog {
 
   .qa-catalog-scroll {
     padding-bottom: calc(var(--grain-bottombar-height, 92px) + 16px);
+    scroll-padding-bottom: calc(var(--grain-bottombar-height, 92px) + 16px);
   }
 }
 

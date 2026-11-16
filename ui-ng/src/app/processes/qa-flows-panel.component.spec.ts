@@ -359,7 +359,7 @@ describe("QaFlowsPanelComponent", () => {
           ],
         };
       }
-      if (route === "GET /api/qa/flow-versions/:hash") {
+      if (route === "GET /api/qa/flow-versions/{hash}") {
         return {
           key: "deterministic-s3-only",
           version: 1,
@@ -572,5 +572,327 @@ describe("QaFlowsPanelComponent", () => {
         }),
       }),
     );
+  });
+
+  it("customizes golden-v1-minimal (V2): syncs skill inherit mode, stopNudge, verifier, disabled built-in check overrides, and upgrades to v4 when stages are edited", () => {
+    const fixture = TestBed.createComponent(QaFlowsPanelComponent);
+    const comp = fixture.componentInstance;
+    comp.selectedDetail.set({
+      key: "golden-v1-minimal",
+      version: 1,
+      hash: "sha256:g1",
+      label: "golden-v1-minimal (Recommended)",
+      summary: "270-token coding contract and deterministic gates",
+      qaEngineRev: 1,
+      resolved: {
+        id: "golden-v1-minimal",
+        label: "golden-v1-minimal (Recommended)",
+        summary: "270-token coding contract",
+        injectSkill: true,
+        skillBytes: 900,
+        stopNudge: true,
+        stagingIsolation: true,
+        enableS4: true,
+        maxS4RepairRounds: 1,
+        rules: [
+          {
+            id: "golden:sibling-export-hazard",
+            label: "Sibling caller hazard",
+            stage: "S3",
+            severity: "warn",
+            summary: "Sweep callers",
+            targetPaths: ["**/*.go"],
+            enabled: true,
+          },
+          {
+            id: "golden:pr-description-contract",
+            label: "PR contract",
+            stage: "S3",
+            severity: "warn",
+            summary: "PR sections",
+            targetPaths: ["PR metadata"],
+            enabled: true,
+          },
+        ],
+      },
+    });
+    fixture.detectChanges();
+
+    comp.newVersion();
+    fixture.detectChanges();
+
+    const st = comp.studio();
+    expect(st).toBeTruthy();
+
+    // Switch coding skill to inherit -> 0 draftSkillBytes and mode="inherit", text=""
+    st?.codingSkillMode.set("inherit");
+    st?.codingSkillText.set("");
+    st?.stopNudge.set(false);
+    st?.verifierEnabled.set(false);
+    comp.toggleCheckEnabled("golden:sibling-export-hazard");
+    comp.toggleCheckEnabled("golden:pr-description-contract");
+    fixture.detectChanges();
+
+    expect(comp.draftSkillBytes()).toBe(0);
+    const v2Draft = comp.prepareDraft();
+    expect(v2Draft.schema).toBe("grain.dev/qa-flow/v2");
+    expect(v2Draft.skill.mode).toBe("inherit");
+    expect(v2Draft.skill.text).toBe("");
+    expect(v2Draft.stopNudge).toBe(false);
+    expect(v2Draft.verifier.enabled).toBe(false);
+    expect(v2Draft.checks["golden:sibling-export-hazard"]).toEqual({
+      enabled: false,
+    });
+    expect(v2Draft.checks["golden:pr-description-contract"]).toEqual({
+      enabled: false,
+    });
+
+    // Enabling a V4 stage upgrades draft.schema to grain.dev/qa-flow/v4
+    st?.s0Intent.set(true);
+    fixture.detectChanges();
+    const upgradedDraft = comp.prepareDraft();
+    expect(upgradedDraft.schema).toBe("grain.dev/qa-flow/v4");
+    expect(upgradedDraft.stages?.["s0-intent"]).toEqual({ enabled: true });
+  });
+
+  it("customizes engineering-workflow-v4 with exclude fixtures losslessly and delegates dry-run in read-only vs draft modes", async () => {
+    const fixture = TestBed.createComponent(QaFlowsPanelComponent);
+    const comp = fixture.componentInstance;
+    comp.selectedDetail.set({
+      key: "engineering-workflow-v4",
+      version: 1,
+      hash: "sha256:v4-base",
+      label: "8-Stage Engineering Workflow",
+      summary: "V4 workflow",
+      schema: "grain.dev/qa-flow/v4",
+      qaEngineRev: 4,
+      sourceYaml:
+        "schema: grain.dev/qa-flow/v4\nkey: engineering-workflow-v4\n",
+      declarationV4: {
+        schema: "grain.dev/qa-flow/v4",
+        key: "engineering-workflow-v4",
+        "custom-checks": [
+          {
+            id: "custom:no-fmt-println-pkg",
+            label: "No debug fmt.Println in pkg/",
+            kind: "pattern",
+            severity: "warn",
+            paths: ["pkg/**/*.go"],
+            exclude: ["**/*_test.go"],
+            "forbid-added": "\\bfmt\\.Println\\(",
+            message: "Use structured logging.",
+            fixtures: {
+              fail: [
+                {
+                  name: "added fmt.Println in handler",
+                  file: "pkg/ui/server.go",
+                  "added-lines": ['\tfmt.Println("debug", req.URL)'],
+                },
+              ],
+              pass: [
+                {
+                  name: "fmt.Println in unit test ignored",
+                  file: "pkg/ui/server_test.go",
+                  "added-lines": ['\tfmt.Println("test output")'],
+                },
+              ],
+            },
+          },
+        ],
+      },
+    });
+    fixture.detectChanges();
+
+    // Read-only mode: Lineage & YAML shows sourceYaml and drawer dry-run sends { hash }
+    expect(comp.studio()?.yamlPreviewText()).toContain(
+      "key: engineering-workflow-v4",
+    );
+    await comp.studio()?.verifyDryRun();
+    expect(api.post).toHaveBeenCalledWith(
+      "POST /api/qa/flow-versions",
+      undefined,
+      { hash: "sha256:v4-base" },
+      "dryRun=1&limit=20",
+    );
+
+    // Customize mode: edit fail example line, verify exclude & server_test.go pass fixture stay intact
+    comp.newVersion();
+    fixture.detectChanges();
+
+    const st = comp.studio();
+    const cc = st?.customChecks()[0];
+    expect(cc?.exclude).toBe("**/*_test.go");
+    if (cc) {
+      st?.updatePatternExample(cc.uid, "fail", '\tfmt.Println("bad")');
+    }
+    fixture.detectChanges();
+
+    const prepared = comp.prepareDraft();
+    const exportedCheck = prepared.customChecks?.[0];
+    expect(exportedCheck?.exclude).toEqual(["**/*_test.go"]);
+    expect(JSON.stringify(exportedCheck?.fixtures?.pass)).toContain(
+      "pkg/ui/server_test.go",
+    );
+
+    api.post.mockClear();
+    await st?.verifyDryRun();
+    expect(api.post).toHaveBeenCalledWith(
+      "POST /api/qa/flow-versions",
+      undefined,
+      expect.objectContaining({
+        declaration: expect.objectContaining({
+          schema: "grain.dev/qa-flow/v4",
+        }),
+      }),
+      "dryRun=1&limit=20",
+    );
+  });
+
+  it("handles version switcher @vN query params, v-prefixed deep links, non-retired preference, qa-flow-switcher family key, and race guard", async () => {
+    let resolveSlowV1: ((v: unknown) => void) | undefined;
+    api.get.mockImplementation((route: string, params?: { hash?: string }) => {
+      if (route === "GET /api/qa/flow-versions") {
+        return Promise.resolve({
+          versions: [
+            {
+              key: "golden-v3",
+              version: 1,
+              hash: "h-v1",
+              label: "Golden V3",
+              summary: "v1 summary",
+            },
+            {
+              key: "golden-v3",
+              version: 2,
+              hash: "h-v2",
+              label: "Golden V3",
+              summary: "v2 summary",
+            },
+            {
+              key: "golden-v3",
+              version: 3,
+              hash: "h-v3-ret",
+              label: "Golden V3",
+              summary: "v3 retired",
+              retiredAt: "2026-06-01T00:00:00Z",
+            },
+          ],
+        });
+      }
+      if (route === "GET /api/qa/flow-versions/{hash}") {
+        if (params?.hash === "h-v1") {
+          return new Promise((resolve) => {
+            resolveSlowV1 = resolve;
+          });
+        }
+        return Promise.resolve({
+          key: "golden-v3",
+          version: 2,
+          hash: "h-v2",
+          label: "Golden V3 v2",
+          summary: "v2 summary",
+          qaEngineRev: 3,
+        });
+      }
+      return Promise.resolve({});
+    });
+
+    TestBed.overrideProvider(ActivatedRoute, {
+      useValue: {
+        snapshot: {
+          queryParamMap: {
+            get: (k: string) => (k === "flow" ? "golden-v3@v2" : null),
+          },
+        },
+        queryParamMap: {
+          subscribe: () => ({ unsubscribe: () => undefined }),
+        },
+      },
+    });
+
+    const fixture = TestBed.createComponent(QaFlowsPanelComponent);
+    const comp = fixture.componentInstance;
+    await comp.loadVersions();
+    fixture.detectChanges();
+
+    // @v2 (leading v stripped) resolved to h-v2, and flowSwitcherOptions uses key "golden-v3"
+    expect(comp.selectedHash()).toBe("h-v2");
+    expect(comp.flowSwitcherOptions()[0]?.value).toBe("golden-v3");
+
+    // Start slow selection of h-v1, then immediately select h-v2: race guard prevents h-v1 from overwriting h-v2
+    const p1 = comp.doSelectVersion("h-v1", true);
+    const p2 = comp.doSelectVersion("h-v2", true);
+    await p2;
+    resolveSlowV1?.({
+      key: "golden-v3",
+      version: 1,
+      hash: "h-v1",
+      label: "Stale V1",
+      summary: "v1 summary",
+    });
+    await p1;
+    expect(comp.selectedHash()).toBe("h-v2");
+    expect(comp.selectedDetail()?.label).toBe("Golden V3 v2");
+  });
+
+  it("prioritizes published overrides over same-version built-ins and prevents V4 draft declarations from leaking into read-only V2 views", () => {
+    const fixture = TestBed.createComponent(QaFlowsPanelComponent);
+    const comp = fixture.componentInstance;
+    comp.versions.set([
+      {
+        key: "engineering-workflow-v4",
+        version: 1,
+        hash: "h-builtin-v4",
+        label: "8-Stage Built-in",
+        summary: "built-in",
+        builtIn: true,
+      },
+      {
+        key: "engineering-workflow-v4",
+        version: 1,
+        hash: "h-custom-v4",
+        label: "8-Stage Custom",
+        summary: "custom override",
+        builtIn: false,
+      },
+    ]);
+    comp.selectedHash.set("h-custom-v4");
+    comp.selectedDetail.set({
+      key: "engineering-workflow-v4",
+      version: 1,
+      hash: "h-custom-v4",
+      label: "8-Stage Custom",
+      summary: "custom override",
+      schema: "grain.dev/qa-flow/v4",
+      declarationV4: {
+        schema: "grain.dev/qa-flow/v4",
+        key: "engineering-workflow-v4",
+        stages: { "s0-intent": { enabled: true } },
+      },
+    });
+    fixture.detectChanges();
+
+    expect(comp.groupedVersions()[0]?.latestActiveHash).toBe("h-custom-v4");
+    expect(comp.versionSwitcherOptions().map((o) => o.label)).toEqual([
+      "@v1",
+      "@v1 (built-in)",
+    ]);
+
+    // Enter V4 edit mode, cancel back to read-only, then switch to a V2 workflow: declV4 must not leak
+    comp.newVersion();
+    fixture.detectChanges();
+    comp.isEditing.set(false);
+    comp.selectedDetail.set({
+      key: "golden-v1-minimal",
+      version: 1,
+      hash: "h-v2-min",
+      label: "Recommended baseline",
+      summary: "V2 minimal",
+      schema: "grain.dev/qa-flow/v2",
+    });
+    fixture.detectChanges();
+
+    expect(comp.studio()?.declV4()).toBeUndefined();
+    expect(comp.studio()?.s0Intent()).toBe(false);
   });
 });

@@ -406,7 +406,8 @@ describe("QaV3StudioComponent", () => {
     const searchedSteps = root.querySelectorAll(".qa-step-node");
     expect(searchedSteps.length).toBe(1);
     expect(searchedSteps[0].textContent).toContain("ts-angular");
-    expect(comp.effectiveStageCollapsed("s3-coding")).toBe(false);
+    expect(comp.visibleStages().map((s) => s.id)).toContain("s2-coding");
+    expect(comp.effectiveStageCollapsed("s2-coding")).toBe(false);
   });
 
   it("inspects and edits Readability Packs, PR Contract, and Custom Checks in the focused substep drawer", () => {
@@ -615,5 +616,152 @@ describe("QaV3StudioComponent", () => {
     expect(fixture.componentInstance.fixtureReport()).toBeNull();
     expect(fixture.componentInstance.skillSteps().length).toBe(0);
     expect(fixture.componentInstance.decomposeMode()).toBe("slice_plan");
+  });
+
+  it("round-trips exclude/requireAdded/maxFiles/allowWaiver/schemaJson losslessly and preserves server_test.go pass fixture on single-side pattern edits", async () => {
+    const declV4: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      "custom-checks": [
+        {
+          id: "custom:no-fmt-println-pkg",
+          label: "No debug fmt.Println in pkg/",
+          kind: "pattern",
+          severity: "warn",
+          paths: ["pkg/**/*.go"],
+          exclude: ["**/*_test.go"],
+          "forbid-added": "\\bfmt\\.Println\\(",
+          "require-added": "fmt|slog",
+          "max-files": 5,
+          "allow-waiver": true,
+          fixtures: {
+            fail: [
+              {
+                name: "added fmt.Println in handler",
+                file: "pkg/ui/server.go",
+                "added-lines": ['\tfmt.Println("debug", req.URL)'],
+              },
+            ],
+            pass: [
+              {
+                name: "fmt.Println in unit test ignored",
+                file: "pkg/ui/server_test.go",
+                "added-lines": ['\tfmt.Println("test output")'],
+              },
+            ],
+          },
+        },
+      ],
+    };
+
+    fixture.componentRef.setInput("editing", true);
+    fixture.componentRef.setInput("draftKey", "custom-v4");
+    fixture.componentRef.setInput("draftExtends", "engineering-workflow-v4@1");
+    fixture.componentRef.setInput("draftLabel", "Custom V4 Flow");
+    fixture.componentRef.setInput("declV4", declV4);
+    fixture.detectChanges();
+
+    const comp = fixture.componentInstance;
+    const cc = comp.customChecks()[0];
+    expect(cc).toBeTruthy();
+    if (cc) {
+      // Editing ONLY the fail example line keeps server_test.go pass fixture intact
+      comp.updatePatternExample(cc.uid, "fail", '\tfmt.Println("oops")');
+    }
+    fixture.detectChanges();
+
+    await comp.runFixtureSelfTest();
+    expect(comp.fixtureReport()?.passed).toBe(true);
+    expect(comp.fixtureReport()?.failTrapOk).toBe(true);
+    expect(comp.fixtureReport()?.cleanPassOk).toBe(true);
+
+    const exported = comp.exportCustomChecks()[0];
+    expect(exported?.exclude).toEqual(["**/*_test.go"]);
+    expect(exported?.["require-added"]).toBe("fmt|slog");
+    expect(exported?.["max-files"]).toBe(5);
+    expect(exported?.["allow-waiver"]).toBe(true);
+    expect(JSON.stringify(exported?.fixtures?.pass)).toContain(
+      "pkg/ui/server_test.go",
+    );
+
+    const yml = comp.buildYaml();
+    expect(yml).toContain('key: "custom-v4"');
+    expect(yml).toContain('extends: "engineering-workflow-v4@1"');
+    expect(yml).toContain('label: "Custom V4 Flow"');
+    expect(yml).toContain('exclude: ["**/*_test.go"]');
+    expect(yml).toContain("allow-waiver: true");
+  });
+
+  it("supports zero-JSON jsonschema checks, monotonic substep IDs, stage timeout bounds, s5:merge-triage customize CTA, and s1:blast-radius safety card", () => {
+    const comp = fixture.componentInstance;
+    const root = fixture.nativeElement as HTMLElement;
+
+    // 1. Read-only mode: s5:merge-triage shows Customize workflow to edit... CTA
+    fixture.componentRef.setInput("editing", false);
+    fixture.detectChanges();
+    comp.selectStepFromGuide({
+      stageId: "s5-triage",
+      stepId: "s5:merge-triage",
+    });
+    fixture.detectChanges();
+    expect(
+      root.querySelector('[data-testid="qa-step-customize-cta"]'),
+    ).toBeTruthy();
+
+    // 2. Customize mode: s1:blast-radius renders safety-floor explanation card (never empty)
+    fixture.componentRef.setInput("editing", true);
+    fixture.detectChanges();
+    comp.selectStep("s1-context", "s1:blast-radius");
+    fixture.detectChanges();
+    expect(
+      root.querySelector('[data-testid="qa-locked-floor-card"]'),
+    ).toBeTruthy();
+
+    // 3. Zero-JSON jsonschema check synthesis & client-side evaluation
+    comp.addCheck("jsonschema");
+    fixture.detectChanges();
+    const schemaCheck = comp
+      .customChecks()
+      .find((c) => c.engine === "jsonschema");
+    expect(schemaCheck?.paths).toBe("**/*.json");
+    expect(schemaCheck?.requiredKeys).toBe("name, version");
+    expect(schemaCheck?.schemaJson).toEqual({
+      type: "object",
+      required: ["name", "version"],
+    });
+    expect(
+      root.querySelector('[data-testid="qa-jsonschema-examples"]')?.textContent,
+    ).toContain("Caught");
+    expect(
+      root.querySelector('[data-testid="qa-jsonschema-examples"]')?.textContent,
+    ).toContain("Allowed");
+
+    // 4. Monotonic IDs across add -> remove -> add, and custom stage timeout clamping 10..120
+    comp.addCustomStage();
+    const firstStage = comp.customStages()[0];
+    comp.addCustomStage();
+    const secondStage = comp.customStages()[1];
+    if (firstStage) {
+      comp.removeCustomStage(firstStage.uid);
+    }
+    comp.addCustomStage();
+    fixture.detectChanges();
+    const thirdStage = comp.customStages()[1];
+    expect(thirdStage?.id).not.toBe(secondStage?.id);
+
+    if (thirdStage) {
+      const timeoutInput = mustEl<HTMLInputElement>(
+        root,
+        '[data-testid="qa-custom-stage-timeout"]',
+      );
+      expect(timeoutInput.min).toBe("10");
+      expect(timeoutInput.max).toBe("120");
+      timeoutInput.value = "500";
+      timeoutInput.dispatchEvent(new Event("input"));
+      fixture.detectChanges();
+      expect(
+        comp.customStages().find((s) => s.uid === thirdStage.uid)
+          ?.timeoutSeconds,
+      ).toBe(120);
+    }
   });
 });

@@ -18,12 +18,13 @@ import { test, expect } from "./fixtures.js";
 test.use({ demoArgs: ["-as", "demo-operator"] });
 
 test.afterEach(async ({ demoServer, accessCode }) => {
+  const headers = {
+    Authorization: `Bearer ${accessCode}`,
+    "Content-Type": "application/json",
+  };
   await fetch(`${demoServer}/api/settings`, {
     method: "PUT",
-    headers: {
-      Authorization: `Bearer ${accessCode}`,
-      "Content-Type": "application/json",
-    },
+    headers,
     body: JSON.stringify({
       qaEnabled: false,
       qaFlowId: "golden-v1-minimal",
@@ -31,6 +32,21 @@ test.afterEach(async ({ demoServer, accessCode }) => {
       qaShadowOnControl: true,
     }),
   });
+  const listRes = await fetch(`${demoServer}/api/qa/flow-versions`, {
+    headers,
+  });
+  if (listRes.ok) {
+    const payload = await listRes.json();
+    for (const v of payload.versions || []) {
+      if (!v.builtIn && !v.retiredAt && v.hash) {
+        await fetch(`${demoServer}/api/qa/flow-versions`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ action: "retire", hash: v.hash }),
+        });
+      }
+    }
+  }
 });
 
 test("Telemetry tab-strip active border, Processes full-width composition body well, and Software Workflow & QA Studio workbench render and switch cleanly", async ({
@@ -232,7 +248,20 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
   expect(scrollStyles.drawerOverflowY).toBe("auto");
   expect(scrollStyles.toolbarOverflowX).not.toBe("auto");
 
-  // Switch inspector tabs cleanly inside the right drawer.
+  // Switch inspector tabs cleanly inside the right drawer and verify right-edge tab is unclipped.
+  await expect(page.getByTestId("qa-insp-tab-empirical")).toHaveText(
+    "Stats & dry-run",
+  );
+  const desktopYamlTabBox = await page
+    .getByTestId("qa-insp-tab-yaml")
+    .boundingBox();
+  const desktopInspTabBox = await stepInspector.boundingBox();
+  expect(desktopYamlTabBox).not.toBeNull();
+  expect(desktopInspTabBox).not.toBeNull();
+  expect(desktopYamlTabBox.x + desktopYamlTabBox.width).toBeLessThanOrEqual(
+    desktopInspTabBox.x + desktopInspTabBox.width + 2,
+  );
+
   await page.getByTestId("qa-insp-tab-yaml").click();
   await expect(page.getByTestId("qa-insp-tab-yaml")).toHaveAttribute(
     "aria-selected",
@@ -244,6 +273,68 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
     "true",
   );
   await expect(page.getByTestId("qa-workflow-guide")).toBeVisible();
+
+  // Customize & publish engineering-workflow-v4 (V4): verify exclude fixture survival, zero-JSON jsonschema check, and historical dry-run.
+  await page.getByTestId("qa-new-version-btn").click();
+  await expect(page.getByTestId("qa-publish-version-btn")).toBeVisible();
+  const draftFieldBox = await page
+    .getByTestId("qa-draft-meta-card")
+    .locator(".qa-field")
+    .first()
+    .boundingBox();
+  expect(draftFieldBox).not.toBeNull();
+  expect(draftFieldBox.height).toBeLessThan(95);
+
+  await page.getByTestId("qa-stage-toggle-s3-checks").click();
+  await page.getByTestId("qa-step-row-custom:no-fmt-println-pkg").click();
+  await expect(page.getByTestId("qa-check-exclude-input")).toHaveValue(
+    "**/*_test.go",
+  );
+  await page
+    .getByTestId("qa-check-fail-line")
+    .fill('\tfmt.Println("bad debug line")');
+  await expect(page.getByTestId("qa-v3-custom-check-row")).toContainText(
+    "Caught",
+  );
+  await expect(page.getByTestId("qa-v3-custom-check-row")).toContainText(
+    "Allowed",
+  );
+
+  await page
+    .locator(
+      '[data-testid="qa-stage-s3-checks"] [data-testid="qa-add-step-btn"]',
+    )
+    .click();
+  await page.getByTestId("qa-v3-add-jsonschema").click();
+  const jsonSchemaCard = page.getByTestId("qa-v3-custom-check-row");
+  await expect(jsonSchemaCard).toBeVisible();
+  expect(await jsonSchemaCard.locator("textarea").count()).toBe(0);
+  await expect(page.getByTestId("qa-check-required-keys")).toHaveValue(
+    "name, version",
+  );
+  await expect(page.getByTestId("qa-jsonschema-examples")).toContainText(
+    "Caught",
+  );
+  await expect(page.getByTestId("qa-jsonschema-examples")).toContainText(
+    "Allowed",
+  );
+
+  await page.getByTestId("qa-test-menu-btn").click();
+  await page.getByTestId("qa-dry-run-btn").click();
+  await expect(page.getByTestId("qa-dry-run-banner")).toBeVisible();
+
+  await page.getByTestId("qa-publish-version-btn").click();
+  await page.getByTestId("confirm-accept").click();
+  await expect(page.getByTestId("qa-new-version-btn")).toBeVisible();
+
+  // Verify the newly published custom V4 version is active (!builtIn, so Retire version is enabled) and retire it back to built-in @v1.
+  await page.getByTestId("qa-more-actions-btn").click();
+  await expect(page.getByTestId("qa-retire-flow-btn")).toBeVisible();
+  await page.getByTestId("qa-retire-flow-btn").click();
+  await page.getByTestId("confirm-accept").click();
+  await page.getByTestId("qa-more-actions-btn").click();
+  await expect(page.getByTestId("qa-retire-flow-btn")).toHaveCount(0);
+  await page.getByTestId("qa-more-actions-btn").click();
 
   // Switch back to golden-v3 cleanly, then inspect partial workflow golden-v1-minimal skipped stages summary bar.
   await v3Row.click();
@@ -257,30 +348,78 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
     "skipped in this workflow",
   );
 
-  // Verify Customize as vN draft mode + zero-JSON custom check test cases.
+  // Customize & publish golden-v1-minimal (V2) twice (creating DB v1 then DB v2), switch versions via qa-version-switcher, and verify qa-flow-switcher at 1024x860.
   await page.getByTestId("qa-new-version-btn").click();
   await expect(page.getByTestId("qa-publish-version-btn")).toBeVisible();
   await expect(page.getByTestId("qa-test-menu-btn")).toBeVisible();
-  await page.getByTestId("qa-stage-toggle-s3-checks").click();
+  await page.getByTestId("qa-stage-toggle-s2-coding").click();
+  await page.getByTestId("qa-step-row-coding:skill").click();
   await page
-    .locator(
-      '[data-testid="qa-stage-s3-checks"] [data-testid="qa-add-step-btn"]',
-    )
-    .click();
-  await expect(page.getByTestId("qa-add-step-catalog")).toBeVisible();
-  await page.getByTestId("qa-v3-add-pattern").click();
+    .locator("textarea#codingSkillTextarea")
+    .fill(
+      "Keep functions concise, verify sibling callers, and add unit tests.",
+    );
 
-  const customCheckCard = page.getByTestId("qa-v3-custom-check-row");
-  await expect(customCheckCard).toBeVisible();
-  expect(await customCheckCard.locator("textarea").count()).toBe(0);
-  await expect(page.getByTestId("qa-check-fail-line")).toBeVisible();
-  await expect(page.getByTestId("qa-check-pass-line")).toBeVisible();
-  await expect(customCheckCard).toContainText("Caught");
-  await expect(customCheckCard).toContainText("Allowed");
-
-  await page.getByTestId("qa-cancel-edit-btn").click();
+  await page.getByTestId("qa-publish-version-btn").click();
   await page.getByTestId("confirm-accept").click();
   await expect(page.getByTestId("qa-new-version-btn")).toBeVisible();
+
+  await page.getByTestId("qa-new-version-btn").click();
+  await page.getByTestId("qa-stage-toggle-s2-coding").click();
+  await page.getByTestId("qa-step-row-coding:skill").click();
+  await page
+    .locator("textarea#codingSkillTextarea")
+    .fill(
+      "Keep functions concise, verify sibling callers, and add deterministic unit tests.",
+    );
+  await page.getByTestId("qa-publish-version-btn").click();
+  await page.getByTestId("confirm-accept").click();
+  await expect(page.getByTestId("qa-version-switcher")).toContainText("@v2");
+  await expect(page.getByTestId("qa-new-version-btn")).toContainText(
+    "Customize as v3",
+  );
+
+  // Switch back to @v1 via qa-version-switcher -> URL carries ?flow=golden-v1-minimal@1.
+  await page.getByTestId("qa-version-switcher").click();
+  await page
+    .getByTestId("qa-version-switcher-menu")
+    .getByRole("option", { name: "@v1", exact: false })
+    .first()
+    .click();
+  await expect(page).toHaveURL(/flow=golden-v1-minimal(@|%40)1/);
+  await expect(page.getByTestId("qa-version-switcher")).toContainText("@v1");
+
+  // Verify at 1024x860 while viewing @v1 that qa-flow-switcher still shows the family title and tabs remain unclipped.
+  await page.setViewportSize({ width: 1024, height: 860 });
+  await expect(page.getByTestId("qa-flow-switcher")).toContainText(
+    "Recommended baseline",
+  );
+  const tabletYamlTabBox = await page
+    .getByTestId("qa-insp-tab-yaml")
+    .boundingBox();
+  const tabletInspBoxCheck = await stepInspector.boundingBox();
+  expect(tabletYamlTabBox).not.toBeNull();
+  expect(tabletInspBoxCheck).not.toBeNull();
+  expect(tabletYamlTabBox.x + tabletYamlTabBox.width).toBeLessThanOrEqual(
+    tabletInspBoxCheck.x + tabletInspBoxCheck.width + 2,
+  );
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // Switch back to @v2 via qa-version-switcher -> URL returns to bare ?flow=golden-v1-minimal, then retire @v2 and custom @v1.
+  await page.getByTestId("qa-version-switcher").click();
+  await page
+    .getByTestId("qa-version-switcher-menu")
+    .getByRole("option", { name: /^@v2\b/ })
+    .click();
+  await expect(page).toHaveURL(/flow=golden-v1-minimal($|&)/);
+  await page.getByTestId("qa-more-actions-btn").click();
+  await page.getByTestId("qa-retire-flow-btn").click();
+  await page.getByTestId("confirm-accept").click();
+  await expect(page.getByTestId("qa-version-switcher")).toContainText("@v1");
+  await page.getByTestId("qa-more-actions-btn").click();
+  await page.getByTestId("qa-retire-flow-btn").click();
+  await page.getByTestId("confirm-accept").click();
+  await expect(page.getByTestId("qa-version-switcher")).toContainText("@v1");
 
   // Verify 3-column desktop geometry and 0 axe violations at 1440x900.
   const desktopCatBox = await catalog.boundingBox();

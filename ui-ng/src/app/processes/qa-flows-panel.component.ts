@@ -53,6 +53,7 @@ import {
   type QAFlowVersionItem,
   type QAFlowVersionsResponse,
   buildClientWorkflowStagesView,
+  compareFlowVersionsDesc,
   computeActivePromptBytes,
   groupWorkflowFamilies,
   humanizeWorkflowKey,
@@ -112,25 +113,36 @@ import { QaWorkflowCatalogComponent } from "./qa-workflow-catalog.component";
             [canEdit]="canAdmin()"
             [isFork]="isFork()"
             [draftKey]="draftDeclaration().key"
+            [draftExtends]="draftDeclaration().extends || ''"
             [draftLabel]="draftDeclaration().label"
             [draftSummary]="draftDeclaration().summary || ''"
+            [draftSkill]="draftDeclaration().skill"
+            [delegateDryRun]="true"
             [builtinCheckOverrides]="draftChecks()"
             [qaEnabled]="qaEnabled()"
             [activeFlowId]="activeFlowId()"
             [activeRolloutPct]="activeRolloutPct()"
             [detail]="detail"
-            [decl]="draftDeclaration().declarationV3 ?? detail.declarationV3"
-            [declV4]="draftDeclaration().declarationV4 ?? detail.declarationV4"
+            [decl]="
+              (isEditing() ? draftDeclaration().declarationV3 : undefined) ??
+              detail.declarationV3
+            "
+            [declV4]="
+              (isEditing() ? draftDeclaration().declarationV4 : undefined) ??
+              detail.declarationV4
+            "
             [showParentDiff]="showParentDiff()"
             [diffFiles]="diffFiles()"
             [externalDryRun]="dryRunResult()"
             (adopted)="onFlowAdopted($event)"
+            (dryRunReq)="runDryRun()"
             (toggleParentDiffReq)="toggleParentDiff()"
             (enterDraftReq)="enterDraftFromStudio()"
             (stepSelected)="onStudioStepSelected()"
             (draftKeyChange)="setDraftField('key', $event)"
             (draftLabelChange)="setDraftField('label', $event)"
             (draftSummaryChange)="setDraftField('summary', $event)"
+            (skillChange)="onStudioSkillChange($event)"
             (builtinCheckToggle)="
               setBuiltinCheckEnabled($event.id, $event.enabled)
             "
@@ -163,8 +175,8 @@ import { QaWorkflowCatalogComponent } from "./qa-workflow-catalog.component";
                       testid="qa-flow-switcher"
                       ariaLabel="Switch workflow"
                       [options]="flowSwitcherOptions()"
-                      [value]="selectedHash() || ''"
-                      (valueChange)="selectVersion($event, true)"
+                      [value]="detail.key"
+                      (valueChange)="selectFlowFamily($event)"
                     />
                   </span>
 
@@ -557,6 +569,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
     "golden:test-hygiene",
     "golden:mutation-hardening",
     "golden:boundary-fuzz",
+    "golden:pr-description-contract",
   ];
 
   readonly canAdmin = computed(() =>
@@ -567,9 +580,16 @@ export class QaFlowsPanelComponent implements OnDestroy {
     this.access.can("PUT /api/settings"),
   );
 
-  readonly draftSkillBytes = computed(() =>
-    this.byteCount(this.draftDeclaration().skill?.text || ""),
-  );
+  readonly draftSkillBytes = computed(() => {
+    if (this.isEditing()) {
+      const st = this.studio();
+      if (st) {
+        return st.codingSkillBytes();
+      }
+    }
+    const sk = this.draftDeclaration().skill;
+    return sk?.mode === "inherit" ? 0 : this.byteCount(sk?.text || "");
+  });
 
   readonly skillByteOverflow = computed(
     () =>
@@ -623,7 +643,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
     }
     return Array.from(groups.entries())
       .map(([key, vers]) => {
-        const sorted = [...vers].sort((a, b) => b.version - a.version);
+        const sorted = [...vers].sort(compareFlowVersionsDesc);
         const latestActive = sorted.find((v) => !v.retiredAt);
         return {
           key,
@@ -636,7 +656,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
 
   readonly flowSwitcherOptions = computed<readonly PillOption[]>(() =>
     this.catalogFamilies().all.map((g) => ({
-      value: g.latestActiveHash,
+      value: g.key,
       label: g.displayTitle,
       hint: `${g.activeStageCount}/8 stages · ${g.schemaBadge}`,
     })),
@@ -651,13 +671,18 @@ export class QaFlowsPanelComponent implements OnDestroy {
     },
   );
 
-  readonly versionSwitcherOptions = computed<readonly PillOption[]>(() =>
-    this.selectedFamilyVersions().map((v) => ({
+  readonly versionSwitcherOptions = computed<readonly PillOption[]>(() => {
+    const vers = this.selectedFamilyVersions();
+    return vers.map((v) => ({
       value: v.hash,
-      label: v.retiredAt ? `@v${v.version} (retired)` : `@v${v.version}`,
+      label: v.retiredAt
+        ? `@v${v.version} (retired)`
+        : v.builtIn && vers.some((x) => !x.builtIn && x.version === v.version)
+          ? `@v${v.version} (built-in)`
+          : `@v${v.version}`,
       hint: v.summary ? v.summary.slice(0, 60) : undefined,
-    })),
-  );
+    }));
+  });
 
   readonly nextVersionNum = computed(() => {
     const vers = this.selectedFamilyVersions();
@@ -824,16 +849,46 @@ export class QaFlowsPanelComponent implements OnDestroy {
   private resolveVersionParam(raw: string): string {
     if (raw.includes("@")) {
       const [key, ver] = raw.split("@");
-      const v = this.versions().find(
-        (item) => item.key === key && item.version === Number(ver),
-      );
+      const verNum = Number((ver || "").replace(/^v/i, ""));
+      const candidates = this.versions()
+        .filter((item) => item.key === key && item.version === verNum)
+        .sort(compareFlowVersionsDesc);
+      const v = candidates.find((item) => !item.retiredAt) ?? candidates[0];
       if (v) return v.hash;
     }
-    const byKey = this.versions()
+    const matching = this.versions()
       .filter((item) => item.key === raw)
-      .sort((a, b) => b.version - a.version)[0];
-    if (byKey) return byKey.hash;
+      .sort(compareFlowVersionsDesc);
+    const preferred = matching.find((item) => !item.retiredAt) ?? matching[0];
+    if (preferred) return preferred.hash;
     return raw;
+  }
+
+  protected selectFlowFamily(flowKey: string): void {
+    const fam = this.catalogFamilies().all.find((g) => g.key === flowKey);
+    if (fam) {
+      void this.selectVersion(fam.latestActiveHash, true);
+      return;
+    }
+    const hash = this.resolveVersionParam(flowKey);
+    if (hash) {
+      void this.selectVersion(hash, true);
+    }
+  }
+
+  protected onStudioSkillChange(ev: {
+    mode: "inherit" | "append" | "replace";
+    text: string;
+  }): void {
+    this.draftDeclaration.update((prev) => ({
+      ...prev,
+      skill: {
+        ...prev.skill,
+        mode: ev.mode,
+        text: ev.mode === "inherit" ? "" : ev.text,
+      },
+      verifier: { ...prev.verifier, tiers: [...prev.verifier.tiers] },
+    }));
   }
 
   schemaShortBadge(detail: QAFlowVersionDetail): string {
@@ -1057,7 +1112,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
       const activeMatch = this.activeFlowId()
         ? loaded
             .filter((v) => v.key === this.activeFlowId() && !v.retiredAt)
-            .sort((a, b) => b.version - a.version)[0]
+            .sort(compareFlowVersionsDesc)[0]
         : undefined;
       const primaryFirst =
         groupWorkflowFamilies(loaded).primary[0]?.latestActiveHash;
@@ -1095,9 +1150,18 @@ export class QaFlowsPanelComponent implements OnDestroy {
       const qpObs = (this.route as unknown as { queryParamMap?: unknown })
         .queryParamMap;
       if (qpObs) {
+        const grp = this.groupedVersions().find((g) => g.key === local.key);
+        const latestActive =
+          grp?.versions.find((v) => !v.retiredAt) ?? grp?.versions[0];
+        const flowQueryVal =
+          local.hash === latestActive?.hash
+            ? local.key
+            : local.version !== (latestActive?.version ?? local.version)
+              ? `${local.key}@${local.version}`
+              : local.hash;
         void this.router.navigate([], {
           relativeTo: this.route,
-          queryParams: { flow: local.key },
+          queryParams: { flow: flowQueryVal },
           queryParamsHandling: "merge",
         });
       }
@@ -1107,6 +1171,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
         "GET /api/qa/flow-versions/{hash}",
         { hash },
       )) as QAFlowVersionDetail | null;
+      if (this.selectedHash() !== hash) return;
       if (detail && detail.hash) {
         this.selectedDetail.set({
           ...local,
@@ -1126,6 +1191,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
     } catch {
       // Fall back to cached list item below.
     }
+    if (this.selectedHash() !== hash) return;
     if (local) {
       this.selectedDetail.set(local);
     }
@@ -1147,6 +1213,14 @@ export class QaFlowsPanelComponent implements OnDestroy {
   initDraft(): void {
     const detail = this.selectedDetail();
     if (!detail) return;
+    const inheritsParentSkill = Boolean(
+      !detail.declaration?.skill &&
+      !detail.declarationV4?.skill &&
+      (detail.parentHash ||
+        detail.declarationV4?.extends ||
+        detail.declarationV3?.extends ||
+        detail.declaration?.extends),
+    );
     const base: FlowDeclarationV2 = detail.declaration ?? {
       schema: "grain.dev/qa-flow/v2",
       key: detail.key,
@@ -1154,8 +1228,8 @@ export class QaFlowsPanelComponent implements OnDestroy {
       label: detail.label,
       summary: detail.summary,
       skill: {
-        mode: "replace",
-        text: detail.summary || "",
+        mode: inheritsParentSkill ? "inherit" : "replace",
+        text: inheritsParentSkill ? "" : detail.summary || "",
         maxBytes: 1800,
       },
       stopNudge: detail.resolved?.stopNudge || false,
@@ -1303,50 +1377,72 @@ export class QaFlowsPanelComponent implements OnDestroy {
         if (params[c] && Object.keys(params[c]).length > 0) {
           draft.checks[c].params = { ...params[c] };
         }
+      } else {
+        draft.checks[c] = { enabled: false };
       }
     }
 
     const st = this.studio();
-    if (
-      st &&
-      (draft.schema === "grain.dev/qa-flow/v4" ||
+    if (st) {
+      const mode = st.codingSkillMode() || "replace";
+      draft.skill = {
+        mode,
+        text: mode === "inherit" ? "" : st.codingSkillText(),
+        maxBytes: draft.skill?.maxBytes || 4096,
+      };
+      draft.stopNudge = st.stopNudge();
+      draft.verifier = {
+        ...draft.verifier,
+        enabled: Boolean(st.verifierEnabled()),
+      };
+
+      if (
+        draft.schema === "grain.dev/qa-flow/v4" ||
         draft.schema === "grain.dev/qa-flow/v3" ||
-        st.skillSteps().length > 0 ||
-        st.customChecks().length > 0 ||
-        st.customStages().length > 0)
-    ) {
-      const v4 = st.exportDeclarationV4({
-        key: draft.key,
-        extends: draft.extends,
-        label: draft.label,
-        summary: draft.summary,
-      });
-      draft.schema = "grain.dev/qa-flow/v4";
-      if (v4.skill) {
-        draft.skill = v4.skill;
-      }
-      draft.stages = v4.stages;
-      draft.decompose = v4.decompose;
-      draft.context = v4.context;
-      draft.readabilityPacks = v4.readabilityPacks;
-      draft.skillSteps = v4.skillSteps;
-      draft.prContract = v4.prContract;
-      draft.stopNudge = v4.stopNudge ?? draft.stopNudge;
-      if (v4.verifier) {
-        draft.verifier = {
-          ...draft.verifier,
-          enabled: Boolean(v4.verifier.enabled),
-        };
-      }
-      if (v4.customChecks?.length) {
-        draft.customChecks = v4.customChecks;
-      } else {
-        delete draft.customChecks;
-        delete draft["custom-checks"];
+        st.hasV4Customizations()
+      ) {
+        const v4 = st.exportDeclarationV4({
+          key: draft.key,
+          extends: draft.extends,
+          label: draft.label,
+          summary: draft.summary,
+          maxSkillBytes: draft.skill.maxBytes,
+        });
+        draft.schema = "grain.dev/qa-flow/v4";
+        if (v4.skill) {
+          draft.skill = v4.skill;
+        }
+        draft.stages = v4.stages;
+        draft.decompose = v4.decompose;
+        draft.context = v4.context;
+        draft.readabilityPacks = v4.readabilityPacks;
+        draft.skillSteps = v4.skillSteps;
+        draft.prContract = v4.prContract;
+        draft.stopNudge = v4.stopNudge ?? draft.stopNudge;
+        if (v4.verifier) {
+          draft.verifier = {
+            ...draft.verifier,
+            enabled: Boolean(v4.verifier.enabled),
+          };
+        }
+        if (v4.customChecks?.length) {
+          draft.customChecks = v4.customChecks;
+        } else {
+          delete draft.customChecks;
+          delete draft["custom-checks"];
+        }
       }
     }
 
     return draft;
+  }
+
+  async runDryRun(): Promise<void> {
+    if (this.isEditing()) {
+      await this.dryRunDraft();
+      return;
+    }
+    await this.dryRun();
   }
 
   async dryRunDraft(): Promise<void> {
@@ -1369,15 +1465,10 @@ export class QaFlowsPanelComponent implements OnDestroy {
     const detail = this.selectedDetail();
     if (!detail) return;
     try {
-      const body = detail.declarationV4
-        ? { declaration: detail.declarationV4 }
-        : detail.declaration
-          ? { declaration: detail.declaration }
-          : { yaml: detail.sourceYaml || "" };
       const res = await this.api.post<QADryRunResponse>(
         "POST /api/qa/flow-versions",
         undefined,
-        body,
+        { hash: detail.hash },
         "dryRun=1&limit=20",
       );
       this.dryRunResult.set(res);
@@ -1440,6 +1531,12 @@ export class QaFlowsPanelComponent implements OnDestroy {
           });
           this.snackbar.show("Flow retired");
           await this.loadVersions();
+          if (this.selectedHash() === detail.hash) {
+            const nextActive = this.versions()
+              .filter((v) => v.key === detail.key && !v.retiredAt)
+              .sort(compareFlowVersionsDesc)[0];
+            await this.doSelectVersion(nextActive?.hash ?? detail.hash);
+          }
         } catch {
           this.snackbar.show("Retire failed");
         }
