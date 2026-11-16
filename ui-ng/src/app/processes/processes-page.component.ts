@@ -196,6 +196,24 @@ function triggerName(path: string): string {
   return path.replace(/^\.grain\/triggers\//, "");
 }
 
+function repoYamlFallback(
+  repo: string,
+  filePath: string,
+  err: unknown,
+): string {
+  const msg = errorText(err);
+  if (
+    msg.includes("no such API endpoint") ||
+    (typeof err === "object" &&
+      err !== null &&
+      "status" in err &&
+      (err as { status?: unknown }).status === 404)
+  ) {
+    return `# Declared in ${repo} at ${filePath}\n# Open repository settings or inspect ${filePath} in git to edit this declaration.`;
+  }
+  return msg;
+}
+
 function templateFileStem(path: string): string {
   const base = path.split("/").pop() ?? path;
   return base.replace(/\.ya?ml$/i, "");
@@ -4513,7 +4531,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       }
     } catch (err) {
       if (this.selectedTriggerKey() === expectedKey) {
-        this.triggerYamlText.set(errorText(err));
+        this.triggerYamlText.set(repoYamlFallback(tr.repo, tr.path, err));
       }
     } finally {
       if (this.selectedTriggerKey() === expectedKey) {
@@ -4659,7 +4677,9 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       }
     } catch (err) {
       if (this.inlineYamlPath() === filePath) {
-        this.inlineYamlText.set(fallbackText ?? errorText(err));
+        this.inlineYamlText.set(
+          fallbackText ?? repoYamlFallback(repo, filePath, err),
+        );
       }
     } finally {
       if (this.inlineYamlPath() === filePath) {

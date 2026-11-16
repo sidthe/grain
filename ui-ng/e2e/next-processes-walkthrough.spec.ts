@@ -244,12 +244,56 @@ test("templates with required parameters preview without 400, workflow Run now c
     )
     .toBe(1);
 
-  // Trigger link on Declarations opens repository Advanced tab.
+  await page.route("**/api/fs/repo/acme/widgets/**", async (route) => {
+    const url = new URL(route.request().url());
+    const rel = decodeURIComponent(
+      url.pathname.replace(/^.*\/api\/fs\/repo\/acme\/widgets\//, ""),
+    );
+    const body = git(bare, ["--git-dir", bare, "show", `main:${rel}`]);
+    await route.fulfill({
+      status: 200,
+      contentType: "text/plain; charset=utf-8",
+      body,
+    });
+  });
+
+  // Trigger path on Declarations toggles inline YAML without leaving Processes,
+  // while decl-open-repo-link opens /next/repos/acme/widgets/advanced.
   await page.goto("processes/declarations");
-  await page
-    .getByRole("link", { name: ".grain/triggers/docs-guard.yml" })
-    .click();
+  const declTriggerBtn = page.getByTestId(
+    "decl-trigger-link-.grain/triggers/docs-guard.yml",
+  );
+  await declTriggerBtn.click();
+  await expect(page).toHaveURL(/\/next\/processes\/declarations$/);
+  await expect(page.getByTestId("decl-inline-yaml")).toContainText(
+    "on: pull_request",
+  );
+  await declTriggerBtn.click();
+  await expect(page.getByTestId("decl-inline-yaml")).toHaveCount(0);
+  await page.getByTestId("decl-open-repo-link").click();
   await expect(page).toHaveURL(/\/next\/repos\/acme\/widgets\/advanced$/);
+
+  // Trigger row on Schedules & Triggers inspects inline with YAML preview and template link.
+  await page.goto("processes/schedules");
+  const triggerRow = page.getByTestId(
+    "trigger-row-trigger:acme/widgets:.grain/triggers/docs-guard.yml",
+  );
+  await expect(triggerRow).toBeVisible();
+  expect(await triggerRow.evaluate((el) => getComputedStyle(el).cursor)).toBe(
+    "pointer",
+  );
+  await triggerRow.click();
+  await expect(page).toHaveURL(/\/next\/processes\/schedules$/);
+  await expect(page.getByTestId("trigger-inspector")).toBeVisible();
+  await expect(page.getByTestId("trigger-yaml-preview")).toContainText(
+    'paths: ["docs/**"]',
+  );
+  await expect(page.getByTestId("trigger-config-pane")).toContainText(
+    "pull_request",
+  );
+  await page.getByTestId("trigger-template-link").click();
+  await expect(page).toHaveURL(/\/next\/processes\/templates$/);
+  await expect(page.getByTestId("tmpl-detail-title")).toHaveText("Docs Check");
 
   // Workflow schedule Run now asks confirmation explaining immediate CI run.
   await page.goto("processes/schedules");
