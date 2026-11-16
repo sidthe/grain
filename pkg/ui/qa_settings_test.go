@@ -248,4 +248,37 @@ func TestQASettingsAcceptV4VersionedAndStoredCustomFlowsAndRejectRetired(t *test
 			}
 		})
 	}
+
+	// Kill-switch safety: when the currently active custom flow (custom-team-flow@1) is retired,
+	// partial updates omitting QAFlowID (such as disabling QA or lowering rollout) succeed,
+	// while re-enabling QA without selecting an active QAFlowID is rejected.
+	if err := st.RetireQAFlowVersion(ctx, "sha256:custom-team-flow-v1", now.Add(4*time.Minute)); err != nil {
+		t.Fatalf("RetireQAFlowVersion v1: %v", err)
+	}
+	rollout10 := 10
+	lowered, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{QARolloutPct: &rollout10})
+	if err != nil {
+		t.Fatalf("UpdateSettings lower rollout with retired active flow: %v", err)
+	}
+	if !lowered.QAEnabled || lowered.QARolloutPct != 10 || lowered.QAFlowID != "custom-team-flow@1" {
+		t.Fatalf("unexpected lowered settings: enabled=%v rollout=%d flow=%q",
+			lowered.QAEnabled, lowered.QARolloutPct, lowered.QAFlowID)
+	}
+
+	disable := false
+	disabled, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{QAEnabled: &disable})
+	if err != nil {
+		t.Fatalf("UpdateSettings disable QA with retired active flow: %v", err)
+	}
+	if disabled.QAEnabled || disabled.QAFlowID != "custom-team-flow@1" {
+		t.Fatalf("expected QA disabled with preserved flowId, got enabled=%v flow=%q",
+			disabled.QAEnabled, disabled.QAFlowID)
+	}
+
+	if _, err := c.PlanSettings(ctx, ui.UpdateSettingsRequest{QAEnabled: &enable}); err == nil || !strings.Contains(err.Error(), "flowId") {
+		t.Fatalf("PlanSettings re-enable with retired flow expected flowId error, got %v", err)
+	}
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{QAEnabled: &enable}); err == nil || !strings.Contains(err.Error(), "flowId") {
+		t.Fatalf("UpdateSettings re-enable with retired flow expected flowId error, got %v", err)
+	}
 }

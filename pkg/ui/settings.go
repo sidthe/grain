@@ -2466,6 +2466,11 @@ func (c *Client) plannedConfig(ctx context.Context, req UpdateSettingsRequest) (
 			nextQA.Epoch = *req.QAEpoch
 		}
 		advanced, err := model.AdvanceQAConfigWithValidator(before.QA, nextQA, func(flow string) bool {
+			if req.QAFlowID == nil &&
+				strings.TrimSpace(flow) == strings.TrimSpace(before.QA.FlowID) &&
+				!(!before.QA.Enabled && nextQA.Enabled) {
+				return true
+			}
 			return c.validQAFlowID(ctx, flow)
 		})
 		if err != nil {

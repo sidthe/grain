@@ -2102,4 +2102,57 @@ describe("ProcessesPageComponent (D-9)", () => {
     expect(patches).toHaveLength(2);
     expect(patches[1].body).toMatchObject({ mode: "count", maxPasses: 3 });
   });
+
+  it("preserves non-first template selection and mobile detail across /processes -> /processes/templates route recreation", async () => {
+    api.templates.push({
+      id: "tmpl-zebra",
+      name: "zz-zebra-check",
+      title: "chore: verify zebra guard",
+      description: "Verify zebra trigger coverage.",
+      autoMerge: false,
+      capabilities: [],
+      revision: "rev-tz",
+    });
+    api.yamlFiles["acme/widgets/.grain/triggers/docs.yml"] =
+      'on: pull_request\npaths: ["docs/**"]\ntemplate: tmpl-zebra\ngate: true\n';
+
+    const harness = await RouterTestingHarness.create("/processes");
+    await flush(harness);
+    await flush(harness);
+    let root = harness.routeNativeElement!;
+
+    const triggerRow = root.querySelector<HTMLButtonElement>(
+      '[data-testid="trigger-row-trigger:acme/widgets:.grain/triggers/docs.yml"]',
+    )!;
+    expect(triggerRow).not.toBeNull();
+    triggerRow.click();
+    await flush(harness);
+    await flush(harness);
+
+    const tmplBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="trigger-template-link"]',
+    )!;
+    expect(tmplBtn).not.toBeNull();
+    expect(tmplBtn.textContent).toContain("zz-zebra-check");
+
+    tmplBtn.click();
+    await flush(harness);
+    await flush(harness);
+    root = harness.routeNativeElement!;
+
+    expect(TestBed.inject(Router).url).toBe("/processes/templates");
+    expect(
+      root.querySelector('[data-testid="tmpl-detail-title"]')?.textContent,
+    ).toContain("zz-zebra-check");
+    expect(
+      root
+        .querySelector('[data-testid="tmpl-row-tmpl-zebra"]')
+        ?.getAttribute("aria-current"),
+    ).toBe("true");
+    expect(
+      root
+        .querySelector(".proc-split")
+        ?.classList.contains("has-mobile-detail"),
+    ).toBe(true);
+  });
 });

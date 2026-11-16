@@ -4080,6 +4080,30 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   constructor() {
     afterNextRender(() => this.sp.attach());
 
+    const nav =
+      this.router.getCurrentNavigation() ??
+      this.router.lastSuccessfulNavigation;
+    const navState = nav?.extras.state;
+    const handoffTmplId =
+      typeof navState?.["selectTemplateId"] === "string"
+        ? navState["selectTemplateId"].trim()
+        : "";
+    if (handoffTmplId) {
+      this.tmplFilter.set("all");
+      this.selectedTemplateId.set(handoffTmplId);
+      this.mobileDetailOpen.set(true);
+    }
+    let handledHandoffTmpl = !handoffTmplId;
+    effect(() => {
+      const loaded = this.store.loaded();
+      untracked(() => {
+        if (!handledHandoffTmpl && loaded) {
+          handledHandoffTmpl = true;
+          this.selectTemplate(handoffTmplId, true);
+        }
+      });
+    });
+
     // ?q= (a shared link, a reload, Back and Forward) fills the "Filter
     // this view" box, and what is typed there goes back into ?q=, the way
     // the Tasks page keeps it. While one of this page's own ?q= writes is
@@ -4543,7 +4567,9 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected openTriggerTemplate(id: string): void {
     this.tmplFilter.set("all");
     this.selectTemplate(id, true);
-    void this.router.navigate(["/processes", "templates"]);
+    void this.router.navigate(["/processes", "templates"], {
+      state: { selectTemplateId: id },
+    });
   }
 
   protected selectTemplate(id: string, fromClick: boolean): void {
