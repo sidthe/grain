@@ -225,9 +225,7 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
   );
   expect(desktopStudioOverflow).toBeLessThanOrEqual(0);
 
-  const axeStudio = await new AxeBuilder({ page })
-    .disableRules(["color-contrast"])
-    .analyze();
+  const axeStudio = await new AxeBuilder({ page }).analyze();
   expect(
     axeStudio.violations.filter((v) =>
       ["serious", "critical"].includes(v.impact ?? ""),
