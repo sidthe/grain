@@ -13,7 +13,11 @@
 // limitations under the License.
 
 import { TestBed } from "@angular/core/testing";
-import { provideRouter, withComponentInputBinding } from "@angular/router";
+import {
+  Router,
+  provideRouter,
+  withComponentInputBinding,
+} from "@angular/router";
 import { RouterTestingHarness } from "@angular/router/testing";
 import { NEVER } from "rxjs";
 import { GrainApi } from "../api/grain-api.service";
@@ -296,6 +300,8 @@ class FakeProcessesApi {
   yamlFiles: Record<string, string> = {
     "acme/widgets/.grain/templates/release-notes.yml":
       "name: release-notes\ntitle: Draft release notes for {{version}}\n",
+    "acme/widgets/.grain/triggers/docs.yml":
+      'on: pull_request\npaths: ["docs/**"]\ntemplate: release-notes\ngate: true\n',
     "acme/widgets/.grain/workflows/ci.yml": "name: CI\non: [push]\n",
   };
 
@@ -1354,6 +1360,31 @@ describe("ProcessesPageComponent (D-9)", () => {
     expect(toggleBtn.textContent).toContain("View YAML");
     expect(root.querySelector('[data-testid="decl-inline-yaml"]')).toBeNull();
 
+    // Trigger file link in Declarations toggles inline YAML without leaving Processes,
+    // while decl-open-repo-link points to /repos/acme/widgets/advanced.
+    const declRepoLink = root.querySelector<HTMLAnchorElement>(
+      '.decl-inspector .proc-insp-top [data-testid="decl-open-repo-link"]',
+    )!;
+    expect(declRepoLink).not.toBeNull();
+    expect(declRepoLink.getAttribute("href")).toBe(
+      "/repos/acme/widgets/advanced",
+    );
+
+    const declTriggerBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="decl-trigger-link-.grain/triggers/docs.yml"]',
+    )!;
+    expect(declTriggerBtn).not.toBeNull();
+    expect(declTriggerBtn.tagName).toBe("BUTTON");
+    declTriggerBtn.click();
+    await flush(harness);
+    expect(TestBed.inject(Router).url).toBe("/processes/declarations");
+    expect(
+      root.querySelector('[data-testid="decl-inline-yaml"]')?.textContent,
+    ).toContain("on: pull_request");
+    declTriggerBtn.click();
+    await flush(harness);
+    expect(root.querySelector('[data-testid="decl-inline-yaml"]')).toBeNull();
+
     // Verify schedule and template dialogs use rows="8" for prompt textareas
     await harness.navigateByUrl("/processes/schedules?new=1");
     await flush(harness);
@@ -1836,19 +1867,68 @@ describe("ProcessesPageComponent (D-9)", () => {
       root.querySelector('[data-testid="proc-inspector"]')!.textContent,
     ).toContain("Target: acme/widgets @ default branch");
   });
-  it("lists a repository's declared triggers beside the schedules, linking its Advanced tab", async () => {
+  it("inspects a repository's declared trigger inline beside schedules, links its template, and renders custom-order drag grips", async () => {
     const harness = await RouterTestingHarness.create("/processes/schedules");
     await flush(harness);
     await flush(harness);
-    const root = harness.routeNativeElement!;
+    let root = harness.routeNativeElement!;
 
-    const row = root.querySelector<HTMLAnchorElement>(
+    // Custom order renders .proc-drag-grip on draggable rows across Schedules, Templates, and Suites.
+    expect(
+      root.querySelectorAll('.proc-row-top > [data-testid="proc-drag-grip"]')
+        .length,
+    ).toBeGreaterThan(0);
+
+    const row = root.querySelector<HTMLButtonElement>(
       '[data-testid="trigger-row-trigger:acme/widgets:.grain/triggers/docs.yml"]',
     )!;
     expect(row).not.toBeNull();
-    expect(row.getAttribute("href")).toBe("/repos/acme/widgets/advanced");
+    expect(row.tagName).toBe("BUTTON");
+    expect(row.getAttribute("href")).toBeNull();
     expect(row.textContent).toContain("docs.yml");
     expect(row.textContent).toContain("on change");
+
+    // Clicking the trigger row stays on /processes/schedules and opens the inline trigger inspector.
+    row.click();
+    await flush(harness);
+    await flush(harness);
+    expect(TestBed.inject(Router).url).toBe("/processes/schedules");
+    expect(row.classList.contains("is-selected")).toBe(true);
+    expect(row.getAttribute("aria-current")).toBe("true");
+
+    const insp = root.querySelector<HTMLElement>(
+      '[data-testid="trigger-inspector"]',
+    )!;
+    expect(insp).not.toBeNull();
+    expect(
+      insp.querySelector('[data-testid="trigger-detail-title"]')?.textContent,
+    ).toContain("docs.yml");
+    expect(
+      insp
+        .querySelector<HTMLAnchorElement>(
+          '[data-testid="trigger-open-repo-link"]',
+        )
+        ?.getAttribute("href"),
+    ).toBe("/repos/acme/widgets/advanced");
+    expect(
+      api.calls.some(
+        (c) =>
+          c.route === "GET /api/fs/repo/{path...}" &&
+          (c.params as { path?: string })?.path ===
+            "acme/widgets/.grain/triggers/docs.yml",
+      ),
+    ).toBe(true);
+    expect(
+      insp.querySelector('[data-testid="trigger-yaml-preview"]')?.textContent,
+    ).toContain('paths: ["docs/**"]');
+    const cfgText =
+      insp.querySelector('[data-testid="trigger-config-pane"]')?.textContent ??
+      "";
+    expect(cfgText).toContain("acme/widgets");
+    expect(cfgText).toContain(".grain/triggers/docs.yml");
+    expect(cfgText).toContain("pull_request");
+    expect(cfgText).toContain("docs/**");
+    expect(cfgText).toContain("true");
 
     // A trigger is never paused, so the Paused chip leaves it out.
     root
@@ -1861,6 +1941,38 @@ describe("ProcessesPageComponent (D-9)", () => {
       .click();
     await flush(harness);
     expect(root.querySelector('[data-testid^="trigger-row-"]')).not.toBeNull();
+
+    // Clicking trigger-template-link navigates to /processes/templates and selects the template.
+    root
+      .querySelector<HTMLButtonElement>(
+        '[data-testid="trigger-template-link"]',
+      )!
+      .click();
+    await flush(harness);
+    await flush(harness);
+    root = harness.routeNativeElement!;
+    expect(TestBed.inject(Router).url).toBe("/processes/templates");
+    expect(
+      root.querySelector('[data-testid="tmpl-detail-title"]')?.textContent,
+    ).toContain("release-notes");
+    expect(
+      root.querySelectorAll('.proc-row-top > [data-testid="proc-drag-grip"]')
+        .length,
+    ).toBeGreaterThan(0);
+
+    await harness.navigateByUrl("/processes/suites");
+    await flush(harness);
+    root = harness.routeNativeElement!;
+    expect(
+      root.querySelectorAll('.proc-row-top > [data-testid="proc-drag-grip"]')
+        .length,
+    ).toBeGreaterThan(0);
+
+    // Non-custom sort hides .proc-drag-grip.
+    await harness.navigateByUrl("/processes/schedules?sort=name");
+    await flush(harness);
+    root = harness.routeNativeElement!;
+    expect(root.querySelector('[data-testid="proc-drag-grip"]')).toBeNull();
   });
 
   it("formats a schedule's run times, keeps an undetailed suppression to its own reason, counts in the singular, and refuses a 0-pass suite in the dialog", async () => {

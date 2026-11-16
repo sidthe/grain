@@ -11,6 +11,13 @@
   background: var(--md-sys-color-surface);
 }
 
+.trigger-inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
 .proc-insp-head {
   display: flex;
   flex-direction: column;

@@ -196,6 +196,88 @@ function triggerName(path: string): string {
   return path.replace(/^\.grain\/triggers\//, "");
 }
 
+function templateFileStem(path: string): string {
+  const base = path.split("/").pop() ?? path;
+  return base.replace(/\.ya?ml$/i, "");
+}
+
+interface ParsedTriggerYaml {
+  on: string;
+  paths: string[];
+  gate: string;
+  template: string;
+}
+
+function unquoteYamlScalar(raw: string): string {
+  const s = raw.replace(/\s+#.*$/, "").trim();
+  if (
+    (s.startsWith('"') && s.endsWith('"')) ||
+    (s.startsWith("'") && s.endsWith("'"))
+  ) {
+    return s.slice(1, -1).trim();
+  }
+  return s;
+}
+
+function parseInlineYamlList(raw: string): string[] {
+  const inner = raw.trim().slice(1, -1).trim();
+  if (!inner) return [];
+  return inner
+    .split(",")
+    .map((part) => unquoteYamlScalar(part))
+    .filter(Boolean);
+}
+
+function parseTriggerYaml(raw: string): ParsedTriggerYaml {
+  const out: ParsedTriggerYaml = { on: "", paths: [], gate: "", template: "" };
+  const lines = raw.split(/\r?\n/);
+  let listKey: "paths" | "on" | null = null;
+  for (const line of lines) {
+    if (!line.trim() || line.trim().startsWith("#")) continue;
+    const listMatch = /^\s*-\s+(.*)$/.exec(line);
+    if (listMatch && listKey) {
+      const val = unquoteYamlScalar(listMatch[1]);
+      if (val) {
+        if (listKey === "paths") out.paths.push(val);
+        else if (listKey === "on") {
+          out.on = out.on ? `${out.on}, ${val}` : val;
+        }
+      }
+      continue;
+    }
+    if (!/^\s/.test(line)) {
+      listKey = null;
+      const kv = /^["']?([a-zA-Z0-9_-]+)["']?\s*:\s*(.*)$/.exec(line);
+      if (!kv) continue;
+      const key = kv[1].toLowerCase();
+      const rest = kv[2].trim();
+      if (key === "paths") {
+        if (!rest || rest.startsWith("#")) {
+          listKey = "paths";
+        } else if (rest.startsWith("[") && rest.endsWith("]")) {
+          out.paths = parseInlineYamlList(rest);
+        } else {
+          const val = unquoteYamlScalar(rest);
+          if (val) out.paths = [val];
+        }
+      } else if (key === "on") {
+        if (!rest || rest.startsWith("#")) {
+          listKey = "on";
+        } else if (rest.startsWith("[") && rest.endsWith("]")) {
+          out.on = parseInlineYamlList(rest).join(", ");
+        } else {
+          out.on = unquoteYamlScalar(rest);
+        }
+      } else if (key === "gate") {
+        out.gate = unquoteYamlScalar(rest);
+      } else if (key === "template") {
+        out.template = unquoteYamlScalar(rest);
+      }
+    }
+  }
+  return out;
+}
+
 const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
 
 @Component({
@@ -468,24 +550,48 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                           (drop)="onDrop($event, 'schedules', r.key)"
                           (dragend)="onDragEnd()"
                         >
-                          <a
+                          <button
+                            type="button"
                             class="proc-row"
-                            draggable="false"
-                            [routerLink]="repoAdvancedRoute(tr.repo)"
+                            [class.is-selected]="selectedTriggerKey() === r.key"
+                            [attr.aria-current]="
+                              selectedTriggerKey() === r.key ? 'true' : null
+                            "
                             [attr.data-testid]="'trigger-row-' + r.key"
                             [attr.aria-keyshortcuts]="
                               activeSort() === 'custom'
                                 ? 'Alt+ArrowUp Alt+ArrowDown'
                                 : null
                             "
-                            [gTip]="
-                              'Open the Advanced tab of ' +
-                              tr.repo +
-                              ', where its triggers are'
-                            "
+                            (click)="selectTrigger(tr, true)"
                             (keydown)="onRowKey($event, 'schedules', r.key)"
+                            (keydown.space)="
+                              selectTrigger(tr, true); $event.preventDefault()
+                            "
                           >
                             <div class="proc-row-top">
+                              @if (activeSort() === "custom") {
+                                <span
+                                  class="proc-drag-grip"
+                                  aria-hidden="true"
+                                  data-testid="proc-drag-grip"
+                                >
+                                  <svg
+                                    width="14"
+                                    height="14"
+                                    viewBox="0 0 16 16"
+                                    fill="currentColor"
+                                    aria-hidden="true"
+                                  >
+                                    <circle cx="5.5" cy="3.5" r="1.25" />
+                                    <circle cx="10.5" cy="3.5" r="1.25" />
+                                    <circle cx="5.5" cy="8" r="1.25" />
+                                    <circle cx="10.5" cy="8" r="1.25" />
+                                    <circle cx="5.5" cy="12.5" r="1.25" />
+                                    <circle cx="10.5" cy="12.5" r="1.25" />
+                                  </svg>
+                                </span>
+                              }
                               <span class="status-pill reply">
                                 <g-status-icon tone="reply" kind="reply" />
                                 Declared
@@ -501,7 +607,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                               <span class="tabular">· {{ tr.path }}</span>
                               <span>· next: on change</span>
                             </div>
-                          </a>
+                          </button>
                         </li>
                       }
                       @if (r.schedule; as s) {
@@ -545,6 +651,28 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                             "
                           >
                             <div class="proc-row-top">
+                              @if (activeSort() === "custom") {
+                                <span
+                                  class="proc-drag-grip"
+                                  aria-hidden="true"
+                                  data-testid="proc-drag-grip"
+                                >
+                                  <svg
+                                    width="14"
+                                    height="14"
+                                    viewBox="0 0 16 16"
+                                    fill="currentColor"
+                                    aria-hidden="true"
+                                  >
+                                    <circle cx="5.5" cy="3.5" r="1.25" />
+                                    <circle cx="10.5" cy="3.5" r="1.25" />
+                                    <circle cx="5.5" cy="8" r="1.25" />
+                                    <circle cx="10.5" cy="8" r="1.25" />
+                                    <circle cx="5.5" cy="12.5" r="1.25" />
+                                    <circle cx="10.5" cy="12.5" r="1.25" />
+                                  </svg>
+                                </span>
+                              }
                               <span [class]="'status-pill ' + badge.tone">
                                 <g-status-icon
                                   [tone]="badge.tone"
@@ -656,6 +784,28 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                           "
                         >
                           <div class="proc-row-top">
+                            @if (activeSort() === "custom") {
+                              <span
+                                class="proc-drag-grip"
+                                aria-hidden="true"
+                                data-testid="proc-drag-grip"
+                              >
+                                <svg
+                                  width="14"
+                                  height="14"
+                                  viewBox="0 0 16 16"
+                                  fill="currentColor"
+                                  aria-hidden="true"
+                                >
+                                  <circle cx="5.5" cy="3.5" r="1.25" />
+                                  <circle cx="10.5" cy="3.5" r="1.25" />
+                                  <circle cx="5.5" cy="8" r="1.25" />
+                                  <circle cx="10.5" cy="8" r="1.25" />
+                                  <circle cx="5.5" cy="12.5" r="1.25" />
+                                  <circle cx="10.5" cy="12.5" r="1.25" />
+                                </svg>
+                              </span>
+                            }
                             <span [class]="'status-pill ' + badge.tone">
                               <g-status-icon
                                 [tone]="badge.tone"
@@ -802,6 +952,28 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                             "
                           >
                             <div class="proc-row-top">
+                              @if (activeSort() === "custom") {
+                                <span
+                                  class="proc-drag-grip"
+                                  aria-hidden="true"
+                                  data-testid="proc-drag-grip"
+                                >
+                                  <svg
+                                    width="14"
+                                    height="14"
+                                    viewBox="0 0 16 16"
+                                    fill="currentColor"
+                                    aria-hidden="true"
+                                  >
+                                    <circle cx="5.5" cy="3.5" r="1.25" />
+                                    <circle cx="10.5" cy="3.5" r="1.25" />
+                                    <circle cx="5.5" cy="8" r="1.25" />
+                                    <circle cx="10.5" cy="8" r="1.25" />
+                                    <circle cx="5.5" cy="12.5" r="1.25" />
+                                    <circle cx="10.5" cy="12.5" r="1.25" />
+                                  </svg>
+                                </span>
+                              }
                               <span class="status-pill proposal">
                                 <g-status-icon
                                   tone="proposal"
@@ -1322,12 +1494,127 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                     }
                   </div>
                 } @else {
-                  <div class="empty-state">
-                    <p>
-                      Select a schedule or event trigger to inspect its cadence
-                      and composition.
-                    </p>
-                  </div>
+                  @if (selectedTrigger(); as tr) {
+                    @let parsed = parsedSelectedTrigger();
+                    <div
+                      class="trigger-inspector"
+                      data-testid="trigger-inspector"
+                    >
+                      <div class="proc-insp-head">
+                        <div class="proc-insp-top">
+                          <div class="headline-cluster">
+                            <button
+                              type="button"
+                              class="btn-text proc-mobile-back"
+                              (click)="mobileDetailOpen.set(false)"
+                            >
+                              ← Back
+                            </button>
+                            <span class="status-pill reply">
+                              <g-status-icon tone="reply" kind="reply" />
+                              Declared
+                            </span>
+                            <h2
+                              class="proc-insp-title"
+                              data-testid="trigger-detail-title"
+                            >
+                              {{ triggerName(tr.path) }}
+                            </h2>
+                          </div>
+
+                          <div class="headline-actions">
+                            <a
+                              class="btn-tonal"
+                              [routerLink]="repoAdvancedRoute(tr.repo)"
+                              data-testid="trigger-open-repo-link"
+                              >Open repository settings</a
+                            >
+                          </div>
+                        </div>
+
+                        <p
+                          class="banner banner-info"
+                          style="margin: 6px 0 0"
+                          data-testid="trigger-declared-banner"
+                        >
+                          Declared in <code>{{ tr.repo }}</code> at
+                          <code>{{ tr.path }}</code
+                          >.
+                        </p>
+                      </div>
+
+                      <div class="g-panes">
+                        <section
+                          class="g-pane"
+                          aria-labelledby="trigger-config-h"
+                          data-testid="trigger-config-pane"
+                        >
+                          <h3 id="trigger-config-h" class="g-pane-title">
+                            Configuration
+                          </h3>
+                          <dl class="g-attrs">
+                            <dt>Repository</dt>
+                            <dd class="tabular">{{ tr.repo }}</dd>
+                            <dt>File path</dt>
+                            <dd class="tabular">
+                              <code>{{ tr.path }}</code>
+                            </dd>
+                            <dt>On</dt>
+                            <dd class="tabular">{{ parsed.on || "—" }}</dd>
+                            <dt>Paths</dt>
+                            <dd class="tabular">
+                              {{
+                                parsed.paths.length
+                                  ? parsed.paths.join(", ")
+                                  : "—"
+                              }}
+                            </dd>
+                            <dt>Gate</dt>
+                            <dd class="tabular">{{ parsed.gate || "—" }}</dd>
+                            <dt>Template</dt>
+                            <dd>
+                              @if (matchedTriggerTemplate(); as mt) {
+                                <button
+                                  type="button"
+                                  class="btn-text tabular"
+                                  data-testid="trigger-template-link"
+                                  (click)="openTriggerTemplate(mt.id)"
+                                >
+                                  {{ mt.name || mt.title || parsed.template }}
+                                </button>
+                              } @else {
+                                <span class="tabular">{{
+                                  parsed.template || "—"
+                                }}</span>
+                              }
+                            </dd>
+                          </dl>
+                        </section>
+
+                        <section
+                          class="g-pane"
+                          aria-labelledby="trigger-yaml-h"
+                          data-testid="trigger-yaml-pane"
+                        >
+                          <h3 id="trigger-yaml-h" class="g-pane-title">
+                            Declared trigger YAML
+                          </h3>
+                          <pre
+                            class="comp-body-well"
+                            data-testid="trigger-yaml-preview"
+                            [textContent]="triggerYamlDisplay()"
+                          ></pre>
+                        </section>
+                      </div>
+                    </div>
+                  } @else {
+                    <div class="empty-state">
+                      <p>
+                        Select a schedule or event trigger to inspect its
+                        cadence and composition.
+                      </p>
+                    </div>
+                  }
                 }
               }
 
@@ -1801,7 +2088,10 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                   @let def = store.repoDefaults()[repo];
                   @let status = def?.declarationsStatus;
                   @let wfResp = store.repoWorkflows()[repo];
-                  <div class="proc-insp-head" data-testid="decl-inspector">
+                  <div
+                    class="proc-insp-head decl-inspector"
+                    data-testid="decl-inspector"
+                  >
                     <div class="proc-insp-top">
                       <div class="headline-cluster">
                         <button
@@ -1814,31 +2104,41 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                         <h2 class="proc-insp-title tabular">{{ repo }}</h2>
                       </div>
 
-                      @if (def) {
-                        <div class="switch-row">
-                          <button
-                            type="button"
-                            role="switch"
-                            class="g-switch"
-                            attr.aria-label="Read {{ repo }}'s own declarations"
-                            data-testid="decl-toggle-switch"
-                            [disabled]="
-                              !access.can(
-                                'PUT /api/repos/{owner}/{name}/declarations',
+                      <div class="headline-actions">
+                        @if (def) {
+                          <div class="switch-row">
+                            <button
+                              type="button"
+                              role="switch"
+                              class="g-switch"
+                              attr.aria-label="Read {{
                                 repo
-                              )
-                            "
-                            [attr.aria-checked]="def.declarations"
-                            (click)="
-                              toggleRepoDeclarations(repo, !def.declarations)
-                            "
-                          ></button>
-                          <span
-                            >Read its own
-                            <code>.grain/</code> declarations</span
-                          >
-                        </div>
-                      }
+                              }}'s own declarations"
+                              data-testid="decl-toggle-switch"
+                              [disabled]="
+                                !access.can(
+                                  'PUT /api/repos/{owner}/{name}/declarations',
+                                  repo
+                                )
+                              "
+                              [attr.aria-checked]="def.declarations"
+                              (click)="
+                                toggleRepoDeclarations(repo, !def.declarations)
+                              "
+                            ></button>
+                            <span
+                              >Read its own
+                              <code>.grain/</code> declarations</span
+                            >
+                          </div>
+                        }
+                        <a
+                          class="btn-tonal"
+                          [routerLink]="repoAdvancedRoute(repo)"
+                          data-testid="decl-open-repo-link"
+                          >Open repository settings</a
+                        >
+                      </div>
                     </div>
 
                     <div class="proc-meta-row">
@@ -1936,14 +2236,16 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                           <div class="proc-insp-top">
                             <div class="headline-cluster">
                               @if (item.kind === "trigger") {
-                                <a
-                                  class="tabular"
-                                  [routerLink]="repoAdvancedRoute(repo)"
+                                <button
+                                  type="button"
+                                  class="btn-text tabular"
                                   [attr.data-testid]="
                                     'decl-trigger-link-' + item.path
                                   "
-                                  ><code>{{ item.path }}</code></a
+                                  (click)="toggleInlineYaml(repo, item.path)"
                                 >
+                                  <code>{{ item.path }}</code>
+                                </button>
                               } @else {
                                 <code class="tabular">{{ item.path }}</code>
                               }
@@ -3321,6 +3623,41 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly suitesView = signal<SuitesPaneView>("suites");
 
   protected readonly selectedScheduleId = signal<string | null>(null);
+  protected readonly selectedTrigger = signal<DeclaredTrigger | null>(null);
+  protected readonly selectedTriggerKey = computed(() => {
+    const tr = this.selectedTrigger();
+    return tr ? `trigger:${tr.repo}:${tr.path}` : null;
+  });
+  protected readonly triggerYamlText = signal("");
+  protected readonly triggerYamlLoading = signal(false);
+  protected readonly triggerYamlDisplay = computed(() =>
+    this.triggerYamlLoading()
+      ? "Loading YAML…"
+      : this.triggerYamlText() || "No YAML content available.",
+  );
+  protected readonly parsedSelectedTrigger = computed(() =>
+    parseTriggerYaml(this.triggerYamlText()),
+  );
+  protected readonly matchedTriggerTemplate = computed<Template | null>(() => {
+    const tr = this.selectedTrigger();
+    const ref = this.parsedSelectedTrigger().template.trim();
+    if (!tr || !ref) return null;
+    const list = this.store.templates();
+    return (
+      list.find((t) => t.id === ref) ??
+      list.find((t) => t.id === `repo:${tr.repo}:${ref}`) ??
+      list.find(
+        (t) =>
+          t.declaredIn?.repo === tr.repo &&
+          templateFileStem(t.declaredIn.path) === ref,
+      ) ??
+      list.find(
+        (t) =>
+          (!t.declaredIn || t.declaredIn.repo === tr.repo) && t.name === ref,
+      ) ??
+      null
+    );
+  });
   protected readonly selectedTemplateId = signal<string | null>(null);
   protected readonly selectedSuiteId = signal<string | null>(null);
   protected readonly selectedSuiteRunId = signal<number | null>(null);
@@ -3813,6 +4150,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       const tab = this.activeTab();
       const loaded = this.store.loaded();
       const scheds = this.sortedSchedules();
+      const trigs = this.filteredTriggers();
       const tmpls = this.sortedTemplates();
       const suites = this.sortedSuites();
       const repos = this.filteredDeclRepos();
@@ -3820,8 +4158,16 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
         if (!loaded || this.itemId() || this.runId()) return;
         const isDesktop = (this.doc.defaultView?.innerWidth ?? 1280) >= 600;
         if (!isDesktop) return;
-        if (tab === "schedules" && !this.selectedScheduleId() && scheds[0]) {
-          this.selectSchedule(scheds[0].id, false);
+        if (
+          tab === "schedules" &&
+          !this.selectedScheduleId() &&
+          !this.selectedTrigger()
+        ) {
+          if (scheds[0]) {
+            this.selectSchedule(scheds[0].id, false);
+          } else if (trigs[0]) {
+            this.selectTrigger(trigs[0], false);
+          }
         } else if (
           tab === "templates" &&
           !this.selectedTemplateId() &&
@@ -4123,6 +4469,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   protected selectSchedule(id: string, fromClick: boolean): void {
+    this.selectedTrigger.set(null);
     this.selectedScheduleId.set(id);
     if (fromClick) this.mobileDetailOpen.set(true);
     this.scheduleComposition.set(null);
@@ -4134,6 +4481,51 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
         })
         .catch(() => undefined);
     }
+  }
+
+  protected selectTrigger(tr: DeclaredTrigger, fromClick: boolean): void {
+    const key = `trigger:${tr.repo}:${tr.path}`;
+    this.selectedScheduleId.set(null);
+    this.scheduleComposition.set(null);
+    this.selectedTrigger.set(tr);
+    if (fromClick) this.mobileDetailOpen.set(true);
+    void this.loadSelectedTriggerYaml(tr, key);
+  }
+
+  private async loadSelectedTriggerYaml(
+    tr: DeclaredTrigger,
+    expectedKey: string,
+  ): Promise<void> {
+    this.triggerYamlText.set("");
+    this.triggerYamlLoading.set(true);
+    const repoPath = tr.path.startsWith(`${tr.repo}/`)
+      ? tr.path
+      : `${tr.repo}/${tr.path.replace(/^\/+/, "")}`;
+    try {
+      if (typeof this.api.getText === "function") {
+        const text = await this.api.getText(
+          "GET /api/fs/repo/{path...}" as RouteKey,
+          { path: repoPath },
+        );
+        if (this.selectedTriggerKey() === expectedKey) {
+          this.triggerYamlText.set(text || "");
+        }
+      }
+    } catch (err) {
+      if (this.selectedTriggerKey() === expectedKey) {
+        this.triggerYamlText.set(errorText(err));
+      }
+    } finally {
+      if (this.selectedTriggerKey() === expectedKey) {
+        this.triggerYamlLoading.set(false);
+      }
+    }
+  }
+
+  protected openTriggerTemplate(id: string): void {
+    this.tmplFilter.set("all");
+    this.selectTemplate(id, true);
+    void this.router.navigate(["/processes", "templates"]);
   }
 
   protected selectTemplate(id: string, fromClick: boolean): void {

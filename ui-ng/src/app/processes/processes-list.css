@@ -4,6 +4,15 @@ g-processes-page {
   display: contents;
 }
 
+g-qa-flows-panel,
+.view-panel-fill {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  overflow: clip;
+}
+
 .proc-list {
   list-style: none;
   margin: 0;
@@ -31,11 +40,6 @@ g-processes-page {
   text-align: left;
   cursor: pointer;
   transition: background-color 120ms var(--md-sys-motion-effects);
-}
-
-/* A trigger row is a link (it opens the repository), drawn as a row. */
-a.proc-row {
-  text-decoration: none;
 }
 
 .proc-row:focus-visible {
@@ -125,9 +129,27 @@ a.proc-row {
   margin-left: auto;
 }
 
-/* Custom order: a row can be dragged; the row it would land on is marked. */
-.proc-li[draggable="true"] > .proc-row {
+/* Custom order: explicit drag grip at the start of .proc-row-top; the row
+   itself always keeps cursor: pointer, and the drop target row is marked. */
+.proc-drag-grip {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--md-sys-color-outline);
   cursor: grab;
+  user-select: none;
+}
+
+.proc-drag-grip:hover {
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-on-surface-variant);
+}
+
+.proc-drag-grip:active {
+  cursor: grabbing;
 }
 
 .proc-li.is-drop-target {
