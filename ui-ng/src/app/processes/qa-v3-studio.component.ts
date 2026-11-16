@@ -28,14 +28,11 @@ import type { DiffPreviewFile } from "../api/models";
 import { SnackbarService } from "../services/snackbar.service";
 import { errorText } from "../sessions/session-helpers";
 import { DialogTrapDirective } from "../shared/dialog-trap.directive";
-import { DiffViewerComponent } from "../shared/diff-viewer.component";
+import { StatusIconComponent } from "../shared/status-icon.component";
+import { TipDirective } from "../shared/tip.directive";
 import {
-  type PillOption,
-  PillSelectComponent,
-} from "../shared/pill-select.component";
-import {
+  ALL_WORKFLOW_STAGE_IDS,
   BUILT_IN_READABILITY_PACK_IDS,
-  BUILT_IN_READABILITY_PACK_SCOPES,
   type CustomCheckDeclarationV3,
   type CustomStageDeclarationV3,
   type FixtureSelfTestReport,
@@ -53,38 +50,41 @@ import {
   buildClientWorkflowStagesView,
   computeActivePromptBytes,
   evaluateFixturesClientSide,
-  isLockedFloorRule,
+  extractPatternExampleLines,
+  formatStageModeLabel,
+  formatStepModeLabel,
+  serializePatternFixtures,
+  stageModePillClass,
+  stageModeTip,
+  stepModePillClass,
+  synthesizeCompanionFixtures,
+  synthesizeDiffBudgetFixtures,
   utf8ByteCount,
 } from "./qa-flows.models";
+import {
+  type CustomCheckEngine,
+  type EditableCustomCheck,
+  type EditableCustomStage,
+  type InsertAfterStage,
+  QaStepDrawerComponent,
+  type StudioInspectorTab,
+} from "./qa-step-drawer.component";
 
-export type CustomCheckEngine =
-  "pattern" | "diff-budget" | "companion" | "jsonschema";
-export type InsertAfterStage = "s2" | "s3" | "s4";
+export type {
+  CustomCheckEngine,
+  EditableCustomCheck,
+  EditableCustomStage,
+  InsertAfterStage,
+  StudioInspectorTab,
+};
 export type StepKindFilter = "all" | "skills" | "checks" | "agents";
-export type StudioInspectorTab = "definition" | "empirical" | "yaml";
 
-export interface EditableCustomStage {
-  readonly uid: number;
-  readonly id: string;
-  readonly label: string;
-  readonly insertAfter: InsertAfterStage;
-  readonly timeoutSeconds: number;
-}
-
-export interface EditableCustomCheck {
-  readonly uid: number;
-  readonly id: string;
-  readonly label: string;
-  readonly engine: CustomCheckEngine;
-  readonly severity: "blocking" | "warn" | "shadow";
-  readonly message: string;
-  readonly paths: string;
-  readonly forbidAdded: string;
-  readonly whenChanged: string;
-  readonly requireChanged: string;
-  readonly maxChangedLines: number;
-  readonly passJson: string;
-  readonly failJson: string;
+function createAllCollapsedMap(): Readonly<Record<string, boolean>> {
+  const out: Record<string, boolean> = {};
+  for (const id of ALL_WORKFLOW_STAGE_IDS) {
+    out[id] = true;
+  }
+  return out;
 }
 
 function inputTextValue(ev: Event): string {
@@ -105,11 +105,18 @@ function inputNumberValue(ev: Event): number {
   return 0;
 }
 
-function inputCheckedValue(ev: Event): boolean {
-  if (ev.target instanceof HTMLInputElement) {
-    return ev.target.checked;
+function normalizeStringList(
+  raw: string | readonly string[] | undefined,
+): readonly string[] {
+  if (Array.isArray(raw)) {
+    return raw.filter(
+      (v): v is string => typeof v === "string" && v.length > 0,
+    );
   }
-  return false;
+  if (typeof raw === "string" && raw.trim().length > 0) {
+    return [raw.trim()];
+  }
+  return [];
 }
 
 function defaultFixturesForEngine(engine: CustomCheckEngine): {
@@ -117,1345 +124,390 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
   whenChanged: string;
   requireChanged: string;
   maxChangedLines: number;
+  failLine: string;
+  passLine: string;
   failJson: string;
   passJson: string;
 } {
   switch (engine) {
-    case "companion":
+    case "companion": {
+      const whenChanged = "pkg/model/schema.go";
+      const requireChanged = "pkg/model/migrations.go";
+      const syn = synthesizeCompanionFixtures(whenChanged, requireChanged);
       return {
         forbidAdded: "",
-        whenChanged: "pkg/model/schema.go",
-        requireChanged: "pkg/model/migrations.go",
+        whenChanged,
+        requireChanged,
         maxChangedLines: 0,
-        failJson: JSON.stringify([
-          {
-            name: "schema.go without migration",
-            "changed-files": ["pkg/model/schema.go"],
-          },
-        ]),
-        passJson: JSON.stringify([
-          {
-            name: "schema.go with migration",
-            "changed-files": ["pkg/model/schema.go", "pkg/model/migrations.go"],
-          },
-        ]),
+        failLine: "",
+        passLine: "",
+        failJson: syn.failJson,
+        passJson: syn.passJson,
       };
-    case "diff-budget":
+    }
+    case "diff-budget": {
+      const maxChangedLines = 250;
+      const syn = synthesizeDiffBudgetFixtures(maxChangedLines, "pkg/**/*.go");
       return {
         forbidAdded: "",
         whenChanged: "",
         requireChanged: "",
-        maxChangedLines: 2,
-        failJson: JSON.stringify([
-          {
-            name: "exceeds line budget",
-            file: "pkg/a.go",
-            "added-lines": ["l1", "l2", "l3"],
-          },
-        ]),
-        passJson: JSON.stringify([
-          {
-            name: "within line budget",
-            file: "pkg/a.go",
-            "added-lines": ["l1"],
-          },
-        ]),
+        maxChangedLines,
+        failLine: "",
+        passLine: "",
+        failJson: syn.failJson,
+        passJson: syn.passJson,
       };
+    }
     case "jsonschema":
       return {
         forbidAdded: "",
         whenChanged: "",
         requireChanged: "",
         maxChangedLines: 0,
+        failLine: "",
+        passLine: "",
         failJson: JSON.stringify([
-          { name: "invalid json payload", file: "cfg.json", content: "{}" },
+          { name: "invalid-schema", content: '{"bad":true}' },
         ]),
         passJson: JSON.stringify([
-          {
-            name: "valid json payload",
-            file: "cfg.json",
-            content: '{"version":1}',
-          },
+          { name: "valid-schema", content: '{"schema":"v4"}' },
         ]),
       };
-    default:
+    case "pattern":
+    default: {
+      const failLine = 'console.log("debug")';
+      const passLine = "const ready = true;";
+      const ser = serializePatternFixtures(failLine, passLine);
       return {
-        forbidAdded: "FIXME",
+        forbidAdded: "console\\.log\\(",
         whenChanged: "",
         requireChanged: "",
         maxChangedLines: 0,
-        failJson: JSON.stringify([
-          {
-            name: "contains forbidden FIXME",
-            file: "pkg/a.go",
-            "added-lines": ["// FIXME: remove debug code"],
-          },
-        ]),
-        passJson: JSON.stringify([
-          {
-            name: "clean production line",
-            file: "pkg/a.go",
-            "added-lines": ["// structured logger call"],
-          },
-        ]),
+        failLine,
+        passLine,
+        failJson: ser.failJson,
+        passJson: ser.passJson,
       };
+    }
   }
 }
 
 @Component({
   selector: "g-qa-v3-studio",
-  imports: [PillSelectComponent, DialogTrapDirective, DiffViewerComponent],
-  encapsulation: ViewEncapsulation.None,
-  styleUrls: ["./qa-v3-studio.css", "./qa-flows-panel.css"],
+  imports: [
+    DialogTrapDirective,
+    StatusIconComponent,
+    TipDirective,
+    QaStepDrawerComponent,
+  ],
   changeDetection: ChangeDetectionStrategy.OnPush,
+  styleUrl: "./qa-v3-studio.css",
+  encapsulation: ViewEncapsulation.None,
   template: `
     <div class="qa-v3-studio" data-testid="qa-v3-studio">
-      @if (!embedded()) {
-        <div
-          class="qa-studio-toolbar"
-          role="toolbar"
-          aria-label="Workflow studio actions"
-          data-testid="qa-studio-toolbar"
-        >
-          <div class="qa-toolbar-left">
-            <span class="status-pill neutral">v4 Studio</span>
-            <div
-              class="qa-prompt-budget byte-counter"
-              [class.error]="promptBudgetOverflow()"
-              data-testid="qa-prompt-budget"
-            >
-              <span>Prompt budget:</span>
-              <strong class="s-num">{{ activePromptBytes() }} B</strong>
-              <span>/ 8.0 kB ({{ maxPromptBudgetBytes }} B)</span>
-              <span class="qa-budget-track" aria-hidden="true">
-                <span
-                  class="qa-budget-fill"
-                  [style.width.%]="promptBudgetPct()"
-                ></span>
-              </span>
-            </div>
-          </div>
-          <div class="qa-toolbar-actions">
-            <button
-              type="button"
-              class="btn-outlined"
-              data-testid="qa-v3-open-probe"
-              (click)="showProbe.set(true)"
-            >
-              What-if probe
-            </button>
-            <button
-              type="button"
-              class="btn-outlined"
-              data-testid="qa-v3-open-adopt"
-              (click)="showAdopt.set(true)"
-            >
-              Adopt from commit
-            </button>
-            <button
-              type="button"
-              class="btn-tonal"
-              data-testid="qa-v3-verify-dry-run"
-              (click)="verifyDryRun()"
-              [disabled]="verifying()"
-            >
-              {{ verifying() ? "Verifying…" : "Verify & dry-run" }}
-            </button>
-          </div>
-        </div>
-      }
-
       <div class="qa-workbench-split">
-        <!-- LEFT 30% STAGE & STEP TREE -->
-        <aside
-          class="qa-stage-tree"
-          aria-label="8-Stage Software Lifecycle Tree"
-          data-testid="qa-stage-tree"
-        >
-          <div class="qa-tree-controls">
-            <form
-              role="search"
-              autocomplete="off"
-              class="qa-tree-search"
-              (submit)="$event.preventDefault()"
-            >
-              <input
-                type="search"
-                data-testid="qa-step-search"
-                placeholder="Filter stages, skills, packs, or checks…"
-                aria-label="Filter stages, skills, packs, or checks"
-                [value]="stepSearch()"
-                (input)="stepSearch.set(textValue($event))"
-              />
-            </form>
-            <div
-              class="qa-kind-chips"
-              role="toolbar"
-              aria-label="Filter steps by kind"
-            >
-              @for (chip of kindFilterOptions; track chip.id) {
+        <!-- CENTER COLUMN: HEADER + LIFECYCLE STAGE SPINE -->
+        <div class="qa-spine-col">
+          <ng-content select="[qaCenterHeader]" />
+
+          <section
+            class="qa-stage-tree"
+            aria-label="Software workflow lifecycle stages"
+            data-testid="qa-stage-tree"
+          >
+            <div class="qa-tree-controls">
+              <form
+                class="qa-spine-search-form"
+                role="search"
+                autocomplete="off"
+                (submit)="$event.preventDefault()"
+              >
+                <input
+                  type="search"
+                  data-testid="qa-step-search"
+                  placeholder="Filter stages or substeps…"
+                  aria-label="Filter stages or substeps"
+                  [value]="stepSearch()"
+                  (input)="stepSearch.set(textValue($event))"
+                />
                 <button
                   type="button"
-                  class="qa-kind-chip"
-                  [attr.data-testid]="'qa-kind-filter-' + chip.id"
-                  [attr.aria-pressed]="kindFilter() === chip.id"
-                  (click)="kindFilter.set(chip.id)"
-                >
-                  {{ chip.label }}
-                </button>
-              }
-            </div>
-          </div>
-
-          <div class="qa-stage-groups">
-            @for (stage of filteredStages(); track stage.id) {
-              <section
-                class="qa-stage-group"
-                [attr.data-testid]="'qa-stage-group-' + stage.id"
-              >
-                <div
-                  class="qa-stage-header-row"
-                  [class.is-selected]="
-                    selectedStageId() === stage.id && !selectedStepId()
+                  class="btn-tonal qa-expand-all-btn"
+                  data-testid="qa-expand-all-stages"
+                  [gTip]="
+                    allVisibleStagesExpanded()
+                      ? 'Collapse all lifecycle stage cards'
+                      : 'Expand all visible lifecycle stage cards'
                   "
+                  (click)="toggleExpandAllStages()"
+                >
+                  {{
+                    allVisibleStagesExpanded() ? "Collapse all" : "Expand all"
+                  }}
+                </button>
+              </form>
+
+              <div
+                class="qa-kind-chips"
+                role="group"
+                aria-label="Filter substep type"
+              >
+                @for (opt of kindFilterOptions; track opt.id) {
+                  <button
+                    type="button"
+                    class="qa-kind-chip"
+                    [attr.aria-pressed]="kindFilter() === opt.id"
+                    [attr.data-testid]="'qa-kind-filter-' + opt.id"
+                    (click)="kindFilter.set(opt.id)"
+                  >
+                    {{ opt.label }}
+                  </button>
+                }
+              </div>
+            </div>
+
+            <div class="qa-stage-tree-list" data-testid="qa-stage-spine-scroll">
+              @for (stage of visibleStages(); track stage.id) {
+                @let isSkipped = !(stage.enabled && stage.mode !== "off");
+                @let collapsed = effectiveStageCollapsed(stage.id);
+                <section
+                  class="qa-stage-group"
+                  [class.is-skipped]="isSkipped"
+                  [attr.data-testid]="'qa-stage-' + stage.id"
                 >
                   <button
                     type="button"
-                    class="qa-stage-collapse-btn"
-                    [attr.aria-expanded]="!isStageCollapsed(stage.id)"
-                    [attr.aria-label]="'Toggle ' + stage.label"
+                    class="qa-stage-header-btn"
+                    [attr.aria-expanded]="!collapsed"
+                    [attr.data-testid]="'qa-stage-toggle-' + stage.id"
                     (click)="toggleStageCollapse(stage.id)"
                   >
-                    {{ isStageCollapsed(stage.id) ? "▸" : "▾" }}
-                  </button>
-                  <button
-                    type="button"
-                    class="qa-stage-select-btn"
-                    [attr.data-testid]="'qa-stage-select-' + stage.id"
-                    (click)="selectStage(stage.id)"
-                  >
-                    <span class="qa-stage-title">{{ stage.label }}</span>
-                    <span class="qa-stage-meta">
-                      <span class="qa-step-count s-num">{{
-                        stage.steps.length
+                    <span class="qa-stage-title-wrap">
+                      <span class="qa-stage-chevron" aria-hidden="true">{{
+                        collapsed ? "▸" : "▾"
                       }}</span>
+                      <span class="qa-stage-title">{{ stage.label }}</span>
+                    </span>
+                    <span class="qa-stage-meta">
+                      <span class="qa-step-count">
+                        {{ activeStepsInStage(stage) }}/{{ stage.steps.length }}
+                      </span>
                       <span
-                        class="qa-pill"
-                        [attr.data-tone]="
-                          stage.enabled && stage.mode !== 'off'
-                            ? 'active'
-                            : 'off'
-                        "
+                        [class]="'status-pill ' + stagePillClass(stage)"
+                        [gTip]="stageTip(stage)"
                       >
-                        {{ stage.mode || (stage.enabled ? "active" : "off") }}
+                        <g-status-icon [tone]="stagePillClass(stage)" />
+                        {{ stagePillLabel(stage) }}
                       </span>
                     </span>
                   </button>
-                </div>
 
-                @if (!isStageCollapsed(stage.id)) {
-                  <ul class="qa-step-list">
+                  <ul class="qa-step-list" [hidden]="collapsed">
                     @for (step of stage.steps; track step.id) {
-                      <li>
+                      <li [attr.data-testid]="'qa-rule-card-' + step.id">
                         <button
                           type="button"
                           class="qa-step-node"
-                          [class.is-selected]="selectedStepId() === step.id"
-                          [attr.data-testid]="'qa-step-node-' + step.id"
+                          [class.is-selected]="
+                            selectedStepId() === step.id && !addingForStageId()
+                          "
+                          [attr.data-testid]="'qa-step-row-' + step.id"
                           (click)="selectStep(stage.id, step.id)"
                         >
-                          <span
-                            class="qa-step-node-main"
-                            [attr.data-testid]="'qa-rule-card-' + step.id"
-                          >
-                            <span class="qa-step-node-label">{{
-                              step.label
-                            }}</span>
-                            <span class="qa-step-node-id s-mono">{{
-                              step.id
-                            }}</span>
-                          </span>
-                          <span class="qa-step-node-pills">
-                            @if (step.lockedFloor || isFloor(step.id)) {
-                              <span class="qa-pill floor-badge">floor</span>
-                            }
+                          <div class="qa-step-node-main">
+                            <span class="qa-step-label">{{ step.label }}</span>
                             <span
-                              class="qa-pill severity-pill"
-                              [attr.data-tone]="stepPillTone(step)"
+                              [class]="'status-pill ' + stepPillClass(step)"
                             >
+                              <g-status-icon [tone]="stepPillClass(step)" />
                               {{ stepPillLabel(step) }}
                             </span>
-                          </span>
+                          </div>
+                          <div class="qa-step-node-sub">
+                            <span class="s-mono">{{
+                              step.scope || "**/*"
+                            }}</span>
+                            @if (step.bytes && step.bytes > 0) {
+                              <span class="s-num">{{ step.bytes }} B</span>
+                            }
+                          </div>
+                        </button>
+                      </li>
+                    }
+
+                    @if (canEdit()) {
+                      <li>
+                        <button
+                          type="button"
+                          class="btn-text qa-add-step-btn"
+                          data-testid="qa-add-step-btn"
+                          [attr.data-stage-id]="stage.id"
+                          [gTip]="
+                            'Add a skill, deterministic check, or critic substep to stage ' +
+                            stage.index +
+                            '.'
+                          "
+                          (click)="requestAddSubstep(stage.id)"
+                        >
+                          + Add substep to Stage {{ stage.index }}…
                         </button>
                       </li>
                     }
                   </ul>
-                  @if (editing()) {
-                    <div class="qa-stage-add-row">
-                      <button
-                        type="button"
-                        class="btn-text qa-add-step-btn"
-                        [attr.data-testid]="'qa-add-step-' + stage.id"
-                        (click)="addStepForStage(stage.id)"
-                      >
-                        + Add step
-                      </button>
-                    </div>
-                  }
-                }
-              </section>
-            }
-
-            @if (customStages().length > 0 || editing()) {
-              <section
-                [class.qa-stage-group]="customStages().length > 0"
-                data-testid="qa-stage-group-custom"
-              >
-                <div class="qa-stage-header-row">
-                  <span class="qa-stage-title"
-                    >Custom Stages ({{ customStages().length }})</span
-                  >
-                  @if (editing()) {
-                    <button
-                      type="button"
-                      class="btn-text"
-                      data-testid="qa-v3-add-stage"
-                      (click)="addCustomStage()"
-                    >
-                      + Custom stage
-                    </button>
-                  }
-                </div>
-              </section>
-            }
-          </div>
-        </aside>
-
-        <!-- RIGHT 70% FULL-WIDTH STAGE / STEP INSPECTOR & LIVE EDITOR -->
-        <section
-          class="qa-step-inspector"
-          aria-label="Stage and Step Inspector"
-          data-testid="qa-step-inspector"
-        >
-          <div class="qa-inspector-inner" data-testid="proc-inspector">
-            <!-- Summary strip for compatibility with flow detail assertions -->
-            <div class="qa-flow-summary-bar" data-testid="qa-flow-detail-card">
-              <div class="qa-flow-summary-item">
-                <span class="s-label">Stage Boundary</span>
-                <span class="s-mono">{{ activeStage().boundary }}</span>
-              </div>
-              <div class="qa-flow-summary-item">
-                <span class="s-label">Coding Skill</span>
-                <span class="s-num">{{ codingSkillBytes() }} bytes</span>
-              </div>
-              <div class="qa-flow-summary-item">
-                <span class="s-label">Verifier</span>
-                <span class="s-mono">{{ verifierSummaryText() }}</span>
-              </div>
-              <div class="qa-flow-summary-item">
-                <span class="s-label">Merge Triage (S5)</span>
-                <span class="s-mono">{{ s5Triage() }}</span>
-              </div>
-            </div>
-
-            <!-- Inspector Tabs -->
-            <div
-              class="tab-strip qa-inspector-tabs"
-              role="tablist"
-              aria-label="Inspector views"
-            >
-              <button
-                type="button"
-                role="tab"
-                class="tab-link"
-                data-testid="qa-insp-tab-definition"
-                [attr.aria-selected]="inspectorTab() === 'definition'"
-                (click)="inspectorTab.set('definition')"
-              >
-                Definition &amp; fixtures
-              </button>
-              <button
-                type="button"
-                role="tab"
-                class="tab-link"
-                data-testid="qa-insp-tab-stats"
-                [attr.aria-selected]="inspectorTab() === 'empirical'"
-                (click)="inspectorTab.set('empirical')"
-              >
-                Empirical stats &amp; dry-run
-              </button>
-              <button
-                type="button"
-                role="tab"
-                class="tab-link"
-                data-testid="qa-insp-tab-yaml"
-                [attr.aria-selected]="inspectorTab() === 'yaml'"
-                (click)="inspectorTab.set('yaml')"
-              >
-                Lineage &amp; YAML
-              </button>
-            </div>
-
-            @if (effectiveDryRun(); as dr) {
-              <div class="dry-run-results" data-testid="qa-dry-run-banner">
-                <h3>Dry Run Results ({{ dr.hash }})</h3>
-                <div>
-                  Sampled PRs: <span class="s-num">{{ dr.sampledPRs }}</span> |
-                  Would block PRs:
-                  <span class="s-num">{{ dr.wouldBlockPRs }}</span>
-                </div>
-                @if (dr.byCheck.length > 0) {
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Rule</th>
-                        <th>Would Block</th>
-                        <th>Warn Count</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      @for (c of dr.byCheck; track c.ruleId) {
-                        <tr>
-                          <td class="s-mono">{{ c.ruleId }}</td>
-                          <td class="s-num">{{ c.wouldBlock }}</td>
-                          <td class="s-num">{{ c.warnCount }}</td>
-                        </tr>
-                      }
-                    </tbody>
-                  </table>
-                }
-              </div>
-            }
-
-            @if (showParentDiff()) {
-              <div class="qa-inspector-card">
-                <h3>Parent Skill Diff</h3>
-                <g-diff-viewer [files]="diffFiles()" />
-              </div>
-            }
-
-            @switch (inspectorTab()) {
-              @case ("definition") {
-                <!-- STAGE CONTRACT CARD -->
-                @let stage = activeStage();
-                <div
-                  class="qa-inspector-card"
-                  data-testid="qa-stage-contract-card"
-                >
-                  <div class="qa-card-head">
-                    <div>
-                      <h3>{{ stage.label }}</h3>
-                      <p class="qa-card-sub">{{ stage.summary }}</p>
-                    </div>
-                    <span
-                      class="qa-pill"
-                      [attr.data-tone]="
-                        stage.enabled && stage.mode !== 'off' ? 'active' : 'off'
-                      "
-                    >
-                      {{ stage.mode || (stage.enabled ? "active" : "off") }}
-                    </span>
-                  </div>
-
-                  <div class="qa-contract-grid">
-                    <div class="qa-contract-kv">
-                      <span class="s-label">Execution boundary</span>
-                      <span class="s-mono">{{ stage.boundary }}</span>
-                    </div>
-                    <div class="qa-contract-kv">
-                      <span class="s-label">Complexity / Blast triggers</span>
-                      <span class="s-mono">{{
-                        stageTriggerSummary(stage.id)
-                      }}</span>
-                    </div>
-                    <div class="qa-contract-kv">
-                      <span class="s-label">Timeout &amp; Token caps</span>
-                      <span class="s-mono">{{
-                        stageCapSummary(stage.id)
-                      }}</span>
-                    </div>
-                    <div class="qa-contract-kv">
-                      <span class="s-label">Configured steps</span>
-                      <span class="s-num">{{ stage.steps.length }} steps</span>
-                    </div>
-                  </div>
-
-                  @if (editing()) {
-                    <div class="qa-stage-toggles">
-                      <label for="s0Intent" class="qa-inline-check">
-                        <input
-                          id="s0Intent"
-                          type="checkbox"
-                          [checked]="s0Intent()"
-                          (change)="s0Intent.set(checkedValue($event))"
-                        />
-                        S0 Intent
-                      </label>
-                      <label for="decomposeEnabled" class="qa-inline-check">
-                        <input
-                          id="decomposeEnabled"
-                          type="checkbox"
-                          data-testid="qa-decompose-enabled"
-                          [checked]="decomposeEnabled()"
-                          (change)="decomposeEnabled.set(checkedValue($event))"
-                        />
-                        Stage 1 Subtask Decompose
-                      </label>
-                      <label for="contextEnabled" class="qa-inline-check">
-                        <input
-                          id="contextEnabled"
-                          type="checkbox"
-                          data-testid="qa-context-enabled"
-                          [checked]="contextEnabled()"
-                          (change)="contextEnabled.set(checkedValue($event))"
-                        />
-                        Stage 2 Context Discovery
-                      </label>
-                      <label for="s2PlanCritic" class="qa-inline-check">
-                        <input
-                          id="s2PlanCritic"
-                          type="checkbox"
-                          [checked]="s2PlanCritic()"
-                          (change)="s2PlanCritic.set(checkedValue($event))"
-                        />
-                        S2 Plan Critic
-                      </label>
-                      <div class="qa-inline-select">
-                        <label for="s5Triage">S5 Merge Triage</label>
-                        <g-pill-select
-                          id="s5Triage"
-                          ariaLabel="S5 Merge Triage"
-                          [(value)]="s5Triage"
-                          [options]="s5Options"
-                        />
-                      </div>
-                    </div>
-                  }
-
-                  <div
-                    class="qa-ordered-steps"
-                    tabindex="0"
-                    role="region"
-                    aria-label="Ordered stage steps"
-                  >
-                    <div class="qa-subhead-row">
-                      <h4>Ordered Stage Steps</h4>
-                      @if (editing()) {
-                        <button
-                          type="button"
-                          class="btn-outlined"
-                          data-testid="qa-add-skill-step-btn"
-                          (click)="addSkillStepForStage(stage.id)"
-                        >
-                          + Add skill step
-                        </button>
-                      }
-                    </div>
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>#</th>
-                          <th>Step</th>
-                          <th>Kind</th>
-                          <th>Scope</th>
-                          <th>Mode / Severity</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        @for (
-                          st of stage.steps;
-                          track st.id;
-                          let idx = $index
-                        ) {
-                          <tr
-                            class="qa-step-table-row"
-                            [class.is-selected]="selectedStepId() === st.id"
-                            (click)="selectStep(stage.id, st.id)"
-                          >
-                            <td class="s-num">{{ idx + 1 }}</td>
-                            <td>
-                              <strong>{{ st.label }}</strong>
-                              <div class="s-mono qa-muted-id">{{ st.id }}</div>
-                            </td>
-                            <td class="s-mono">{{ st.kind }}</td>
-                            <td class="s-mono">{{ st.scope || "**/*" }}</td>
-                            <td>
-                              <span class="severity-pill">{{
-                                stepPillLabel(st)
-                              }}</span>
-                              @if (st.lockedFloor || isFloor(st.id)) {
-                                <span class="badge floor-badge">Floor</span>
-                              }
-                            </td>
-                          </tr>
-                        }
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-
-                <!-- SELECTED STEP / PACK / PR CONTRACT / CHECK INSPECTOR -->
-                @if (activeStep(); as step) {
-                  <div
-                    class="qa-inspector-card"
-                    data-testid="qa-selected-step-card"
-                  >
-                    <div class="qa-card-head">
-                      <div>
-                        <span class="s-mono qa-muted-id"
-                          >{{ step.kind }} · {{ step.id }}</span
-                        >
-                        <h3>{{ step.label }}</h3>
-                        <p class="qa-card-sub">{{ step.summary }}</p>
-                      </div>
-                      <div class="qa-step-head-badges">
-                        @if (step.bytes) {
-                          <span class="s-num qa-pill"
-                            >{{ step.bytes }} bytes</span
-                          >
-                        }
-                        <span class="severity-pill">{{
-                          stepPillLabel(step)
-                        }}</span>
-                      </div>
-                    </div>
-
-                    <!-- READABILITY PACK INSPECTOR & LIVE EDITOR -->
-                    @if (selectedPack(); as pack) {
-                      <div
-                        class="qa-pack-editor"
-                        data-testid="qa-readability-pack-inspector"
-                      >
-                        <div class="qa-form-row">
-                          <label
-                            [attr.for]="'pack-enabled-' + pack.id"
-                            class="qa-inline-check"
-                          >
-                            <input
-                              [id]="'pack-enabled-' + pack.id"
-                              type="checkbox"
-                              data-testid="qa-pack-enabled-toggle"
-                              [checked]="pack.enabled"
-                              [disabled]="!editing()"
-                              (change)="
-                                updatePackEnabled(pack.id, checkedValue($event))
-                              "
-                            />
-                            Enable {{ pack.id }} Readability Pack
-                          </label>
-                          <div class="qa-inline-select">
-                            <label [attr.for]="'pack-act-' + pack.id"
-                              >Activation</label
-                            >
-                            <g-pill-select
-                              [id]="'pack-act-' + pack.id"
-                              ariaLabel="Pack activation"
-                              [options]="packActivationOptions"
-                              [value]="pack.activation || 'auto'"
-                              [disabled]="!editing()"
-                              (valueChange)="
-                                updatePackActivation(pack.id, $event)
-                              "
-                            />
-                          </div>
-                          <div class="qa-field-grow">
-                            <label [attr.for]="'pack-globs-' + pack.id"
-                              >Target file globs</label
-                            >
-                            <input
-                              [id]="'pack-globs-' + pack.id"
-                              type="text"
-                              class="s-mono"
-                              data-testid="qa-pack-globs-input"
-                              [value]="
-                                (pack.globs || []).join(', ') ||
-                                defaultPackScope(pack.id)
-                              "
-                              [disabled]="!editing()"
-                              (input)="
-                                updatePackGlobs(pack.id, textValue($event))
-                              "
-                            />
-                          </div>
-                        </div>
-                        <div
-                          class="s-mono skill-text-readonly"
-                          tabindex="0"
-                          role="region"
-                          [attr.aria-label]="pack.id + ' readability rules'"
-                        >
-                          {{ step.text }}
-                        </div>
-                        @if (editing()) {
-                          <label [attr.for]="'pack-custom-' + pack.id"
-                            >Custom repository rules for {{ pack.id }}</label
-                          >
-                          <textarea
-                            [id]="'pack-custom-' + pack.id"
-                            rows="3"
-                            class="s-mono"
-                            data-testid="qa-pack-custom-text"
-                            [value]="pack.customText || ''"
-                            (input)="
-                              updatePackCustomText(pack.id, textValue($event))
-                            "
-                          ></textarea>
-                        }
-                      </div>
-                    } @else if (step.id === "pr:contract") {
-                      <!-- PR CONTRACT INSPECTOR & LIVE EDITOR -->
-                      <div
-                        class="qa-pr-contract-editor"
-                        data-testid="qa-pr-contract-inspector"
-                      >
-                        <div class="qa-form-row">
-                          <label
-                            for="prContractEnabled"
-                            class="qa-inline-check"
-                          >
-                            <input
-                              id="prContractEnabled"
-                              type="checkbox"
-                              data-testid="qa-pr-enabled-checkbox"
-                              [checked]="prEnabled()"
-                              [disabled]="!editing()"
-                              (change)="prEnabled.set(checkedValue($event))"
-                            />
-                            Enforce PR Authoring Contract
-                          </label>
-                          <div class="qa-inline-select">
-                            <label for="prContractMode">Mode</label>
-                            <g-pill-select
-                              id="prContractMode"
-                              ariaLabel="PR Contract Mode"
-                              [options]="prModeOptions"
-                              [value]="prMode()"
-                              [disabled]="!editing()"
-                              (valueChange)="updatePrMode($event)"
-                            />
-                          </div>
-                          <div>
-                            <label for="prMaxSubjectChars"
-                              >Max subject chars</label
-                            >
-                            <input
-                              id="prMaxSubjectChars"
-                              type="number"
-                              class="s-num"
-                              data-testid="qa-pr-max-subject-input"
-                              [value]="prMaxSubjectChars()"
-                              [disabled]="!editing()"
-                              (input)="prMaxSubjectChars.set(numValue($event))"
-                            />
-                          </div>
-                        </div>
-                        <div class="qa-form-row">
-                          <div class="qa-field-grow">
-                            <label for="prRequiredSections"
-                              >Required PR description sections</label
-                            >
-                            <input
-                              id="prRequiredSections"
-                              type="text"
-                              data-testid="qa-pr-sections-input"
-                              [value]="prRequiredSections()"
-                              [disabled]="!editing()"
-                              (input)="
-                                prRequiredSections.set(textValue($event))
-                              "
-                            />
-                          </div>
-                          <label for="prAuditLint" class="qa-inline-check">
-                            <input
-                              id="prAuditLint"
-                              type="checkbox"
-                              data-testid="qa-pr-audit-lint-checkbox"
-                              [checked]="prAuditLint()"
-                              [disabled]="!editing()"
-                              (change)="prAuditLint.set(checkedValue($event))"
-                            />
-                            Audit lint suppressions
-                          </label>
-                        </div>
-                        <label for="prGuidanceText">PR contract guidance</label>
-                        <textarea
-                          id="prGuidanceText"
-                          rows="3"
-                          class="s-mono"
-                          data-testid="qa-pr-guidance-textarea"
-                          [value]="prGuidanceText()"
-                          [disabled]="!editing()"
-                          (input)="prGuidanceText.set(textValue($event))"
-                        ></textarea>
-                      </div>
-                    } @else if (selectedSkillStep()) {
-                      @let skStep = selectedSkillStep()!;
-                      <!-- MODULAR SKILL STEP EDITOR -->
-                      <div
-                        class="qa-skill-step-editor"
-                        data-testid="qa-skill-step-inspector"
-                      >
-                        <div class="qa-form-row">
-                          <label
-                            [attr.for]="'sk-enabled-' + skStep.id"
-                            class="qa-inline-check"
-                          >
-                            <input
-                              [id]="'sk-enabled-' + skStep.id"
-                              type="checkbox"
-                              data-testid="qa-skill-step-enabled-checkbox"
-                              [checked]="skStep.enabled"
-                              [disabled]="!editing()"
-                              (change)="
-                                updateSkillStepEnabled(
-                                  skStep.id,
-                                  checkedValue($event)
-                                )
-                              "
-                            />
-                            Enable step
-                          </label>
-                          <div>
-                            <label [attr.for]="'sk-label-' + skStep.id"
-                              >Step label</label
-                            >
-                            <input
-                              [id]="'sk-label-' + skStep.id"
-                              type="text"
-                              [value]="skStep.label || skStep.id"
-                              [disabled]="!editing()"
-                              (input)="
-                                updateSkillStepLabel(
-                                  skStep.id,
-                                  textValue($event)
-                                )
-                              "
-                            />
-                          </div>
-                          <div class="qa-field-grow">
-                            <label [attr.for]="'sk-globs-' + skStep.id"
-                              >Scope globs</label
-                            >
-                            <input
-                              [id]="'sk-globs-' + skStep.id"
-                              type="text"
-                              class="s-mono"
-                              [value]="(skStep.globs || []).join(', ')"
-                              [disabled]="!editing()"
-                              (input)="
-                                updateSkillStepGlobs(
-                                  skStep.id,
-                                  textValue($event)
-                                )
-                              "
-                            />
-                          </div>
-                          @if (editing()) {
-                            <button
-                              type="button"
-                              class="btn-text danger"
-                              data-testid="qa-remove-skill-step-btn"
-                              (click)="removeSkillStep(skStep.id)"
-                            >
-                              Remove step
-                            </button>
-                          }
-                        </div>
-                        <label [attr.for]="'sk-text-' + skStep.id"
-                          >Skill step instructions (Markdown)</label
-                        >
-                        <textarea
-                          [id]="'sk-text-' + skStep.id"
-                          rows="5"
-                          class="s-mono"
-                          data-testid="qa-skill-step-textarea"
-                          [value]="skStep.text || ''"
-                          [disabled]="!editing()"
-                          (input)="
-                            updateSkillStepText(skStep.id, textValue($event))
-                          "
-                        ></textarea>
-                      </div>
-                    } @else if (step.text) {
-                      <!-- CORE SKILL / CRITIC / VERIFIER MARKDOWN -->
-                      <div class="skill-header">
-                        <span class="byte-counter s-num"
-                          >{{ step.bytes || codingSkillBytes() }} bytes</span
-                        >
-                        <label class="compare-toggle">
-                          <input
-                            type="checkbox"
-                            [checked]="showParentDiff()"
-                            (change)="toggleParentDiffReq.emit()"
-                          />
-                          Compare with parent
-                        </label>
-                      </div>
-                      @if (editing() && step.id === "s2:coding-skill") {
-                        <textarea
-                          rows="6"
-                          class="s-mono"
-                          data-testid="qa-coding-skill-textarea"
-                          aria-label="Coding skill markdown"
-                          [value]="codingSkillText() || step.text"
-                          (input)="codingSkillText.set(textValue($event))"
-                        ></textarea>
-                      } @else {
-                        <div
-                          class="s-mono skill-text-readonly"
-                          tabindex="0"
-                          role="region"
-                          aria-label="Coding skill markdown"
-                        >
-                          {{ step.text }}
-                        </div>
-                      }
-                    }
-                  </div>
-                }
-
-                <!-- INLINE FIXTURE SELF-TEST RUNNER & CUSTOM CHECKS WORKBENCH -->
-                <div
-                  class="qa-inspector-card"
-                  data-testid="qa-fixtures-workbench-card"
-                >
-                  <div class="qa-card-head">
-                    <div>
-                      <h3>
-                        Custom Checks &amp; Inline Fixture Self-Test Runner
-                      </h3>
-                      <p class="qa-card-sub">
-                        Verify deterministic pattern, companion, diff-budget,
-                        and jsonschema gates against Fail trap &amp; Clean pass
-                        fixtures.
-                      </p>
-                    </div>
-                    <div class="qa-fixture-actions">
-                      <button
-                        type="button"
-                        class="btn-tonal"
-                        data-testid="qa-run-fixtures-btn"
-                        [disabled]="verifying()"
-                        (click)="runFixtureSelfTest()"
-                      >
-                        {{
-                          verifying()
-                            ? "Running fixtures…"
-                            : "Run fixture self-test"
-                        }}
-                      </button>
-                    </div>
-                  </div>
-
-                  @if (editing()) {
-                    <div class="check-engine-bar">
-                      <button
-                        type="button"
-                        class="btn-outlined"
-                        data-testid="qa-v3-add-pattern"
-                        (click)="addCheck('pattern')"
-                      >
-                        + pattern
-                      </button>
-                      <button
-                        type="button"
-                        class="btn-outlined"
-                        data-testid="qa-v3-add-diff-budget"
-                        (click)="addCheck('diff-budget')"
-                      >
-                        + diff-budget
-                      </button>
-                      <button
-                        type="button"
-                        class="btn-outlined"
-                        data-testid="qa-v3-add-companion"
-                        (click)="addCheck('companion')"
-                      >
-                        + companion
-                      </button>
-                      <button
-                        type="button"
-                        class="btn-outlined"
-                        data-testid="qa-v3-add-jsonschema"
-                        (click)="addCheck('jsonschema')"
-                      >
-                        + jsonschema
-                      </button>
-                    </div>
-                  }
-
-                  @if (fixtureReport(); as rep) {
-                    <div
-                      class="qa-fixture-report"
-                      [attr.data-pass]="rep.passed"
-                      data-testid="qa-fixture-test-result"
-                    >
-                      <div class="qa-fixture-report-head">
-                        <strong>{{ rep.summary }}</strong>
-                        <span class="qa-pill">
-                          Fail trap: {{ rep.failTrapOk ? "PASS" : "FAIL" }} ·
-                          Clean pass: {{ rep.cleanPassOk ? "PASS" : "FAIL" }}
-                        </span>
-                      </div>
-                      <ul class="qa-fixture-case-list">
-                        @for (c of rep.cases; track c.name + c.kind) {
-                          <li>
-                            <span class="s-mono">[{{ c.kind }}]</span>
-                            <strong>{{ c.name }}</strong> — {{ c.detail }}
-                          </li>
-                        }
-                      </ul>
-                    </div>
-                  }
-
-                  @for (check of customChecks(); track check.uid) {
-                    <div class="check-row" data-testid="qa-v3-custom-check-row">
-                      <div class="check-name">
-                        <strong>{{ check.id }}</strong>
-                        <span class="severity-pill">{{ check.engine }}</span>
-                        <span class="severity-pill">{{ check.severity }}</span>
-                        @if (editing()) {
-                          <button
-                            type="button"
-                            class="btn-text danger"
-                            (click)="removeCheck(check.uid)"
-                          >
-                            Remove
-                          </button>
-                        }
-                      </div>
-                      <div class="check-params fixture-stack">
-                        <div class="qa-form-row">
-                          <div>
-                            <label [attr.for]="'chk-id-' + check.uid"
-                              >Check ID</label
-                            >
-                            <input
-                              [id]="'chk-id-' + check.uid"
-                              type="text"
-                              class="s-mono"
-                              [value]="check.id"
-                              [disabled]="!editing()"
-                              (input)="
-                                updateCheckMeta(
-                                  check.uid,
-                                  'id',
-                                  textValue($event)
-                                )
-                              "
-                            />
-                          </div>
-                          <div>
-                            <label [attr.for]="'chk-paths-' + check.uid"
-                              >Scope paths</label
-                            >
-                            <input
-                              [id]="'chk-paths-' + check.uid"
-                              type="text"
-                              class="s-mono"
-                              data-testid="qa-check-paths-input"
-                              [value]="check.paths"
-                              [disabled]="!editing()"
-                              (input)="
-                                updateCheckField(
-                                  check.uid,
-                                  'paths',
-                                  textValue($event)
-                                )
-                              "
-                            />
-                          </div>
-                          @if (check.engine === "pattern") {
-                            <div>
-                              <label [attr.for]="'chk-forbid-' + check.uid"
-                                >Forbid added regex</label
-                              >
-                              <input
-                                [id]="'chk-forbid-' + check.uid"
-                                type="text"
-                                class="s-mono"
-                                data-testid="qa-check-forbid-added-input"
-                                [value]="check.forbidAdded"
-                                [disabled]="!editing()"
-                                (input)="
-                                  updateCheckField(
-                                    check.uid,
-                                    'forbidAdded',
-                                    textValue($event)
-                                  )
-                                "
-                              />
-                            </div>
-                          } @else if (check.engine === "diff-budget") {
-                            <div>
-                              <label [attr.for]="'chk-maxlines-' + check.uid"
-                                >Max changed lines</label
-                              >
-                              <input
-                                [id]="'chk-maxlines-' + check.uid"
-                                type="number"
-                                class="s-num"
-                                data-testid="qa-check-max-lines-input"
-                                [value]="check.maxChangedLines"
-                                [disabled]="!editing()"
-                                (input)="
-                                  updateCheckMaxLines(
-                                    check.uid,
-                                    numValue($event)
-                                  )
-                                "
-                              />
-                            </div>
-                          } @else if (check.engine === "companion") {
-                            <div>
-                              <label [attr.for]="'chk-when-' + check.uid"
-                                >When changed</label
-                              >
-                              <input
-                                [id]="'chk-when-' + check.uid"
-                                type="text"
-                                class="s-mono"
-                                [value]="check.whenChanged"
-                                [disabled]="!editing()"
-                                (input)="
-                                  updateCheckField(
-                                    check.uid,
-                                    'whenChanged',
-                                    textValue($event)
-                                  )
-                                "
-                              />
-                            </div>
-                            <div>
-                              <label [attr.for]="'chk-req-' + check.uid"
-                                >Require changed</label
-                              >
-                              <input
-                                [id]="'chk-req-' + check.uid"
-                                type="text"
-                                class="s-mono"
-                                [value]="check.requireChanged"
-                                [disabled]="!editing()"
-                                (input)="
-                                  updateCheckField(
-                                    check.uid,
-                                    'requireChanged',
-                                    textValue($event)
-                                  )
-                                "
-                              />
-                            </div>
-                          }
-                          <div class="qa-field-grow">
-                            <label [attr.for]="'chk-msg-' + check.uid"
-                              >Finding message</label
-                            >
-                            <input
-                              [id]="'chk-msg-' + check.uid"
-                              type="text"
-                              [value]="check.message"
-                              [disabled]="!editing()"
-                              (input)="
-                                updateCheckMeta(
-                                  check.uid,
-                                  'message',
-                                  textValue($event)
-                                )
-                              "
-                            />
-                          </div>
-                        </div>
-                        <label [attr.for]="'fail-' + check.uid">
-                          Fail trap fixture (JSON array)
-                        </label>
-                        <textarea
-                          [id]="'fail-' + check.uid"
-                          class="s-mono"
-                          data-testid="qa-fixture-fail-input"
-                          [value]="check.failJson"
-                          [disabled]="!editing()"
-                          (input)="
-                            updateFixture({
-                              uid: check.uid,
-                              kind: 'fail',
-                              val: textValue($event),
-                            })
-                          "
-                          rows="2"
-                        ></textarea>
-                        <label [attr.for]="'pass-' + check.uid">
-                          Clean pass fixture (JSON array)
-                        </label>
-                        <textarea
-                          [id]="'pass-' + check.uid"
-                          class="s-mono"
-                          data-testid="qa-fixture-pass-input"
-                          [value]="check.passJson"
-                          [disabled]="!editing()"
-                          (input)="
-                            updateFixture({
-                              uid: check.uid,
-                              kind: 'pass',
-                              val: textValue($event),
-                            })
-                          "
-                          rows="2"
-                        ></textarea>
-                      </div>
-                    </div>
-                  }
-
-                  @for (stage of customStages(); track stage.uid) {
-                    <div class="check-row" data-testid="qa-v3-custom-stage-row">
-                      <div class="check-name">
-                        <strong>Custom Stage: {{ stage.id }}</strong>
-                        @if (editing()) {
-                          <button
-                            type="button"
-                            class="btn-text danger"
-                            (click)="removeCustomStage(stage.uid)"
-                          >
-                            Remove
-                          </button>
-                        }
-                      </div>
-                      <div class="check-params">
-                        <label [attr.for]="'stage-id-' + stage.uid">ID</label>
-                        <input
-                          [id]="'stage-id-' + stage.uid"
-                          type="text"
-                          [value]="stage.id"
-                          [disabled]="!editing()"
-                          (input)="updateStageId(stage.uid, textValue($event))"
-                        />
-                        <label [attr.for]="'stage-label-' + stage.uid"
-                          >Label</label
-                        >
-                        <input
-                          [id]="'stage-label-' + stage.uid"
-                          type="text"
-                          [value]="stage.label"
-                          [disabled]="!editing()"
-                          (input)="
-                            updateStageLabel(stage.uid, textValue($event))
-                          "
-                        />
-                        <label [attr.for]="'stage-after-' + stage.uid"
-                          >Insert After</label
-                        >
-                        <g-pill-select
-                          ariaLabel="Insert after"
-                          [value]="stage.insertAfter"
-                          [disabled]="!editing()"
-                          (valueChange)="
-                            updateStageInsertAfter(stage.uid, $event)
-                          "
-                          [options]="insertAfterOptions"
-                        />
-                        <label [attr.for]="'stage-timeout-' + stage.uid"
-                          >Timeout (s)</label
-                        >
-                        <input
-                          [id]="'stage-timeout-' + stage.uid"
-                          type="number"
-                          [value]="stage.timeoutSeconds"
-                          [disabled]="!editing()"
-                          (input)="
-                            updateStageTimeout(stage.uid, numValue($event))
-                          "
-                        />
-                      </div>
-                    </div>
-                  }
-                </div>
+                </section>
               }
 
-              @case ("empirical") {
-                <div
-                  class="qa-inspector-card"
-                  data-testid="qa-empirical-stats-card"
+              @if (
+                isPartialReadonlyFilterActive() && skippedStagesCount() > 0
+              ) {
+                <button
+                  type="button"
+                  class="qa-skipped-stages-bar"
+                  data-testid="qa-toggle-skipped-stages"
+                  [attr.aria-expanded]="showSkippedStages()"
+                  gTip="Show or hide stages skipped in this partial workflow."
+                  (click)="showSkippedStages.set(!showSkippedStages())"
                 >
-                  <div class="qa-card-head">
-                    <div>
-                      <h3>Empirical Rule Stats &amp; Historical Dry-Run</h3>
-                      <p class="qa-card-sub">
-                        Replay this 8-stage workflow declaration against recent
-                        recorded PR check runs.
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      class="btn-tonal"
-                      (click)="verifyDryRun()"
-                      [disabled]="verifying()"
-                    >
-                      {{ verifying() ? "Running…" : "Run historical dry-run" }}
-                    </button>
-                  </div>
-                  @if (effectiveDryRun(); as dr) {
-                    <p>
-                      Hash: <code class="s-mono">{{ dr.hash }}</code> · Sampled
-                      PRs: <strong class="s-num">{{ dr.sampledPRs }}</strong> ·
-                      Would block:
-                      <strong class="s-num">{{ dr.wouldBlockPRs }}</strong>
-                    </p>
+                  @if (showSkippedStages()) {
+                    Hide {{ skippedStagesCount() }} skipped
+                    {{ skippedStagesCount() === 1 ? "stage" : "stages" }}
                   } @else {
-                    <p class="qa-card-sub">
-                      Trigger a dry-run to compute per-rule block and warning
-                      counts across recent tasks.
-                    </p>
+                    + {{ skippedStagesCount() }}
+                    {{ skippedStagesCount() === 1 ? "stage" : "stages" }}
+                    skipped in this workflow — Show all 8
                   }
-                </div>
+                </button>
               }
+            </div>
+          </section>
+        </div>
 
-              @case ("yaml") {
-                <div
-                  class="qa-inspector-card"
-                  data-testid="qa-lineage-yaml-card"
-                >
-                  <div class="qa-card-head">
-                    <div>
-                      <h3>Lineage &amp; Resolved Declaration YAML</h3>
-                      <p class="qa-card-sub">
-                        Extends:
-                        <code class="s-mono">{{
-                          detail()?.declaration?.extends ||
-                            detail()?.declarationV4?.extends ||
-                            "golden-v3@1"
-                        }}</code>
-                        · Hash:
-                        <code class="s-mono">{{
-                          detail()?.hash || "draft"
-                        }}</code>
-                      </p>
-                    </div>
-                    <label class="compare-toggle">
-                      <input
-                        type="checkbox"
-                        [checked]="showParentDiff()"
-                        (change)="toggleParentDiffReq.emit()"
-                      />
-                      Compare with parent
-                    </label>
-                  </div>
-                  @if (detail()?.lineage?.length) {
-                    <ul class="qa-lineage-list">
-                      @for (lin of detail()?.lineage || []; track lin.hash) {
-                        <li class="s-mono">
-                          {{ lin.key }}&#64;{{ lin.version }} ({{ lin.hash }})
-                        </li>
-                      }
-                    </ul>
-                  }
-                  <pre
-                    class="s-mono skill-text-readonly"
-                    data-testid="qa-studio-yaml-preview"
-                    >{{ buildYaml() }}</pre>
-                </div>
-              }
-            }
-          </div>
-        </section>
+        <!-- RIGHT COLUMN: FOCUSED SUBSTEP / GUIDE DRAWER -->
+        <g-qa-step-drawer
+          [detail]="detail()"
+          [stages]="workflowStages()"
+          [selectedStage]="activeStage()"
+          [selectedStep]="selectedStepView()"
+          [addingForStage]="addingStageView()"
+          [inspectorTab]="inspectorTab()"
+          [editing]="editing()"
+          [canEdit]="canEdit()"
+          [isFork]="isFork()"
+          [draftKey]="draftKey()"
+          [draftLabel]="draftLabel()"
+          [draftSummary]="draftSummary()"
+          [qaEnabled]="qaEnabled()"
+          [activeFlowId]="activeFlowId()"
+          [activeRolloutPct]="activeRolloutPct()"
+          [activePromptBytes]="activePromptBytes()"
+          [verifierSummaryText]="verifierSummaryText()"
+          [showParentDiff]="showParentDiff()"
+          [diffFiles]="diffFiles()"
+          [dryRunResult]="effectiveDryRun()"
+          [fixtureReport]="fixtureReport()"
+          [verifying]="verifying()"
+          [yamlPreview]="buildYaml()"
+          [s0Intent]="s0Intent()"
+          [decomposeEnabled]="decomposeEnabled()"
+          [decomposeMode]="decomposeMode()"
+          [decomposeMaxSubtasks]="decomposeMaxSubtasks()"
+          [decomposeTargetDiffLines]="decomposeTargetDiffLines()"
+          [contextEnabled]="contextEnabled()"
+          [contextIncludeCallers]="contextIncludeCallers()"
+          [contextIncludeMemory]="contextIncludeMemory()"
+          [contextMaxTokens]="contextMaxTokens()"
+          [s2PlanCritic]="s2PlanCritic()"
+          [codingSkillMode]="codingSkillMode()"
+          [codingSkillText]="codingSkillText()"
+          [readabilityPacks]="readabilityPacks()"
+          [skillSteps]="skillSteps()"
+          [customChecks]="customChecks()"
+          [customStages]="customStages()"
+          [prEnabled]="prEnabled()"
+          [prMode]="prMode()"
+          [prMaxSubjectChars]="prMaxSubjectChars()"
+          [prRequiredSections]="prRequiredSections()"
+          [prAuditLint]="prAuditLint()"
+          [prGuidanceText]="prGuidanceText()"
+          [stopNudge]="stopNudge()"
+          [verifierEnabled]="verifierEnabled()"
+          [s5Triage]="s5Triage()"
+          (tabChange)="inspectorTab.set($event)"
+          (closeStep)="openGuide()"
+          (enterDraftReq)="enterDraftReq.emit()"
+          (toggleParentDiffReq)="toggleParentDiffReq.emit()"
+          (openProbeReq)="showProbe.set(true)"
+          (verifyDryRunReq)="verifyDryRun()"
+          (runFixtureSelfTestReq)="runFixtureSelfTest()"
+          (selectStepFromInsight)="selectStepFromGuide($event)"
+          (draftKeyChange)="draftKeyChange.emit($event)"
+          (draftLabelChange)="draftLabelChange.emit($event)"
+          (draftSummaryChange)="draftSummaryChange.emit($event)"
+          (addSkillStepReq)="addSkillStepForStage($event)"
+          (addCheckReq)="addCheck($event)"
+          (addCustomStageReq)="addCustomStage()"
+          (s0IntentChange)="s0Intent.set($event)"
+          (decomposeEnabledChange)="decomposeEnabled.set($event)"
+          (decomposeModeChange)="updateDecomposeMode($event)"
+          (decomposeMaxSubtasksChange)="decomposeMaxSubtasks.set($event)"
+          (decomposeTargetLinesChange)="decomposeTargetDiffLines.set($event)"
+          (contextEnabledChange)="contextEnabled.set($event)"
+          (contextCallersChange)="contextIncludeCallers.set($event)"
+          (contextMemoryChange)="contextIncludeMemory.set($event)"
+          (contextMaxTokensChange)="contextMaxTokens.set($event)"
+          (s2PlanCriticChange)="s2PlanCritic.set($event)"
+          (codingSkillModeChange)="updateCodingSkillMode($event)"
+          (codingSkillTextChange)="codingSkillText.set($event)"
+          (packEnabledChange)="updatePackEnabled($event.id, $event.enabled)"
+          (packActivationChange)="
+            updatePackActivation($event.id, $event.activation)
+          "
+          (packGlobsChange)="updatePackGlobs($event.id, $event.globs)"
+          (packCustomTextChange)="updatePackCustomText($event.id, $event.text)"
+          (skillStepEnabledChange)="
+            updateSkillStepEnabled($event.id, $event.enabled)
+          "
+          (skillStepLabelChange)="updateSkillStepLabel($event.id, $event.label)"
+          (skillStepGlobsChange)="updateSkillStepGlobs($event.id, $event.globs)"
+          (skillStepTextChange)="updateSkillStepText($event.id, $event.text)"
+          (removeSkillStepReq)="removeSkillStep($event)"
+          (customCheckMetaChange)="
+            updateCheckMeta($event.uid, $event.field, $event.val)
+          "
+          (customCheckSeverityChange)="
+            updateCheckSeverity($event.uid, $event.severity)
+          "
+          (customCheckFieldChange)="
+            updateCheckField($event.uid, $event.field, $event.val)
+          "
+          (customCheckMaxLinesChange)="
+            updateCheckMaxLines($event.uid, $event.maxChangedLines)
+          "
+          (patternExampleChange)="
+            updatePatternExample($event.uid, $event.kind, $event.line)
+          "
+          (removeCustomCheckReq)="removeCheck($event)"
+          (customStageLabelChange)="updateStageLabel($event.uid, $event.label)"
+          (customStageAfterChange)="
+            updateStageInsertAfter($event.uid, $event.insertAfter)
+          "
+          (customStageTimeoutChange)="
+            updateStageTimeout($event.uid, $event.timeoutSeconds)
+          "
+          (removeCustomStageReq)="removeCustomStage($event)"
+          (builtinCheckToggleReq)="builtinCheckToggle.emit($event)"
+          (builtinCheckSeverityReq)="builtinCheckSeverity.emit($event)"
+          (prEnabledChange)="prEnabled.set($event)"
+          (prModeChange)="updatePrMode($event)"
+          (prMaxSubjectCharsChange)="prMaxSubjectChars.set($event)"
+          (prRequiredSectionsChange)="prRequiredSections.set($event)"
+          (prAuditLintChange)="prAuditLint.set($event)"
+          (prGuidanceTextChange)="prGuidanceText.set($event)"
+          (stopNudgeChange)="stopNudge.set($event)"
+          (verifierEnabledChange)="verifierEnabled.set($event)"
+          (s5TriageChange)="updateS5Triage($event)"
+        />
       </div>
 
       <!-- ADOPT FLOW MODAL -->
@@ -1476,8 +528,8 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
             (click)="$event.stopPropagation()"
             (keydown)="$event.stopPropagation()"
           >
-            <h3 id="qa-v3-adopt-title">Adopt Flow from Commit</h3>
-            <div>
+            <h3 id="qa-v3-adopt-title">Import workflow from git commit</h3>
+            <div class="modal-fields">
               <label for="adoptRepo">Repository (owner/name)</label>
               <input
                 id="adoptRepo"
@@ -1486,23 +538,30 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
                 (input)="adoptRepo.set(textValue($event))"
                 placeholder="owner/repo"
               />
-              <label for="adoptPath">File Path</label>
+              <label for="adoptPath">Declaration file path</label>
               <input
                 id="adoptPath"
                 type="text"
                 [value]="adoptPath()"
                 (input)="adoptPath.set(textValue($event))"
               />
-              <label for="adoptCommit">40-character Commit SHA</label>
+              <label for="adoptCommit">40-character commit SHA</label>
               <input
                 id="adoptCommit"
                 type="text"
                 [value]="adoptCommit()"
                 (input)="adoptCommit.set(textValue($event))"
-                placeholder="e.g. 0123456789abcdef0123456789abcdef01234567"
+                placeholder="0123456789abcdef0123456789abcdef01234567"
               />
             </div>
             <div class="dialog-actions">
+              <button
+                type="button"
+                class="btn-text"
+                (click)="showAdopt.set(false)"
+              >
+                Cancel
+              </button>
               <button
                 type="button"
                 class="btn-primary"
@@ -1510,14 +569,7 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
                 (click)="doAdopt()"
                 [disabled]="adopting()"
               >
-                Adopt
-              </button>
-              <button
-                type="button"
-                class="btn-text"
-                (click)="showAdopt.set(false)"
-              >
-                Cancel
+                Import
               </button>
             </div>
           </div>
@@ -1542,32 +594,33 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
             (click)="$event.stopPropagation()"
             (keydown)="$event.stopPropagation()"
           >
-            <h3 id="qa-v3-probe-title">What-if Probe</h3>
-            <div>
-              <label for="probeTitle">Task Title</label>
+            <h3 id="qa-v3-probe-title">Simulate file paths &amp; blast tier</h3>
+            <div class="modal-fields">
+              <label for="probeTitle">Sample task title</label>
               <input
                 id="probeTitle"
                 type="text"
                 [value]="probeTitle()"
                 (input)="probeTitle.set(textValue($event))"
               />
-              <label for="probeBody">Task Body</label>
+              <label for="probeBody">Sample task description</label>
               <textarea
                 id="probeBody"
+                rows="3"
                 [value]="probeBody()"
                 (input)="probeBody.set(textValue($event))"
-                rows="3"
               ></textarea>
               <label for="probeFiles"
-                >Changed Files (comma or newline separated)</label
+                >Touched files (comma or newline separated)</label
               >
               <textarea
                 id="probeFiles"
+                rows="3"
+                class="s-mono"
                 [value]="probeFiles()"
                 (input)="probeFiles.set(textValue($event))"
-                rows="3"
               ></textarea>
-              <label for="probeNonTest">Non-test Lines Added</label>
+              <label for="probeNonTest">Non-test added lines</label>
               <input
                 id="probeNonTest"
                 type="number"
@@ -1578,35 +631,34 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
             <div class="dialog-actions">
               <button
                 type="button"
-                class="btn-primary"
-                data-testid="qa-v3-submit-probe"
-                (click)="doProbe()"
-                [disabled]="probing()"
-              >
-                Run Probe
-              </button>
-              <button
-                type="button"
                 class="btn-text"
                 (click)="showProbe.set(false)"
               >
                 Close
               </button>
+              <button
+                type="button"
+                class="btn-primary"
+                data-testid="qa-v3-submit-probe"
+                (click)="doProbe()"
+                [disabled]="probing()"
+              >
+                Run simulation
+              </button>
             </div>
             @if (probeResult(); as pr) {
-              <div class="section-divider" data-testid="qa-v3-probe-result">
-                <h4>Probe Results</h4>
+              <div class="qa-drawer-card" data-testid="qa-v3-probe-result">
                 <p>
-                  <strong>Complexity:</strong> {{ pr.complexity.tier }} (Score:
+                  <strong>Complexity:</strong> {{ pr.complexity.tier }} (score
                   {{ pr.complexity.score }})
                 </p>
                 <p>
-                  <strong>Blast Radius:</strong> {{ pr.risk.tier }} (Score:
+                  <strong>Blast radius:</strong> {{ pr.risk.tier }} (score
                   {{ pr.risk.score }}/100)
                 </p>
-                <p><strong>Stages Fired:</strong> {{ probeStagesText() }}</p>
+                <p><strong>Stages fired:</strong> {{ probeStagesText() }}</p>
                 <p>
-                  <strong>S5 Decision:</strong> {{ pr.triage.decision }} ({{
+                  <strong>Merge triage:</strong> {{ pr.triage.decision }} ({{
                     pr.triage.mode
                   }})
                 </p>
@@ -1626,34 +678,60 @@ export class QaV3StudioComponent {
   readonly declV4 = input<FlowDeclarationV4 | undefined>(undefined);
   readonly detail = input<QAFlowVersionDetail | null>(null);
   readonly editing = input<boolean>(true);
+  readonly canEdit = input<boolean>(true);
   readonly embedded = input<boolean>(false);
+  readonly isFork = input<boolean>(false);
+  readonly draftKey = input<string>("");
+  readonly draftLabel = input<string>("");
+  readonly draftSummary = input<string>("");
+  readonly builtinCheckOverrides = input<
+    Readonly<Record<string, { enabled?: boolean; severity?: string }>>
+  >({});
+
+  readonly qaEnabled = input<boolean>(false);
+  readonly activeFlowId = input<string>("");
+  readonly activeRolloutPct = input<number>(0);
+
   readonly showParentDiff = input<boolean>(false);
   readonly diffFiles = input<readonly DiffPreviewFile[]>([]);
   readonly externalDryRun = input<QADryRunResponse | null>(null);
 
   readonly adopted = output<string>();
   readonly toggleParentDiffReq = output<void>();
+  readonly enterDraftReq = output<void>();
+  readonly stepSelected = output<string>();
+  readonly draftKeyChange = output<string>();
+  readonly draftLabelChange = output<string>();
+  readonly draftSummaryChange = output<string>();
+  readonly builtinCheckToggle = output<{ id: string; enabled: boolean }>();
+  readonly builtinCheckSeverity = output<{ id: string; severity: string }>();
 
   private nextUid = 1;
+  private lastHydratedIdentity = "__uninitialized__";
+  private wasEditing = false;
 
   readonly maxPromptBudgetBytes = MAX_PROMPT_BUDGET_BYTES;
 
   readonly stepSearch = signal("");
   readonly kindFilter = signal<StepKindFilter>("all");
-  readonly collapsedStages = signal<Readonly<Record<string, boolean>>>({});
+  readonly collapsedStages = signal<Readonly<Record<string, boolean>>>(
+    createAllCollapsedMap(),
+  );
+  readonly showSkippedStages = signal(false);
   readonly selectedStageId = signal<string>("s0-decompose");
   readonly selectedStepId = signal<string | null>(null);
+  readonly addingForStageId = signal<string | null>(null);
   readonly inspectorTab = signal<StudioInspectorTab>("definition");
 
   readonly s0Intent = signal(false);
-  readonly decomposeEnabled = signal(true);
+  readonly decomposeEnabled = signal(false);
   readonly decomposeMode = signal<"off" | "slice_plan" | "propose_dag">(
     "slice_plan",
   );
   readonly decomposeMaxSubtasks = signal(4);
   readonly decomposeTargetDiffLines = signal(400);
 
-  readonly contextEnabled = signal(true);
+  readonly contextEnabled = signal(false);
   readonly contextIncludeCallers = signal(true);
   readonly contextIncludeMemory = signal(true);
   readonly contextMaxTokens = signal(12000);
@@ -1668,7 +746,7 @@ export class QaV3StudioComponent {
   readonly readabilityPacks = signal<readonly ReadabilityPackDecl[]>(
     BUILT_IN_READABILITY_PACK_IDS.map((id) => ({
       id,
-      enabled: true,
+      enabled: false,
       activation: "auto",
       globs: [],
       customText: "",
@@ -1677,7 +755,7 @@ export class QaV3StudioComponent {
 
   readonly skillSteps = signal<readonly SkillStepDecl[]>([]);
 
-  readonly prEnabled = signal(true);
+  readonly prEnabled = signal(false);
   readonly prMode = signal<"off" | "warn" | "blocking">("warn");
   readonly prMaxSubjectChars = signal(72);
   readonly prRequiredSections = signal("Summary, Verification");
@@ -1686,6 +764,7 @@ export class QaV3StudioComponent {
     "Explain root cause, verification commands, and any intentional trade-offs.",
   );
   readonly stopNudge = signal(true);
+  readonly verifierEnabled = signal(false);
 
   readonly s5Triage = signal<"off" | "shadow" | "enforced">("off");
   readonly customStages = signal<readonly EditableCustomStage[]>([]);
@@ -1714,39 +793,21 @@ export class QaV3StudioComponent {
     label: string;
   }[] = [
     { id: "all", label: "All" },
-    { id: "skills", label: "Skills & Packs" },
-    { id: "checks", label: "Gates & Checks" },
-    { id: "agents", label: "Sub-agents" },
+    { id: "skills", label: "Skills" },
+    { id: "checks", label: "Checks" },
+    { id: "agents", label: "Critics" },
   ];
 
-  readonly insertAfterOptions: PillOption[] = [
-    { value: "s2", label: "s2" },
-    { value: "s3", label: "s3" },
-    { value: "s4", label: "s4" },
-  ];
-
-  readonly s5Options: PillOption[] = [
-    { value: "off", label: "off" },
-    { value: "shadow", label: "shadow" },
-    { value: "enforced", label: "enforced" },
-  ];
-
-  readonly packActivationOptions: PillOption[] = [
-    { value: "auto", label: "auto" },
-    { value: "always", label: "always" },
-    { value: "glob", label: "glob" },
-  ];
-
-  readonly prModeOptions: PillOption[] = [
-    { value: "off", label: "off" },
-    { value: "warn", label: "warn" },
-    { value: "blocking", label: "blocking" },
-  ];
-
-  readonly stagesView = computed<WorkflowStageView[]>(() => {
+  readonly workflowStages = computed<readonly WorkflowStageView[]>(() => {
     const det = this.detail();
+    const exportedChecks = this.exportCustomChecks();
+    const exportedStages = this.exportCustomStages();
+    const prSections = this.prRequiredSections()
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
     return buildClientWorkflowStagesView(det, {
-      preferLiveDraft: this.editing() || !det?.stagesView?.length,
+      preferLiveDraft: true,
       s0Intent: this.s0Intent(),
       s2PlanCritic: this.s2PlanCritic(),
       s5Triage: this.s5Triage(),
@@ -1769,254 +830,289 @@ export class QaV3StudioComponent {
         enabled: this.prEnabled(),
         mode: this.prMode(),
         maxSubjectChars: this.prMaxSubjectChars(),
-        requiredSections: this.prRequiredSections()
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
+        requiredSections: prSections,
         auditLintSuppressions: this.prAuditLint(),
         guidanceText: this.prGuidanceText(),
       },
       stopNudge: this.stopNudge(),
       codingSkillText: this.codingSkillText(),
       codingSkillMode: this.codingSkillMode(),
-      customChecks: this.exportCustomChecks(),
-      customStages: this.exportCustomStages(),
+      checks: this.editing() ? this.builtinCheckOverrides() : undefined,
+      verifier: {
+        enabled: this.verifierEnabled(),
+      },
+      customChecks: exportedChecks,
+      customStages: exportedStages,
     });
   });
 
-  readonly filteredStages = computed<WorkflowStageView[]>(() => {
-    const query = this.stepSearch().trim().toLowerCase();
-    const kind = this.kindFilter();
-    const all = this.stagesView();
-    if (!query && kind === "all") {
-      return all;
+  readonly filteredStages = computed<readonly WorkflowStageView[]>(() => {
+    const q = this.stepSearch().trim().toLowerCase();
+    const kf = this.kindFilter();
+    const stages = this.workflowStages();
+    if (!q && kf === "all") return stages;
+    return stages
+      .map((st) => {
+        const stageMatch = q !== "" && st.label.toLowerCase().includes(q);
+        const steps = st.steps.filter((step) => {
+          if (!this.matchesKindFilter(step, kf)) return false;
+          if (!q || stageMatch) return true;
+          return (
+            step.label.toLowerCase().includes(q) ||
+            step.id.toLowerCase().includes(q) ||
+            (step.scope || "").toLowerCase().includes(q) ||
+            (step.summary || "").toLowerCase().includes(q)
+          );
+        });
+        return { ...st, steps };
+      })
+      .filter((st) => st.steps.length > 0);
+  });
+
+  readonly isPartialReadonlyFilterActive = computed(
+    () =>
+      !this.editing() &&
+      this.stepSearch().trim() === "" &&
+      this.kindFilter() === "all",
+  );
+
+  readonly skippedStagesCount = computed(
+    () =>
+      this.filteredStages().filter((s) => !(s.enabled && s.mode !== "off"))
+        .length,
+  );
+
+  readonly visibleStages = computed<readonly WorkflowStageView[]>(() => {
+    const all = this.filteredStages();
+    if (this.isPartialReadonlyFilterActive() && !this.showSkippedStages()) {
+      return all.filter((s) => s.enabled && s.mode !== "off");
     }
-    const out: WorkflowStageView[] = [];
-    for (const st of all) {
-      const stageMatchesQuery =
-        !query ||
-        st.label.toLowerCase().includes(query) ||
-        st.id.toLowerCase().includes(query) ||
-        st.summary.toLowerCase().includes(query);
-      const matchedSteps = st.steps.filter((step) => {
-        if (!this.matchesKindFilter(step, kind)) return false;
-        if (!query) return true;
-        return (
-          stageMatchesQuery ||
-          step.label.toLowerCase().includes(query) ||
-          step.id.toLowerCase().includes(query) ||
-          step.kind.toLowerCase().includes(query) ||
-          (step.summary || "").toLowerCase().includes(query) ||
-          (step.scope || "").toLowerCase().includes(query)
-        );
-      });
-      if (matchedSteps.length > 0 || (stageMatchesQuery && kind === "all")) {
-        out.push({ ...st, steps: matchedSteps });
-      }
-    }
-    return out;
+    return all;
+  });
+
+  readonly allVisibleStagesExpanded = computed(() => {
+    const vis = this.visibleStages();
+    return (
+      vis.length > 0 && vis.every((s) => !this.effectiveStageCollapsed(s.id))
+    );
   });
 
   readonly activeStage = computed<WorkflowStageView>(() => {
-    const all = this.stagesView();
-    return (
-      all.find((s) => s.id === this.selectedStageId()) ??
-      all[0] ?? {
-        id: "s0-decompose",
-        index: 1,
-        label: "1 · Goal & Subtask Breakdown",
-        boundary: "controller_fresh_context",
-        enabled: true,
-        mode: "slice_plan",
-        summary: "",
-        steps: [],
-      }
-    );
+    const id = this.selectedStageId();
+    const stages = this.workflowStages();
+    return stages.find((s) => s.id === id) ?? stages[0];
   });
 
-  readonly activeStep = computed<WorkflowStepView | null>(() => {
-    const stepId = this.selectedStepId();
-    if (!stepId) return this.activeStage().steps[0] ?? null;
-    for (const st of this.stagesView()) {
-      const found = st.steps.find((s) => s.id === stepId);
+  readonly addingStageView = computed<WorkflowStageView | null>(() => {
+    const id = this.addingForStageId();
+    if (!id) return null;
+    return this.workflowStages().find((s) => s.id === id) ?? null;
+  });
+
+  readonly selectedStepView = computed<WorkflowStepView | null>(() => {
+    const id = this.selectedStepId();
+    if (!id) return null;
+    for (const st of this.workflowStages()) {
+      const found = st.steps.find((s) => s.id === id);
       if (found) return found;
     }
-    return this.activeStage().steps[0] ?? null;
+    return null;
   });
 
-  readonly selectedPack = computed<ReadabilityPackDecl | null>(() => {
-    const step = this.activeStep();
-    if (!step || !step.id.startsWith("pack:")) return null;
-    const packId = step.id.slice("pack:".length);
-    return (
-      this.readabilityPacks().find((p) => p.id === packId) ?? {
-        id: packId,
-        enabled: step.enabled,
-        activation: step.mode || "auto",
-      }
-    );
-  });
-
-  readonly selectedSkillStep = computed<SkillStepDecl | null>(() => {
-    const step = this.activeStep();
-    if (!step || step.kind !== "skill_step") return null;
-    return this.skillSteps().find((s) => s.id === step.id) ?? null;
-  });
-
-  readonly activePromptBytes = computed<number>(() =>
-    computeActivePromptBytes(
-      this.stagesView(),
-      this.detail()?.resolved?.skillBytes ??
-        utf8ByteCount(this.codingSkillText()),
-    ),
+  readonly codingSkillBytes = computed(() =>
+    utf8ByteCount(this.codingSkillText()),
   );
 
-  readonly promptBudgetPct = computed<number>(() =>
-    Math.min(
-      100,
-      Math.round((this.activePromptBytes() / MAX_PROMPT_BUDGET_BYTES) * 100),
-    ),
+  readonly activePromptBytes = computed(() =>
+    computeActivePromptBytes(this.workflowStages(), this.codingSkillBytes()),
   );
 
-  readonly promptBudgetOverflow = computed<boolean>(
-    () => this.activePromptBytes() > MAX_PROMPT_BUDGET_BYTES,
-  );
-
-  readonly codingSkillBytes = computed<number>(() => {
-    const det = this.detail();
-    if (this.codingSkillText()) {
-      return utf8ByteCount(this.codingSkillText());
-    }
-    return det?.resolved?.skillBytes ?? utf8ByteCount(det?.summary || "");
-  });
-
-  readonly verifierSummaryText = computed<string>(() => {
-    const det = this.detail();
-    const enabled = det?.declaration
-      ? det.declaration.verifier.enabled
-      : (det?.resolved?.enableS4 ?? true);
-    if (!enabled) return "disabled";
-    const tiers = det?.declaration?.verifier?.tiers;
-    const rounds =
-      det?.declaration?.verifier?.maxRepairRounds ??
-      det?.resolved?.maxS4RepairRounds ??
-      1;
-    if (tiers && tiers.length > 0) {
-      return `${tiers.join("/")} diffs (max ${rounds} round)`;
-    }
-    return `T2/T3 diffs (max ${rounds} round)`;
-  });
-
-  readonly effectiveDryRun = computed<QADryRunResponse | null>(
+  readonly effectiveDryRun = computed(
     () => this.dryRunResult() ?? this.externalDryRun(),
   );
 
-  readonly probeStagesText = computed<string>(() =>
-    (this.probeResult()?.stagesFired ?? []).join(", "),
-  );
+  readonly verifierSummaryText = computed(() => {
+    if (!this.verifierEnabled()) return "disabled";
+    const det = this.detail();
+    const rounds =
+      det?.declarationV4?.verifier?.maxRepairRounds ??
+      det?.declaration?.verifier?.maxRepairRounds ??
+      det?.resolved?.maxS4RepairRounds ??
+      1;
+    return `T2/T3 diffs (max ${rounds} round${rounds === 1 ? "" : "s"})`;
+  });
 
-  protected readonly textValue = inputTextValue;
-  protected readonly numValue = inputNumberValue;
-  protected readonly checkedValue = inputCheckedValue;
-  protected readonly isFloor = isLockedFloorRule;
+  readonly probeStagesText = computed(() => {
+    const pr = this.probeResult();
+    if (!pr || pr.stagesFired.length === 0) return "none";
+    return pr.stagesFired.join(", ");
+  });
 
   constructor() {
     effect(() => {
+      const d3 = this.decl();
+      const d4 = this.declV4();
       const det = this.detail();
-      const d4 =
-        this.declV4() ?? det?.declarationV4 ?? det?.declaration?.declarationV4;
-      const d3 =
-        this.decl() ?? det?.declarationV3 ?? det?.declaration?.declarationV3;
-      if (!det && !d4 && !d3) return;
-      this.hydrateFromDeclarations(det, d3, d4);
+      const isEd = this.editing();
+      const identity = [
+        det?.hash ?? "",
+        det?.key ?? "",
+        d4?.key ?? "",
+        d3?.key ?? "",
+        d4 ? "v4" : "",
+        d3 ? "v3" : "",
+      ].join("|");
+      const discardedEdit = this.wasEditing && !isEd;
+      this.wasEditing = isEd;
+
+      if (identity !== this.lastHydratedIdentity || discardedEdit) {
+        const changedFlow = identity !== this.lastHydratedIdentity;
+        this.lastHydratedIdentity = identity;
+        this.hydrateFromDeclarations(d3, d4, det);
+        if (changedFlow) {
+          this.collapsedStages.set(createAllCollapsedMap());
+          this.showSkippedStages.set(false);
+          this.selectedStepId.set(null);
+          this.addingForStageId.set(null);
+          this.fixtureReport.set(null);
+          this.dryRunResult.set(null);
+        }
+      }
     });
   }
 
-  hydrateFromDeclarations(
-    det?: QAFlowVersionDetail | null,
-    d3?: FlowDeclarationV3,
-    d4?: FlowDeclarationV4,
+  private hydrateFromDeclarations(
+    d3: FlowDeclarationV3 | undefined,
+    d4: FlowDeclarationV4 | undefined,
+    det: QAFlowVersionDetail | null,
   ): void {
-    this.fixtureReport.set(null);
-    this.dryRunResult.set(null);
-    const stages = d4?.stages ?? d3?.stages;
-    const s0 = stages?.["s0-intent"];
-    this.s0Intent.set(
-      typeof s0 === "boolean"
-        ? s0
-        : Boolean(s0?.enabled ?? det?.resolved?.s0Intent),
+    const effectiveV4 =
+      d4 ?? det?.declarationV4 ?? det?.declaration?.declarationV4;
+    const effectiveV3 =
+      d3 ?? det?.declarationV3 ?? det?.declaration?.declarationV3;
+    const isV4 = Boolean(
+      effectiveV4 ||
+      det?.schemaVer === "grain.dev/qa-flow/v4" ||
+      det?.schema === "grain.dev/qa-flow/v4",
     );
-    const s2 = stages?.["s2-plan-critic"];
-    this.s2PlanCritic.set(
-      typeof s2 === "boolean"
-        ? s2
-        : Boolean(s2?.enabled ?? det?.resolved?.s2PlanCritic),
+    const isV3 = Boolean(
+      effectiveV3 ||
+      det?.schemaVer === "grain.dev/qa-flow/v3" ||
+      det?.schema === "grain.dev/qa-flow/v3",
     );
-    const s5 = stages?.["s5-merge-triage"];
-    const mode = typeof s5 === "string" ? s5 : s5?.mode;
-    this.s5Triage.set(mode === "shadow" || mode === "enforced" ? mode : "off");
+    const stages = effectiveV4?.stages ?? effectiveV3?.stages;
 
-    if (d4?.decompose) {
-      this.decomposeEnabled.set(d4.decompose.enabled ?? true);
-      const dm = d4.decompose.mode;
+    const s0 = stages?.["s0-intent"];
+    if (typeof s0 === "boolean") {
+      this.s0Intent.set(s0);
+    } else if (s0 && typeof s0 === "object") {
+      this.s0Intent.set(Boolean(s0.enabled));
+    } else {
+      this.s0Intent.set(Boolean(det?.resolved?.s0Intent ?? (isV4 || isV3)));
+    }
+
+    const s2 = stages?.["s2-plan-critic"];
+    if (typeof s2 === "boolean") {
+      this.s2PlanCritic.set(s2);
+    } else if (s2 && typeof s2 === "object") {
+      this.s2PlanCritic.set(Boolean(s2.enabled));
+    } else {
+      this.s2PlanCritic.set(
+        Boolean(det?.resolved?.s2PlanCritic ?? (isV4 || isV3)),
+      );
+    }
+
+    const s5 = stages?.["s5-merge-triage"];
+    if (typeof s5 === "string") {
+      this.s5Triage.set(s5);
+    } else if (s5 && typeof s5 === "object") {
+      this.s5Triage.set(s5.mode ?? "off");
+    } else {
+      const resolvedTriage = det?.resolved?.s5MergeTriage;
+      if (resolvedTriage === "enforced" || resolvedTriage === "shadow") {
+        this.s5Triage.set(resolvedTriage);
+      } else {
+        this.s5Triage.set(isV4 || isV3 ? "shadow" : "off");
+      }
+    }
+
+    if (effectiveV4?.decompose) {
+      this.decomposeEnabled.set(effectiveV4.decompose.enabled ?? true);
+      const dm = effectiveV4.decompose.mode;
       this.decomposeMode.set(
         dm === "off" || dm === "propose_dag" ? dm : "slice_plan",
       );
       this.decomposeMaxSubtasks.set(
-        d4.decompose.maxSubtasks ?? d4.decompose["max-subtasks"] ?? 4,
+        effectiveV4.decompose.maxSubtasks ??
+          effectiveV4.decompose["max-subtasks"] ??
+          4,
       );
       this.decomposeTargetDiffLines.set(
-        d4.decompose.targetDiffLines ??
-          d4.decompose["target-diff-lines"] ??
+        effectiveV4.decompose.targetDiffLines ??
+          effectiveV4.decompose["target-diff-lines"] ??
           400,
       );
     } else {
-      this.decomposeEnabled.set(true);
+      this.decomposeEnabled.set(isV4);
       this.decomposeMode.set("slice_plan");
       this.decomposeMaxSubtasks.set(4);
       this.decomposeTargetDiffLines.set(400);
     }
 
-    if (d4?.context) {
-      this.contextEnabled.set(d4.context.enabled ?? true);
+    if (effectiveV4?.context) {
+      this.contextEnabled.set(effectiveV4.context.enabled ?? true);
       this.contextIncludeCallers.set(
-        d4.context.includeCallers ?? d4.context["include-callers"] ?? true,
+        effectiveV4.context.includeCallers ??
+          effectiveV4.context["include-callers"] ??
+          true,
       );
       this.contextIncludeMemory.set(
-        d4.context.includeMemory ?? d4.context["include-memory"] ?? true,
+        effectiveV4.context.includeMemory ??
+          effectiveV4.context["include-memory"] ??
+          true,
       );
       this.contextMaxTokens.set(
-        d4.context.maxTokens ?? d4.context["max-tokens"] ?? 12000,
+        effectiveV4.context.maxTokens ??
+          effectiveV4.context["max-tokens"] ??
+          12000,
       );
     } else {
-      this.contextEnabled.set(true);
+      this.contextEnabled.set(isV4);
       this.contextIncludeCallers.set(true);
       this.contextIncludeMemory.set(true);
       this.contextMaxTokens.set(12000);
     }
 
-    const sk = d4?.skill ?? det?.declaration?.skill;
+    const sk = effectiveV4?.skill ?? det?.declaration?.skill;
     if (sk) {
       this.codingSkillMode.set(sk.mode || "replace");
       this.codingSkillText.set(sk.text || "");
+    } else if (det?.resolved?.injectSkill === false) {
+      this.codingSkillMode.set("replace");
+      this.codingSkillText.set("");
     } else if (det) {
+      this.codingSkillMode.set("replace");
       this.codingSkillText.set(det.sourceYaml || det.summary || "");
     } else {
       this.codingSkillText.set("");
     }
 
-    const rawPacks = d4?.readabilityPacks ?? d4?.["readability-packs"];
+    const rawPacks =
+      effectiveV4?.readabilityPacks ?? effectiveV4?.["readability-packs"];
     if (rawPacks && rawPacks.length > 0) {
       const byId = new Map(rawPacks.map((p) => [p.id, p]));
       this.readabilityPacks.set(
         BUILT_IN_READABILITY_PACK_IDS.map((id) => {
           const found = byId.get(id);
+          const fallbackText =
+            (found as { text?: string } | undefined)?.text ?? "";
           return {
             id,
             enabled: found ? Boolean(found.enabled) : false,
             activation: found?.activation || "auto",
             globs: found?.globs ? [...found.globs] : [],
-            customText: found?.customText ?? found?.["custom-text"] ?? "",
+            customText:
+              found?.customText ?? found?.["custom-text"] ?? fallbackText,
           };
         }),
       );
@@ -2024,7 +1120,7 @@ export class QaV3StudioComponent {
       this.readabilityPacks.set(
         BUILT_IN_READABILITY_PACK_IDS.map((id) => ({
           id,
-          enabled: true,
+          enabled: isV4,
           activation: "auto",
           globs: [],
           customText: "",
@@ -2032,7 +1128,7 @@ export class QaV3StudioComponent {
       );
     }
 
-    const rawSteps = d4?.skillSteps ?? d4?.["skill-steps"];
+    const rawSteps = effectiveV4?.skillSteps ?? effectiveV4?.["skill-steps"];
     if (rawSteps) {
       this.skillSteps.set(
         rawSteps.map((s) => ({
@@ -2049,7 +1145,7 @@ export class QaV3StudioComponent {
       this.skillSteps.set([]);
     }
 
-    const pr = d4?.prContract ?? d4?.["pr-contract"];
+    const pr = effectiveV4?.prContract ?? effectiveV4?.["pr-contract"];
     if (pr) {
       this.prEnabled.set(Boolean(pr.enabled));
       const pm = pr.mode;
@@ -2058,11 +1154,9 @@ export class QaV3StudioComponent {
         pr.maxSubjectChars ?? pr["max-subject-chars"] ?? 72,
       );
       const secs = pr.requiredSections ?? pr["required-sections"];
-      if (secs?.length) {
-        this.prRequiredSections.set(secs.join(", "));
-      } else {
-        this.prRequiredSections.set("Summary, Verification");
-      }
+      this.prRequiredSections.set(
+        secs?.length ? secs.join(", ") : "Summary, Verification",
+      );
       this.prAuditLint.set(
         pr.auditLintSuppressions ?? pr["audit-lint-suppressions"] ?? true,
       );
@@ -2070,12 +1164,29 @@ export class QaV3StudioComponent {
         this.prGuidanceText.set(pr.guidanceText ?? pr["guidance-text"] ?? "");
       }
     } else {
-      this.prEnabled.set(true);
+      this.prEnabled.set(isV4);
       this.prMode.set("warn");
       this.prMaxSubjectChars.set(72);
       this.prRequiredSections.set("Summary, Verification");
       this.prAuditLint.set(true);
     }
+
+    this.stopNudge.set(
+      effectiveV4?.stopNudge ??
+        det?.declaration?.stopNudge ??
+        det?.resolved?.stopNudge ??
+        isV4,
+    );
+
+    this.verifierEnabled.set(
+      Boolean(
+        effectiveV4?.verifier?.enabled ??
+        effectiveV3?.verifier?.enabled ??
+        det?.declaration?.verifier?.enabled ??
+        det?.resolved?.enableS4 ??
+        isV4,
+      ),
+    );
 
     const cStages = (stages?.custom ?? []).map((cs) => ({
       uid: this.nextUid++,
@@ -2089,10 +1200,10 @@ export class QaV3StudioComponent {
     this.customStages.set(cStages);
 
     const rawChecks =
-      d4?.customChecks ??
-      d4?.["custom-checks"] ??
-      d3?.["custom-checks"] ??
-      d3?.customChecks;
+      effectiveV4?.customChecks ??
+      effectiveV4?.["custom-checks"] ??
+      effectiveV3?.["custom-checks"] ??
+      effectiveV3?.customChecks;
     const list: readonly CustomCheckDeclarationV3[] = Array.isArray(rawChecks)
       ? rawChecks
       : rawChecks
@@ -2102,6 +1213,53 @@ export class QaV3StudioComponent {
       list.map((cc, idx) => {
         const engine = cc.kind ?? cc.engine ?? "pattern";
         const def = defaultFixturesForEngine(engine);
+        const forbidAdded =
+          cc["forbid-added"] ?? cc.forbidAdded ?? cc.forbid ?? def.forbidAdded;
+        const whenList = normalizeStringList(
+          cc["when-changed"] ?? cc.whenChanged,
+        );
+        const whenChanged = (
+          whenList.length > 0
+            ? whenList
+            : def.whenChanged
+              ? [def.whenChanged]
+              : []
+        ).join(", ");
+        const reqList = normalizeStringList(
+          cc["require-changed"] ?? cc.requireChanged,
+        );
+        const requireChanged = (
+          reqList.length > 0
+            ? reqList
+            : def.requireChanged
+              ? [def.requireChanged]
+              : []
+        ).join(", ");
+        const maxChangedLines =
+          cc["max-changed-lines"] ?? cc.maxChangedLines ?? def.maxChangedLines;
+        const paths = normalizeStringList(cc.paths).join(", ");
+
+        let failJson = cc.fixtures?.fail
+          ? JSON.stringify(cc.fixtures.fail)
+          : def.failJson;
+        let passJson = cc.fixtures?.pass
+          ? JSON.stringify(cc.fixtures.pass)
+          : def.passJson;
+        if (!cc.fixtures?.fail && engine === "companion") {
+          const syn = synthesizeCompanionFixtures(whenChanged, requireChanged);
+          failJson = syn.failJson;
+          passJson = syn.passJson;
+        } else if (!cc.fixtures?.fail && engine === "diff-budget") {
+          const syn = synthesizeDiffBudgetFixtures(maxChangedLines, paths);
+          failJson = syn.failJson;
+          passJson = syn.passJson;
+        }
+
+        const patternLines =
+          engine === "pattern"
+            ? extractPatternExampleLines(failJson, passJson, forbidAdded)
+            : { failLine: "", passLine: "" };
+
         return {
           uid: this.nextUid++,
           id: cc.id ?? `custom:check-${idx}`,
@@ -2109,30 +1267,15 @@ export class QaV3StudioComponent {
           engine,
           severity: cc.severity ?? "blocking",
           message: cc.message ?? "Custom check failed.",
-          paths: (cc.paths ?? []).join(", "),
-          forbidAdded: cc["forbid-added"] ?? cc.forbidAdded ?? def.forbidAdded,
-          whenChanged: (
-            cc["when-changed"] ??
-            cc.whenChanged ?? [def.whenChanged]
-          )
-            .filter(Boolean)
-            .join(", "),
-          requireChanged: (
-            cc["require-changed"] ??
-            cc.requireChanged ?? [def.requireChanged]
-          )
-            .filter(Boolean)
-            .join(", "),
-          maxChangedLines:
-            cc["max-changed-lines"] ??
-            cc.maxChangedLines ??
-            def.maxChangedLines,
-          passJson: cc.fixtures?.pass
-            ? JSON.stringify(cc.fixtures.pass)
-            : def.passJson,
-          failJson: cc.fixtures?.fail
-            ? JSON.stringify(cc.fixtures.fail)
-            : def.failJson,
+          paths,
+          forbidAdded,
+          whenChanged,
+          requireChanged,
+          maxChangedLines,
+          failLine: patternLines.failLine,
+          passLine: patternLines.passLine,
+          passJson,
+          failJson,
         };
       }),
     );
@@ -2166,87 +1309,104 @@ export class QaV3StudioComponent {
     return k === "llm_critic" || k === "decomposition" || k === "llm_verifier";
   }
 
-  isStageCollapsed(stageId: string): boolean {
+  effectiveStageCollapsed(stageId: string): boolean {
+    if (this.stepSearch().trim() !== "" || this.kindFilter() !== "all") {
+      return false;
+    }
     return Boolean(this.collapsedStages()[stageId]);
   }
 
   toggleStageCollapse(stageId: string): void {
+    const currentlyCollapsed = this.effectiveStageCollapsed(stageId);
     this.collapsedStages.update((prev) => ({
       ...prev,
-      [stageId]: !prev[stageId],
+      [stageId]: !currentlyCollapsed,
     }));
+    this.selectedStageId.set(stageId);
   }
 
-  selectStage(stageId: string): void {
-    this.selectedStageId.set(stageId);
+  toggleExpandAllStages(): void {
+    const collapseAll = this.allVisibleStagesExpanded();
+    const next: Record<string, boolean> = {};
+    for (const id of ALL_WORKFLOW_STAGE_IDS) {
+      next[id] = collapseAll;
+    }
+    this.collapsedStages.set(next);
+  }
+
+  openGuide(): void {
     this.selectedStepId.set(null);
+    this.addingForStageId.set(null);
+    this.inspectorTab.set("definition");
   }
 
   selectStep(stageId: string, stepId: string): void {
+    this.addingForStageId.set(null);
     this.selectedStageId.set(stageId);
     this.selectedStepId.set(stepId);
+    this.inspectorTab.set("definition");
+    this.stepSelected.emit(stepId);
   }
 
-  stepPillLabel(step: WorkflowStepView): string {
-    if (!step.enabled) return "off";
-    return step.mode || "active";
+  selectStepFromGuide(target: { stageId: string; stepId: string }): void {
+    this.showSkippedStages.set(true);
+    this.collapsedStages.update((prev) => ({
+      ...prev,
+      [target.stageId]: false,
+    }));
+    this.selectStep(target.stageId, target.stepId);
   }
 
-  stepPillTone(step: WorkflowStepView): string {
-    if (!step.enabled || step.mode === "off") return "off";
-    if (step.mode === "blocking" || step.mode === "enforced") return "blocking";
-    if (step.mode === "warn" || step.mode === "shadow") return "warn";
-    return "active";
-  }
-
-  stageTriggerSummary(stageId: string): string {
-    switch (stageId) {
-      case "s0-decompose":
-        return "medium, high complexity";
-      case "s1-context":
-        return "T0..T3 blast graph + callers";
-      case "s2-plan":
-        return "high complexity · T2, T3";
-      case "s2-coding":
-        return "auto / always / glob language packs";
-      case "s3-checks":
-        return "all PR diffs (T0..T3)";
-      case "s3-pr":
-        return "pre-PR commit & description";
-      case "s4-verify":
-        return this.verifierSummaryText();
-      case "s5-triage":
-        return `mode=${this.s5Triage()} (auto: T0/T1, human: T2/T3)`;
-      default:
-        return "all tasks";
+  requestAddSubstep(stageId: string): void {
+    this.collapsedStages.update((prev) => ({ ...prev, [stageId]: false }));
+    this.selectedStageId.set(stageId);
+    this.selectedStepId.set(null);
+    this.addingForStageId.set(stageId);
+    this.inspectorTab.set("definition");
+    if (!this.editing()) {
+      this.enterDraftReq.emit();
     }
+    this.stepSelected.emit(`add:${stageId}`);
   }
 
-  stageCapSummary(stageId: string): string {
-    switch (stageId) {
-      case "s0-decompose":
-        return `30s · 15k tok · max ${this.decomposeMaxSubtasks()} slices`;
-      case "s1-context":
-        return `${this.contextMaxTokens()} context tokens`;
-      case "s2-plan":
-        return "45s · 25k tok · max 1 bounce";
-      case "s2-coding":
-        return `${this.activePromptBytes()} / ${MAX_PROMPT_BUDGET_BYTES} B (8.0 kB cap)`;
-      case "s3-checks":
-        return "< 400ms AST gate · 60s mutation";
-      case "s3-pr":
-        return `subject <= ${this.prMaxSubjectChars()} chars`;
-      case "s4-verify":
-        return "60s · 50k tokens · 1 repair round";
-      case "s5-triage":
-        return "ComposeTightenOnly controller gate";
-      default:
-        return "bounded";
-    }
+  protected activeStepsInStage(stage: WorkflowStageView): number {
+    return stage.steps.filter((s) => s.enabled).length;
   }
 
-  defaultPackScope(packId: string): string {
-    return BUILT_IN_READABILITY_PACK_SCOPES[packId] ?? "*.*";
+  protected stagePillLabel(stage: WorkflowStageView): string {
+    return formatStageModeLabel(stage);
+  }
+
+  protected stagePillClass(stage: WorkflowStageView): string {
+    return stageModePillClass(stage);
+  }
+
+  protected stageTip(stage: WorkflowStageView): string {
+    return stageModeTip(stage);
+  }
+
+  protected stepPillLabel(step: WorkflowStepView): string {
+    return formatStepModeLabel(step);
+  }
+
+  protected stepPillClass(step: WorkflowStepView): string {
+    return stepModePillClass(step);
+  }
+
+  protected updateDecomposeMode(val: string): void {
+    this.decomposeMode.set(
+      val === "off" || val === "propose_dag" ? val : "slice_plan",
+    );
+  }
+
+  protected updateCodingSkillMode(val: string): void {
+    this.codingSkillMode.set(
+      val === "append" || val === "inherit" ? val : "replace",
+    );
+  }
+
+  protected updateS5Triage(val: string): void {
+    this.s5Triage.set(val === "enforced" || val === "shadow" ? val : "off");
   }
 
   updatePackEnabled(packId: string, enabled: boolean): void {
@@ -2278,20 +1438,11 @@ export class QaV3StudioComponent {
   }
 
   updatePrMode(val: string): void {
-    const mode = val === "off" || val === "blocking" ? val : "warn";
-    this.prMode.set(mode);
-  }
-
-  addStepForStage(stageId: string): void {
-    if (stageId === "s3-checks") {
-      this.addCheck("pattern");
-      return;
-    }
-    this.addSkillStepForStage(stageId);
+    this.prMode.set(val === "off" || val === "blocking" ? val : "warn");
   }
 
   addSkillStepForStage(stageId: string): void {
-    const stageMap: Record<string, string> = {
+    const stageMap: Readonly<Record<string, string>> = {
       "s0-decompose": "s0",
       "s2-plan": "s2",
       "s2-coding": "coding",
@@ -2299,19 +1450,30 @@ export class QaV3StudioComponent {
       "s4-verify": "s4",
     };
     const stg = stageMap[stageId] ?? "coding";
+    const targetStageViewId =
+      stageId === "s1-context" ||
+      stageId === "s3-checks" ||
+      stageId === "s5-triage"
+        ? "s2-coding"
+        : stageId;
     const idx = this.skillSteps().length + 1;
     const id = `step:custom-${stg}-${idx}`;
     const newStep: SkillStepDecl = {
       id,
-      label: `Custom ${stg} step ${idx}`,
+      label: `Custom ${stg} skill ${idx}`,
       stage: stg,
       enabled: true,
       globs: ["**/*"],
       maxBytes: 600,
-      text: ` Verify ${stg} invariants before proceeding.`,
+      text: `Verify ${stg} invariants before proceeding.`,
     };
     this.skillSteps.update((prev) => [...prev, newStep]);
-    this.selectedStageId.set(stageId);
+    this.addingForStageId.set(null);
+    this.collapsedStages.update((prev) => ({
+      ...prev,
+      [targetStageViewId]: false,
+    }));
+    this.selectedStageId.set(targetStageViewId);
     this.selectedStepId.set(id);
   }
 
@@ -2350,12 +1512,6 @@ export class QaV3StudioComponent {
     }
   }
 
-  protected updateStageId(uid: number, id: string): void {
-    this.customStages.update((list) =>
-      list.map((s) => (s.uid === uid ? { ...s, id } : s)),
-    );
-  }
-
   protected updateStageLabel(uid: number, label: string): void {
     this.customStages.update((list) =>
       list.map((s) => (s.uid === uid ? { ...s, label } : s)),
@@ -2364,7 +1520,7 @@ export class QaV3StudioComponent {
 
   protected updateStageInsertAfter(uid: number, val: string): void {
     const insertAfter: InsertAfterStage =
-      val === "s3" || val === "s4" ? val : "s2";
+      val === "s2" || val === "s4" ? val : "s3";
     this.customStages.update((list) =>
       list.map((s) => (s.uid === uid ? { ...s, insertAfter } : s)),
     );
@@ -2378,20 +1534,30 @@ export class QaV3StudioComponent {
 
   addCustomStage(): void {
     const uid = this.nextUid++;
+    const idx = this.customStages().length;
+    const id = `custom:stage-${idx}`;
     this.customStages.update((s) => [
       ...s,
       {
         uid,
-        id: `custom:stage-${s.length}`,
-        label: `Custom ${s.length}`,
+        id,
+        label: `Custom critic stage ${idx + 1}`,
         insertAfter: "s3",
         timeoutSeconds: 30,
       },
     ]);
+    this.addingForStageId.set(null);
+    this.collapsedStages.update((prev) => ({ ...prev, "s3-checks": false }));
+    this.selectedStageId.set("s3-checks");
+    this.selectedStepId.set(id);
   }
 
   removeCustomStage(uid: number): void {
+    const target = this.customStages().find((s) => s.uid === uid);
     this.customStages.update((s) => s.filter((item) => item.uid !== uid));
+    if (target && this.selectedStepId() === target.id) {
+      this.selectedStepId.set(null);
+    }
   }
 
   addCheck(engine: CustomCheckEngine): void {
@@ -2404,30 +1570,54 @@ export class QaV3StudioComponent {
       {
         uid,
         id,
-        label: `Custom ${engine} check ${idx}`,
+        label: `Custom ${engine} check ${idx + 1}`,
         engine,
         severity: "blocking",
-        message: "Failed custom check.",
+        message: "Custom check failed.",
         paths: "pkg/**/*.go",
         forbidAdded: def.forbidAdded,
         whenChanged: def.whenChanged,
         requireChanged: def.requireChanged,
         maxChangedLines: def.maxChangedLines,
+        failLine: def.failLine,
+        passLine: def.passLine,
         passJson: def.passJson,
         failJson: def.failJson,
       },
     ]);
+    this.addingForStageId.set(null);
+    this.collapsedStages.update((prev) => ({ ...prev, "s3-checks": false }));
     this.selectedStageId.set("s3-checks");
     this.selectedStepId.set(id);
   }
 
   removeCheck(uid: number): void {
+    const target = this.customChecks().find((c) => c.uid === uid);
     this.customChecks.update((c) => c.filter((item) => item.uid !== uid));
+    if (target && this.selectedStepId() === target.id) {
+      this.selectedStepId.set(null);
+    }
   }
 
-  updateCheckMeta(uid: number, field: "id" | "message", val: string): void {
+  updateCheckMeta(
+    uid: number,
+    field: "id" | "label" | "message",
+    val: string,
+  ): void {
+    const prev = this.customChecks().find((c) => c.uid === uid);
     this.customChecks.update((list) =>
       list.map((c) => (c.uid === uid ? { ...c, [field]: val } : c)),
+    );
+    if (field === "id" && prev && this.selectedStepId() === prev.id) {
+      this.selectedStepId.set(val);
+    }
+  }
+
+  updateCheckSeverity(uid: number, val: string): void {
+    const severity: "blocking" | "warn" | "shadow" =
+      val === "warn" || val === "shadow" ? val : "blocking";
+    this.customChecks.update((list) =>
+      list.map((c) => (c.uid === uid ? { ...c, severity } : c)),
     );
   }
 
@@ -2437,13 +1627,58 @@ export class QaV3StudioComponent {
     val: string,
   ): void {
     this.customChecks.update((list) =>
-      list.map((c) => (c.uid === uid ? { ...c, [field]: val } : c)),
+      list.map((c) => {
+        if (c.uid !== uid) return c;
+        const next = { ...c, [field]: val };
+        if (next.engine === "companion") {
+          const syn = synthesizeCompanionFixtures(
+            next.whenChanged,
+            next.requireChanged,
+          );
+          return { ...next, failJson: syn.failJson, passJson: syn.passJson };
+        }
+        if (next.engine === "diff-budget" && field === "paths") {
+          const syn = synthesizeDiffBudgetFixtures(
+            next.maxChangedLines,
+            next.paths,
+          );
+          return { ...next, failJson: syn.failJson, passJson: syn.passJson };
+        }
+        return next;
+      }),
     );
   }
 
   updateCheckMaxLines(uid: number, maxChangedLines: number): void {
     this.customChecks.update((list) =>
-      list.map((c) => (c.uid === uid ? { ...c, maxChangedLines } : c)),
+      list.map((c) => {
+        if (c.uid !== uid) return c;
+        const syn = synthesizeDiffBudgetFixtures(maxChangedLines, c.paths);
+        return {
+          ...c,
+          maxChangedLines,
+          failJson: syn.failJson,
+          passJson: syn.passJson,
+        };
+      }),
+    );
+  }
+
+  updatePatternExample(uid: number, kind: "fail" | "pass", line: string): void {
+    this.customChecks.update((list) =>
+      list.map((c) => {
+        if (c.uid !== uid) return c;
+        const failLine = kind === "fail" ? line : c.failLine;
+        const passLine = kind === "pass" ? line : c.passLine;
+        const ser = serializePatternFixtures(failLine, passLine);
+        return {
+          ...c,
+          failLine,
+          passLine,
+          failJson: ser.failJson,
+          passJson: ser.passJson,
+        };
+      }),
     );
   }
 
@@ -2539,7 +1774,7 @@ export class QaV3StudioComponent {
         det?.declarationV4?.extends ||
         det?.declaration?.extends ||
         "engineering-workflow-v4@1",
-      label: meta?.label || det?.label || "Engineering Workflow V4",
+      label: meta?.label || det?.label || "Engineering workflow v4",
       summary: meta?.summary || det?.summary || "",
       ...(skillText
         ? {
@@ -2596,6 +1831,15 @@ export class QaV3StudioComponent {
           .filter(Boolean),
         auditLintSuppressions: this.prAuditLint(),
         guidanceText: this.prGuidanceText(),
+      },
+      stopNudge: this.stopNudge(),
+      verifier: {
+        enabled: this.verifierEnabled(),
+        tiers: ["T2", "T3"],
+        maxRepairRounds: 1,
+        maxSeconds: 60,
+        maxTokens: 50000,
+        checklist: "escape-classes-v1",
       },
       ...(customChecks.length > 0 ? { customChecks } : {}),
     };
@@ -2798,5 +2042,13 @@ export class QaV3StudioComponent {
     } finally {
       this.probing.set(false);
     }
+  }
+
+  protected textValue(ev: Event): string {
+    return inputTextValue(ev);
+  }
+
+  protected numValue(ev: Event): number {
+    return inputNumberValue(ev);
   }
 }

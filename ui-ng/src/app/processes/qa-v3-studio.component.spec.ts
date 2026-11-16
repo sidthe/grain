@@ -13,6 +13,7 @@
 // limitations under the License.
 
 import { ComponentFixture, TestBed } from "@angular/core/testing";
+import { provideRouter } from "@angular/router";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { GrainApi } from "../api/grain-api.service";
 import { SnackbarService } from "../services/snackbar.service";
@@ -58,6 +59,14 @@ const ROUTE_RESPONSES: Readonly<Record<string, unknown>> = {
   },
 };
 
+function mustEl<T extends Element>(root: ParentNode, selector: string): T {
+  const el = root.querySelector<T>(selector);
+  if (!el) {
+    throw new Error(`Expected element matching ${selector}`);
+  }
+  return el;
+}
+
 describe("QaV3StudioComponent", () => {
   let fixture: ComponentFixture<QaV3StudioComponent>;
   let postSpy: ReturnType<
@@ -79,6 +88,7 @@ describe("QaV3StudioComponent", () => {
     await TestBed.configureTestingModule({
       imports: [QaV3StudioComponent],
       providers: [
+        provideRouter([]),
         { provide: GrainApi, useValue: { post: postSpy } },
         { provide: SnackbarService, useValue: { show: showSpy } },
       ],
@@ -88,7 +98,63 @@ describe("QaV3StudioComponent", () => {
     fixture.detectChanges();
   });
 
-  it("hydrates stages and custom checks from a V3 flow declaration", () => {
+  it("starts all 8 stages collapsed by default and hides skipped stages in read-only partial workflows", () => {
+    const partialDecl: FlowDeclarationV3 = {
+      schema: "grain.dev/qa-flow/v3",
+      stages: {
+        "s0-intent": { enabled: false },
+        "s2-plan-critic": { enabled: false },
+        "s4-verify": { enabled: false },
+        "s5-merge-triage": { mode: "off" },
+      },
+      skill: { mode: "off", text: "" },
+    };
+
+    fixture.componentRef.setInput("editing", false);
+    fixture.componentRef.setInput("decl", partialDecl);
+    fixture.detectChanges();
+
+    const comp = fixture.componentInstance;
+    const root = fixture.nativeElement as HTMLElement;
+
+    // Every stage starts collapsed by default so active stages fit above the fold
+    for (const stg of comp.workflowStages()) {
+      expect(comp.effectiveStageCollapsed(stg.id)).toBe(true);
+    }
+
+    // Only active stages render in read-only partial workflow; skipped summary bar shows the count
+    const visibleGroups = root.querySelectorAll(
+      '[data-testid="qa-stage-tree"] .qa-stage-group',
+    );
+    expect(visibleGroups.length).toBeLessThan(8);
+    const skippedToggle = mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-toggle-skipped-stages"]',
+    );
+    expect(skippedToggle.textContent).toContain("skipped in this workflow");
+    expect(skippedToggle.textContent).toContain("Show all 8");
+
+    // Clicking Show all 8 reveals all 8 canonical stages
+    skippedToggle.click();
+    fixture.detectChanges();
+    expect(
+      root.querySelectorAll('[data-testid="qa-stage-tree"] .qa-stage-group')
+        .length,
+    ).toBe(8);
+
+    // Expand all / Collapse all toggles stage expansion cleanly
+    const expandAllBtn = mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-expand-all-stages"]',
+    );
+    expect(expandAllBtn.textContent?.trim()).toBe("Expand all");
+    expandAllBtn.click();
+    fixture.detectChanges();
+    expect(expandAllBtn.textContent?.trim()).toBe("Collapse all");
+    expect(comp.effectiveStageCollapsed("s3-checks")).toBe(false);
+  });
+
+  it("hydrates stages and custom checks from a V3 flow declaration in focused substep drawer", () => {
     const decl: FlowDeclarationV3 = {
       schema: "grain.dev/qa-flow/v3",
       stages: {
@@ -108,6 +174,8 @@ describe("QaV3StudioComponent", () => {
         {
           id: "custom:schema-migration",
           kind: "companion",
+          "when-changed": "pkg/model/schema.go",
+          "require-changed": "pkg/model/migrations.go",
           fixtures: {
             fail: [{ name: "missing migration" }],
             pass: [{ name: "with migration" }],
@@ -116,46 +184,101 @@ describe("QaV3StudioComponent", () => {
       ],
     };
 
+    fixture.componentRef.setInput("editing", true);
     fixture.componentRef.setInput("decl", decl);
     fixture.detectChanges();
 
+    const comp = fixture.componentInstance;
     const root = fixture.nativeElement as HTMLElement;
-    expect(root.querySelector<HTMLInputElement>("#s0Intent")!.checked).toBe(
-      true,
-    );
-    expect(root.querySelector<HTMLInputElement>("#s2PlanCritic")!.checked).toBe(
-      true,
-    );
+    expect(comp.s0Intent()).toBe(true);
+    expect(comp.s2PlanCritic()).toBe(true);
+    expect(comp.customStages().length).toBe(1);
+    expect(comp.customChecks().length).toBe(1);
+
+    // Select s0:intent substep -> focused single-substep editor shows #s0Intent
+    mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-step-row-s0:intent"]',
+    ).click();
+    fixture.detectChanges();
+    expect(mustEl<HTMLInputElement>(root, "#s0Intent").checked).toBe(true);
+
+    // Select custom stage substep
+    mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-step-row-custom:s3b"]',
+    ).click();
+    fixture.detectChanges();
     expect(
-      root.querySelectorAll('[data-testid="qa-v3-custom-stage-row"]').length,
-    ).toBe(1);
+      root.querySelector('[data-testid="qa-v3-custom-stage-row"]'),
+    ).toBeTruthy();
+
+    // Select companion custom check substep -> zero-JSON companion test cases
+    mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-step-row-custom:schema-migration"]',
+    ).click();
+    fixture.detectChanges();
     expect(
-      root.querySelectorAll('[data-testid="qa-v3-custom-check-row"]').length,
-    ).toBe(1);
-    expect(root.textContent).toContain("companion");
+      root.querySelector('[data-testid="qa-v3-custom-check-row"]'),
+    ).toBeTruthy();
+    expect(
+      root.querySelector('[data-testid="qa-companion-examples"]'),
+    ).toBeTruthy();
   });
 
-  it("verifies inline fixtures via dryRun=1 with strict kebab-case YAML keys", async () => {
+  it("adds zero-JSON pattern, companion, and diff-budget checks and verifies via dryRun=1", async () => {
+    fixture.componentRef.setInput("editing", true);
+    fixture.detectChanges();
+    const comp = fixture.componentInstance;
     const root = fixture.nativeElement as HTMLElement;
 
-    root
-      .querySelector<HTMLButtonElement>('[data-testid="qa-v3-add-stage"]')!
-      .click();
-    root
-      .querySelector<HTMLButtonElement>('[data-testid="qa-v3-add-pattern"]')!
-      .click();
+    // Expand Stage 5 and click + Add substep...
+    comp.requestAddSubstep("s3-checks");
+    fixture.detectChanges();
+    expect(
+      root.querySelector('[data-testid="qa-add-step-catalog"]'),
+    ).toBeTruthy();
+
+    mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-v3-add-pattern"]',
+    ).click();
     fixture.detectChanges();
 
+    // Zero raw JSON textareas in custom check editor; 2 single-line example inputs instead
     expect(
-      root.querySelectorAll('[data-testid="qa-v3-custom-stage-row"]').length,
-    ).toBe(1);
-    expect(
-      root.querySelectorAll('[data-testid="qa-v3-custom-check-row"]').length,
-    ).toBe(1);
+      root.querySelector('[data-testid="qa-v3-custom-check-row"] textarea'),
+    ).toBeNull();
+    const failInput = mustEl<HTMLInputElement>(
+      root,
+      '[data-testid="qa-check-fail-line"]',
+    );
+    const passInput = mustEl<HTMLInputElement>(
+      root,
+      '[data-testid="qa-check-pass-line"]',
+    );
+    expect(failInput.value).toContain("console.log");
+    expect(passInput.value).toContain("const ready");
+    expect(root.textContent).toContain("Caught");
+    expect(root.textContent).toContain("Allowed");
 
-    root
-      .querySelector<HTMLButtonElement>('[data-testid="qa-v3-verify-dry-run"]')!
-      .click();
+    // Also add custom stage via catalog and run dryRun=1 verification
+    comp.requestAddSubstep("s4-verify");
+    fixture.detectChanges();
+    mustEl<HTMLButtonElement>(root, '[data-testid="qa-v3-add-stage"]').click();
+    fixture.detectChanges();
+
+    // Switch to Empirical stats & dry-run tab to trigger verifyDryRun button
+    mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-insp-tab-empirical"]',
+    ).click();
+    fixture.detectChanges();
+    mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-v3-verify-dry-run"]',
+    ).click();
     await fixture.whenStable();
     fixture.detectChanges();
 
@@ -166,62 +289,71 @@ describe("QaV3StudioComponent", () => {
     expect(yamlBody).toContain("insert-after: s3");
     expect(yamlBody).toContain("timeout-seconds: 30");
     expect(root.textContent).toContain("sha256:v3preview");
+
+    // Companion and diff-budget auto-synthesize fail/pass fixtures without JSON
+    comp.addCheck("companion");
+    comp.addCheck("diff-budget");
+    fixture.detectChanges();
+    const exported = comp.exportCustomChecks();
+    const companionCheck = exported.find((c) => c.kind === "companion");
+    const budgetCheck = exported.find((c) => c.kind === "diff-budget");
+    expect(companionCheck?.fixtures?.fail?.length).toBe(1);
+    expect(companionCheck?.fixtures?.pass?.length).toBe(1);
+    expect(budgetCheck?.fixtures?.fail?.length).toBe(1);
+    expect(budgetCheck?.fixtures?.pass?.length).toBe(1);
   });
 
   it("runs what-if probe and adopts repo-committed flow declarations", async () => {
+    const comp = fixture.componentInstance;
     const root = fixture.nativeElement as HTMLElement;
 
-    root
-      .querySelector<HTMLButtonElement>('[data-testid="qa-v3-open-probe"]')!
-      .click();
+    comp.showProbe.set(true);
     fixture.detectChanges();
 
     expect(
       root.querySelector('[data-testid="qa-v3-probe-dialog"]'),
     ).toBeTruthy();
 
-    const probeTitleInput =
-      root.querySelector<HTMLInputElement>("#probeTitle")!;
+    const probeTitleInput = mustEl<HTMLInputElement>(root, "#probeTitle");
     probeTitleInput.value = "Migrate schema 149";
     probeTitleInput.dispatchEvent(new Event("input"));
-    const probeFilesInput =
-      root.querySelector<HTMLTextAreaElement>("#probeFiles")!;
+    const probeFilesInput = mustEl<HTMLTextAreaElement>(root, "#probeFiles");
     probeFilesInput.value = "pkg/model/schema.go, pkg/model/migrations.go";
     probeFilesInput.dispatchEvent(new Event("input"));
     fixture.detectChanges();
 
-    root
-      .querySelector<HTMLButtonElement>('[data-testid="qa-v3-submit-probe"]')!
-      .click();
+    mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-v3-submit-probe"]',
+    ).click();
     await fixture.whenStable();
     fixture.detectChanges();
 
     const probeResultEl = root.querySelector(
       '[data-testid="qa-v3-probe-result"]',
     );
-    expect(probeResultEl?.textContent).toContain("Score: 85/100");
+    expect(probeResultEl?.textContent).toContain("score 85/100");
     expect(probeResultEl?.textContent).toContain("require_human (enforced)");
 
-    root
-      .querySelector<HTMLButtonElement>('[data-testid="qa-v3-open-adopt"]')!
-      .click();
+    comp.showAdopt.set(true);
     fixture.detectChanges();
 
     expect(
       root.querySelector('[data-testid="qa-v3-adopt-dialog"]'),
     ).toBeTruthy();
 
-    const repoInput = root.querySelector<HTMLInputElement>("#adoptRepo")!;
+    const repoInput = mustEl<HTMLInputElement>(root, "#adoptRepo");
     repoInput.value = "sidthe/grain";
     repoInput.dispatchEvent(new Event("input"));
-    const commitInput = root.querySelector<HTMLInputElement>("#adoptCommit")!;
+    const commitInput = mustEl<HTMLInputElement>(root, "#adoptCommit");
     commitInput.value = "0123456789abcdef0123456789abcdef01234567";
     commitInput.dispatchEvent(new Event("input"));
     fixture.detectChanges();
 
-    root
-      .querySelector<HTMLButtonElement>('[data-testid="qa-v3-submit-adopt"]')!
-      .click();
+    mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-v3-submit-adopt"]',
+    ).click();
     await fixture.whenStable();
     fixture.detectChanges();
 
@@ -229,24 +361,26 @@ describe("QaV3StudioComponent", () => {
     expect(root.querySelector('[data-testid="qa-v3-adopt-dialog"]')).toBeNull();
   });
 
-  it("renders all 8 Software Lifecycle Stages and filters by search query and kind chips", () => {
+  it("renders all 8 Software Lifecycle Stages in Customize mode and auto-expands stages on search or kind filter", () => {
+    fixture.componentRef.setInput("editing", true);
+    fixture.detectChanges();
+    const comp = fixture.componentInstance;
     const root = fixture.nativeElement as HTMLElement;
 
     const stageGroups = root.querySelectorAll(
       '[data-testid="qa-stage-tree"] .qa-stage-group',
     );
     expect(stageGroups.length).toBe(8);
-    expect(root.textContent).toContain("1 · Goal & Subtask Breakdown");
-    expect(root.textContent).toContain("3 · Plan & Fresh Critique");
-    expect(root.textContent).toContain("4 · Coding & Readability Rules");
-    expect(root.textContent).toContain("8 · Scorecard & Merge Triage");
+    expect(root.textContent).toContain("1 · Goal & subtask breakdown");
+    expect(root.textContent).toContain("3 · Plan & fresh critique");
+    expect(root.textContent).toContain("4 · Coding & readability rules");
+    expect(root.textContent).toContain("8 · Scorecard & merge triage");
 
-    // Filter by kind chip: Sub-agents
-    root
-      .querySelector<HTMLButtonElement>(
-        '[data-testid="qa-kind-filter-agents"]',
-      )!
-      .click();
+    // Filter by kind chip: Critics auto-expands matching stages
+    mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-kind-filter-agents"]',
+    ).click();
     fixture.detectChanges();
 
     const subagentStages = root.querySelectorAll(
@@ -254,14 +388,17 @@ describe("QaV3StudioComponent", () => {
     );
     expect(subagentStages.length).toBeGreaterThanOrEqual(2);
     expect(subagentStages.length).toBeLessThan(8);
+    expect(comp.effectiveStageCollapsed("s4-verify")).toBe(false);
 
     // Reset to All and filter by search query
-    root
-      .querySelector<HTMLButtonElement>('[data-testid="qa-kind-filter-all"]')!
-      .click();
-    const searchInput = root.querySelector<HTMLInputElement>(
+    mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-kind-filter-all"]',
+    ).click();
+    const searchInput = mustEl<HTMLInputElement>(
+      root,
       '[data-testid="qa-step-search"]',
-    )!;
+    );
     searchInput.value = "ts-angular";
     searchInput.dispatchEvent(new Event("input"));
     fixture.detectChanges();
@@ -269,9 +406,10 @@ describe("QaV3StudioComponent", () => {
     const searchedSteps = root.querySelectorAll(".qa-step-node");
     expect(searchedSteps.length).toBe(1);
     expect(searchedSteps[0].textContent).toContain("ts-angular");
+    expect(comp.effectiveStageCollapsed("s3-coding")).toBe(false);
   });
 
-  it("inspects and edits Readability Packs, PR Contract, and Custom Checks in the 70% inspector", () => {
+  it("inspects and edits Readability Packs, PR Contract, and Custom Checks in the focused substep drawer", () => {
     const declV4: FlowDeclarationV4 = {
       schema: "grain.dev/qa-flow/v4",
       "readability-packs": [
@@ -305,6 +443,7 @@ describe("QaV3StudioComponent", () => {
       ],
     };
 
+    fixture.componentRef.setInput("editing", true);
     fixture.componentRef.setInput("declV4", declV4);
     fixture.detectChanges();
 
@@ -314,44 +453,42 @@ describe("QaV3StudioComponent", () => {
     const root = fixture.nativeElement as HTMLElement;
 
     // Select ts-angular readability pack
-    const packNode = root.querySelector<HTMLButtonElement>(
-      '[data-testid="qa-step-node-pack:ts-angular"]',
-    )!;
-    expect(packNode).toBeTruthy();
-    packNode.click();
+    mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-step-row-pack:ts-angular"]',
+    ).click();
     fixture.detectChanges();
 
-    const packInspector = root.querySelector(
-      '[data-testid="qa-readability-pack-inspector"]',
-    );
-    expect(packInspector).toBeTruthy();
-    const packText = root.querySelector<HTMLTextAreaElement>(
+    expect(
+      root.querySelector('[data-testid="qa-readability-pack-inspector"]'),
+    ).toBeTruthy();
+    const packText = mustEl<HTMLTextAreaElement>(
+      root,
       '[data-testid="qa-pack-custom-text"]',
-    )!;
+    );
     expect(packText.value).toContain("Use standalone OnPush components");
 
     // Select PR contract step in Stage 6
-    const prNode = root.querySelector<HTMLButtonElement>(
-      '[data-testid="qa-step-node-pr:contract"]',
-    )!;
-    expect(prNode).toBeTruthy();
-    prNode.click();
+    mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-step-row-pr:contract"]',
+    ).click();
     fixture.detectChanges();
 
     expect(
       root.querySelector('[data-testid="qa-pr-contract-inspector"]'),
     ).toBeTruthy();
-    const prSectionsInput = root.querySelector<HTMLInputElement>(
+    const prSectionsInput = mustEl<HTMLInputElement>(
+      root,
       '[data-testid="qa-pr-sections-input"]',
-    )!;
+    );
     expect(prSectionsInput.value).toContain("Summary, Testing");
 
     // Select custom check step in Stage 5
-    const customCheckNode = root.querySelector<HTMLButtonElement>(
-      '[data-testid="qa-step-node-custom:no-console-log"]',
-    )!;
-    expect(customCheckNode).toBeTruthy();
-    customCheckNode.click();
+    mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-step-row-custom:no-console-log"]',
+    ).click();
     fixture.detectChanges();
 
     expect(
@@ -359,7 +496,7 @@ describe("QaV3StudioComponent", () => {
     ).toContain("custom:no-console-log");
   });
 
-  it("evaluates Fail trap and Clean pass fixtures via the 1-click Inline Fixture Self-Test Runner", async () => {
+  it("evaluates Fail trap and Clean pass fixtures via the 1-click self-test runner", async () => {
     const declV4: FlowDeclarationV4 = {
       schema: "grain.dev/qa-flow/v4",
       "custom-checks": [
@@ -376,15 +513,21 @@ describe("QaV3StudioComponent", () => {
       ],
     };
 
+    fixture.componentRef.setInput("editing", true);
     fixture.componentRef.setInput("declV4", declV4);
     fixture.detectChanges();
 
     const root = fixture.nativeElement as HTMLElement;
-    const runBtn = root.querySelector<HTMLButtonElement>(
-      '[data-testid="qa-run-fixtures-btn"]',
-    )!;
-    expect(runBtn).toBeTruthy();
+    mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-step-row-custom:forbid-debugger"]',
+    ).click();
+    fixture.detectChanges();
 
+    const runBtn = mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-run-fixtures-btn"]',
+    );
     runBtn.click();
     await fixture.whenStable();
     fixture.detectChanges();
@@ -395,8 +538,6 @@ describe("QaV3StudioComponent", () => {
     expect(resultsBox).toBeTruthy();
     expect(resultsBox?.textContent).toContain("Fail trap: PASS");
     expect(resultsBox?.textContent).toContain("Clean pass: PASS");
-    expect(resultsBox?.textContent).toContain("debugger statement");
-    expect(resultsBox?.textContent).toContain("clean statement");
     expect(postSpy).toHaveBeenCalledWith(
       "POST /api/qa/flow-versions",
       undefined,

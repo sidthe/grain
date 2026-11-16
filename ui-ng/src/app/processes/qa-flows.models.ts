@@ -102,6 +102,7 @@ export interface CustomCheckFixtureItem {
   readonly name?: string;
   readonly file?: string;
   readonly diff?: string;
+  readonly added?: readonly string[];
   readonly "added-lines"?: readonly string[];
   readonly addedLines?: readonly string[];
   readonly "changed-files"?: readonly string[];
@@ -118,6 +119,7 @@ export interface CustomCheckDeclarationV3 {
   readonly message?: string;
   readonly paths?: readonly string[];
   readonly exclude?: readonly string[];
+  readonly forbid?: string;
   readonly "forbid-added"?: string;
   readonly forbidAdded?: string;
   readonly "require-added"?: string;
@@ -525,6 +527,28 @@ export function utf8ByteCount(text: string): number {
   return new TextEncoder().encode(text || "").length;
 }
 
+export const ALL_WORKFLOW_STAGE_IDS = [
+  "s0-decompose",
+  "s1-context",
+  "s2-plan",
+  "s2-coding",
+  "s3-checks",
+  "s3-pr",
+  "s4-verify",
+  "s5-triage",
+] as const;
+
+export const CANONICAL_STAGE_LABELS: Readonly<Record<string, string>> = {
+  "s0-decompose": "1 · Goal & subtask breakdown",
+  "s1-context": "2 · Context & blast radius",
+  "s2-plan": "3 · Plan & fresh critique",
+  "s2-coding": "4 · Coding & readability rules",
+  "s3-checks": "5 · Pre-PR deterministic gates",
+  "s3-pr": "6 · PR authoring & self-review",
+  "s4-verify": "7 · Adversarial verification",
+  "s5-triage": "8 · Scorecard & merge triage",
+};
+
 export function isLockedFloorRule(ruleId: string): boolean {
   return (
     ruleId === "golden:test-integrity-guard" ||
@@ -562,8 +586,9 @@ export function buildClientWorkflowStagesView(
     item.stagesView.length >= 8
   ) {
     return item.stagesView.map((st) => {
+      const canonicalLabel = CANONICAL_STAGE_LABELS[st.id] ?? st.label;
       if (st.id !== "s2-coding") {
-        return { ...st, steps: [...(st.steps || [])] };
+        return { ...st, label: canonicalLabel, steps: [...(st.steps || [])] };
       }
       const steps = [...(st.steps || [])];
       for (const packId of BUILT_IN_READABILITY_PACK_IDS) {
@@ -572,7 +597,7 @@ export function buildClientWorkflowStagesView(
           const text = BUILT_IN_READABILITY_PACK_TEXT[packId] ?? "";
           steps.push({
             id: stepId,
-            label: `Readability Pack (${packId})`,
+            label: `Readability pack (${packId})`,
             kind: "readability_pack",
             stageId: "s2-coding",
             enabled: false,
@@ -584,7 +609,7 @@ export function buildClientWorkflowStagesView(
           });
         }
       }
-      return { ...st, steps };
+      return { ...st, label: canonicalLabel, steps };
     });
   }
 
@@ -627,16 +652,21 @@ export function buildClientWorkflowStagesView(
       ? s2Raw
       : (s2Raw?.enabled ?? Boolean(v4 || v3)));
 
-  const skillText =
+  const injectSkillAllowed =
+    options?.preferLiveDraft || options?.codingSkillText !== undefined
+      ? true
+      : (res?.injectSkill ?? true);
+  const rawSkillText =
     options?.codingSkillText ??
     v4?.skill?.text ??
     v2?.skill?.text ??
-    item?.sourceYaml ??
-    item?.summary ??
-    "";
+    (injectSkillAllowed ? item?.sourceYaml || item?.summary || "" : "");
+  const skillText = injectSkillAllowed ? rawSkillText : "";
   const skillMode =
     options?.codingSkillMode ?? v4?.skill?.mode ?? v2?.skill?.mode ?? "replace";
-  const skillBytes = utf8ByteCount(skillText) || res?.skillBytes || 0;
+  const skillBytes = injectSkillAllowed
+    ? utf8ByteCount(skillText) || res?.skillBytes || 0
+    : 0;
 
   const rawPacks =
     options?.readabilityPacks ??
@@ -692,11 +722,6 @@ export function buildClientWorkflowStagesView(
     v4?.verifier?.maxSeconds ??
     v2?.verifier?.maxSeconds ??
     60;
-  const verifierTokens =
-    options?.verifier?.maxTokens ??
-    v4?.verifier?.maxTokens ??
-    v2?.verifier?.maxTokens ??
-    50000;
   const verifierChecklist =
     options?.verifier?.checklist ??
     v4?.verifier?.checklist ??
@@ -727,21 +752,33 @@ export function buildClientWorkflowStagesView(
     ? rawCustomChecks
     : Object.values(rawCustomChecks);
 
+  const normalizeSkillStepStage = (rawStage: string | undefined): string => {
+    if (
+      rawStage === "s0" ||
+      rawStage === "s2" ||
+      rawStage === "pr" ||
+      rawStage === "s4"
+    ) {
+      return rawStage;
+    }
+    return "coding";
+  };
+
   const stageSkillStepViews = (
     stageKey: string,
     stageViewId: string,
   ): WorkflowStepView[] =>
     skillSteps
-      .filter((s) => (s.stage || "coding") === stageKey)
+      .filter((s) => normalizeSkillStepStage(s.stage) === stageKey)
       .map((s) => ({
         id: s.id,
         label: s.label || s.id,
         kind: "skill_step",
         stageId: stageViewId,
         enabled: s.enabled,
-        mode: s.enabled ? stageKey : "off",
+        mode: s.enabled ? "active" : "off",
         scope: s.globs?.length ? s.globs.join(", ") : "**/*",
-        summary: `Custom ${stageKey} skill step (${utf8ByteCount(s.text || "")} bytes).`,
+        summary: `Custom ${stageKey} skill substep (${utf8ByteCount(s.text || "")} bytes).`,
         text: s.text || "",
         bytes: utf8ByteCount(s.text || ""),
       }));
@@ -773,7 +810,7 @@ export function buildClientWorkflowStagesView(
   const s0Steps: WorkflowStepView[] = [
     {
       id: "s0:intent",
-      label: "Intent & WHEN/SHALL Acceptance Criteria",
+      label: "Intent & acceptance criteria",
       kind: "llm_critic",
       stageId: "s0-decompose",
       enabled: s0Intent,
@@ -786,13 +823,13 @@ export function buildClientWorkflowStagesView(
     },
     {
       id: "s0:decompose",
-      label: "Complexity-Gated Subtask Decomposition",
+      label: "Complexity-gated subtask decomposition",
       kind: "decomposition",
       stageId: "s0-decompose",
       enabled: decompEnabled,
       mode: decompEnabled ? decomp.mode || "slice_plan" : "off",
       scope: (decomp.complexities || ["medium", "high"]).join(", "),
-      summary: `Splits complex work into bounded slices (maxSubtasks=${decomp.maxSubtasks ?? decomp["max-subtasks"] ?? 4}, targetDiffLines=${decomp.targetDiffLines ?? decomp["target-diff-lines"] ?? 400}).`,
+      summary: `Splits complex work into bounded slices (max ${decomp.maxSubtasks ?? decomp["max-subtasks"] ?? 4} subtasks, target ${decomp.targetDiffLines ?? decomp["target-diff-lines"] ?? 400} diff lines).`,
     },
     ...stageSkillStepViews("s0", "s0-decompose"),
   ];
@@ -802,7 +839,7 @@ export function buildClientWorkflowStagesView(
   const s1Steps: WorkflowStepView[] = [
     {
       id: "s1:blast-radius",
-      label: "Deterministic 0..100 Blast-Radius Classifier",
+      label: "Deterministic 0..100 blast-radius classifier",
       kind: "classifier",
       stageId: "s1-context",
       enabled: true,
@@ -814,7 +851,7 @@ export function buildClientWorkflowStagesView(
     },
     {
       id: "s1:context-discovery",
-      label: "Caller & Memory Context Discovery",
+      label: "Caller & memory context discovery",
       kind: "context_discovery",
       stageId: "s1-context",
       enabled: Boolean(ctxDecl.enabled),
@@ -822,7 +859,7 @@ export function buildClientWorkflowStagesView(
       scope:
         (ctxDecl.extraPaths ?? ctxDecl["extra-paths"])?.join(", ") ||
         "design/design/**, docs/**",
-      summary: `includeCallers=${ctxDecl.includeCallers ?? ctxDecl["include-callers"] ?? true} includeMemory=${ctxDecl.includeMemory ?? ctxDecl["include-memory"] ?? true} maxTokens=${ctxMaxTokens}`,
+      summary: `Discovers sibling callers and repository memory (up to ${ctxMaxTokens} tokens).`,
     },
   ];
 
@@ -830,7 +867,7 @@ export function buildClientWorkflowStagesView(
   const s2PlanSteps: WorkflowStepView[] = [
     {
       id: "s2:plan-critic",
-      label: "Fresh-Context Plan & Caller Critic",
+      label: "Fresh-context plan & caller critic",
       kind: "llm_critic",
       stageId: "s2-plan",
       enabled: s2PlanCritic,
@@ -849,11 +886,11 @@ export function buildClientWorkflowStagesView(
   const codingSteps: WorkflowStepView[] = [
     {
       id: "coding:skill",
-      label: "Core Engineering Coding Contract",
+      label: "Core engineering coding contract",
       kind: "skill",
       stageId: "s2-coding",
-      enabled: (res?.injectSkill ?? true) && skillBytes > 0,
-      mode: (res?.injectSkill ?? true) && skillBytes > 0 ? skillMode : "off",
+      enabled: injectSkillAllowed && skillBytes > 0,
+      mode: injectSkillAllowed && skillBytes > 0 ? skillMode : "off",
       scope: "**/*",
       summary: `Primary coding skill contract (${skillBytes} bytes).`,
       text: skillText,
@@ -873,7 +910,7 @@ export function buildClientWorkflowStagesView(
       : (BUILT_IN_READABILITY_PACK_SCOPES[packId] ?? "*.*");
     codingSteps.push({
       id: `pack:${packId}`,
-      label: `Readability Pack (${packId})`,
+      label: `Readability pack (${packId})`,
       kind: "readability_pack",
       stageId: "s2-coding",
       enabled,
@@ -944,29 +981,25 @@ export function buildClientWorkflowStagesView(
     prContract["required-sections"] ?? ["Summary", "Verification"];
   const prMaxSubj =
     prContract.maxSubjectChars ?? prContract["max-subject-chars"] ?? 72;
-  const prAudit =
-    prContract.auditLintSuppressions ??
-    prContract["audit-lint-suppressions"] ??
-    true;
   const prGuidance =
     prContract.guidanceText ?? prContract["guidance-text"] ?? "";
   const prActive = Boolean(prContract.enabled && prContract.mode !== "off");
   const prSteps: WorkflowStepView[] = [
     {
       id: "pr:contract",
-      label: "PR Subject, Required Sections & Lint-Suppression Contract",
+      label: "PR subject, required sections & lint-suppression contract",
       kind: "pr_contract",
       stageId: "s3-pr",
       enabled: prActive,
       mode: prActive ? prContract.mode || "warn" : "off",
       scope: prSections.join(", "),
-      summary: `maxSubjectChars=${prMaxSubj} requiredSections=[${prSections.join(", ")}] auditLintSuppressions=${prAudit}`,
+      summary: `Max ${prMaxSubj} subject chars; required sections: ${prSections.join(", ")}.`,
       text: prGuidance,
       bytes: utf8ByteCount(prGuidance),
     },
     {
       id: "pr:stop-nudge",
-      label: "Pre-Completion Self-Review Nudge",
+      label: "Pre-completion self-review nudge",
       kind: "stop_nudge",
       stageId: "s3-pr",
       enabled: Boolean(stopNudge),
@@ -982,13 +1015,13 @@ export function buildClientWorkflowStagesView(
   const s4Steps: WorkflowStepView[] = [
     {
       id: "golden:s4-orthogonal-verifier",
-      label: "Fresh-Context Orthogonal Diff Verifier + 6-Filter Inquisitor",
+      label: "Fresh-context orthogonal diff verifier",
       kind: "llm_verifier",
       stageId: "s4-verify",
       enabled: Boolean(verifierEnabled),
       mode: verifierEnabled ? "blocking" : "off",
       scope: verifierTiers.join(", ") || "T2, T3",
-      summary: `maxRepairRounds=${verifierRounds} maxSeconds=${verifierSeconds} maxTokens=${verifierTokens} checklist=${verifierChecklist}`,
+      summary: `Max ${verifierRounds} repair round(s), ${verifierSeconds}s timeout, checklist ${verifierChecklist}.`,
       text: `Escape-class verification checklist (${verifierChecklist}):\n1. State-machine transitions\n2. Invariants and bijections\n3. Arithmetic & slice boundaries\n4. Nil, zero, and omitted config values\n5. Context cancellation & cleanup`,
       bytes: 238,
     },
@@ -1001,12 +1034,12 @@ export function buildClientWorkflowStagesView(
   const s5Steps: WorkflowStepView[] = [
     {
       id: "s5:merge-triage",
-      label: "ComposeTightenOnly Blast-Tier Merge Triage",
+      label: "Blast-tier merge triage",
       kind: "merge_triage",
       stageId: "s5-triage",
       enabled: s5Enabled,
       mode: s5Mode,
-      scope: "auto=[T0, T1] human=[T2, T3]",
+      scope: "auto: T0, T1 · human: T2, T3",
       lockedFloor: true,
       summary:
         "Routes clean green low-blast PRs to auto-merge when allowed and holds high-blast or trust-boundary changes for human review.",
@@ -1017,7 +1050,7 @@ export function buildClientWorkflowStagesView(
     {
       id: "s0-decompose",
       index: 1,
-      label: "1 · Goal & Subtask Breakdown",
+      label: CANONICAL_STAGE_LABELS["s0-decompose"],
       boundary: "controller_fresh_context",
       enabled: s0Intent || decompEnabled,
       mode: decompEnabled
@@ -1032,7 +1065,7 @@ export function buildClientWorkflowStagesView(
     {
       id: "s1-context",
       index: 2,
-      label: "2 · Context & Blast Radius",
+      label: CANONICAL_STAGE_LABELS["s1-context"],
       boundary: "deterministic_ast_graph",
       enabled: true,
       mode: ctxDecl.enabled ? "context+blast" : "blast_only",
@@ -1043,7 +1076,7 @@ export function buildClientWorkflowStagesView(
     {
       id: "s2-plan",
       index: 3,
-      label: "3 · Plan & Fresh Critique",
+      label: CANONICAL_STAGE_LABELS["s2-plan"],
       boundary: "isolated_critic",
       enabled: s2PlanCritic,
       mode: s2PlanCritic ? "active" : "off",
@@ -1054,7 +1087,7 @@ export function buildClientWorkflowStagesView(
     {
       id: "s2-coding",
       index: 4,
-      label: "4 · Coding & Readability Rules",
+      label: CANONICAL_STAGE_LABELS["s2-coding"],
       boundary: "sandbox_agent_prompt",
       enabled: codingSteps.some((s) => s.enabled),
       mode: codingSteps.some((s) => s.enabled) ? "active" : "off",
@@ -1065,40 +1098,40 @@ export function buildClientWorkflowStagesView(
     {
       id: "s3-checks",
       index: 5,
-      label: "5 · Pre-PR Deterministic Gates",
+      label: CANONICAL_STAGE_LABELS["s3-checks"],
       boundary: "staging_ref_ast_gate",
       enabled: true,
       mode: "enforced",
       summary:
-        "Runs sub-second AST/diff integrity floors, sibling caller sweeps, mutation/fuzz hardening, and fixture-verified custom checks.",
+        "Runs sub-second AST/diff integrity floors, sibling caller sweeps, mutation/fuzz hardening, and custom checks.",
       steps: s3Steps,
     },
     {
       id: "s3-pr",
       index: 6,
-      label: "6 · PR Authoring & Self-Review",
+      label: CANONICAL_STAGE_LABELS["s3-pr"],
       boundary: "pre_pr_contract",
       enabled: prActive || Boolean(stopNudge),
       mode: prActive ? prContract.mode || "warn" : stopNudge ? "active" : "off",
       summary:
-        "Enforces commit/PR subject length, required Summary & Verification sections, lint-suppression audits, and self-review nudges.",
+        "Enforces commit/PR subject length, required sections, lint-suppression audits, and self-review nudges.",
       steps: prSteps,
     },
     {
       id: "s4-verify",
       index: 7,
-      label: "7 · Adversarial Verification",
+      label: CANONICAL_STAGE_LABELS["s4-verify"],
       boundary: "fresh_context_readonly_verifier",
       enabled: Boolean(verifierEnabled),
       mode: verifierEnabled ? "blocking" : "off",
       summary:
-        "Executes a fresh-context read-only verification pass with zero author CoT and 6-filter Inquisitor grounding.",
+        "Executes a fresh-context read-only verification pass with zero author chain-of-thought and grounded evidence checks.",
       steps: s4Steps,
     },
     {
       id: "s5-triage",
       index: 8,
-      label: "8 · Scorecard & Merge Triage",
+      label: CANONICAL_STAGE_LABELS["s5-triage"],
       boundary: "controller_merge_gate",
       enabled: s5Enabled,
       mode: s5Mode,
@@ -1241,7 +1274,7 @@ export function evaluateFixturesClientSide(check: {
     const diffParsed = item.diff
       ? parseFixtureDiff(item.diff)
       : { file: undefined, lines: [] as string[] };
-    const explicitLines = item["added-lines"] ?? item.addedLines;
+    const explicitLines = item["added-lines"] ?? item.addedLines ?? item.added;
     const lines =
       explicitLines && explicitLines.length > 0
         ? explicitLines
@@ -1357,5 +1390,383 @@ export function evaluateFixturesClientSide(check: {
       ? `All ${cases.length} inline fixtures verified (Fail trap caught + Clean pass green).`
       : `Fixture self-test failed (failTrap=${failTrapOk ? "PASS" : "FAIL"}, cleanPass=${cleanPassOk ? "PASS" : "FAIL"}).`,
     cases,
+  };
+}
+
+const PRIMARY_FLOW_ORDER: Readonly<Record<string, number>> = {
+  "engineering-workflow-v4": 1,
+  "golden-v3-enforced": 2,
+  "golden-v3": 3,
+  "golden-v2": 4,
+  "golden-v1-minimal": 5,
+  "repo-custom": 6,
+};
+
+const HUMAN_FLOW_TITLES: Readonly<Record<string, string>> = {
+  "engineering-workflow-v4": "Full 8-stage workflow",
+  "golden-v3-enforced": "Enforced pre-PR & triage",
+  "golden-v3": "Plan critic & shadow triage",
+  "golden-v2": "Expanded pre-PR gates",
+  "golden-v1-minimal": "Recommended baseline",
+  "repo-custom": "Repository custom (.grain/qa-flow.yml)",
+  "deterministic-s3-only": "Deterministic checks only",
+  "golden-v2-skill-only": "Coding skill only (benchmark)",
+  "golden-v2-checks-only": "Pre-PR checks only (benchmark)",
+};
+
+export interface WorkflowFamilyGroup {
+  readonly key: string;
+  readonly displayTitle: string;
+  readonly summary: string;
+  readonly versions: readonly QAFlowVersionItem[];
+  readonly latestActiveHash: string;
+  readonly latestVersion: number;
+  readonly schemaBadge: string;
+  readonly activeStageCount: number;
+  readonly activeSubstepCount: number;
+  readonly promptBytes: number;
+  readonly isBenchmark: boolean;
+  readonly isAllRetired: boolean;
+}
+
+export function isBenchmarkOrAblationKey(key: string): boolean {
+  const k = key.trim().toLowerCase();
+  return (
+    k === "deterministic-s3-only" ||
+    k.endsWith("-checks-only") ||
+    k.endsWith("-skill-only") ||
+    k.endsWith("-seed") ||
+    k.endsWith("-ablation") ||
+    k.endsWith("-benchmark")
+  );
+}
+
+export function humanizeWorkflowKey(key: string, label?: string): string {
+  const mapped = HUMAN_FLOW_TITLES[key];
+  if (mapped) return mapped;
+  const raw = (label && label !== key ? label : key)
+    .replace(/[-_]+/g, " ")
+    .trim();
+  if (!raw) return key;
+  return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
+export function schemaShortLabel(item: QAFlowVersionItem): string {
+  const sv =
+    item.schemaVer ||
+    item.schema ||
+    item.declarationV4?.schema ||
+    item.declarationV3?.schema ||
+    item.declaration?.schema ||
+    "";
+  if (sv.endsWith("/v4") || item.key.includes("v4")) return "v4";
+  if (sv.endsWith("/v3") || item.key.includes("v3")) return "v3";
+  if (
+    item.key === "golden-v1-minimal" ||
+    item.key === "deterministic-s3-only"
+  ) {
+    return "v1";
+  }
+  return "v2";
+}
+
+export function groupWorkflowFamilies(versions: readonly QAFlowVersionItem[]): {
+  readonly primary: readonly WorkflowFamilyGroup[];
+  readonly archived: readonly WorkflowFamilyGroup[];
+  readonly all: readonly WorkflowFamilyGroup[];
+} {
+  const byKey = new Map<string, QAFlowVersionItem[]>();
+  for (const v of versions) {
+    const arr = byKey.get(v.key);
+    if (arr) {
+      arr.push(v);
+    } else {
+      byKey.set(v.key, [v]);
+    }
+  }
+
+  const all: WorkflowFamilyGroup[] = [];
+  for (const [key, list] of byKey.entries()) {
+    const sorted = [...list].sort((a, b) => b.version - a.version);
+    const rep = sorted.find((v) => !v.retiredAt) ?? sorted[0];
+    const isAllRetired = sorted.every((v) => Boolean(v.retiredAt));
+    const isBenchmark = isBenchmarkOrAblationKey(key);
+    const stages = buildClientWorkflowStagesView(rep);
+    const activeStageCount = stages.filter(
+      (s) => s.enabled && s.mode !== "off",
+    ).length;
+    const activeSubstepCount = stages.reduce(
+      (sum, s) => sum + s.steps.filter((st) => st.enabled).length,
+      0,
+    );
+    const fallbackBytes =
+      rep.resolved?.injectSkill === false
+        ? 0
+        : rep.declaration?.skill?.text
+          ? utf8ByteCount(rep.declaration.skill.text)
+          : (rep.resolved?.skillBytes ?? 0);
+    const promptBytes = computeActivePromptBytes(stages, fallbackBytes);
+
+    all.push({
+      key,
+      displayTitle: humanizeWorkflowKey(key, rep.label),
+      summary:
+        rep.summary ||
+        `${activeStageCount} of 8 stages active (${activeSubstepCount} substeps).`,
+      versions: sorted,
+      latestActiveHash: rep.hash,
+      latestVersion: rep.version,
+      schemaBadge: schemaShortLabel(rep),
+      activeStageCount,
+      activeSubstepCount,
+      promptBytes,
+      isBenchmark,
+      isAllRetired,
+    });
+  }
+
+  all.sort((a, b) => {
+    const oa = PRIMARY_FLOW_ORDER[a.key] ?? 100;
+    const ob = PRIMARY_FLOW_ORDER[b.key] ?? 100;
+    if (oa !== ob) return oa - ob;
+    return a.key.localeCompare(b.key);
+  });
+
+  const primary = all.filter((g) => !g.isBenchmark && !g.isAllRetired);
+  const archived = all.filter((g) => g.isBenchmark || g.isAllRetired);
+  return { primary, archived, all };
+}
+
+export function formatStageModeLabel(stage: WorkflowStageView): string {
+  if (!stage.enabled || stage.mode === "off") return "Skipped";
+  const m = (stage.mode || "active").toLowerCase();
+  switch (m) {
+    case "enforced":
+      return "Enforced";
+    case "blocking":
+      return "Blocking";
+    case "warn":
+      return "Warn only";
+    case "shadow":
+      return "Evaluate";
+    case "slice_plan":
+      return "Slice plan";
+    case "propose_dag":
+      return "Subtask DAG";
+    case "context+blast":
+      return "Context + blast";
+    case "blast_only":
+      return "Blast tier";
+    default:
+      return "Active";
+  }
+}
+
+export function stageModePillClass(stage: WorkflowStageView): string {
+  if (!stage.enabled || stage.mode === "off") return "neutral";
+  const m = (stage.mode || "active").toLowerCase();
+  if (m === "enforced" || m === "blocking") return "healthy";
+  if (m === "warn" || m === "shadow") return "warn";
+  return "reply";
+}
+
+export function stageModeTip(stage: WorkflowStageView): string {
+  if (!stage.enabled || stage.mode === "off") {
+    return "Stage is skipped in this workflow and adds zero latency or prompt tokens.";
+  }
+  const m = (stage.mode || "active").toLowerCase();
+  if (m === "enforced" || m === "blocking") {
+    return "Blocks PR creation or auto-merge until findings in this stage are resolved.";
+  }
+  if (m === "warn" || m === "shadow") {
+    return "Records findings for telemetry and review without blocking the pull request.";
+  }
+  return stage.summary;
+}
+
+export function formatStepModeLabel(step: WorkflowStepView): string {
+  if (!step.enabled || step.mode === "off") return "Off";
+  const m = (step.mode || "active").toLowerCase();
+  switch (m) {
+    case "blocking":
+      return "Blocking";
+    case "enforced":
+      return "Enforced";
+    case "warn":
+      return "Warn only";
+    case "shadow":
+      return "Evaluate";
+    case "auto":
+      return "Auto scope";
+    case "always":
+      return "Always on";
+    case "glob":
+      return "Glob match";
+    case "replace":
+      return "Replace";
+    case "append":
+      return "Append";
+    case "inherit":
+      return "Inherit";
+    case "slice_plan":
+      return "Slice plan";
+    case "propose_dag":
+      return "Subtask DAG";
+    default:
+      return "Active";
+  }
+}
+
+export function stepModePillClass(step: WorkflowStepView): string {
+  if (!step.enabled || step.mode === "off") return "neutral";
+  const m = (step.mode || "active").toLowerCase();
+  if (m === "blocking" || m === "enforced") return "healthy";
+  if (m === "warn" || m === "shadow") return "warn";
+  return "reply";
+}
+
+export function substepHelpTip(step: WorkflowStepView): string {
+  if (step.lockedFloor) {
+    return "Safety floor substep: always enforced across workflows so trust boundaries cannot be weakened.";
+  }
+  if (step.kind.startsWith("custom_check:")) {
+    return "Repository custom check evaluated deterministically on PR diffs before review.";
+  }
+  if (step.kind === "readability_pack") {
+    return "Language-specific readability guidance injected only when matching files are touched.";
+  }
+  return step.summary || "Configurable workflow substep.";
+}
+
+export function globToSamplePath(rawGlob: string): string {
+  const g = rawGlob.trim();
+  if (!g || g === "**/*" || g === "*") return "pkg/sample/file.go";
+  const extMatch = g.match(/\*\.([a-zA-Z0-9]+)$/);
+  const ext = extMatch ? extMatch[1] : "go";
+  if (!g.includes("*")) return g;
+  const replaced = g
+    .replace(/\*\*\//g, "sub/")
+    .replace(/\*\*/g, `sample.${ext}`)
+    .replace(/\*/g, "sample");
+  return replaced || `sample.${ext}`;
+}
+
+export function extractPatternExampleLines(
+  failJson: string,
+  passJson: string,
+  forbidAdded = "",
+): { readonly failLine: string; readonly passLine: string } {
+  const firstLineFrom = (raw: string, fallback: string): string => {
+    try {
+      const parsed: unknown = JSON.parse(raw || "[]");
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const item = parsed[0] as CustomCheckFixtureItem;
+        const lines = item["added-lines"] ?? item.addedLines ?? item.added;
+        if (lines && lines.length > 0 && lines[0]) return lines[0];
+        if (item.diff) {
+          const d = parseFixtureDiff(item.diff);
+          if (d.lines.length > 0) return d.lines[0];
+        }
+        if (item.content) return item.content.split(/\r?\n/)[0] ?? fallback;
+      }
+    } catch {
+      // Ignore malformed fixture JSON and fall back cleanly.
+    }
+    return fallback;
+  };
+  const defaultFail = forbidAdded.includes("fmt")
+    ? 'fmt.Println("debug")'
+    : 'console.log("debug")';
+  return {
+    failLine: firstLineFrom(failJson, defaultFail),
+    passLine: firstLineFrom(passJson, "const ready = true;"),
+  };
+}
+
+export function serializePatternFixtures(
+  failLine: string,
+  passLine: string,
+): { readonly failJson: string; readonly passJson: string } {
+  return {
+    failJson: JSON.stringify([
+      { name: "caught-example", "added-lines": [failLine] },
+    ]),
+    passJson: JSON.stringify([
+      { name: "allowed-example", "added-lines": [passLine] },
+    ]),
+  };
+}
+
+export function synthesizeCompanionFixtures(
+  whenChangedCsv: string,
+  requireChangedCsv: string,
+): {
+  readonly failJson: string;
+  readonly passJson: string;
+  readonly whenSample: string;
+  readonly requireSample: string;
+} {
+  const firstWhen =
+    whenChangedCsv
+      .split(",")
+      .map((s) => s.trim())
+      .find(Boolean) || "pkg/model/schema.go";
+  const firstReq =
+    requireChangedCsv
+      .split(",")
+      .map((s) => s.trim())
+      .find(Boolean) || "pkg/model/migrations.go";
+  const whenSample = globToSamplePath(firstWhen);
+  const requireSample = globToSamplePath(firstReq);
+  return {
+    whenSample,
+    requireSample,
+    failJson: JSON.stringify([
+      { name: "missing-companion", "changed-files": [whenSample] },
+    ]),
+    passJson: JSON.stringify([
+      {
+        name: "with-companion",
+        "changed-files": [whenSample, requireSample],
+      },
+    ]),
+  };
+}
+
+export function synthesizeDiffBudgetFixtures(
+  maxChangedLines: number,
+  pathsCsv: string,
+): {
+  readonly failJson: string;
+  readonly passJson: string;
+  readonly failLineCount: number;
+} {
+  const cap = Math.max(1, Math.floor(maxChangedLines || 250));
+  const failLineCount = cap + 1;
+  const firstGlob = pathsCsv
+    .split(",")
+    .map((s) => s.trim())
+    .find(Boolean);
+  const sampleFile = firstGlob ? globToSamplePath(firstGlob) : undefined;
+  const overLines = Array.from(
+    { length: failLineCount },
+    (_, i) => `added line ${i + 1}`,
+  );
+  return {
+    failLineCount,
+    failJson: JSON.stringify([
+      {
+        name: "exceeds-budget",
+        ...(sampleFile ? { file: sampleFile } : {}),
+        "added-lines": overLines,
+      },
+    ]),
+    passJson: JSON.stringify([
+      {
+        name: "within-budget",
+        ...(sampleFile ? { file: sampleFile } : {}),
+        "added-lines": ["added line 1"],
+      },
+    ]),
   };
 }

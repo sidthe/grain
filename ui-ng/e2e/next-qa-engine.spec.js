@@ -71,15 +71,25 @@ test("Processes -> Quality checks and Task Detail -> Pre-PR quality checks work 
 
   const goldenRow = page.getByTestId("qa-flow-row-golden-v1-minimal");
   const detRow = page.getByTestId("qa-flow-row-deterministic-s3-only");
+  const archivedToggle = page.getByTestId("qa-toggle-archived-flows");
   await expect(goldenRow).toBeVisible();
-  await expect(detRow).toBeVisible();
+  await expect(detRow).toBeHidden();
   await expect(goldenRow).toContainText("Active (50%)");
+
+  await archivedToggle.click();
+  await expect(detRow).toBeVisible();
   await expect(detRow).toContainText("Available");
 
   const inspTitle = page.getByTestId("qa-flow-insp-title");
   const detailCard = page.getByTestId("qa-flow-detail-card");
   await expect(inspTitle).toContainText("golden-v1-minimal (Recommended)");
   await expect(page.getByTestId("qa-mobile-back")).toBeHidden();
+
+  // All stages start collapsed by default; expanding reveals stage substeps & rule hooks.
+  await expect(
+    page.getByTestId("qa-rule-card-golden:test-integrity-guard"),
+  ).toBeHidden();
+  await page.getByTestId("qa-expand-all-stages").click();
   await expect(
     page.getByTestId("qa-rule-card-golden:test-integrity-guard"),
   ).toBeVisible();
@@ -97,11 +107,7 @@ test("Processes -> Quality checks and Task Detail -> Pre-PR quality checks work 
     .include('[data-testid="proc-inspector"]')
     .include('[data-testid="quality-flows-list"]')
     .analyze();
-  expect(
-    axeProcLight.violations.filter((v) =>
-      ["serious", "critical"].includes(v.impact ?? ""),
-    ),
-  ).toEqual([]);
+  expect(axeProcLight.violations).toEqual([]);
 
   await detRow.click();
   await expect(inspTitle).toContainText(
@@ -353,6 +359,13 @@ test("/next/processes/quality syncs selected flow to ?flow= URL and preserves se
 
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/next/processes/quality?flow=deterministic-s3-only");
+  await expect(page.getByTestId("qa-toggle-archived-flows")).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+  await expect(
+    page.getByTestId("qa-flow-row-deterministic-s3-only"),
+  ).toBeVisible();
   await expect(page.getByTestId("qa-flow-insp-title")).toContainText(
     "deterministic-s3-only",
   );

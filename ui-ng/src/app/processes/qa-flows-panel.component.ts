@@ -15,6 +15,7 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  ElementRef,
   type OnDestroy,
   ViewEncapsulation,
   computed,
@@ -40,340 +41,440 @@ import {
   type PillOption,
   PillSelectComponent,
 } from "../shared/pill-select.component";
+import { StatusIconComponent } from "../shared/status-icon.component";
+import { TipDirective } from "../shared/tip.directive";
 import {
   type FlowDeclarationV2,
   type FlowDeclarationV4,
   MAX_PROMPT_BUDGET_BYTES,
   type QADryRunResponse,
+  type QAFlowPublishResponse,
   type QAFlowVersionDetail,
   type QAFlowVersionItem,
   type QAFlowVersionsResponse,
   buildClientWorkflowStagesView,
   computeActivePromptBytes,
+  groupWorkflowFamilies,
+  humanizeWorkflowKey,
   isLockedFloorRule,
+  schemaShortLabel,
   utf8ByteCount,
 } from "./qa-flows.models";
 import { QaV3StudioComponent } from "./qa-v3-studio.component";
+import { QaWorkflowCatalogComponent } from "./qa-workflow-catalog.component";
 
 @Component({
   selector: "g-qa-flows-panel",
   imports: [
+    QaWorkflowCatalogComponent,
     QaV3StudioComponent,
     PillSelectComponent,
     ConfirmDialogComponent,
+    StatusIconComponent,
+    TipDirective,
     RouterLink,
   ],
   changeDetection: ChangeDetectionStrategy.OnPush,
-  styleUrls: ["./qa-flows-panel.css", "./qa-v3-studio.css"],
+  styleUrl: "./qa-flows-panel.css",
   encapsulation: ViewEncapsulation.None,
+  host: {
+    "(document:click)": "onDocumentClick($event)",
+    "(document:keydown.escape)": "closeMenus()",
+  },
   template: `
     <div
-      class="qa-flows-panel qa-flows-layout"
+      class="qa-flows-panel"
       [class.has-mobile-inspector]="mobileInspectorOpen()"
       data-testid="qa-flows-panel"
     >
-      <!-- TOP SUB-HEADER TOOLBAR -->
-      <header
-        class="qa-studio-toolbar"
-        role="toolbar"
-        aria-label="Workflow studio toolbar"
-        data-testid="qa-studio-toolbar"
+      <div
+        class="qa-studio-columns"
+        [class.is-catalog-collapsed]="catalogCollapsed()"
       >
-        <div class="qa-toolbar-top-row">
-          <div class="qa-toolbar-identity">
-            <button
-              type="button"
-              class="btn-text qa-mobile-back"
-              data-testid="qa-mobile-back"
-              [hidden]="!mobileInspectorOpen()"
-              (click)="mobileInspectorOpen.set(false)"
-            >
-              ← Flows
-            </button>
-            <g-pill-select
-              testid="qa-flow-switcher"
-              ariaLabel="Flow package version"
-              [options]="flowSwitcherOptions()"
-              [value]="selectedHash() || ''"
-              (valueChange)="selectVersion($event, true)"
-            />
-            @if (selectedDetail(); as detail) {
-              <h2 class="qa-toolbar-title" data-testid="qa-flow-insp-title">
-                {{ detail.label || detail.key }}
-                <span class="s-mono">&#64;{{ detail.version }}</span>
-              </h2>
-              <div class="qa-toolbar-badges">
-                @if (qaEnabled() && activeFlowId() === detail.key) {
-                  <span class="badge active-badge"
-                    >Active ({{ activeRolloutPct() }}%)</span
-                  >
-                } @else {
-                  <span class="badge active-badge">Available</span>
-                }
-                @if (detail.builtIn) {
-                  <span class="badge builtin-badge">Built-in</span>
-                } @else {
-                  <span class="badge custom-badge">Custom</span>
-                }
-                <span
-                  class="badge severity-pill"
-                  data-testid="qa-schema-pill"
-                  >{{ schemaShortBadge(detail) }}</span
-                >
-                @if (detail.retiredAt) {
-                  <span class="badge retired-badge">Retired</span>
-                }
-                @if (detail.sourceKind === "adopt" && detail.sourceRepo) {
-                  <span class="s-mono badge severity-pill"
-                    >{{ detail.sourceRepo }}&#64;{{
-                      (detail.sourceCommit || "").slice(0, 7)
-                    }}</span
-                  >
-                }
-              </div>
-            }
-          </div>
+        <g-qa-workflow-catalog
+          [primaryGroups]="catalogFamilies().primary"
+          [archivedGroups]="catalogFamilies().archived"
+          [selectedKey]="selectedDetail()?.key || ''"
+          [selectedHash]="selectedHash() || ''"
+          [flowQueryParam]="flowQueryParam()"
+          [qaEnabled]="qaEnabled()"
+          [activeFlowId]="activeFlowId()"
+          [activeRolloutPct]="activeRolloutPct()"
+          [collapsed]="catalogCollapsed()"
+          (selectFamily)="selectVersion($event, true)"
+          (toggleCollapsed)="catalogCollapsed.set(!catalogCollapsed())"
+        />
 
-          <div class="qa-toolbar-right">
-            <div
-              class="qa-prompt-budget byte-counter"
-              [class.error]="skillByteOverflow() || promptBudgetOverflow()"
-              data-testid="qa-prompt-budget"
-            >
-              <span>Prompt budget:</span>
-              <strong class="s-num">{{ activePromptBytes() }} B</strong>
-              <span>/ 8.0 kB ({{ maxPromptBudgetBytes }} B)</span>
-              <span class="qa-budget-track" aria-hidden="true">
-                <span
-                  class="qa-budget-fill"
-                  [style.width.%]="promptBudgetPct()"
-                ></span>
-              </span>
-            </div>
-
-            <div class="detail-actions">
-              <button
-                type="button"
-                class="btn-outlined"
-                data-testid="qa-v3-open-probe"
-                (click)="openProbe()"
-              >
-                What-if probe
-              </button>
-              <button
-                type="button"
-                class="btn-tonal"
-                data-testid="qa-dry-run-btn"
-                (click)="isEditing() ? dryRunDraft() : dryRun()"
-              >
-                Dry run
-              </button>
-              @if (canAdmin()) {
-                <button
-                  type="button"
-                  class="btn-outlined"
-                  data-testid="qa-v3-open-adopt"
-                  (click)="openAdopt()"
-                >
-                  Adopt from commit
-                </button>
-                <button
-                  type="button"
-                  class="btn-tonal"
-                  data-testid="qa-fork-flow-btn"
-                  (click)="forkFlow()"
-                >
-                  Fork flow
-                </button>
-                <button
-                  type="button"
-                  class="btn-tonal"
-                  data-testid="qa-new-version-btn"
-                  (click)="newVersion()"
-                >
-                  New version
-                </button>
-              }
-              @if (selectedDetail(); as detail) {
-                <a
-                  class="btn-tonal"
-                  [routerLink]="['/telemetry']"
-                  [queryParams]="{
-                    tab: 'quality',
-                    createExp: '1',
-                    flow: detail.hash,
-                  }"
-                  >Test in experiment</a
-                >
-                @if (canAdmin() && !detail.builtIn && !detail.retiredAt) {
-                  <button
-                    type="button"
-                    class="btn-text btn-retire"
-                    (click)="retireFlow()"
-                  >
-                    Retire
-                  </button>
-                }
-              }
-              <a
-                class="btn-text"
-                routerLink="/settings/tasks"
-                data-testid="qa-configure-rollout-link"
-                >Settings → Tasks</a
-              >
-            </div>
-          </div>
-        </div>
-
-        <!-- FLOW PACKAGE QUICK-SELECT STRIP -->
-        @if (!isEditing()) {
-          <div
-            class="qa-flows-list"
-            role="navigation"
-            aria-label="Quality flow versions"
-            data-testid="quality-flows-list"
-          >
-            @for (group of groupedVersions(); track group.key) {
-              @for (v of group.versions; track v.hash) {
-                <button
-                  type="button"
-                  class="flow-item"
-                  [attr.data-testid]="
-                    v.hash === group.latestActiveHash
-                      ? 'qa-flow-row-' + group.key
-                      : null
-                  "
-                  [class.selected]="v.hash === selectedHash()"
-                  [attr.aria-current]="
-                    v.hash === selectedHash() ? 'true' : null
-                  "
-                  (click)="selectVersion(v.hash, true)"
-                >
-                  <span class="s-mono"
-                    >{{ group.key }}&#64;{{ v.version }}</span
-                  >
-                  @if (
-                    qaEnabled() &&
-                    activeFlowId() === v.key &&
-                    v.hash === group.latestActiveHash
-                  ) {
-                    <span class="badge active-badge"
-                      >Active ({{ activeRolloutPct() }}%)</span
-                    >
-                  } @else if (v.hash === group.latestActiveHash) {
-                    <span class="badge active-badge">Available</span>
-                  }
-                  @if (v.builtIn) {
-                    <span class="badge builtin-badge">Built-in</span>
-                  } @else {
-                    <span class="badge custom-badge">Custom</span>
-                  }
-                </button>
-              }
-            }
-          </div>
-        }
-
-        <!-- IN-PLACE DRAFT EDITING DIRTY BAR -->
-        @if (isEditing()) {
-          <div class="editor-header" data-testid="qa-draft-dirty-bar">
-            <div class="qa-draft-meta-fields">
-              <strong>{{ isFork() ? "Fork flow" : "New version" }}</strong>
-              <label for="qa-flow-key-input">
-                Key
-                <input
-                  id="qa-flow-key-input"
-                  type="text"
-                  class="s-mono"
-                  [value]="draftDeclaration().key"
-                  (input)="updateDraft('key', $event)"
-                  [disabled]="!isFork()"
-                />
-              </label>
-              <label for="qa-flow-lbl-input">
-                Label
-                <input
-                  id="qa-flow-lbl-input"
-                  type="text"
-                  [value]="draftDeclaration().label"
-                  (input)="updateDraft('label', $event)"
-                />
-              </label>
-              <label for="qa-flow-sum-input">
-                Summary
-                <input
-                  id="qa-flow-sum-input"
-                  type="text"
-                  [value]="draftDeclaration().summary || ''"
-                  (input)="updateDraft('summary', $event)"
-                />
-              </label>
-              <label for="qa-flow-skill-textarea">
-                Coding skill ({{ draftSkillBytes() }} /
-                {{ draftDeclaration().skill.maxBytes }} B)
-                <input
-                  id="qa-flow-skill-textarea"
-                  type="text"
-                  class="s-mono"
-                  [value]="draftDeclaration().skill.text"
-                  (input)="updateDraft('skill.text', $event)"
-                />
-              </label>
-            </div>
-            <div class="editor-actions">
-              <button
-                type="button"
-                class="btn-text"
-                data-testid="qa-cancel-edit-btn"
-                (click)="cancelEdit()"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                class="btn-tonal"
-                data-testid="qa-v3-verify-dry-run"
-                (click)="dryRunDraft()"
-              >
-                Verify &amp; dry-run
-              </button>
-              <button
-                type="button"
-                class="btn-primary"
-                data-testid="qa-publish-version-btn"
-                [disabled]="skillByteOverflow() || promptBudgetOverflow()"
-                (click)="confirmPublish()"
-              >
-                Publish version
-              </button>
-            </div>
-          </div>
-        }
-      </header>
-
-      <!-- 30/70 8-STAGE STUDIO WORKBENCH -->
-      <div class="qa-flows-detail">
-        @if (selectedDetail() || isEditing()) {
+        @if (selectedDetail(); as detail) {
           <g-qa-v3-studio
             [embedded]="true"
-            [detail]="selectedDetail()"
             [editing]="isEditing()"
-            [decl]="
-              draftDeclaration().declarationV3 ??
-              selectedDetail()?.declarationV3
-            "
-            [declV4]="
-              draftDeclaration().declarationV4 ??
-              selectedDetail()?.declarationV4
-            "
+            [canEdit]="canAdmin()"
+            [isFork]="isFork()"
+            [draftKey]="draftDeclaration().key"
+            [draftLabel]="draftDeclaration().label"
+            [draftSummary]="draftDeclaration().summary || ''"
+            [builtinCheckOverrides]="draftChecks()"
+            [qaEnabled]="qaEnabled()"
+            [activeFlowId]="activeFlowId()"
+            [activeRolloutPct]="activeRolloutPct()"
+            [detail]="detail"
+            [decl]="draftDeclaration().declarationV3 ?? detail.declarationV3"
+            [declV4]="draftDeclaration().declarationV4 ?? detail.declarationV4"
             [showParentDiff]="showParentDiff()"
             [diffFiles]="diffFiles()"
             [externalDryRun]="dryRunResult()"
-            (adopted)="loadVersions()"
+            (adopted)="onFlowAdopted($event)"
             (toggleParentDiffReq)="toggleParentDiff()"
-          />
+            (enterDraftReq)="enterDraftFromStudio()"
+            (stepSelected)="onStudioStepSelected()"
+            (draftKeyChange)="setDraftField('key', $event)"
+            (draftLabelChange)="setDraftField('label', $event)"
+            (draftSummaryChange)="setDraftField('summary', $event)"
+            (builtinCheckToggle)="
+              setBuiltinCheckEnabled($event.id, $event.enabled)
+            "
+            (builtinCheckSeverity)="
+              updateCheckSeverity($event.id, $event.severity)
+            "
+          >
+            <div
+              qaCenterHeader
+              class="qa-studio-toolbar"
+              role="region"
+              aria-label="Workflow studio toolbar"
+              data-testid="qa-studio-toolbar"
+            >
+              <div class="qa-toolbar-row">
+                <div class="qa-toolbar-identity">
+                  <button
+                    type="button"
+                    class="btn-text qa-mobile-back"
+                    data-testid="qa-mobile-back"
+                    [hidden]="!mobileInspectorOpen()"
+                    (click)="mobileInspectorOpen.set(false)"
+                  >
+                    ← Back
+                  </button>
+
+                  <span class="qa-flow-switcher-wrap">
+                    <g-pill-select
+                      align="left"
+                      testid="qa-flow-switcher"
+                      ariaLabel="Switch workflow"
+                      [options]="flowSwitcherOptions()"
+                      [value]="selectedHash() || ''"
+                      (valueChange)="selectVersion($event, true)"
+                    />
+                  </span>
+
+                  <h2 class="qa-toolbar-title" data-testid="qa-flow-insp-title">
+                    {{ detail.label || detail.key }}
+                  </h2>
+
+                  <span
+                    class="status-pill neutral"
+                    data-testid="qa-schema-pill"
+                    [gTip]="
+                      'Workflow declaration schema ' + schemaShortBadge(detail)
+                    "
+                  >
+                    {{ schemaShortBadge(detail) }}
+                  </span>
+
+                  @if (versionSwitcherOptions().length > 0) {
+                    <g-pill-select
+                      align="left"
+                      testid="qa-version-switcher"
+                      ariaLabel="Workflow version"
+                      [options]="versionSwitcherOptions()"
+                      [value]="selectedHash() || ''"
+                      (valueChange)="selectVersion($event, true)"
+                    />
+                  }
+
+                  <span
+                    [class]="'status-pill ' + rolloutStatusTone(detail.key)"
+                    data-testid="qa-rollout-status-pill"
+                    [gTip]="rolloutStatusTip(detail.key)"
+                  >
+                    <g-status-icon [tone]="rolloutStatusTone(detail.key)" />
+                    {{ rolloutStatusLabel(detail.key) }}
+                  </span>
+
+                  @if (isEditing()) {
+                    <span class="status-pill reply" data-testid="qa-draft-pill">
+                      <g-status-icon tone="reply" kind="proposal" />
+                      {{
+                        isFork() ? "Draft fork" : "Draft v" + nextVersionNum()
+                      }}
+                    </span>
+                  }
+
+                  @if (detail.retiredAt) {
+                    <span class="status-pill warn">
+                      <g-status-icon tone="warn" />
+                      Retired
+                    </span>
+                  }
+                </div>
+              </div>
+
+              <div class="qa-toolbar-row">
+                <div
+                  class="qa-prompt-budget byte-counter"
+                  [class.is-overflow]="
+                    skillByteOverflow() || promptBudgetOverflow()
+                  "
+                  [class.error]="skillByteOverflow() || promptBudgetOverflow()"
+                  data-testid="qa-prompt-budget"
+                  [gTip]="
+                    'Active prompt guidance across enabled stages (' +
+                    activePromptBytes() +
+                    ' B of ' +
+                    maxPromptBudgetBytes +
+                    ' B budget).'
+                  "
+                >
+                  <span>Prompt:</span>
+                  <strong class="s-num">{{ activePromptBytes() }} B</strong>
+                  <span>/ 8.0 kB</span>
+                  <span class="qa-budget-track" aria-hidden="true">
+                    <span
+                      class="qa-budget-fill"
+                      [style.width.%]="promptBudgetPct()"
+                    ></span>
+                  </span>
+                </div>
+
+                <div class="qa-toolbar-actions">
+                  <button
+                    type="button"
+                    class="btn-text"
+                    data-testid="qa-open-guide-btn"
+                    gTip="Open the workflow quick-start guide and live stage insights."
+                    (click)="openGuide()"
+                  >
+                    Guide
+                  </button>
+
+                  @if (!isEditing()) {
+                    @if (canShowSetDefault(detail)) {
+                      <button
+                        type="button"
+                        class="btn-tonal"
+                        data-testid="qa-set-default-btn"
+                        gTip="Make this workflow the active default for eligible new tasks."
+                        (click)="confirmSetAsDefault()"
+                      >
+                        Set as default…
+                      </button>
+                    }
+
+                    @if (canAdmin()) {
+                      <button
+                        type="button"
+                        class="btn-primary"
+                        data-testid="qa-new-version-btn"
+                        [gTip]="
+                          'Start an editable draft for v' +
+                          nextVersionNum() +
+                          ' without affecting active tasks until published.'
+                        "
+                        (click)="newVersion()"
+                      >
+                        Customize as v{{ nextVersionNum() }}
+                      </button>
+                    }
+                  } @else {
+                    <span class="qa-menu-anchor">
+                      <button
+                        type="button"
+                        class="btn-tonal"
+                        data-testid="qa-test-menu-btn"
+                        [attr.aria-expanded]="testMenuOpen()"
+                        aria-haspopup="menu"
+                        gTip="Dry-run this draft against recent pull requests or simulate touched file paths."
+                        (click)="toggleTestMenu($event)"
+                      >
+                        Test on recent PRs ▾
+                      </button>
+                      @if (testMenuOpen()) {
+                        <ul
+                          class="pop-menu qa-action-pop align-left"
+                          role="menu"
+                          aria-label="Draft validation tools"
+                        >
+                          <li role="none">
+                            <button
+                              type="button"
+                              role="menuitem"
+                              data-testid="qa-dry-run-btn"
+                              (click)="closeMenus(); dryRunDraft()"
+                            >
+                              Dry run on recent PRs
+                            </button>
+                          </li>
+                          <li role="none">
+                            <button
+                              type="button"
+                              role="menuitem"
+                              data-testid="qa-v3-open-probe"
+                              (click)="closeMenus(); openProbe()"
+                            >
+                              Simulate file paths…
+                            </button>
+                          </li>
+                        </ul>
+                      }
+                    </span>
+
+                    <button
+                      type="button"
+                      class="btn-tonal"
+                      data-testid="qa-cancel-edit-btn"
+                      gTip="Discard unpublished draft changes and return to read-only inspection."
+                      (click)="cancelEdit()"
+                    >
+                      Discard draft
+                    </button>
+
+                    <button
+                      type="button"
+                      class="btn-primary"
+                      data-testid="qa-publish-version-btn"
+                      [disabled]="skillByteOverflow() || promptBudgetOverflow()"
+                      [gTip]="
+                        'Validate custom check examples and publish ' +
+                        (isFork() ? 'v1' : 'v' + nextVersionNum()) +
+                        '.'
+                      "
+                      (click)="confirmPublish()"
+                    >
+                      Publish {{ isFork() ? "v1" : "v" + nextVersionNum() }}
+                    </button>
+                  }
+
+                  <span class="qa-menu-anchor">
+                    <button
+                      type="button"
+                      class="qa-more-btn"
+                      data-testid="qa-more-actions-btn"
+                      aria-label="More workflow actions"
+                      aria-haspopup="menu"
+                      [attr.aria-expanded]="moreMenuOpen()"
+                      gTip="More workflow actions"
+                      (click)="toggleMoreMenu($event)"
+                    >
+                      ⋯
+                    </button>
+                    @if (moreMenuOpen()) {
+                      <ul
+                        class="pop-menu qa-action-pop"
+                        role="menu"
+                        aria-label="More workflow actions"
+                      >
+                        @if (!isEditing()) {
+                          <li role="none">
+                            <button
+                              type="button"
+                              role="menuitem"
+                              data-testid="qa-dry-run-btn"
+                              (click)="closeMenus(); dryRun()"
+                            >
+                              Test on recent PRs
+                            </button>
+                          </li>
+                          <li role="none">
+                            <button
+                              type="button"
+                              role="menuitem"
+                              data-testid="qa-v3-open-probe"
+                              (click)="closeMenus(); openProbe()"
+                            >
+                              Simulate file paths…
+                            </button>
+                          </li>
+                        }
+                        @if (canAdmin()) {
+                          <li role="none">
+                            <button
+                              type="button"
+                              role="menuitem"
+                              data-testid="qa-fork-flow-btn"
+                              (click)="closeMenus(); forkFlow()"
+                            >
+                              Fork as new workflow
+                            </button>
+                          </li>
+                          <li role="none">
+                            <button
+                              type="button"
+                              role="menuitem"
+                              data-testid="qa-v3-open-adopt"
+                              (click)="closeMenus(); openAdopt()"
+                            >
+                              Import from git commit…
+                            </button>
+                          </li>
+                        }
+                        <li role="none">
+                          <a
+                            role="menuitem"
+                            [routerLink]="['/telemetry']"
+                            [queryParams]="{
+                              tab: 'quality',
+                              createExp: '1',
+                              flow: detail.hash,
+                            }"
+                            (click)="closeMenus()"
+                            >Compare in A/B experiment</a
+                          >
+                        </li>
+                        <li role="none">
+                          <button
+                            type="button"
+                            role="menuitem"
+                            data-testid="qa-menu-view-yaml"
+                            (click)="closeMenus(); openYamlTab()"
+                          >
+                            View YAML
+                          </button>
+                        </li>
+                        <li role="none">
+                          <a
+                            role="menuitem"
+                            routerLink="/settings/tasks"
+                            (click)="closeMenus()"
+                            >Settings → Tasks</a
+                          >
+                        </li>
+                        @if (
+                          canAdmin() && !detail.builtIn && !detail.retiredAt
+                        ) {
+                          <li role="none">
+                            <button
+                              type="button"
+                              role="menuitem"
+                              class="is-danger"
+                              data-testid="qa-retire-flow-btn"
+                              (click)="closeMenus(); retireFlow()"
+                            >
+                              Retire version…
+                            </button>
+                          </li>
+                        }
+                      </ul>
+                    }
+                  </span>
+                </div>
+              </div>
+            </div>
+          </g-qa-v3-studio>
         } @else {
-          <div class="empty-detail">Select a flow version from the list.</div>
+          <div class="qa-empty-detail">
+            Select a workflow from the catalog to inspect its stages.
+          </div>
         }
       </div>
     </div>
@@ -392,6 +493,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
   private readonly snackbar = inject(SnackbarService);
   private readonly route = inject(ActivatedRoute);
   private readonly router = inject(Router, { optional: true });
+  private readonly hostEl = inject<ElementRef<HTMLElement>>(ElementRef);
   private readonly querySub?: Subscription;
 
   readonly studio = viewChild(QaV3StudioComponent);
@@ -404,12 +506,16 @@ export class QaFlowsPanelComponent implements OnDestroy {
   readonly qaEnabled = signal(false);
   readonly activeFlowId = signal("");
   readonly activeRolloutPct = signal(0);
+  readonly qaShadowOnControl = signal(true);
   readonly mobileInspectorOpen = signal(false);
+  readonly catalogCollapsed = signal(false);
+  readonly flowQueryParam = signal("");
 
   readonly isEditing = signal(false);
   readonly isFork = signal(false);
   readonly showParentDiff = signal(false);
-  readonly jumpSection = signal("basics");
+  readonly testMenuOpen = signal(false);
+  readonly moreMenuOpen = signal(false);
 
   readonly dryRunResult = signal<QADryRunResponse | null>(null);
   readonly confirmRequest = signal<ConfirmRequest | null>(null);
@@ -442,8 +548,6 @@ export class QaFlowsPanelComponent implements OnDestroy {
     {},
   );
 
-  readonly verifierTiers = ["T1", "T2", "T3"];
-
   readonly builtInCheckKeys = [
     "golden:test-integrity-guard",
     "golden:strict-config-decoder",
@@ -457,6 +561,10 @@ export class QaFlowsPanelComponent implements OnDestroy {
 
   readonly canAdmin = computed(() =>
     this.access.can("POST /api/qa/flow-versions"),
+  );
+
+  readonly canWriteSettings = computed(() =>
+    this.access.can("PUT /api/settings"),
   );
 
   readonly draftSkillBytes = computed(() =>
@@ -502,18 +610,9 @@ export class QaFlowsPanelComponent implements OnDestroy {
     () => this.activePromptBytes() > MAX_PROMPT_BUDGET_BYTES,
   );
 
-  readonly flowSwitcherOptions = computed<PillOption[]>(() => {
-    const opts: PillOption[] = [];
-    for (const group of this.groupedVersions()) {
-      for (const v of group.versions) {
-        opts.push({
-          value: v.hash,
-          label: `${v.key}@${v.version}`,
-        });
-      }
-    }
-    return opts;
-  });
+  readonly catalogFamilies = computed(() =>
+    groupWorkflowFamilies(this.versions()),
+  );
 
   readonly groupedVersions = computed(() => {
     const list = this.versions();
@@ -533,6 +632,37 @@ export class QaFlowsPanelComponent implements OnDestroy {
         };
       })
       .sort((a, b) => a.key.localeCompare(b.key));
+  });
+
+  readonly flowSwitcherOptions = computed<readonly PillOption[]>(() =>
+    this.catalogFamilies().all.map((g) => ({
+      value: g.latestActiveHash,
+      label: g.displayTitle,
+      hint: `${g.activeStageCount}/8 stages · ${g.schemaBadge}`,
+    })),
+  );
+
+  readonly selectedFamilyVersions = computed<readonly QAFlowVersionItem[]>(
+    () => {
+      const det = this.selectedDetail();
+      if (!det) return [];
+      const grp = this.groupedVersions().find((g) => g.key === det.key);
+      return grp?.versions ?? [det];
+    },
+  );
+
+  readonly versionSwitcherOptions = computed<readonly PillOption[]>(() =>
+    this.selectedFamilyVersions().map((v) => ({
+      value: v.hash,
+      label: v.retiredAt ? `@v${v.version} (retired)` : `@v${v.version}`,
+      hint: v.summary ? v.summary.slice(0, 60) : undefined,
+    })),
+  );
+
+  readonly nextVersionNum = computed(() => {
+    const vers = this.selectedFamilyVersions();
+    if (vers.length === 0) return 2;
+    return (vers[0]?.version ?? 1) + 1;
   });
 
   readonly diffFiles = computed(() => {
@@ -590,6 +720,12 @@ export class QaFlowsPanelComponent implements OnDestroy {
   });
 
   constructor() {
+    const snapQm = this.route.snapshot?.queryParamMap;
+    const initParam = snapQm?.get("flow") || snapQm?.get("from") || "";
+    if (initParam) {
+      this.flowQueryParam.set(initParam);
+    }
+
     void this.loadVersions();
 
     const qpObs = (
@@ -603,7 +739,8 @@ export class QaFlowsPanelComponent implements OnDestroy {
     ).queryParamMap;
     if (qpObs && typeof qpObs.subscribe === "function") {
       this.querySub = qpObs.subscribe((m) => {
-        const flowParam = m.get("flow") || m.get("from");
+        const flowParam = m.get("flow") || m.get("from") || "";
+        this.flowQueryParam.set(flowParam);
         if (this.versions().length === 0) return;
         if (flowParam) {
           const h = this.resolveVersionParam(flowParam);
@@ -626,6 +763,64 @@ export class QaFlowsPanelComponent implements OnDestroy {
     this.querySub?.unsubscribe();
   }
 
+  protected onDocumentClick(ev: Event): void {
+    const target = ev.target;
+    if (!(target instanceof Node)) return;
+    const insideAnchor = Array.from(
+      this.hostEl.nativeElement.querySelectorAll(".qa-menu-anchor"),
+    ).some((el) => el.contains(target));
+    if (!insideAnchor) {
+      this.closeMenus();
+    }
+  }
+
+  protected toggleTestMenu(ev: Event): void {
+    ev.stopPropagation();
+    const next = !this.testMenuOpen();
+    this.moreMenuOpen.set(false);
+    this.testMenuOpen.set(next);
+  }
+
+  protected toggleMoreMenu(ev: Event): void {
+    ev.stopPropagation();
+    const next = !this.moreMenuOpen();
+    this.testMenuOpen.set(false);
+    this.moreMenuOpen.set(next);
+  }
+
+  protected closeMenus(): void {
+    this.testMenuOpen.set(false);
+    this.moreMenuOpen.set(false);
+  }
+
+  protected openGuide(): void {
+    this.studio()?.openGuide();
+  }
+
+  protected openYamlTab(): void {
+    this.studio()?.inspectorTab.set("yaml");
+  }
+
+  protected onStudioStepSelected(): void {
+    if (typeof window !== "undefined" && window.innerWidth < 600) {
+      this.mobileInspectorOpen.set(true);
+    }
+  }
+
+  protected enterDraftFromStudio(): void {
+    if (!this.isEditing() && this.canAdmin()) {
+      this.newVersion();
+    }
+  }
+
+  protected onFlowAdopted(hash: string): void {
+    void this.loadVersions().then(() => {
+      if (hash) {
+        void this.doSelectVersion(hash);
+      }
+    });
+  }
+
   private resolveVersionParam(raw: string): string {
     if (raw.includes("@")) {
       const [key, ver] = raw.split("@");
@@ -634,7 +829,9 @@ export class QaFlowsPanelComponent implements OnDestroy {
       );
       if (v) return v.hash;
     }
-    const byKey = this.versions().find((item) => item.key === raw);
+    const byKey = this.versions()
+      .filter((item) => item.key === raw)
+      .sort((a, b) => b.version - a.version)[0];
     if (byKey) return byKey.hash;
     return raw;
   }
@@ -646,15 +843,95 @@ export class QaFlowsPanelComponent implements OnDestroy {
     ) {
       return "v4";
     }
-    const sv =
-      detail.schemaVer ||
-      detail.declarationV4?.schema ||
-      detail.declarationV3?.schema ||
-      detail.declaration?.schema ||
-      "";
-    if (sv.endsWith("/v4") || detail.key.includes("v4")) return "v4";
-    if (sv.endsWith("/v3") || detail.key.includes("v3")) return "v3";
-    return "v2";
+    return schemaShortLabel(detail);
+  }
+
+  protected rolloutStatusTone(flowKey: string): string {
+    if (this.activeFlowId() === flowKey) {
+      if (this.qaEnabled() && this.activeRolloutPct() > 0) {
+        return "healthy";
+      }
+      return "warn";
+    }
+    return "neutral";
+  }
+
+  protected rolloutStatusLabel(flowKey: string): string {
+    if (this.activeFlowId() === flowKey) {
+      if (this.qaEnabled() && this.activeRolloutPct() > 0) {
+        return `Active (${this.activeRolloutPct()}%)`;
+      }
+      return "Default · Paused (0%)";
+    }
+    return "Available";
+  }
+
+  protected rolloutStatusTip(flowKey: string): string {
+    if (this.activeFlowId() === flowKey) {
+      if (this.qaEnabled() && this.activeRolloutPct() > 0) {
+        return `Active default workflow for ${this.activeRolloutPct()}% of eligible new tasks.`;
+      }
+      return "Selected as default in Settings → Tasks, but rollout is currently paused at 0%.";
+    }
+    return "Available to pin on schedules, suites, A/B experiments, or set as the global default.";
+  }
+
+  protected canShowSetDefault(detail: QAFlowVersionDetail): boolean {
+    if (!this.canWriteSettings() || detail.retiredAt) return false;
+    const alreadyActive =
+      this.qaEnabled() &&
+      this.activeFlowId() === detail.key &&
+      this.activeRolloutPct() > 0;
+    return !alreadyActive;
+  }
+
+  confirmSetAsDefault(): void {
+    const detail = this.selectedDetail();
+    if (!detail) return;
+    const prev = {
+      qaEnabled: this.qaEnabled(),
+      qaFlowId: this.activeFlowId() || "golden-v1-minimal",
+      qaRolloutPct: this.activeRolloutPct(),
+      qaShadowOnControl: this.qaShadowOnControl(),
+    };
+    const nextPct = prev.qaRolloutPct > 0 ? prev.qaRolloutPct : 100;
+    const friendly = humanizeWorkflowKey(detail.key, detail.label);
+
+    this.confirmRequest.set({
+      title: `Set ${detail.label || friendly} as default`,
+      message: `Activate "${detail.label || friendly}" (${detail.key}) for ${nextPct}% of eligible new tasks with shadow evaluation on control?`,
+      accept: "Set as default",
+      destructive: false,
+      run: async () => {
+        try {
+          await this.api.put("PUT /api/settings", undefined, {
+            qaEnabled: true,
+            qaFlowId: detail.key,
+            qaRolloutPct: nextPct,
+            qaShadowOnControl: true,
+          });
+          this.qaEnabled.set(true);
+          this.activeFlowId.set(detail.key);
+          this.activeRolloutPct.set(nextPct);
+          this.qaShadowOnControl.set(true);
+          this.snackbar.show(
+            `Default workflow set to ${detail.label || friendly} (${nextPct}%)`,
+            {
+              label: "Undo",
+              run: async () => {
+                await this.api.put("PUT /api/settings", undefined, prev);
+                this.qaEnabled.set(prev.qaEnabled);
+                this.activeFlowId.set(prev.qaFlowId);
+                this.activeRolloutPct.set(prev.qaRolloutPct);
+                this.qaShadowOnControl.set(prev.qaShadowOnControl);
+              },
+            },
+          );
+        } catch {
+          this.snackbar.show("Failed to update default workflow");
+        }
+      },
+    });
   }
 
   byteCount(text: string): number {
@@ -671,6 +948,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
   }
 
   readonlySkillBytes(detail: QAFlowVersionDetail): number {
+    if (detail.resolved?.injectSkill === false) return 0;
     if (detail.declaration?.skill?.text) {
       return this.byteCount(detail.declaration.skill.text);
     }
@@ -700,11 +978,13 @@ export class QaFlowsPanelComponent implements OnDestroy {
           qaEnabled?: boolean;
           qaFlowId?: string;
           qaRolloutPct?: number;
+          qaShadowOnControl?: boolean;
         } | null;
         if (settings) {
           this.qaEnabled.set(Boolean(settings.qaEnabled));
           this.activeFlowId.set(settings.qaFlowId ?? "");
           this.activeRolloutPct.set(settings.qaRolloutPct ?? 0);
+          this.qaShadowOnControl.set(settings.qaShadowOnControl ?? true);
         }
       } catch {
         // Optional settings read when operator holds narrower scope.
@@ -767,6 +1047,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
       const qm = this.route.snapshot?.queryParamMap;
       const fromParam = qm?.get("from") || qm?.get("flow");
       if (fromParam) {
+        this.flowQueryParam.set(fromParam);
         const resolved = this.resolveVersionParam(fromParam);
         if (resolved) {
           await this.doSelectVersion(resolved);
@@ -774,9 +1055,13 @@ export class QaFlowsPanelComponent implements OnDestroy {
         }
       }
       const activeMatch = this.activeFlowId()
-        ? loaded.find((v) => v.key === this.activeFlowId() && !v.retiredAt)
+        ? loaded
+            .filter((v) => v.key === this.activeFlowId() && !v.retiredAt)
+            .sort((a, b) => b.version - a.version)[0]
         : undefined;
-      const firstHash = activeMatch?.hash ?? loaded[0].hash;
+      const primaryFirst =
+        groupWorkflowFamilies(loaded).primary[0]?.latestActiveHash;
+      const firstHash = activeMatch?.hash ?? primaryFirst ?? loaded[0].hash;
       await this.doSelectVersion(firstHash);
     }
   }
@@ -785,7 +1070,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
     if (this.isEditing()) {
       this.confirmRequest.set({
         title: "Unsaved changes",
-        message: "You have unsaved changes. Discard them?",
+        message: "You have unsaved draft changes. Discard them?",
         accept: "Discard",
         destructive: true,
         run: async () => {
@@ -801,6 +1086,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
     this.selectedHash.set(hash);
     this.isEditing.set(false);
     this.dryRunResult.set(null);
+    this.closeMenus();
     if (fromUserClick) {
       this.mobileInspectorOpen.set(true);
     }
@@ -855,6 +1141,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
     this.isEditing.set(true);
     this.isFork.set(true);
     this.initDraft();
+    this.studio()?.openGuide();
   }
 
   initDraft(): void {
@@ -887,6 +1174,7 @@ export class QaFlowsPanelComponent implements OnDestroy {
     const draft = structuredClone(base);
     if (
       detail.schemaVer === "grain.dev/qa-flow/v4" ||
+      detail.schema === "grain.dev/qa-flow/v4" ||
       detail.declarationV4 ||
       detail.key.includes("v4")
     ) {
@@ -894,17 +1182,14 @@ export class QaFlowsPanelComponent implements OnDestroy {
       draft.declarationV4 = detail.declarationV4;
     } else if (
       detail.schemaVer === "grain.dev/qa-flow/v3" ||
+      detail.schema === "grain.dev/qa-flow/v3" ||
       detail.declarationV3 ||
       detail.key.startsWith("golden-v3")
     ) {
       draft.schema = "grain.dev/qa-flow/v3";
       draft.declarationV3 = detail.declarationV3;
     }
-    if (this.isFork()) {
-      draft.key = detail.key + "-fork";
-    } else {
-      draft.key = detail.key;
-    }
+    draft.key = this.isFork() ? `${detail.key}-fork` : detail.key;
     draft.extends = detail.hash;
 
     const checks: Record<string, { enabled: boolean; severity: string }> = {};
@@ -913,9 +1198,11 @@ export class QaFlowsPanelComponent implements OnDestroy {
       if (this.isFloorCheck(c)) {
         checks[c] = { enabled: true, severity: "blocking" };
       } else {
+        const resolvedRule = detail.resolved?.rules?.find((r) => r.id === c);
         checks[c] = {
-          enabled: draft.checks?.[c]?.enabled ?? false,
-          severity: draft.checks?.[c]?.severity || "blocking",
+          enabled: draft.checks?.[c]?.enabled ?? resolvedRule?.enabled ?? false,
+          severity:
+            draft.checks?.[c]?.severity || resolvedRule?.severity || "blocking",
         };
         params[c] = { ...(draft.checks?.[c]?.params || {}) };
       }
@@ -927,18 +1214,21 @@ export class QaFlowsPanelComponent implements OnDestroy {
 
   cancelEdit(): void {
     this.confirmRequest.set({
-      title: "Unsaved changes",
-      message: "You have unsaved changes. Discard them?",
-      accept: "Discard",
+      title: "Discard draft",
+      message: "Discard your unpublished draft changes?",
+      accept: "Discard draft",
       destructive: true,
       run: async () => {
         this.isEditing.set(false);
+        this.isFork.set(false);
       },
     });
   }
 
-  updateDraft(field: string, event: Event): void {
-    const val = (event.target as HTMLInputElement | HTMLTextAreaElement).value;
+  setDraftField(
+    field: "key" | "extends" | "label" | "summary" | "skill.text",
+    val: string,
+  ): void {
     this.draftDeclaration.update((prev) => {
       const next: FlowDeclarationV2 = {
         ...prev,
@@ -950,84 +1240,46 @@ export class QaFlowsPanelComponent implements OnDestroy {
       if (field === "label") next.label = val;
       if (field === "summary") next.summary = val;
       if (field === "skill.text") next.skill.text = val;
-      if (field === "verifier.maxSeconds") {
-        next.verifier.maxSeconds = Number(val);
-      }
-      if (field === "verifier.maxTokens") {
-        next.verifier.maxTokens = Number(val);
-      }
       return next;
     });
   }
 
-  updateCheckParam(check: string, param: string, event: Event): void {
-    const val = Number((event.target as HTMLInputElement).value);
-    this.draftCheckParams.update((prev) => ({
-      ...prev,
-      [check]: { ...(prev[check] || {}), [param]: val },
-    }));
+  updateDraft(field: string, event: Event): void {
+    const val = (event.target as HTMLInputElement | HTMLTextAreaElement).value;
+    if (
+      field === "key" ||
+      field === "extends" ||
+      field === "label" ||
+      field === "summary" ||
+      field === "skill.text"
+    ) {
+      this.setDraftField(field, val);
+    }
   }
 
-  toggleCheckEnabled(check: string): void {
+  protected setBuiltinCheckEnabled(check: string, enabled: boolean): void {
     this.draftChecks.update((prev) => {
       const cur = prev[check] || { enabled: false, severity: "blocking" };
       return {
         ...prev,
-        [check]: { ...cur, enabled: !cur.enabled },
+        [check]: { ...cur, enabled },
       };
     });
   }
 
-  toggleVerifierEnabled(): void {
-    this.draftDeclaration.update((prev) => ({
-      ...prev,
-      verifier: { ...prev.verifier, enabled: !prev.verifier.enabled },
-    }));
-  }
-
-  updateSkillMode(mode: string): void {
-    this.draftDeclaration.update((prev) => ({
-      ...prev,
-      skill: {
-        ...prev.skill,
-        mode: mode as "replace" | "inherit" | "append",
-      },
-    }));
+  toggleCheckEnabled(check: string): void {
+    const cur = this.draftChecks()[check]?.enabled ?? false;
+    this.setBuiltinCheckEnabled(check, !cur);
   }
 
   updateCheckSeverity(check: string, sev: string): void {
     this.draftChecks.update((prev) => {
-      const cur = prev[check] || { enabled: false, severity: "blocking" };
+      const cur = prev[check] || { enabled: true, severity: "blocking" };
       return {
         ...prev,
         [check]: { ...cur, severity: sev },
       };
     });
-  }
-
-  updateVerifierChecklist(val: string): void {
-    this.draftDeclaration.update((prev) => ({
-      ...prev,
-      verifier: { ...prev.verifier, checklist: val },
-    }));
-  }
-
-  toggleTier(tier: string): void {
-    this.draftDeclaration.update((prev) => {
-      const tiers = prev.verifier.tiers.includes(tier)
-        ? prev.verifier.tiers.filter((t) => t !== tier)
-        : [...prev.verifier.tiers, tier];
-      return {
-        ...prev,
-        verifier: { ...prev.verifier, tiers },
-      };
-    });
-  }
-
-  scrollToSection(section: string): void {
-    this.jumpSection.set(section);
-    const el = document.getElementById("section-" + section);
-    if (el) el.scrollIntoView({ behavior: "smooth" });
   }
 
   prepareDraft(): FlowDeclarationV2 & Partial<FlowDeclarationV4> {
@@ -1060,7 +1312,8 @@ export class QaFlowsPanelComponent implements OnDestroy {
       (draft.schema === "grain.dev/qa-flow/v4" ||
         draft.schema === "grain.dev/qa-flow/v3" ||
         st.skillSteps().length > 0 ||
-        st.customChecks().length > 0)
+        st.customChecks().length > 0 ||
+        st.customStages().length > 0)
     ) {
       const v4 = st.exportDeclarationV4({
         key: draft.key,
@@ -1078,6 +1331,13 @@ export class QaFlowsPanelComponent implements OnDestroy {
       draft.readabilityPacks = v4.readabilityPacks;
       draft.skillSteps = v4.skillSteps;
       draft.prContract = v4.prContract;
+      draft.stopNudge = v4.stopNudge ?? draft.stopNudge;
+      if (v4.verifier) {
+        draft.verifier = {
+          ...draft.verifier,
+          enabled: Boolean(v4.verifier.enabled),
+        };
+      }
       if (v4.customChecks?.length) {
         draft.customChecks = v4.customChecks;
       } else {
@@ -1131,21 +1391,32 @@ export class QaFlowsPanelComponent implements OnDestroy {
     const decl = this.prepareDraft();
     const activeBlocking =
       Object.values(decl.checks || {}).filter((c) => c.severity === "blocking")
-        .length + 2;
+        .length +
+      (decl.customChecks?.filter((c) => c.severity === "blocking").length ??
+        0) +
+      2;
     const skillBytes = this.byteCount(decl.skill.text);
+    const targetVer = this.isFork() ? 1 : this.nextVersionNum();
     this.confirmRequest.set({
-      title: "Publish version",
-      message: `Publish ${decl.key} (extends ${decl.extends || "none"})?\nSkill size: ${skillBytes} bytes.\nActive blocking checks: ${activeBlocking}.`,
-      accept: "Publish",
+      title: `Publish v${targetVer}`,
+      message: `Publish ${decl.key}@v${targetVer} (extends ${decl.extends || "none"})?\nPrompt size: ${skillBytes} bytes · Blocking checks: ${activeBlocking}.`,
+      accept: `Publish v${targetVer}`,
       destructive: false,
       run: async () => {
         try {
-          await this.api.post("POST /api/qa/flow-versions", undefined, {
+          const pubRes = (await this.api.post<
+            QAFlowPublishResponse & { hash?: string }
+          >("POST /api/qa/flow-versions", undefined, {
             declaration: decl,
-          });
+          })) as (QAFlowPublishResponse & { hash?: string }) | null;
           this.snackbar.show("Version published");
           this.isEditing.set(false);
+          this.isFork.set(false);
           await this.loadVersions();
+          const newHash = pubRes?.version?.hash ?? pubRes?.hash;
+          if (newHash) {
+            await this.doSelectVersion(newHash);
+          }
         } catch {
           this.snackbar.show("Publish failed");
         }
