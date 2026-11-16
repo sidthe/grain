@@ -147,10 +147,10 @@ func requireMeasuredAgy(t *testing.T) {
 // Two facts, both load-bearing in this package:
 //
 //   - agy keeps retrying past DefaultModelRetryCutoff, after at least nine
-//     provider requests, before it gives up on its own. 1.5.3 made nine
+//     provider requests, before it gives up on its own. 1.5.9 made nine
 //     main-model attempts (initial request plus eight retries with backoff
 //     capped near thirty seconds, without 1.4.9's three extra startup
-//     requests) and returned after about 2m15s (1.2.2 was still retrying at
+//     requests) and returned after about 2m14s, the same ladder 1.5.3 had (1.2.2 was still retrying at
 //     seven minutes). That ladder is what turnDeadline exists to bound; a
 //     binary that gives up before the cutoff makes the bound moot and should
 //     make this probe ask to be re-measured again.
