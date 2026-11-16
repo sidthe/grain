@@ -632,7 +632,12 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
                     </div>
                   }
 
-                  <div class="qa-ordered-steps">
+                  <div
+                    class="qa-ordered-steps"
+                    tabindex="0"
+                    role="region"
+                    aria-label="Ordered stage steps"
+                  >
                     <div class="qa-subhead-row">
                       <h4>Ordered Stage Steps</h4>
                       @if (editing()) {
