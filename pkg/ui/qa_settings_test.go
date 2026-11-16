@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/ai-on-gke/grain/pkg/model"
-	"github.com/ai-on-gke/grain/pkg/qa"
+	"github.com/ai-on-gke/grain/pkg/qa/resolve"
 	"github.com/ai-on-gke/grain/pkg/ui"
 )
 
@@ -118,10 +118,11 @@ func TestQASettingsAcceptV4VersionedAndStoredCustomFlowsAndRejectRetired(t *test
 	}
 
 	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
-	baseSpec, ok := qa.LookupFlow(model.DefaultQAFlowID)
-	if !ok {
-		t.Fatalf("qa.LookupFlow(%q) not found", model.DefaultQAFlowID)
+	spec, _, err := resolve.LookupFlowSpec(ctx, st, model.DefaultQAFlowID)
+	if err != nil || spec == nil {
+		t.Fatalf("resolve.LookupFlowSpec(%q): %v", model.DefaultQAFlowID, err)
 	}
+	baseSpec := *spec
 	baseSpec.ID = "custom-team-flow@1"
 	specBytes, err := json.Marshal(baseSpec)
 	if err != nil {
