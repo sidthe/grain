@@ -295,6 +295,7 @@ describe("QaV3StudioComponent", () => {
           id: "custom:no-console-log",
           kind: "pattern",
           severity: "blocking",
+          paths: ["ui-ng/src/**/*.ts"],
           "forbid-added": "console\\.log",
           fixtures: {
             fail: [{ name: "leftover console.log", diff: "+console.log(x)" }],
@@ -306,6 +307,9 @@ describe("QaV3StudioComponent", () => {
 
     fixture.componentRef.setInput("declV4", declV4);
     fixture.detectChanges();
+
+    const exportedChecks = fixture.componentInstance.exportCustomChecks();
+    expect(exportedChecks[0]?.paths).toEqual(["ui-ng/src/**/*.ts"]);
 
     const root = fixture.nativeElement as HTMLElement;
 

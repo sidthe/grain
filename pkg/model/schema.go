@@ -679,15 +679,19 @@ import "strconv"
 // 146 adds `grain_config`.`qa` (model.Config.QA): the deployment-wide quality
 // control engine and single-instance PR rollout configuration, stored as JSON
 // and defaulting to empty (engine off).
-// 147 adds `qa_flow_version` to track quality-control execution flow snapshots,
+// 147 changes no table: it forgets the commit every repository's
+// declarations were last read at (`repo_declaration_sync`.`commit`), so
+// the next reconcile writes back the grants a schedule file declares that
+// a firing from before 144 overwrote (rereadDeclarations, grain/task-5360).
+// 148 adds `qa_flow_version` to track quality-control execution flow snapshots,
 // and indexes `task(origin_ref)` to quickly find prior runs of an origin.
-// 148 adds `qa_experiment` and `qa_enrollment` for pre-registered quality
+// 149 adds `qa_experiment` and `qa_enrollment` for pre-registered quality
 // experiments and extends `task_qa_check_run` with experiment/engine provenance.
-// 149 adds `schema_ver` and source provenance to `qa_flow_version`, and
+// 150 adds `schema_ver` and source provenance to `qa_flow_version`, and
 // blast/complexity/triage tracking to `task_qa_check_run`.
-// 150 adds operator-only `qa_flow_ref` to `template`, `suite`, `schedule`,
+// 151 adds operator-only `qa_flow_ref` to `template`, `suite`, `schedule`,
 // `repo_config`, and `task`.
-const SchemaVersion = 150
+const SchemaVersion = 151
 
 const qaExperimentTable = `CREATE TABLE IF NOT EXISTS ` + "`qa_experiment`" + ` (
   ` + "`id`" + `                   TEXT     NOT NULL PRIMARY KEY,

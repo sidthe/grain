@@ -645,6 +645,9 @@ func (s *Server) roleGate(pattern string, next http.HandlerFunc) http.HandlerFun
 			writeError(w, agentRefusalStatus(err), err)
 			return
 		}
+		if ciCall, ok := model.CIAPICallFromContext(r.Context()); ok {
+			ciCall.MarkAuthorized()
+		}
 		next(w, r)
 	}
 }
@@ -791,6 +794,14 @@ func (s *Server) authorizeRoleCall(r *http.Request, pattern string, a *accessRol
 		}
 		if (pattern == "GET /api/inbox" && strings.TrimSpace(r.URL.Query().Get("repo")) == "") || (isRepoNarrowedTasksRead(pattern, r) && repo == "") {
 			return nil
+		}
+		if _, isCIAPI := model.CIAPICallFromContext(r.Context()); isCIAPI && repo == "" {
+			switch pattern {
+			case "GET /api/persistent-sandboxes",
+				"GET /api/schedules",
+				"GET /api/notifications":
+				return nil
+			}
 		}
 		if !a.allows(scope, repo) {
 			if repo == "" {

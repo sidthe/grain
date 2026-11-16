@@ -2276,28 +2276,29 @@ export class QaV3StudioComponent {
       } catch {
         failArr = [];
       }
+      const paths = c.paths
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const whenChanged = c.whenChanged
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const requireChanged = c.requireChanged
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
       return {
         id: c.id,
         label: c.label || c.id,
         kind: c.engine,
         severity: c.severity,
         message: c.message || "Failed",
+        ...(paths.length > 0 ? { paths } : {}),
         ...(c.forbidAdded ? { "forbid-added": c.forbidAdded } : {}),
-        ...(c.whenChanged
-          ? {
-              "when-changed": c.whenChanged
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean),
-            }
-          : {}),
-        ...(c.requireChanged
-          ? {
-              "require-changed": c.requireChanged
-                .split(",")
-                .map((s) => s.trim())
-                .filter(Boolean),
-            }
+        ...(whenChanged.length > 0 ? { "when-changed": whenChanged } : {}),
+        ...(requireChanged.length > 0
+          ? { "require-changed": requireChanged }
           : {}),
         ...(c.maxChangedLines > 0
           ? { "max-changed-lines": c.maxChangedLines }
