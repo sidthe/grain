@@ -667,7 +667,11 @@ describe("QaFlowsPanelComponent", () => {
 
     expect(comp.draftSkillBytes()).toBe(0);
     expect(comp.effectiveDraftSchema()).toBe("grain.dev/qa-flow/v2");
-    expect(st?.buildYaml()).toContain('schema: "grain.dev/qa-flow/v2"');
+    const v2Yaml = st?.buildYaml() ?? "";
+    expect(v2Yaml).toContain('schema: "grain.dev/qa-flow/v2"');
+    expect(v2Yaml).not.toContain("decompose:");
+    expect(v2Yaml).not.toContain("stages:");
+    expect(v2Yaml).not.toContain("pr-contract:");
     const v2Draft = comp.prepareDraft();
     expect(v2Draft.schema).toBe("grain.dev/qa-flow/v2");
     expect(v2Draft.skill.mode).toBe("inherit");
@@ -1125,6 +1129,53 @@ describe("QaFlowsPanelComponent", () => {
     expect(selCustomV2 ? comp.isVersionActiveDefault(selCustomV2) : false).toBe(
       true,
     );
+
+    // 4. Custom family whose newest version (v2) is retired: bare "my-flow" resolves to retired v2 (not v1), and Set as default on v1 pins "my-flow@1"
+    const myV1Hash = "c".repeat(64);
+    const myV2Hash = "d".repeat(64);
+    const retiredHeadVersions = [
+      ...seededVersions,
+      {
+        key: "my-flow",
+        version: 1,
+        hash: myV1Hash,
+        label: "My Flow",
+        summary: "Active v1",
+        builtIn: false,
+      },
+      {
+        key: "my-flow",
+        version: 2,
+        hash: myV2Hash,
+        label: "My Flow",
+        summary: "Retired v2",
+        builtIn: false,
+        retiredAt: "2026-11-17T00:00:00Z",
+      },
+    ];
+    comp.versions.set(retiredHeadVersions);
+    comp.qaEnabled.set(true);
+    comp.activeFlowId.set("my-flow");
+    comp.activeRolloutPct.set(100);
+    await comp.doSelectVersion(myV1Hash, true);
+    fixture.detectChanges();
+
+    const selMyV1 = comp.selectedDetail();
+    expect(comp.activeResolvedHash()).toBe(myV2Hash);
+    expect(selMyV1 ? comp.isVersionActiveDefault(selMyV1) : true).toBe(false);
+    expect(
+      root.querySelector('[data-testid="qa-set-default-btn"]'),
+    ).toBeTruthy();
+
+    comp.confirmSetAsDefault();
+    comp.onConfirmDone(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(api.put).toHaveBeenLastCalledWith(
+      "PUT /api/settings",
+      undefined,
+      expect.objectContaining({ qaFlowId: "my-flow@1" }),
+    );
+    expect(selMyV1 ? comp.isVersionActiveDefault(selMyV1) : false).toBe(true);
   });
 
   it("never copies summary into skill.text on initDraft, enforces 4096 B parent+append skill cap, guards unsaved drafts, and drops stale dry-run responses", async () => {

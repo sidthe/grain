@@ -1314,17 +1314,28 @@ describe("QaV3StudioComponent", () => {
     expect(validateSafeRe2Pattern("\\bfmt\\.Println\\(")).toBeNull();
     expect(validateSafeRe2Pattern("([a+b])+")).toBeNull();
 
-    // draftSchema input controls buildYaml() schema header while editing
+    // draftSchema input controls buildYaml() schema header and emits strictly FlowDeclarationV2 keys for v2
     fixture.componentRef.setInput("editing", true);
     fixture.componentRef.setInput("draftSchema", "grain.dev/qa-flow/v2");
     fixture.detectChanges();
-    expect(fixture.componentInstance.buildYaml()).toContain(
-      'schema: "grain.dev/qa-flow/v2"',
-    );
+    const v2Yaml = fixture.componentInstance.buildYaml();
+    expect(v2Yaml).toContain('schema: "grain.dev/qa-flow/v2"');
+    expect(v2Yaml).toContain("skill:");
+    expect(v2Yaml).toContain("stop-nudge:");
+    expect(v2Yaml).toContain("verifier:");
+    expect(v2Yaml).not.toContain("decompose:");
+    expect(v2Yaml).not.toContain("context:");
+    expect(v2Yaml).not.toContain("readability-packs:");
+    expect(v2Yaml).not.toContain("skill-steps:");
+    expect(v2Yaml).not.toContain("pr-contract:");
+    expect(v2Yaml).not.toContain("stages:");
+    expect(v2Yaml).not.toContain("custom-checks:");
     fixture.componentRef.setInput("draftSchema", "grain.dev/qa-flow/v4");
     fixture.detectChanges();
-    expect(fixture.componentInstance.buildYaml()).toContain(
-      'schema: "grain.dev/qa-flow/v4"',
-    );
+    const v4Yaml = fixture.componentInstance.buildYaml();
+    expect(v4Yaml).toContain('schema: "grain.dev/qa-flow/v4"');
+    expect(v4Yaml).toContain("decompose:");
+    expect(v4Yaml).toContain("stages:");
+    expect(v4Yaml).toContain("pr-contract:");
   });
 });

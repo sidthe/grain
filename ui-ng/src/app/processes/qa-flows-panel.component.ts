@@ -1163,6 +1163,14 @@ export class QaFlowsPanelComponent {
           trimmed.startsWith(`builtin:${v.key}@${v.version}`)),
     );
     if (builtInMatch) return builtInMatch.hash;
+    if (!normRaw.includes("@")) {
+      const matching = this.versions()
+        .filter((v) => v.key === normRaw)
+        .sort(compareFlowVersionsDesc);
+      if (matching.length > 0) {
+        return matching[0].hash;
+      }
+    }
     return this.resolveVersionParam(normRaw) || null;
   }
 
@@ -1178,6 +1186,15 @@ export class QaFlowsPanelComponent {
         return detail.hash;
       }
       return `${detail.key}@${detail.version}`;
+    }
+    const newestStored = this.versions()
+      .filter((v) => v.key === detail.key)
+      .sort(compareFlowVersionsDesc)[0];
+    if (newestStored && newestStored.hash !== detail.hash) {
+      const verRef = `${detail.key}@${detail.version}`;
+      return this.resolveSettingsFlowHash(verRef) === detail.hash
+        ? verRef
+        : detail.hash;
     }
     return this.computeCanonicalFlowParam(detail);
   }

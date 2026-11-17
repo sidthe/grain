@@ -363,7 +363,7 @@ test("/next/processes/quality syncs selected flow to ?flow= URL and preserves se
     page.getByTestId("qa-flow-row-deterministic-s3-only"),
   ).toBeVisible();
   await expect(page.getByTestId("qa-flow-insp-title")).toContainText(
-    "deterministic-s3-only",
+    "Deterministic checks only",
   );
 
   await page.getByTestId("qa-flow-row-repo-custom").click();
@@ -372,7 +372,7 @@ test("/next/processes/quality syncs selected flow to ?flow= URL and preserves se
   await expect(page).toHaveURL(/\/next\/settings\/tasks/);
   await page.goBack();
   await expect(page.getByTestId("qa-flow-insp-title")).toContainText(
-    "repo-custom",
+    "Repository custom (.grain/qa-flow.yml)",
   );
 });
 

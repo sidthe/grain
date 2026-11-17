@@ -379,7 +379,7 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
   // Switch back to golden-v3 cleanly, then inspect partial workflow golden-v1-minimal skipped stages summary bar.
   await v3Row.click();
   await expect(page.getByTestId("qa-flow-insp-title")).toContainText(
-    "golden v3",
+    "Plan critic & shadow triage",
   );
   await expect(page.getByTestId("qa-schema-pill")).toContainText("v3");
 
