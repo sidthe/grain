@@ -17,7 +17,14 @@ import { provideRouter } from "@angular/router";
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { GrainApi } from "../api/grain-api.service";
 import { SnackbarService } from "../services/snackbar.service";
-import type { FlowDeclarationV3, FlowDeclarationV4 } from "./qa-flows.models";
+import {
+  buildClientWorkflowStagesView,
+  evaluateFixturesClientSide,
+  matchesGlobPattern,
+  synthesizeDiffBudgetFixtures,
+  type FlowDeclarationV3,
+  type FlowDeclarationV4,
+} from "./qa-flows.models";
 import { QaV3StudioComponent } from "./qa-v3-studio.component";
 
 const ROUTE_RESPONSES: Readonly<Record<string, unknown>> = {
@@ -1146,5 +1153,130 @@ describe("QaV3StudioComponent", () => {
     });
     fixture.detectChanges();
     expect(comp.prGuidanceText()).toBe("");
+  });
+
+  it("preserves omitted context.extraPaths from Go omitempty, matches ** globs across nested slashes, and evaluates zeroed or out-of-scope diff-budget fixtures honestly", () => {
+    const comp = fixture.componentInstance;
+
+    // 1. Hydrating declarationV4.context with extraPaths omitted (Go json:",omitempty") keeps [] and renders "callers & memory"
+    const declWithOmittedExtra: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      key: "omitempty-ctx-v4",
+      context: {
+        enabled: true,
+        includeCallers: true,
+        includeMemory: true,
+        maxTokens: 8000,
+      },
+    };
+    fixture.componentRef.setInput("editing", true);
+    fixture.componentRef.setInput("declV4", declWithOmittedExtra);
+    fixture.detectChanges();
+
+    expect(comp.exportDeclarationV4().context?.extraPaths).toEqual([]);
+    const studioCtxStep = comp
+      .workflowStages()
+      .find((s) => s.id === "s1-context")
+      ?.steps.find((st) => st.id === "s1:context-discovery");
+    expect(studioCtxStep?.scope).toBe("callers & memory");
+
+    const directStages = buildClientWorkflowStagesView({
+      key: "omitempty-ctx-v4",
+      version: 1,
+      hash: "sha256:omitempty-ctx",
+      label: "OmitEmpty Context",
+      summary: "Test",
+      schema: "grain.dev/qa-flow/v4",
+      declarationV4: declWithOmittedExtra,
+    });
+    const directCtxStep = directStages
+      .find((s) => s.id === "s1-context")
+      ?.steps.find((st) => st.id === "s1:context-discovery");
+    expect(directCtxStep?.scope).toBe("callers & memory");
+
+    // 2. Single-pass ** glob matching and max-files-only synthesis with exclude: "pkg/core/**"
+    expect(
+      matchesGlobPattern("pkg/core/**", "pkg/core/sub_1/handler_1.go"),
+    ).toBe(true);
+    expect(matchesGlobPattern("pkg/core/**", "pkg/ui/handler_1.go")).toBe(
+      false,
+    );
+
+    const syn = synthesizeDiffBudgetFixtures(
+      0,
+      "pkg/**/*.go",
+      "pkg/core/**",
+      3,
+    );
+    const parsedFail = JSON.parse(syn.failJson) as {
+      "changed-files"?: string[];
+    }[];
+    const failFiles = parsedFail[0]?.["changed-files"] ?? [];
+    expect(failFiles.length).toBe(4);
+    expect(failFiles.some((p) => p.startsWith("pkg/core/"))).toBe(false);
+    expect(failFiles.every((p) => matchesGlobPattern("pkg/**/*.go", p))).toBe(
+      true,
+    );
+    const maxFilesEval = evaluateFixturesClientSide({
+      id: "custom:pkg-files-budget",
+      engine: "diff-budget",
+      paths: ["pkg/**/*.go"],
+      exclude: ["pkg/core/**"],
+      maxChangedLines: 0,
+      maxFiles: 3,
+      failJson: syn.failJson,
+      passJson: syn.passJson,
+    });
+    expect(maxFilesEval.passed).toBe(true);
+
+    // 3. diff-budget with both maxChangedLines: 0 and maxFiles: 0 must fail failTrapOk (never false green)
+    const zeroBudgetEval = evaluateFixturesClientSide({
+      id: "custom:zero-budget",
+      engine: "diff-budget",
+      paths: ["pkg/**/*.go"],
+      maxChangedLines: 0,
+      maxFiles: 0,
+      failJson: JSON.stringify([
+        {
+          name: "would fail if budget set",
+          "changed-files": ["pkg/a.go", "pkg/b.go"],
+          "added-lines": ["+line1", "+line2"],
+        },
+      ]),
+      passJson: JSON.stringify([
+        {
+          name: "small diff",
+          "changed-files": ["pkg/a.go"],
+          "added-lines": ["+line1"],
+        },
+      ]),
+    });
+    expect(zeroBudgetEval.failTrapOk).toBe(false);
+    expect(zeroBudgetEval.passed).toBe(false);
+
+    // Out-of-scope changed-files must not falsely trigger line-budget findings
+    const outOfScopeLinesEval = evaluateFixturesClientSide({
+      id: "custom:pkg-lines-budget",
+      engine: "diff-budget",
+      paths: ["pkg/**/*.go"],
+      maxChangedLines: 2,
+      maxFiles: 0,
+      failJson: JSON.stringify([
+        {
+          name: "out-of-scope docs file with 5 lines",
+          "changed-files": ["docs/notes.md"],
+          "added-lines": ["1", "2", "3", "4", "5"],
+        },
+      ]),
+      passJson: JSON.stringify([
+        {
+          name: "in-scope small diff",
+          "changed-files": ["pkg/a.go"],
+          "added-lines": ["1"],
+        },
+      ]),
+    });
+    expect(outOfScopeLinesEval.failTrapOk).toBe(false);
+    expect(outOfScopeLinesEval.passed).toBe(false);
   });
 });

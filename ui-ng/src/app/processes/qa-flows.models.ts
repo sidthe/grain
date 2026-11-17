@@ -947,10 +947,9 @@ export function buildClientWorkflowStagesView(
       stageId: "s1-context",
       enabled: Boolean(ctxDecl.enabled),
       mode: ctxDecl.enabled ? "active" : "off",
-      scope:
-        ctxExtraPaths !== undefined
-          ? ctxExtraPaths.join(", ") || "callers & memory"
-          : "design/design/**, docs/**",
+      scope: ctxExtraPaths?.length
+        ? ctxExtraPaths.join(", ")
+        : "callers & memory",
       summary: `Discovers sibling callers and repository memory (up to ${ctxMaxTokens} tokens).`,
     },
   ];
@@ -1306,9 +1305,9 @@ export function matchesGlobPattern(glob: string, target: string): boolean {
     "^" +
     g
       .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-      .replace(/\*\*\//g, "(?:.+/)?")
-      .replace(/\*\*/g, ".*")
-      .replace(/\*/g, "[^/]*") +
+      .replace(/\*\*\/|\*\*|\*/g, (tok) =>
+        tok === "**/" ? "(?:.+/)?" : tok === "**" ? ".*" : "[^/]*",
+      ) +
     "$";
   try {
     return new RegExp(reStr).test(t);
@@ -1562,18 +1561,19 @@ export function evaluateFixturesClientSide(check: {
       }
     } else if (check.engine === "diff-budget") {
       if ((check.maxChangedLines ?? 0) > 0 || (check.maxFiles ?? 0) > 0) {
-        const overLines =
-          (check.maxChangedLines ?? 0) > 0 &&
-          lines.length > (check.maxChangedLines ?? 0);
         const scopedFiles = files.filter((f) =>
           matchesFixturePathScope(f, check.paths, check.exclude),
         );
+        const overLines =
+          (files.length === 0 || scopedFiles.length > 0) &&
+          (check.maxChangedLines ?? 0) > 0 &&
+          lines.length > (check.maxChangedLines ?? 0);
         const overFiles =
           (check.maxFiles ?? 0) > 0 &&
           scopedFiles.length > (check.maxFiles ?? 0);
         triggered = overLines || overFiles;
       } else {
-        triggered = expectFinding;
+        triggered = false;
       }
     } else if (check.engine === "jsonschema") {
       if (!check.schemaJson) {

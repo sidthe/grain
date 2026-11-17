@@ -1297,11 +1297,7 @@ export class QaV3StudioComponent {
       );
       const rawExtra =
         effectiveV4.context.extraPaths ?? effectiveV4.context["extra-paths"];
-      this.contextExtraPaths.set(
-        Array.isArray(rawExtra)
-          ? [...rawExtra]
-          : ["design/design/**", "docs/**"],
-      );
+      this.contextExtraPaths.set(Array.isArray(rawExtra) ? [...rawExtra] : []);
     } else {
       this.contextEnabled.set(isV4);
       this.contextIncludeCallers.set(true);
