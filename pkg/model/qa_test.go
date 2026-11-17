@@ -56,7 +56,6 @@ func TestQAConfigDefaultsAndValidation(t *testing.T) {
 	wantIDs := []string{
 		model.QAFlowGoldenV1Minimal,
 		model.QAFlowEngineeringWorkflowV4,
-		model.QAFlowGoldenV3Enforced,
 		model.QAFlowGoldenV3,
 		model.QAFlowGoldenV2,
 		model.QAFlowDeterministicS3Only,
@@ -70,8 +69,6 @@ func TestQAConfigDefaultsAndValidation(t *testing.T) {
 		model.QAFlowGoldenV1Minimal + "@1",
 		model.QAFlowEngineeringWorkflowV4,
 		model.QAFlowEngineeringWorkflowV4 + "@1",
-		model.QAFlowGoldenV3Enforced,
-		model.QAFlowGoldenV3Enforced + "@1",
 		model.QAFlowGoldenV3,
 		model.QAFlowGoldenV3 + "@1",
 		model.QAFlowGoldenV2,
@@ -81,7 +78,9 @@ func TestQAConfigDefaultsAndValidation(t *testing.T) {
 		model.QAFlowGoldenV2SkillOnly,
 		model.QAFlowGoldenV2SkillOnly + "@1",
 		model.QAFlowDeterministicS3Only,
+		model.QAFlowDeterministicS3Only + "@1",
 		model.QAFlowRepoCustom,
+		model.QAFlowRepoCustom + "@1",
 	} {
 		if !model.ValidQAFlowID(validID) {
 			t.Errorf("ValidQAFlowID(%q) = false, want true", validID)
@@ -91,7 +90,7 @@ func TestQAConfigDefaultsAndValidation(t *testing.T) {
 			t.Errorf("NormalizeQAConfig(%q) = (%+v, %v), want FlowID=%q", validID, norm, err, validID)
 		}
 	}
-	for _, invalidID := range []string{"", "nonexistent-flow", "golden-v3@2", "golden-v3@1@1"} {
+	for _, invalidID := range []string{"", "nonexistent-flow", model.QAFlowGoldenV3Enforced, "golden-v3@2", "golden-v3@1@1"} {
 		if model.ValidQAFlowID(invalidID) {
 			t.Errorf("ValidQAFlowID(%q) = true, want false", invalidID)
 		}

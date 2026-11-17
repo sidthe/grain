@@ -131,7 +131,6 @@ func QAFlowIDs() []string {
 	return []string{
 		QAFlowGoldenV1Minimal,
 		QAFlowEngineeringWorkflowV4,
-		QAFlowGoldenV3Enforced,
 		QAFlowGoldenV3,
 		QAFlowGoldenV2,
 		QAFlowDeterministicS3Only,

@@ -118,6 +118,42 @@ func TestQASettingsAcceptV4VersionedAndStoredCustomFlowsAndRejectRetired(t *test
 		t.Fatal(err)
 	}
 
+	enable := true
+	fresh, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings fresh: %v", err)
+	}
+	if slices.Contains(fresh.QAFlowIDs, model.QAFlowGoldenV3Enforced) {
+		t.Fatalf("fresh QAFlowIDs must not advertise unseeded %q: %v", model.QAFlowGoldenV3Enforced, fresh.QAFlowIDs)
+	}
+	unseededEnforced := model.QAFlowGoldenV3Enforced
+	if _, err := c.PlanSettings(ctx, ui.UpdateSettingsRequest{QAFlowID: &unseededEnforced}); err == nil || !strings.Contains(err.Error(), "flowId") {
+		t.Fatalf("PlanSettings(%q) on fresh store expected flowId error, got %v", unseededEnforced, err)
+	}
+	for _, freshFlow := range append(
+		slices.Clone(fresh.QAFlowIDs),
+		model.QAFlowDeterministicS3Only+"@1",
+		model.QAFlowRepoCustom+"@1",
+	) {
+		flow := freshFlow
+		t.Run("fresh_accept_"+flow, func(t *testing.T) {
+			planned, err := c.PlanSettings(ctx, ui.UpdateSettingsRequest{
+				QAEnabled: &enable,
+				QAFlowID:  &flow,
+			})
+			if err != nil || planned.QAFlowID != flow {
+				t.Fatalf("PlanSettings(%q) on fresh store = (%q, %v)", flow, planned.QAFlowID, err)
+			}
+			saved, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{
+				QAEnabled: &enable,
+				QAFlowID:  &flow,
+			})
+			if err != nil || saved.QAFlowID != flow {
+				t.Fatalf("UpdateSettings(%q) on fresh store = (%q, %v)", flow, saved.QAFlowID, err)
+			}
+		})
+	}
+
 	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
 	spec, _, err := resolve.LookupFlowSpec(ctx, st, model.DefaultQAFlowID)
 	if err != nil || spec == nil {
@@ -168,12 +204,27 @@ func TestQASettingsAcceptV4VersionedAndStoredCustomFlowsAndRejectRetired(t *test
 		t.Fatalf("InsertQAFlowVersion retired: %v", err)
 	}
 
+	if err := st.InsertQAFlowVersion(ctx, model.QAFlowVersion{
+		Hash:      "sha256:golden-v3-enforced-v1",
+		Key:       model.QAFlowGoldenV3Enforced,
+		Version:   1,
+		Label:     "Golden v3 Enforced",
+		SpecJSON:  string(specBytes),
+		CreatedAt: now,
+		CreatedBy: "operator",
+	}); err != nil {
+		t.Fatalf("InsertQAFlowVersion golden-v3-enforced: %v", err)
+	}
+
 	cur, err := c.GetSettings(ctx)
 	if err != nil {
 		t.Fatalf("GetSettings: %v", err)
 	}
 	if cur.QAFlowIDs[0] != model.QAFlowGoldenV1Minimal {
 		t.Fatalf("QAFlowIDs[0] = %q, want %q", cur.QAFlowIDs[0], model.QAFlowGoldenV1Minimal)
+	}
+	if !slices.Contains(cur.QAFlowIDs, model.QAFlowGoldenV3Enforced) {
+		t.Fatalf("expected seeded %q in QAFlowIDs, got %v", model.QAFlowGoldenV3Enforced, cur.QAFlowIDs)
 	}
 	customCount := 0
 	for _, id := range cur.QAFlowIDs {
@@ -191,9 +242,9 @@ func TestQASettingsAcceptV4VersionedAndStoredCustomFlowsAndRejectRetired(t *test
 		t.Fatalf("expected %q in QAFlowIDs, got %v", model.QAFlowEngineeringWorkflowV4, cur.QAFlowIDs)
 	}
 
-	enable := true
 	for _, validFlow := range []string{
 		model.QAFlowEngineeringWorkflowV4,
+		model.QAFlowGoldenV3Enforced,
 		model.QAFlowGoldenV3 + "@1",
 		"custom-team-flow",
 		"custom-team-flow@1",

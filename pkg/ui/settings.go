@@ -2776,6 +2776,9 @@ func (c *Client) validQAFlowID(ctx context.Context, flow string) bool {
 		return model.ValidQAFlowID(trimmed)
 	}
 	spec, hash, err := resolve.LookupFlowSpec(ctx, c.Store, trimmed)
+	if err == nil && spec == nil && strings.HasSuffix(trimmed, "@1") && model.ValidQAFlowID(trimmed) {
+		spec, hash, err = resolve.LookupFlowSpec(ctx, c.Store, strings.TrimSuffix(trimmed, "@1"))
+	}
 	if err != nil || spec == nil {
 		return false
 	}
