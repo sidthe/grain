@@ -227,16 +227,27 @@ func TestQASettingsAcceptV4VersionedAndStoredCustomFlowsAndRejectRetired(t *test
 		})
 	}
 
-	// Retire custom-team-flow@2 and verify custom-team-flow@2 is now rejected while @1 remains valid,
-	// and nonexistent-flow + retired-custom-flow are rejected.
+	// Retire custom-team-flow@2 and verify bare custom-team-flow and custom-team-flow@2 are rejected
+	// while custom-team-flow@1 appears in QAFlowIDs and remains valid.
 	if err := st.RetireQAFlowVersion(ctx, "sha256:custom-team-flow-v2", now.Add(3*time.Minute)); err != nil {
 		t.Fatalf("RetireQAFlowVersion: %v", err)
+	}
+	afterV2Retire, err := c.GetSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSettings after retiring v2: %v", err)
+	}
+	if slices.Contains(afterV2Retire.QAFlowIDs, "custom-team-flow") {
+		t.Fatalf("bare custom-team-flow must not appear in QAFlowIDs after head @2 is retired: %v", afterV2Retire.QAFlowIDs)
+	}
+	if !slices.Contains(afterV2Retire.QAFlowIDs, "custom-team-flow@1") {
+		t.Fatalf("expected active custom-team-flow@1 in QAFlowIDs after head @2 is retired, got %v", afterV2Retire.QAFlowIDs)
 	}
 	for _, badFlow := range []string{
 		"nonexistent-flow",
 		"retired-custom-flow",
 		"retired-custom-flow@1",
 		"sha256:retired-custom-flow-v1",
+		"custom-team-flow",
 		"custom-team-flow@2",
 	} {
 		flow := badFlow
@@ -254,6 +265,13 @@ func TestQASettingsAcceptV4VersionedAndStoredCustomFlowsAndRejectRetired(t *test
 	// kill-switch safety and ramp/epoch guards.
 	activeFlow := "custom-team-flow@1"
 	rollout10 := 10
+	if plannedActive, err := c.PlanSettings(ctx, ui.UpdateSettingsRequest{
+		QAEnabled:    &enable,
+		QAFlowID:     &activeFlow,
+		QARolloutPct: &rollout10,
+	}); err != nil || plannedActive.QAFlowID != activeFlow {
+		t.Fatalf("PlanSettings(%q) after retiring v2 = (%+v, %v)", activeFlow, plannedActive, err)
+	}
 	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{
 		QAEnabled:    &enable,
 		QAFlowID:     &activeFlow,

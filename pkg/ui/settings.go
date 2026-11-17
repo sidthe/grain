@@ -17,6 +17,7 @@ package ui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -2746,13 +2747,22 @@ func (c *Client) qaFlowIDs(ctx context.Context) []string {
 	for _, id := range ids {
 		seen[id] = true
 	}
+	headRetired := make(map[string]bool)
 	for _, fv := range versions {
 		key := strings.TrimSpace(fv.Key)
-		if key == "" || fv.RetiredAt != nil || seen[key] {
+		if key == "" || seen[key] {
+			continue
+		}
+		if fv.RetiredAt != nil {
+			headRetired[key] = true
 			continue
 		}
 		seen[key] = true
-		ids = append(ids, key)
+		if headRetired[key] && !model.ValidQAFlowID(key) {
+			ids = append(ids, fmt.Sprintf("%s@%d", key, fv.Version))
+		} else {
+			ids = append(ids, key)
+		}
 	}
 	return ids
 }
@@ -2762,35 +2772,19 @@ func (c *Client) validQAFlowID(ctx context.Context, flow string) bool {
 	if trimmed == "" {
 		return false
 	}
-	if model.ValidQAFlowID(trimmed) {
-		return true
+	if c.Store == nil {
+		return model.ValidQAFlowID(trimmed)
 	}
-	if c.Store == nil || !hasActiveStoredQAFlowVersion(ctx, c.Store, trimmed) {
+	spec, hash, err := resolve.LookupFlowSpec(ctx, c.Store, trimmed)
+	if err != nil || spec == nil {
 		return false
 	}
-	spec, _, err := resolve.LookupFlowSpec(ctx, c.Store, trimmed)
-	return err == nil && spec != nil
-}
-
-func hasActiveStoredQAFlowVersion(ctx context.Context, store *model.Store, ref string) bool {
-	if before, after, hasAt := strings.Cut(ref, "@"); hasAt {
-		vNum, err := strconv.Atoi(after)
-		if err != nil || vNum <= 0 {
-			return false
+	if hash != "" {
+		if fv, gErr := c.Store.GetQAFlowVersion(ctx, hash); gErr == nil {
+			return fv.RetiredAt == nil
 		}
-		fv, err := store.GetQAFlowVersionByKeyVersion(ctx, before, vNum)
-		return err == nil && fv.RetiredAt == nil
 	}
-	if fv, err := store.GetQAFlowVersion(ctx, ref); err == nil {
-		return fv.RetiredAt == nil
-	}
-	list, err := store.ListQAFlowVersions(ctx, ref, 500)
-	if err != nil || len(list) == 0 {
-		return false
-	}
-	return slices.ContainsFunc(list, func(v model.QAFlowVersion) bool {
-		return v.RetiredAt == nil
-	})
+	return model.ValidQAFlowID(trimmed)
 }
 
 func (c *Client) PlanSettings(ctx context.Context, req UpdateSettingsRequest) (Settings, error) {
