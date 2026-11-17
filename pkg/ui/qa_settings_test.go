@@ -16,6 +16,7 @@ package ui_test
 
 import (
 	"encoding/json"
+	"net/http"
 	"reflect"
 	"slices"
 	"strings"
@@ -249,28 +250,73 @@ func TestQASettingsAcceptV4VersionedAndStoredCustomFlowsAndRejectRetired(t *test
 		})
 	}
 
-	// Kill-switch safety: when the currently active custom flow (custom-team-flow@1) is retired,
-	// partial updates omitting QAFlowID (such as disabling QA or lowering rollout) succeed,
-	// while re-enabling QA without selecting an active QAFlowID is rejected.
+	// Enable custom-team-flow@1 at 10% rollout while it is still active, then retire it to exercise
+	// kill-switch safety and ramp/epoch guards.
+	activeFlow := "custom-team-flow@1"
+	rollout10 := 10
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{
+		QAEnabled:    &enable,
+		QAFlowID:     &activeFlow,
+		QARolloutPct: &rollout10,
+	}); err != nil {
+		t.Fatalf("UpdateSettings enable custom-team-flow@1 at 10%%: %v", err)
+	}
 	if err := st.RetireQAFlowVersion(ctx, "sha256:custom-team-flow-v1", now.Add(4*time.Minute)); err != nil {
 		t.Fatalf("RetireQAFlowVersion v1: %v", err)
 	}
-	rollout10 := 10
-	lowered, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{QARolloutPct: &rollout10})
-	if err != nil {
-		t.Fatalf("UpdateSettings lower rollout with retired active flow: %v", err)
+
+	srv := ui.NewServerWithClient(c)
+
+	// Partial PUT /api/settings attempting to ramp rollout or bump epoch on an enabled retired flow
+	// must fail with 400 validation error.
+	rollout100 := 100
+	if _, err := c.PlanSettings(ctx, ui.UpdateSettingsRequest{QARolloutPct: &rollout100}); err == nil || !strings.Contains(err.Error(), "flowId") {
+		t.Fatalf("PlanSettings ramp rollout on retired flow expected flowId error, got %v", err)
 	}
-	if !lowered.QAEnabled || lowered.QARolloutPct != 10 || lowered.QAFlowID != "custom-team-flow@1" {
+	recRamp := do(t, srv, http.MethodPut, "/api/settings", `{"qaRolloutPct":100}`)
+	if recRamp.Code != http.StatusBadRequest || !strings.Contains(recRamp.Body.String(), "flowId") {
+		t.Fatalf("PUT /api/settings ramp rollout on retired flow = %d (%s), want 400 flowId error",
+			recRamp.Code, recRamp.Body.String())
+	}
+
+	epoch2 := 2
+	if _, err := c.PlanSettings(ctx, ui.UpdateSettingsRequest{QAEpoch: &epoch2}); err == nil || !strings.Contains(err.Error(), "flowId") {
+		t.Fatalf("PlanSettings bump epoch on retired flow expected flowId error, got %v", err)
+	}
+	recEpoch := do(t, srv, http.MethodPut, "/api/settings", `{"qaEpoch":2}`)
+	if recEpoch.Code != http.StatusBadRequest || !strings.Contains(recEpoch.Body.String(), "flowId") {
+		t.Fatalf("PUT /api/settings bump epoch on retired flow = %d (%s), want 400 flowId error",
+			recEpoch.Code, recEpoch.Body.String())
+	}
+
+	// Lowering rollout to 0% on the enabled-at-10% retired flow succeeds.
+	recLower := do(t, srv, http.MethodPut, "/api/settings", `{"qaRolloutPct":0}`)
+	if recLower.Code != http.StatusOK {
+		t.Fatalf("PUT /api/settings lower rollout on retired flow = %d (%s), want 200",
+			recLower.Code, recLower.Body.String())
+	}
+	lowered := decode[ui.Settings](t, recLower)
+	if !lowered.QAEnabled || lowered.QARolloutPct != 0 || lowered.QAFlowID != activeFlow {
 		t.Fatalf("unexpected lowered settings: enabled=%v rollout=%d flow=%q",
 			lowered.QAEnabled, lowered.QARolloutPct, lowered.QAFlowID)
 	}
 
+	// Full-form PUT /api/settings turning QA off while echoing the unchanged retired qaFlowId succeeds.
 	disable := false
-	disabled, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{QAEnabled: &disable})
-	if err != nil {
-		t.Fatalf("UpdateSettings disable QA with retired active flow: %v", err)
+	if plannedOff, err := c.PlanSettings(ctx, ui.UpdateSettingsRequest{
+		QAEnabled: &disable,
+		QAFlowID:  &activeFlow,
+	}); err != nil || plannedOff.QAEnabled || plannedOff.QAFlowID != activeFlow {
+		t.Fatalf("PlanSettings full-form disable with retired flow = (%+v, %v)", plannedOff, err)
 	}
-	if disabled.QAEnabled || disabled.QAFlowID != "custom-team-flow@1" {
+	recOff := do(t, srv, http.MethodPut, "/api/settings",
+		`{"qaEnabled":false,"qaFlowId":"custom-team-flow@1","qaRolloutPct":0,"qaShadowOnControl":true}`)
+	if recOff.Code != http.StatusOK {
+		t.Fatalf("PUT /api/settings full-form disable with unchanged retired flow = %d (%s), want 200",
+			recOff.Code, recOff.Body.String())
+	}
+	disabled := decode[ui.Settings](t, recOff)
+	if disabled.QAEnabled || disabled.QAFlowID != activeFlow {
 		t.Fatalf("expected QA disabled with preserved flowId, got enabled=%v flow=%q",
 			disabled.QAEnabled, disabled.QAFlowID)
 	}

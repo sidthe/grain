@@ -35,7 +35,6 @@ import {
   viewChild,
 } from "@angular/core";
 import { Router, RouterLink } from "@angular/router";
-import type { RouteKey } from "../api/generated-routes";
 import { GrainApi } from "../api/grain-api.service";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
@@ -65,6 +64,7 @@ import {
   type DeclarationAcceptanceView,
   type DeclaredTrigger,
   type DerivedRuns,
+  type PathTriggerView,
   type ProcessSort,
   type ProcessTab,
   type Recurrence,
@@ -196,27 +196,143 @@ function triggerName(path: string): string {
   return path.replace(/^\.grain\/triggers\//, "");
 }
 
-function repoYamlFallback(
-  repo: string,
-  filePath: string,
-  err: unknown,
-): string {
-  const msg = errorText(err);
-  if (
-    msg.includes("no such API endpoint") ||
-    (typeof err === "object" &&
-      err !== null &&
-      "status" in err &&
-      (err as { status?: unknown }).status === 404)
-  ) {
-    return `# Declared in ${repo} at ${filePath}\n# Open repository settings or inspect ${filePath} in git to edit this declaration.`;
-  }
-  return msg;
-}
-
 function templateFileStem(path: string): string {
   const base = path.split("/").pop() ?? path;
   return base.replace(/\.ya?ml$/i, "");
+}
+
+function synthesizeTriggerYaml(
+  repo: string,
+  filePath: string,
+  detail: PathTriggerView | undefined,
+  templates: readonly Template[],
+): string {
+  const lines = [`# ${repo}:${filePath}`];
+  if (!detail) {
+    lines.push("# Synced path trigger declaration.");
+    return lines.join("\n");
+  }
+  if (detail.on) lines.push(`on: ${detail.on}`);
+  if (detail.branches?.length) {
+    lines.push(
+      `branches: [${detail.branches.map((b) => JSON.stringify(b)).join(", ")}]`,
+    );
+  }
+  if (detail.paths?.length) {
+    lines.push(
+      `paths: [${detail.paths.map((p) => JSON.stringify(p)).join(", ")}]`,
+    );
+  }
+  if (detail.ignore?.length) {
+    lines.push(
+      `ignore: [${detail.ignore.map((p) => JSON.stringify(p)).join(", ")}]`,
+    );
+  }
+  if (detail.template) {
+    const declTmpl = templates.find(
+      (t) => t.id === detail.template && t.declaredIn?.repo === repo,
+    );
+    const tmplRef = declTmpl?.declaredIn?.path
+      ? templateFileStem(declTmpl.declaredIn.path)
+      : detail.template;
+    lines.push(`template: ${tmplRef}`);
+  }
+  if (detail.per) lines.push(`per: ${detail.per}`);
+  lines.push(`gate: ${detail.gate ? "true" : "false"}`);
+  if (detail.human) lines.push(`human: ${detail.human}`);
+  if (detail.auto_approve) lines.push("auto-approve: true");
+  if (detail.sensitive) lines.push("sensitive: true");
+  if (detail.approvers?.length) {
+    lines.push(
+      `approvers: [${detail.approvers.map((a) => JSON.stringify(a)).join(", ")}]`,
+    );
+  }
+  if (detail.fixes) lines.push("fixes: true");
+  return lines.join("\n");
+}
+
+function synthesizeDeclaredTemplateYaml(
+  repo: string,
+  filePath: string,
+  t: Template,
+): string {
+  const lines = [`# ${repo}:${filePath}`];
+  if (t.name) lines.push(`name: ${t.name}`);
+  if (t.title) lines.push(`title: ${t.title}`);
+  if (t.fields?.length) {
+    lines.push("fields:");
+    for (const f of t.fields) {
+      lines.push(`  - name: ${f.name}`);
+      if (f.label) lines.push(`    label: ${JSON.stringify(f.label)}`);
+      if (f.required) lines.push("    required: true");
+      if (f.default) lines.push(`    default: ${JSON.stringify(f.default)}`);
+    }
+  }
+  if (t.description) {
+    lines.push("prompt: |");
+    for (const pl of t.description.split(/\r?\n/)) {
+      lines.push(`  ${pl}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+const UPPER_QA_TOKENS = new Set(["qa", "pr", "ci", "llm", "ui", "api", "id"]);
+
+function humanizeQaFlowKey(key: string): string {
+  return key
+    .split(/[-_\s]+/)
+    .filter(Boolean)
+    .map((word) => {
+      const lower = word.toLowerCase();
+      if (/^v\d+[a-z0-9]*$/i.test(word) || /^s\d+$/i.test(word)) {
+        return word.toUpperCase();
+      }
+      if (UPPER_QA_TOKENS.has(lower)) {
+        return lower.toUpperCase();
+      }
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    })
+    .join(" ");
+}
+
+function formatQaFlowLabel(key: string, rawLabel?: string): string {
+  const trimmed = (rawLabel ?? "").trim();
+  if (!trimmed || trimmed === key) {
+    return humanizeQaFlowKey(key);
+  }
+  const parenIdx = trimmed.indexOf(" (");
+  const head = (parenIdx >= 0 ? trimmed.slice(0, parenIdx) : trimmed).trim();
+  if (
+    head === key ||
+    head === head.toLowerCase() ||
+    head.toLowerCase().replace(/[\s_]+/g, "-") === key.toLowerCase()
+  ) {
+    return humanizeQaFlowKey(head);
+  }
+  return trimmed;
+}
+
+function formatQaFlowHint(ref: string): string {
+  const atIdx = ref.indexOf("@");
+  if (atIdx < 0) return ref;
+  const key = ref.slice(0, atIdx);
+  const ver = ref.slice(atIdx + 1).replace(/^v/i, "") || "1";
+  return `${key}@v${ver}`;
+}
+
+function isBenchmarkQaFlow(key: string, rawLabel?: string): boolean {
+  const k = key.toLowerCase();
+  const l = (rawLabel ?? "").toLowerCase();
+  return (
+    k === "deterministic-s3-only" ||
+    k.endsWith("-skill-only") ||
+    k.endsWith("-checks-only") ||
+    k.includes("-ablation") ||
+    k.startsWith("bench-") ||
+    l.includes("ablation") ||
+    l.includes("benchmark")
+  );
 }
 
 interface ParsedTriggerYaml {
@@ -263,8 +379,8 @@ function parseTriggerYaml(raw: string): ParsedTriggerYaml {
       }
       continue;
     }
+    listKey = null;
     if (!/^\s/.test(line)) {
-      listKey = null;
       const kv = /^["']?([a-zA-Z0-9_-]+)["']?\s*:\s*(.*)$/.exec(line);
       if (!kv) continue;
       const key = kv[1].toLowerCase();
@@ -459,6 +575,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
               [attr.aria-current]="activeTab() === t.id ? 'page' : null"
               [attr.data-testid]="'proc-tab-' + t.id"
               [gTip]="t.tip"
+              (click)="onTabClick($event, t.id)"
             >
               {{ t.label }}
               <span
@@ -593,6 +710,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                                   class="proc-drag-grip"
                                   aria-hidden="true"
                                   data-testid="proc-drag-grip"
+                                  [gTip]="'Drag or press Alt+Up/Down to reorder'"
                                 >
                                   <svg
                                     width="14"
@@ -674,6 +792,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                                   class="proc-drag-grip"
                                   aria-hidden="true"
                                   data-testid="proc-drag-grip"
+                                  [gTip]="'Drag or press Alt+Up/Down to reorder'"
                                 >
                                   <svg
                                     width="14"
@@ -807,6 +926,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                                 class="proc-drag-grip"
                                 aria-hidden="true"
                                 data-testid="proc-drag-grip"
+                                [gTip]="'Drag or press Alt+Up/Down to reorder'"
                               >
                                 <svg
                                   width="14"
@@ -975,6 +1095,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                                   class="proc-drag-grip"
                                   aria-hidden="true"
                                   data-testid="proc-drag-grip"
+                                  [gTip]="'Drag or press Alt+Up/Down to reorder'"
                                 >
                                   <svg
                                     width="14"
@@ -1618,7 +1739,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                             Declared trigger YAML
                           </h3>
                           <pre
-                            class="comp-body-well"
+                            class="comp-body-well s-mono"
                             data-testid="trigger-yaml-preview"
                             [textContent]="triggerYamlDisplay()"
                           ></pre>
@@ -2276,19 +2397,21 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                               class="btn-text"
                               data-testid="decl-inline-yaml-toggle"
                               [attr.data-file-path]="item.path"
-                              [attr.aria-expanded]="isInlineYamlOpen(item.path)"
+                              [attr.aria-expanded]="
+                                isInlineYamlOpen(repo, item.path)
+                              "
                               (click)="toggleInlineYaml(repo, item.path)"
                             >
                               {{
-                                isInlineYamlOpen(item.path)
+                                isInlineYamlOpen(repo, item.path)
                                   ? "Hide YAML"
                                   : "View YAML"
                               }}
                             </button>
                           </div>
-                          @if (isInlineYamlOpen(item.path)) {
+                          @if (isInlineYamlOpen(repo, item.path)) {
                             <pre
-                              class="comp-body-well"
+                              class="comp-body-well s-mono"
                               data-testid="decl-inline-yaml"
                               [textContent]="inlineYamlDisplay()"
                             ></pre>
@@ -2353,14 +2476,14 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                                   data-testid="decl-inline-yaml-toggle"
                                   [attr.data-file-path]="wf.path"
                                   [attr.aria-expanded]="
-                                    isInlineYamlOpen(wf.path)
+                                    isInlineYamlOpen(repo, wf.path)
                                   "
                                   (click)="
                                     toggleInlineYaml(repo, wf.path, wf.text)
                                   "
                                 >
                                   {{
-                                    isInlineYamlOpen(wf.path)
+                                    isInlineYamlOpen(repo, wf.path)
                                       ? "Hide YAML"
                                       : "View YAML"
                                   }}
@@ -2384,9 +2507,9 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                                 </button>
                               </div>
                             </div>
-                            @if (isInlineYamlOpen(wf.path)) {
+                            @if (isInlineYamlOpen(repo, wf.path)) {
                               <pre
-                                class="comp-body-well"
+                                class="comp-body-well s-mono"
                                 data-testid="decl-inline-yaml"
                                 [textContent]="inlineYamlDisplay()"
                               ></pre>
@@ -3608,6 +3731,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   private readonly doc = inject(DOCUMENT);
   private readonly zone = inject(NgZone);
   private readonly injector = inject(Injector);
+  private readonly hostEl = inject<ElementRef<HTMLElement>>(ElementRef);
 
   private readonly onCaptureKeydown = (ev: KeyboardEvent): void => {
     if (ev.key === "Escape" && this.openPicker()) {
@@ -3642,22 +3766,62 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
 
   protected readonly selectedScheduleId = signal<string | null>(null);
   protected readonly selectedTrigger = signal<DeclaredTrigger | null>(null);
+  protected readonly liveSelectedTrigger = computed<DeclaredTrigger | null>(
+    () => {
+      const sel = this.selectedTrigger();
+      if (!sel) return null;
+      return (
+        this.store
+          .triggers()
+          .find((t) => t.repo === sel.repo && t.path === sel.path) ?? sel
+      );
+    },
+  );
   protected readonly selectedTriggerKey = computed(() => {
     const tr = this.selectedTrigger();
     return tr ? `trigger:${tr.repo}:${tr.path}` : null;
   });
   protected readonly triggerYamlText = signal("");
   protected readonly triggerYamlLoading = signal(false);
-  protected readonly triggerYamlDisplay = computed(() =>
-    this.triggerYamlLoading()
-      ? "Loading YAML…"
-      : this.triggerYamlText() || "No YAML content available.",
-  );
-  protected readonly parsedSelectedTrigger = computed(() =>
-    parseTriggerYaml(this.triggerYamlText()),
-  );
+  protected readonly triggerYamlDisplay = computed(() => {
+    const tr = this.liveSelectedTrigger();
+    if (!tr) return "No YAML content available.";
+    if (tr.detail) {
+      return synthesizeTriggerYaml(
+        tr.repo,
+        tr.path,
+        tr.detail,
+        this.store.templates(),
+      );
+    }
+    if (this.triggerYamlLoading() || this.store.repoLoading() === tr.repo) {
+      return "Loading YAML…";
+    }
+    const raw = this.triggerYamlText();
+    if (raw) return raw;
+    return synthesizeTriggerYaml(
+      tr.repo,
+      tr.path,
+      undefined,
+      this.store.templates(),
+    );
+  });
+  protected readonly parsedSelectedTrigger = computed<ParsedTriggerYaml>(() => {
+    const tr = this.liveSelectedTrigger();
+    if (tr?.detail) {
+      return {
+        on: tr.detail.on || "",
+        paths: tr.detail.paths ?? [],
+        gate: tr.detail.gate ? "true" : "false",
+        template: tr.detail.template || "",
+      };
+    }
+    const raw = this.triggerYamlText();
+    if (raw) return parseTriggerYaml(raw);
+    return { on: "", paths: [], gate: "", template: "" };
+  });
   protected readonly matchedTriggerTemplate = computed<Template | null>(() => {
-    const tr = this.selectedTrigger();
+    const tr = this.liveSelectedTrigger();
     const ref = this.parsedSelectedTrigger().template.trim();
     if (!tr || !ref) return null;
     const list = this.store.templates();
@@ -3680,7 +3844,8 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly selectedSuiteId = signal<string | null>(null);
   protected readonly selectedSuiteRunId = signal<number | null>(null);
   protected readonly selectedDeclRepo = signal<string | null>(null);
-  protected readonly inlineYamlPath = signal<string | null>(null);
+  protected readonly inlineYamlKey = signal<string | null>(null);
+  private inlineYamlSeq = 0;
   protected readonly inlineYamlText = signal<string>("");
   protected readonly inlineYamlLoading = signal(false);
   protected readonly inlineYamlDisplay = computed(() =>
@@ -3765,21 +3930,42 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly stDraftQaFlowRef = signal("");
   protected readonly draftSuiteComposition = signal<Composition | null>(null);
 
-  protected readonly loadedQaFlowRefs = signal<string[]>([]);
+  private requestedQaFlowVersions = false;
+  protected readonly qaFlowVersionsLoaded = signal(false);
+  protected readonly loadedQaFlowVersions = signal<
+    {
+      ref: string;
+      key: string;
+      version: number;
+      label: string;
+      benchmark: boolean;
+    }[]
+  >([]);
   protected readonly qaFlowOptions = computed<PillOption[]>(() => {
     const opts: PillOption[] = [{ value: "", label: "Deployment default" }];
     const seen = new Set<string>([""]);
-    const addRef = (raw: string | undefined): void => {
+    const addOption = (
+      raw: string | undefined,
+      explicitLabel?: string,
+    ): void => {
       const ref = (raw ?? "").trim();
       if (!ref || seen.has(ref)) return;
       seen.add(ref);
-      opts.push({ value: ref, label: ref });
+      const atIdx = ref.indexOf("@");
+      const key = atIdx >= 0 ? ref.slice(0, atIdx) : ref;
+      opts.push({
+        value: ref,
+        label: formatQaFlowLabel(key, explicitLabel),
+        hint: formatQaFlowHint(ref),
+      });
     };
-    for (const ref of this.loadedQaFlowRefs()) addRef(ref);
-    for (const ref of DEFAULT_QA_FLOW_REFS) addRef(ref);
-    addRef(this.sDraftQaFlowRef());
-    addRef(this.tDraftQaFlowRef());
-    addRef(this.stDraftQaFlowRef());
+    for (const v of this.loadedQaFlowVersions()) {
+      addOption(v.ref, v.label);
+    }
+    for (const ref of DEFAULT_QA_FLOW_REFS) addOption(ref);
+    addOption(this.sDraftQaFlowRef());
+    addOption(this.tDraftQaFlowRef());
+    addOption(this.stDraftQaFlowRef());
     return opts;
   });
 
@@ -4307,6 +4493,35 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
         });
       });
     });
+
+    // Load active QA flow versions once the store is loaded and the caller
+    // holds qa:read (GET /api/qa/flow-versions).
+    effect(() => {
+      const loaded = this.store.loaded();
+      const canReadFlows = this.access.can("GET /api/qa/flow-versions");
+      untracked(() => {
+        if (!loaded || !canReadFlows || this.requestedQaFlowVersions) return;
+        this.requestedQaFlowVersions = true;
+        void this.loadQaFlowOptions();
+      });
+    });
+
+    // Keep the active section tab visible inside horizontal .tab-strip scroll
+    // containers on phone viewports (e.g. /processes/quality at 390x844).
+    effect(() => {
+      this.activeTab();
+      afterNextRender(
+        () => {
+          const active = this.hostEl.nativeElement.querySelector<HTMLElement>(
+            '.tab-strip .tab-link[aria-current="page"]',
+          );
+          if (active && typeof active.scrollIntoView === "function") {
+            active.scrollIntoView({ block: "nearest", inline: "nearest" });
+          }
+        },
+        { injector: this.injector },
+      );
+    });
   }
 
   ngOnInit(): void {
@@ -4314,30 +4529,48 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       this.doc.addEventListener("keydown", this.onCaptureKeydown, true);
     });
     this.store.start();
-    void this.loadQaFlowOptions();
   }
 
   private async loadQaFlowOptions(): Promise<void> {
     try {
-      const res = (await this.api.get(
-        "GET /api/qa/flow-versions" as RouteKey,
-        undefined,
-        "limit=50",
-      )) as {
+      const res = (await this.api.get<{
         versions?: {
           key?: string;
           version?: number;
+          label?: string;
+          retiredAt?: string | null;
+          retired?: boolean;
+        }[];
+      }>("GET /api/qa/flow-versions", undefined, "limit=500")) as {
+        versions?: {
+          key?: string;
+          version?: number;
+          label?: string;
           retiredAt?: string | null;
           retired?: boolean;
         }[];
       } | null;
-      const refs: string[] = [];
+      const items: {
+        ref: string;
+        key: string;
+        version: number;
+        label: string;
+        benchmark: boolean;
+      }[] = [];
       for (const v of res?.versions ?? []) {
         if (v.retiredAt || v.retired || !v.key) continue;
-        refs.push(`${v.key}@${v.version ?? 1}`);
+        const ver = v.version ?? 1;
+        items.push({
+          ref: `${v.key}@${ver}`,
+          key: v.key,
+          version: ver,
+          label: formatQaFlowLabel(v.key, v.label),
+          benchmark: isBenchmarkQaFlow(v.key, v.label),
+        });
       }
-      if (refs.length > 0) {
-        this.loadedQaFlowRefs.set(refs);
+      this.loadedQaFlowVersions.set(items);
+      if (items.length > 0) {
+        this.qaFlowVersionsLoaded.set(true);
       }
     } catch {
       // Built-in fallback options remain available.
@@ -4480,8 +4713,17 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
           this.store.awaitingAcceptancesCount() ||
           this.store.knownRepos().length
         );
-      case "quality":
+      case "quality": {
+        if (this.qaFlowVersionsLoaded()) {
+          const primaryKeys = new Set(
+            this.loadedQaFlowVersions()
+              .filter((v) => !v.benchmark)
+              .map((v) => v.key),
+          );
+          if (primaryKeys.size > 0) return primaryKeys.size;
+        }
         return this.store.qaFlows().length;
+      }
     }
   }
 
@@ -4526,41 +4768,14 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   }
 
   protected selectTrigger(tr: DeclaredTrigger, fromClick: boolean): void {
-    const key = `trigger:${tr.repo}:${tr.path}`;
     this.selectedScheduleId.set(null);
     this.scheduleComposition.set(null);
+    this.triggerYamlText.set("");
+    this.triggerYamlLoading.set(false);
     this.selectedTrigger.set(tr);
     if (fromClick) this.mobileDetailOpen.set(true);
-    void this.loadSelectedTriggerYaml(tr, key);
-  }
-
-  private async loadSelectedTriggerYaml(
-    tr: DeclaredTrigger,
-    expectedKey: string,
-  ): Promise<void> {
-    this.triggerYamlText.set("");
-    this.triggerYamlLoading.set(true);
-    const repoPath = tr.path.startsWith(`${tr.repo}/`)
-      ? tr.path
-      : `${tr.repo}/${tr.path.replace(/^\/+/, "")}`;
-    try {
-      if (typeof this.api.getText === "function") {
-        const text = await this.api.getText(
-          "GET /api/fs/repo/{path...}" as RouteKey,
-          { path: repoPath },
-        );
-        if (this.selectedTriggerKey() === expectedKey) {
-          this.triggerYamlText.set(text || "");
-        }
-      }
-    } catch (err) {
-      if (this.selectedTriggerKey() === expectedKey) {
-        this.triggerYamlText.set(repoYamlFallback(tr.repo, tr.path, err));
-      }
-    } finally {
-      if (this.selectedTriggerKey() === expectedKey) {
-        this.triggerYamlLoading.set(false);
-      }
+    if (!tr.detail && !this.store.repoDefaults()[tr.repo]?.declarationsStatus) {
+      void this.store.loadRepoInspect(tr.repo);
     }
   }
 
@@ -4629,7 +4844,8 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
 
   protected selectDeclRepo(repo: string, fromClick: boolean): void {
     this.selectedDeclRepo.set(repo);
-    this.inlineYamlPath.set(null);
+    this.inlineYamlSeq++;
+    this.inlineYamlKey.set(null);
     this.inlineYamlText.set("");
     this.inlineYamlLoading.set(false);
     if (fromClick) this.mobileDetailOpen.set(true);
@@ -4668,50 +4884,107 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     return out;
   }
 
-  protected isInlineYamlOpen(path: string): boolean {
-    return this.inlineYamlPath() === path;
+  protected isInlineYamlOpen(repo: string, path: string): boolean {
+    return this.inlineYamlKey() === `${repo}:${path}`;
   }
 
   protected async toggleInlineYaml(
     repo: string,
     filePath: string,
-    fallbackText?: string,
+    rawText?: string,
   ): Promise<void> {
-    if (this.inlineYamlPath() === filePath) {
-      this.inlineYamlPath.set(null);
+    const key = `${repo}:${filePath}`;
+    const seq = ++this.inlineYamlSeq;
+    if (this.inlineYamlKey() === key) {
+      this.inlineYamlKey.set(null);
       this.inlineYamlText.set("");
       this.inlineYamlLoading.set(false);
       return;
     }
-    this.inlineYamlPath.set(filePath);
-    this.inlineYamlText.set("");
-    this.inlineYamlLoading.set(true);
-    const repoPath = filePath.startsWith(`${repo}/`)
-      ? filePath
-      : `${repo}/${filePath.replace(/^\/+/, "")}`;
-    try {
-      if (typeof this.api.getText === "function") {
-        const text = await this.api.getText(
-          "GET /api/fs/repo/{path...}" as RouteKey,
-          { path: repoPath },
-        );
-        if (this.inlineYamlPath() === filePath) {
-          this.inlineYamlText.set(text || fallbackText || "");
-        }
-      } else if (fallbackText !== undefined) {
-        this.inlineYamlText.set(fallbackText);
-      }
-    } catch (err) {
-      if (this.inlineYamlPath() === filePath) {
-        this.inlineYamlText.set(
-          fallbackText ?? repoYamlFallback(repo, filePath, err),
-        );
-      }
-    } finally {
-      if (this.inlineYamlPath() === filePath) {
-        this.inlineYamlLoading.set(false);
+    this.inlineYamlKey.set(key);
+    if (rawText !== undefined && rawText.length > 0) {
+      this.inlineYamlText.set(rawText);
+      this.inlineYamlLoading.set(false);
+      return;
+    }
+    const hasDecl = Boolean(
+      this.store.repoDefaults()[repo]?.declarationsStatus,
+    );
+    const hasWfs = Boolean(this.store.repoWorkflows()[repo]);
+    if (!hasDecl || !hasWfs) {
+      this.inlineYamlText.set("");
+      this.inlineYamlLoading.set(true);
+      await this.store.loadRepoInspect(repo);
+      if (this.inlineYamlSeq !== seq || this.inlineYamlKey() !== key) {
+        return;
       }
     }
+    this.inlineYamlText.set(this.resolveDeclaredFileYaml(repo, filePath));
+    this.inlineYamlLoading.set(false);
+  }
+
+  private resolveDeclaredFileYaml(repo: string, filePath: string): string {
+    const wfs = this.store.repoWorkflows();
+    const wf = wfs[repo]?.workflows.find((w) => w.path === filePath);
+    if (wf?.text) return wf.text;
+
+    const status = this.store.repoDefaults()[repo]?.declarationsStatus;
+    const trig = status?.triggerDetails?.find((d) => d.path === filePath);
+    if (trig || (status?.triggers ?? []).includes(filePath)) {
+      return synthesizeTriggerYaml(
+        repo,
+        filePath,
+        trig,
+        this.store.templates(),
+      );
+    }
+
+    const tmpl = this.store
+      .templates()
+      .find(
+        (t) => t.declaredIn?.repo === repo && t.declaredIn.path === filePath,
+      );
+    if (tmpl) {
+      return synthesizeDeclaredTemplateYaml(repo, filePath, tmpl);
+    }
+
+    const suite = this.store
+      .suites()
+      .find(
+        (s) => s.declaredIn?.repo === repo && s.declaredIn.path === filePath,
+      );
+    if (suite) {
+      const lines = [
+        `# ${repo}:${filePath}`,
+        `name: ${suite.name}`,
+        `mode: ${suite.mode}`,
+      ];
+      if (suite.maxPasses) lines.push(`maxPasses: ${suite.maxPasses}`);
+      if (suite.items.length) {
+        lines.push("items:");
+        for (const it of suite.items) {
+          lines.push(`  - template: ${it.templateName || it.templateId}`);
+        }
+      }
+      return lines.join("\n");
+    }
+
+    const sched = this.store
+      .schedules()
+      .find(
+        (s) => s.declaredIn?.repo === repo && s.declaredIn.path === filePath,
+      );
+    if (sched) {
+      const lines = [
+        `# ${repo}:${filePath}`,
+        `title: ${sched.title}`,
+        `cadence: ${formatCadence(sched.recurrence, sched.timeZone)}`,
+      ];
+      if (sched.overlap) lines.push(`overlap: ${sched.overlap}`);
+      return lines.join("\n");
+    }
+
+    return `# ${repo}:${filePath}\n# Synced repository declaration.`;
   }
 
   protected scheduledTasksFor(s: Schedule) {
@@ -5667,9 +5940,68 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     }
   }
 
+  private discardDraftResolve: ((ok: boolean) => void) | null = null;
+  private bypassUnsavedDraftGuard = false;
+
+  private hasUnsavedQaDraft(): boolean {
+    return Boolean(this.doc.querySelector('[data-qa-unsaved-draft="true"]'));
+  }
+
+  canDeactivate(): boolean | Promise<boolean> {
+    if (this.bypassUnsavedDraftGuard || !this.hasUnsavedQaDraft()) {
+      return true;
+    }
+    return this.promptDiscardQaDraft();
+  }
+
+  private promptDiscardQaDraft(): Promise<boolean> {
+    if (this.discardDraftResolve) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      this.discardDraftResolve = resolve;
+      this.confirming.set({
+        title: "Discard unpublished workflow draft?",
+        message:
+          "You have an unpublished workflow draft in Software Workflow & QA. Discard your unsaved changes?",
+        accept: "Discard draft",
+        destructive: true,
+        run: async () => undefined,
+      });
+    });
+  }
+
+  protected onTabClick(ev: MouseEvent, tabId: ProcessTab): void {
+    if (
+      ev.button !== 0 ||
+      ev.metaKey ||
+      ev.ctrlKey ||
+      ev.shiftKey ||
+      ev.altKey
+    ) {
+      return;
+    }
+    if (tabId === this.activeTab() || !this.hasUnsavedQaDraft()) {
+      return;
+    }
+    ev.preventDefault();
+    void this.promptDiscardQaDraft().then((ok) => {
+      if (!ok) return;
+      this.bypassUnsavedDraftGuard = true;
+      void this.router
+        .navigate(["/processes", tabId], { queryParamsHandling: "merge" })
+        .finally(() => {
+          this.bypassUnsavedDraftGuard = false;
+        });
+    });
+  }
+
   protected async onConfirmDone(accepted: boolean): Promise<void> {
     const req = this.confirming();
+    const resolveDraft = this.discardDraftResolve;
+    this.discardDraftResolve = null;
     this.confirming.set(null);
+    if (resolveDraft) {
+      resolveDraft(accepted);
+    }
     if (!accepted || !req) return;
     try {
       await req.run();

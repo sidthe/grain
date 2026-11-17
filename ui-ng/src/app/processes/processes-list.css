@@ -14,6 +14,7 @@ g-qa-flows-panel,
 }
 
 .proc-list {
+  position: relative;
   list-style: none;
   margin: 0;
   padding: 0;
@@ -53,6 +54,7 @@ g-qa-flows-panel,
 
 .proc-row.is-selected {
   background: var(--md-sys-color-secondary-container);
+  box-shadow: inset 3px 0 0 var(--md-sys-color-primary);
 }
 
 .proc-row-top {
@@ -93,6 +95,22 @@ g-qa-flows-panel,
 
 .proc-mobile-back {
   display: none;
+}
+
+@media (max-width: 1180px) {
+  .tab-strip[aria-label="Process sections"] {
+    gap: 0;
+  }
+  .tab-strip[aria-label="Process sections"] > .tab-link {
+    gap: 4px;
+    padding: 0 6px;
+    font-size: 12.5px;
+  }
+  .tab-strip[aria-label="Process sections"] .tab-count {
+    min-width: 18px;
+    padding: 0 5px;
+    font-size: 11px;
+  }
 }
 
 @media (max-width: 599.95px) {

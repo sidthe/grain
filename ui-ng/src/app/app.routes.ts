@@ -171,6 +171,10 @@ const teamless: RedirectFunction = ({ params, queryParams, fragment }) =>
 const repoLeaveGuard = (page: { canLeave?: () => Promise<boolean> } | null) =>
   page?.canLeave ? page.canLeave() : true;
 
+const processesLeaveGuard = (
+  page: { canDeactivate?: () => boolean | Promise<boolean> } | null,
+) => (page?.canDeactivate ? page.canDeactivate() : true);
+
 // Every page is lazy, so the shell's own bundle stays inside the budget
 // (angular.json) however many pages move over. A path this app does not
 // have yet goes to the Inbox; the shell's links take the reader to the
@@ -264,6 +268,7 @@ export const routes: Routes = [
   {
     path: "processes/suites/runs/:runId",
     title: "Suite run · grain",
+    canDeactivate: [processesLeaveGuard],
     loadComponent: () =>
       import("./processes/processes-page.component").then(
         (m) => m.ProcessesPageComponent,
@@ -287,6 +292,7 @@ export const routes: Routes = [
   {
     path: "processes",
     title: "Processes · grain",
+    canDeactivate: [processesLeaveGuard],
     loadComponent: () =>
       import("./processes/processes-page.component").then(
         (m) => m.ProcessesPageComponent,
@@ -295,6 +301,7 @@ export const routes: Routes = [
   {
     path: "processes/:tab",
     title: "Processes · grain",
+    canDeactivate: [processesLeaveGuard],
     loadComponent: () =>
       import("./processes/processes-page.component").then(
         (m) => m.ProcessesPageComponent,
@@ -303,6 +310,7 @@ export const routes: Routes = [
   {
     path: "processes/:tab/:itemId",
     title: "Processes · grain",
+    canDeactivate: [processesLeaveGuard],
     loadComponent: () =>
       import("./processes/processes-page.component").then(
         (m) => m.ProcessesPageComponent,

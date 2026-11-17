@@ -244,19 +244,6 @@ test("templates with required parameters preview without 400, workflow Run now c
     )
     .toBe(1);
 
-  await page.route("**/api/fs/repo/acme/widgets/**", async (route) => {
-    const url = new URL(route.request().url());
-    const rel = decodeURIComponent(
-      url.pathname.replace(/^.*\/api\/fs\/repo\/acme\/widgets\//, ""),
-    );
-    const body = git(bare, ["--git-dir", bare, "show", `main:${rel}`]);
-    await route.fulfill({
-      status: 200,
-      contentType: "text/plain; charset=utf-8",
-      body,
-    });
-  });
-
   // Trigger path on Declarations toggles inline YAML without leaving Processes,
   // while decl-open-repo-link opens /next/repos/acme/widgets/advanced.
   await page.goto("processes/declarations");
@@ -411,3 +398,36 @@ test(
     await expect(page.getByTestId("proc-dialog-error")).toHaveCount(0);
   },
 );
+
+test("Process section tab strip fits all 5 tabs at 1024x860 and scrolls active quality tab into view at 390x844", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1024, height: 860 });
+  await page.goto("processes/schedules");
+  const strip = page.locator('.tab-strip[aria-label="Process sections"]');
+  const qualityTab = page.getByTestId("proc-tab-quality");
+  await expect(qualityTab).toBeVisible();
+
+  const fit1024 = await strip.evaluate((el) => ({
+    scrollWidth: el.scrollWidth,
+    clientWidth: el.clientWidth,
+  }));
+  expect(fit1024.scrollWidth).toBeLessThanOrEqual(fit1024.clientWidth);
+  const stripBox1024 = (await strip.boundingBox())!;
+  const qualBox1024 = (await qualityTab.boundingBox())!;
+  expect(qualBox1024.x + qualBox1024.width).toBeLessThanOrEqual(
+    stripBox1024.x + stripBox1024.width + 1,
+  );
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("processes/quality");
+  await expect(qualityTab).toHaveAttribute("aria-current", "page");
+  await expect
+    .poll(async () => {
+      const sb = await strip.boundingBox();
+      const qb = await qualityTab.boundingBox();
+      if (!sb || !qb) return false;
+      return qb.x >= sb.x - 1 && qb.x + qb.width <= sb.x + sb.width + 1;
+    })
+    .toBe(true);
+});

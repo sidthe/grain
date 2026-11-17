@@ -2466,9 +2466,15 @@ func (c *Client) plannedConfig(ctx context.Context, req UpdateSettingsRequest) (
 			nextQA.Epoch = *req.QAEpoch
 		}
 		advanced, err := model.AdvanceQAConfigWithValidator(before.QA, nextQA, func(flow string) bool {
-			if req.QAFlowID == nil &&
-				strings.TrimSpace(flow) == strings.TrimSpace(before.QA.FlowID) &&
-				!(!before.QA.Enabled && nextQA.Enabled) {
+			sameBeforeFlow := strings.TrimSpace(flow) == strings.TrimSpace(before.QA.FlowID)
+			if !nextQA.Enabled && sameBeforeFlow {
+				return true
+			}
+			if before.QA.Enabled && nextQA.Enabled &&
+				req.QAFlowID == nil &&
+				sameBeforeFlow &&
+				nextQA.RolloutPct <= before.QA.RolloutPct &&
+				nextQA.Epoch <= before.QA.EpochOrDefault() {
 				return true
 			}
 			return c.validQAFlowID(ctx, flow)
@@ -2732,7 +2738,7 @@ func (c *Client) qaFlowIDs(ctx context.Context) []string {
 	if c.Store == nil {
 		return ids
 	}
-	versions, err := c.Store.ListQAFlowVersions(ctx, "", 50)
+	versions, err := c.Store.ListQAFlowVersions(ctx, "", 500)
 	if err != nil {
 		return ids
 	}
@@ -2778,7 +2784,7 @@ func hasActiveStoredQAFlowVersion(ctx context.Context, store *model.Store, ref s
 	if fv, err := store.GetQAFlowVersion(ctx, ref); err == nil {
 		return fv.RetiredAt == nil
 	}
-	list, err := store.ListQAFlowVersions(ctx, ref, 50)
+	list, err := store.ListQAFlowVersions(ctx, ref, 500)
 	if err != nil || len(list) == 0 {
 		return false
 	}

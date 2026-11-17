@@ -369,6 +369,23 @@ export interface DeclaredPush {
   refs: { pattern: string; force?: boolean }[];
 }
 
+export interface PathTriggerView {
+  name: string;
+  path: string;
+  on: string;
+  branches?: string[];
+  paths: string[];
+  ignore?: string[];
+  template: string;
+  per?: string;
+  gate?: boolean;
+  human?: string;
+  auto_approve?: boolean;
+  sensitive?: boolean;
+  approvers?: string[];
+  fixes?: boolean;
+}
+
 export interface RepoDeclarationsStatus {
   commit?: string;
   checkedAt?: string;
@@ -378,6 +395,7 @@ export interface RepoDeclarationsStatus {
   suites?: string[];
   schedules?: string[];
   triggers?: string[];
+  triggerDetails?: PathTriggerView[];
   pushes?: DeclaredPush[];
   mergeRules?: string;
   warnings?: string[];
@@ -387,6 +405,7 @@ export interface RepoDeclarationsStatus {
 export interface DeclaredTrigger {
   repo: string;
   path: string;
+  detail?: PathTriggerView;
 }
 
 export interface RepoDefaultsView {
