@@ -144,11 +144,18 @@ func ValidQAFlowID(id string) bool {
 	if trimmed == "" {
 		return false
 	}
-	base := strings.TrimSuffix(trimmed, "@1")
-	if slices.Contains(QAFlowIDs(), base) {
+	if trimmed == QAFlowDeterministicS3Only || trimmed == QAFlowRepoCustom {
 		return true
 	}
-	return base == QAFlowGoldenV2ChecksOnly || base == QAFlowGoldenV2SkillOnly
+	base := strings.TrimSuffix(trimmed, "@1")
+	return slices.Contains([]string{
+		QAFlowGoldenV1Minimal,
+		QAFlowEngineeringWorkflowV4,
+		QAFlowGoldenV3,
+		QAFlowGoldenV2,
+		QAFlowGoldenV2ChecksOnly,
+		QAFlowGoldenV2SkillOnly,
+	}, base)
 }
 
 // QAConfig configures the deployment-wide quality control engine and single-instance
@@ -297,6 +304,16 @@ func AdvanceQAConfigWithValidator(prev, next QAConfig, validFlow func(string) bo
 	}
 	if next.RegimeID < prev.RegimeIDOrDefault() {
 		next.RegimeID = prev.RegimeIDOrDefault()
+	}
+	if validFlow == nil && !prev.IsZero() {
+		prevFlow := strings.TrimSpace(prev.FlowID)
+		nextFlow := strings.TrimSpace(next.FlowID)
+		if nextFlow != "" && nextFlow == prevFlow && validStoredQAFlowRef(nextFlow) &&
+			(!next.Enabled || (prev.Enabled && next.RolloutPct <= prev.RolloutPct && next.Epoch <= prev.EpochOrDefault())) {
+			validFlow = func(flow string) bool {
+				return strings.TrimSpace(flow) == prevFlow || ValidQAFlowID(flow)
+			}
+		}
 	}
 	norm, err := NormalizeQAConfigWithValidator(next, validFlow)
 	if err != nil {

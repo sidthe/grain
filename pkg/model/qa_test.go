@@ -78,9 +78,7 @@ func TestQAConfigDefaultsAndValidation(t *testing.T) {
 		model.QAFlowGoldenV2SkillOnly,
 		model.QAFlowGoldenV2SkillOnly + "@1",
 		model.QAFlowDeterministicS3Only,
-		model.QAFlowDeterministicS3Only + "@1",
 		model.QAFlowRepoCustom,
-		model.QAFlowRepoCustom + "@1",
 	} {
 		if !model.ValidQAFlowID(validID) {
 			t.Errorf("ValidQAFlowID(%q) = false, want true", validID)
@@ -90,7 +88,15 @@ func TestQAConfigDefaultsAndValidation(t *testing.T) {
 			t.Errorf("NormalizeQAConfig(%q) = (%+v, %v), want FlowID=%q", validID, norm, err, validID)
 		}
 	}
-	for _, invalidID := range []string{"", "nonexistent-flow", model.QAFlowGoldenV3Enforced, "golden-v3@2", "golden-v3@1@1"} {
+	for _, invalidID := range []string{
+		"",
+		"nonexistent-flow",
+		model.QAFlowGoldenV3Enforced,
+		model.QAFlowDeterministicS3Only + "@1",
+		model.QAFlowRepoCustom + "@1",
+		"golden-v3@2",
+		"golden-v3@1@1",
+	} {
 		if model.ValidQAFlowID(invalidID) {
 			t.Errorf("ValidQAFlowID(%q) = true, want false", invalidID)
 		}
@@ -191,6 +197,88 @@ func TestQAConfigAdvanceBumpsRegimeAndPreservesExplicitShadowFalse(t *testing.T)
 	}
 	if _, err := model.AdvanceQAConfig(r3, model.QAConfig{Enabled: true, RolloutPct: 50, Epoch: 1}); err == nil {
 		t.Fatalf("expected AdvanceQAConfig to reject Epoch downgrade 3 -> 1")
+	}
+}
+
+func TestQAConfigAdvancePreservesCustomFlowOnDowngradeAndDisable(t *testing.T) {
+	t.Parallel()
+
+	for _, flow := range []string{model.QAFlowGoldenV3Enforced, "custom-team-flow@2"} {
+		t.Run(flow, func(t *testing.T) {
+			prev := model.QAConfig{
+				Enabled:         true,
+				FlowID:          flow,
+				RolloutPct:      40,
+				ShadowOnControl: model.BoolPtr(true),
+				Epoch:           1,
+				RegimeID:        1,
+			}
+
+			// Circuit-breaker auto-downgrade to 0% preserves prev.FlowID and bumps RegimeID.
+			downgraded, err := model.AdvanceQAConfig(prev, model.QAConfig{
+				Enabled:         true,
+				FlowID:          flow,
+				RolloutPct:      0,
+				ShadowOnControl: model.BoolPtr(true),
+				Epoch:           1,
+			})
+			if err != nil {
+				t.Fatalf("AdvanceQAConfig downgrade(%q): %v", flow, err)
+			}
+			if !downgraded.Enabled || downgraded.FlowID != flow || downgraded.RolloutPct != 0 || downgraded.RegimeID != 2 {
+				t.Fatalf("downgraded = %+v, want Enabled=true FlowID=%q RolloutPct=0 RegimeID=2", downgraded, flow)
+			}
+
+			// Disabling QA while keeping prev.FlowID succeeds without an explicit store validator.
+			disabled, err := model.AdvanceQAConfig(prev, model.QAConfig{
+				Enabled:         false,
+				FlowID:          flow,
+				RolloutPct:      40,
+				ShadowOnControl: model.BoolPtr(true),
+				Epoch:           1,
+			})
+			if err != nil {
+				t.Fatalf("AdvanceQAConfig disable(%q): %v", flow, err)
+			}
+			if disabled.Enabled || disabled.FlowID != flow || disabled.RegimeID != 2 {
+				t.Fatalf("disabled = %+v, want Enabled=false FlowID=%q RegimeID=2", disabled, flow)
+			}
+
+			// Without an explicit store validator, rollout increases, epoch increases, re-enables,
+			// and flow switches must still be rejected.
+			if _, err := model.AdvanceQAConfig(prev, model.QAConfig{
+				Enabled:    true,
+				FlowID:     flow,
+				RolloutPct: 60,
+				Epoch:      1,
+			}); err == nil {
+				t.Fatalf("expected AdvanceQAConfig(%q) rollout increase to fail without store validator", flow)
+			}
+			if _, err := model.AdvanceQAConfig(prev, model.QAConfig{
+				Enabled:    true,
+				FlowID:     flow,
+				RolloutPct: 40,
+				Epoch:      2,
+			}); err == nil {
+				t.Fatalf("expected AdvanceQAConfig(%q) epoch increase to fail without store validator", flow)
+			}
+			if _, err := model.AdvanceQAConfig(disabled, model.QAConfig{
+				Enabled:    true,
+				FlowID:     flow,
+				RolloutPct: 10,
+				Epoch:      1,
+			}); err == nil {
+				t.Fatalf("expected AdvanceQAConfig(%q) re-enable to fail without store validator", flow)
+			}
+			if _, err := model.AdvanceQAConfig(prev, model.QAConfig{
+				Enabled:    true,
+				FlowID:     "other-custom-flow@1",
+				RolloutPct: 0,
+				Epoch:      1,
+			}); err == nil {
+				t.Fatalf("expected AdvanceQAConfig(%q) flow switch to fail without store validator", flow)
+			}
+		})
 	}
 }
 
