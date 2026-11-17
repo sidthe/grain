@@ -1431,6 +1431,13 @@ describe("ProcessesPageComponent (D-9)", () => {
               builtIn: true,
             },
             {
+              hash: "sha256:eng-v4-custom-v1",
+              key: "engineering-workflow-v4",
+              version: 1,
+              label: "Engineering Workflow V4",
+              builtIn: false,
+            },
+            {
               hash: "custom:engineering-workflow-v4@2#4",
               key: "engineering-workflow-v4",
               version: 2,
@@ -1451,6 +1458,20 @@ describe("ProcessesPageComponent (D-9)", () => {
               label: "golden v2 (S3+S4 checks only — ablation)",
               builtIn: true,
             },
+            {
+              hash: "sha256:demo-seed-v1",
+              key: "demo-seed",
+              version: 1,
+              label: "Demo Seed",
+              builtIn: false,
+            },
+            {
+              hash: "sha256:v4-benchmark-v1",
+              key: "v4-benchmark",
+              version: 1,
+              label: "V4 Suite",
+              builtIn: false,
+            },
           ],
         });
       }
@@ -1463,11 +1484,13 @@ describe("ProcessesPageComponent (D-9)", () => {
     await flush(harness);
     let root = harness.routeNativeElement!;
 
-    // 1. Quality tab displays "Software Workflow & QA" and deduplicated primary family count (2: engineering-workflow-v4 + golden-v3-enforced; excludes ablation variant)
+    // 1. Quality tab displays "Software Workflow & QA" and deduplicated primary family count
+    // (3: engineering-workflow-v4 + golden-v3-enforced + golden-v1-minimal from store.qaFlows;
+    // excludes deterministic-s3-only, ablation, -seed, and -benchmark variants).
     const qualityTab = root.querySelector('[data-testid="proc-tab-quality"]')!;
     expect(qualityTab.textContent).toContain("Software Workflow & QA");
     expect(qualityTab.querySelector(".tab-count")?.textContent?.trim()).toBe(
-      "2",
+      "3",
     );
     expect(
       api.calls.some(
@@ -1494,6 +1517,20 @@ describe("ProcessesPageComponent (D-9)", () => {
     )!;
     expect(v4Opt.textContent).toContain("Engineering Workflow V4");
     expect(v4Opt.textContent).toContain("engineering-workflow-v4@v1");
+    // Custom v1 override of a built-in family emits its SHA-256 hash and an explicit override hint
+    // without colliding with engineering-workflow-v4@1, and unreturned DEFAULT_QA_FLOW_REFS are omitted.
+    const v4OverrideOpt = root.querySelector<HTMLButtonElement>(
+      '[data-testid="process-qa-flow-select-opt-sha256:eng-v4-custom-v1"]',
+    )!;
+    expect(v4OverrideOpt).not.toBeNull();
+    expect(v4OverrideOpt.textContent).toContain(
+      "engineering-workflow-v4@v1 (override)",
+    );
+    expect(
+      root.querySelector(
+        '[data-testid="process-qa-flow-select-opt-golden-v2@1"]',
+      ),
+    ).toBeNull();
     v4Opt.click();
     await flush(harness);
     expect(schedFlowBtn.textContent).toContain("Engineering Workflow V4");
@@ -2297,5 +2334,51 @@ describe("ProcessesPageComponent (D-9)", () => {
       gate: "true",
       template: "docs-check",
     });
+  });
+
+  it("skips GET /api/qa/flow-versions when qa:read is repo-limited and filters benchmark fallback count", async () => {
+    api.configBody = {
+      ...api.configBody,
+      access: {
+        role: "grain/reader",
+        roles: ["grain/reader"],
+        full: false,
+        scopes: ["tasks:read", "settings:read", "schedules:write", "qa:read"],
+        repoLimits: { "qa:read": ["acme/widgets"] },
+      },
+    };
+
+    const harness = await RouterTestingHarness.create(
+      "/processes/schedules?new=1",
+    );
+    await flush(harness);
+    const root = harness.routeNativeElement!;
+
+    expect(api.calls.some((c) => c.route === "GET /api/qa/flow-versions")).toBe(
+      false,
+    );
+    // Fallback quality tab count excludes deterministic-s3-only from store.qaFlows().
+    const qualityTab = root.querySelector('[data-testid="proc-tab-quality"]')!;
+    expect(qualityTab.querySelector(".tab-count")?.textContent?.trim()).toBe(
+      "1",
+    );
+
+    // Fallback DEFAULT_QA_FLOW_REFS advertises golden-v1-minimal@1, never unseeded golden-v3-enforced@1.
+    const schedFlowBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="process-qa-flow-select"]',
+    );
+    expect(schedFlowBtn).not.toBeNull();
+    schedFlowBtn!.click();
+    await flush(harness);
+    expect(
+      root.querySelector(
+        '[data-testid="process-qa-flow-select-opt-golden-v1-minimal@1"]',
+      ),
+    ).not.toBeNull();
+    expect(
+      root.querySelector(
+        '[data-testid="process-qa-flow-select-opt-golden-v3-enforced@1"]',
+      ),
+    ).toBeNull();
   });
 });

@@ -2779,6 +2779,9 @@ func (c *Client) validQAFlowID(ctx context.Context, flow string) bool {
 	if err != nil || spec == nil {
 		return false
 	}
+	if strings.HasPrefix(hash, "builtin:") {
+		return true
+	}
 	if hash != "" {
 		if fv, gErr := c.Store.GetQAFlowVersion(ctx, hash); gErr == nil {
 			return fv.RetiredAt == nil

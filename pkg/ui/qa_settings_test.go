@@ -436,3 +436,98 @@ func TestQASettingsAcceptV4VersionedAndStoredCustomFlowsAndRejectRetired(t *test
 		t.Fatalf("UpdateSettings re-enable with retired flow expected flowId error, got %v", err)
 	}
 }
+
+func TestQASettingsBuiltInOverridesAndBuiltInHash(t *testing.T) {
+	t.Parallel()
+	c, st, ctx := testClient(t)
+	if _, err := c.UpdateSettings(ctx, firstSettings()); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Date(2026, 11, 17, 4, 0, 0, 0, time.UTC)
+	baseSpecPtr, builtinHash, err := resolve.LookupFlowSpec(ctx, st, model.QAFlowEngineeringWorkflowV4)
+	if err != nil || baseSpecPtr == nil || !strings.HasPrefix(builtinHash, "builtin:") {
+		t.Fatalf("resolve.LookupFlowSpec(%q) = (%v, %q, %v), want builtin hash",
+			model.QAFlowEngineeringWorkflowV4, baseSpecPtr, builtinHash, err)
+	}
+	baseSpec := *baseSpecPtr
+	specBytes, err := json.Marshal(baseSpec)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	const (
+		customV1Hash = "sha256:eng-v4-custom-v1-override"
+		customV2Hash = "sha256:eng-v4-custom-v2-override"
+	)
+	if err := st.InsertQAFlowVersion(ctx, model.QAFlowVersion{
+		Hash:      customV1Hash,
+		Key:       model.QAFlowEngineeringWorkflowV4,
+		Version:   1,
+		Label:     "Engineering Workflow v4 (custom v1 override)",
+		SpecJSON:  string(specBytes),
+		CreatedAt: now,
+		CreatedBy: "operator",
+	}); err != nil {
+		t.Fatalf("InsertQAFlowVersion v1 override: %v", err)
+	}
+	if err := st.InsertQAFlowVersion(ctx, model.QAFlowVersion{
+		Hash:      customV2Hash,
+		Key:       model.QAFlowEngineeringWorkflowV4,
+		Version:   2,
+		Label:     "Engineering Workflow v4 (custom v2 override)",
+		SpecJSON:  string(specBytes),
+		CreatedAt: now.Add(time.Minute),
+		CreatedBy: "operator",
+	}); err != nil {
+		t.Fatalf("InsertQAFlowVersion v2 override: %v", err)
+	}
+
+	enable := true
+	for _, ref := range []string{
+		customV1Hash,
+		model.QAFlowEngineeringWorkflowV4 + "@2",
+		model.QAFlowEngineeringWorkflowV4,
+		builtinHash,
+	} {
+		flow := ref
+		t.Run("accept_"+flow, func(t *testing.T) {
+			planned, err := c.PlanSettings(ctx, ui.UpdateSettingsRequest{
+				QAEnabled: &enable,
+				QAFlowID:  &flow,
+			})
+			if err != nil || planned.QAFlowID != flow {
+				t.Fatalf("PlanSettings(%q) = (%q, %v)", flow, planned.QAFlowID, err)
+			}
+			saved, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{
+				QAEnabled: &enable,
+				QAFlowID:  &flow,
+			})
+			if err != nil || saved.QAFlowID != flow {
+				t.Fatalf("UpdateSettings(%q) = (%q, %v)", flow, saved.QAFlowID, err)
+			}
+			resolvedSpec, _, err := resolve.LookupFlowSpec(ctx, st, saved.QAFlowID)
+			if err != nil || resolvedSpec == nil {
+				t.Fatalf("resolve.LookupFlowSpec(%q) = (%v, %v), want non-nil spec", saved.QAFlowID, resolvedSpec, err)
+			}
+		})
+	}
+
+	// Retire custom v2 override: engineering-workflow-v4@2 is now rejected while built-in refs stay valid.
+	if err := st.RetireQAFlowVersion(ctx, customV2Hash, now.Add(2*time.Minute)); err != nil {
+		t.Fatalf("RetireQAFlowVersion v2 override: %v", err)
+	}
+	retiredV2 := model.QAFlowEngineeringWorkflowV4 + "@2"
+	if _, err := c.PlanSettings(ctx, ui.UpdateSettingsRequest{QAFlowID: &retiredV2}); err == nil || !strings.Contains(err.Error(), "flowId") {
+		t.Fatalf("PlanSettings(%q) after retire expected flowId error, got %v", retiredV2, err)
+	}
+	if _, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{QAFlowID: &retiredV2}); err == nil || !strings.Contains(err.Error(), "flowId") {
+		t.Fatalf("UpdateSettings(%q) after retire expected flowId error, got %v", retiredV2, err)
+	}
+	for _, stillValid := range []string{model.QAFlowEngineeringWorkflowV4, builtinHash, customV1Hash} {
+		flow := stillValid
+		if saved, err := c.UpdateSettings(ctx, ui.UpdateSettingsRequest{QAEnabled: &enable, QAFlowID: &flow}); err != nil || saved.QAFlowID != flow {
+			t.Fatalf("UpdateSettings(%q) after retiring v2 = (%q, %v)", flow, saved.QAFlowID, err)
+		}
+	}
+}

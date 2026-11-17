@@ -99,7 +99,7 @@ import { MarkdownDirective } from "../shared/code-highlight";
 
 const DEFAULT_QA_FLOW_REFS = [
   "engineering-workflow-v4@1",
-  "golden-v3-enforced@1",
+  "golden-v1-minimal@1",
   "golden-v3@1",
   "golden-v2@1",
 ] as const;
@@ -328,6 +328,8 @@ function isBenchmarkQaFlow(key: string, rawLabel?: string): boolean {
     k === "deterministic-s3-only" ||
     k.endsWith("-skill-only") ||
     k.endsWith("-checks-only") ||
+    k.endsWith("-seed") ||
+    k.endsWith("-benchmark") ||
     k.includes("-ablation") ||
     k.startsWith("bench-") ||
     l.includes("ablation") ||
@@ -3938,6 +3940,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       key: string;
       version: number;
       label: string;
+      hint?: string;
       benchmark: boolean;
     }[]
   >([]);
@@ -3947,6 +3950,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     const addOption = (
       raw: string | undefined,
       explicitLabel?: string,
+      explicitHint?: string,
     ): void => {
       const ref = (raw ?? "").trim();
       if (!ref || seen.has(ref)) return;
@@ -3956,13 +3960,15 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       opts.push({
         value: ref,
         label: formatQaFlowLabel(key, explicitLabel),
-        hint: formatQaFlowHint(ref),
+        hint: explicitHint ?? formatQaFlowHint(ref),
       });
     };
     for (const v of this.loadedQaFlowVersions()) {
-      addOption(v.ref, v.label);
+      addOption(v.ref, v.label, v.hint);
     }
-    for (const ref of DEFAULT_QA_FLOW_REFS) addOption(ref);
+    if (!this.qaFlowVersionsLoaded()) {
+      for (const ref of DEFAULT_QA_FLOW_REFS) addOption(ref);
+    }
     addOption(this.sDraftQaFlowRef());
     addOption(this.tDraftQaFlowRef());
     addOption(this.stDraftQaFlowRef());
@@ -4495,10 +4501,12 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     });
 
     // Load active QA flow versions once the store is loaded and the caller
-    // holds qa:read (GET /api/qa/flow-versions).
+    // holds global qa:read (GET /api/qa/flow-versions).
     effect(() => {
       const loaded = this.store.loaded();
-      const canReadFlows = this.access.can("GET /api/qa/flow-versions");
+      const canReadFlows =
+        this.access.can("GET /api/qa/flow-versions") &&
+        this.access.canGlobalScope("qa:read");
       untracked(() => {
         if (!loaded || !canReadFlows || this.requestedQaFlowVersions) return;
         this.requestedQaFlowVersions = true;
@@ -4535,36 +4543,54 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     try {
       const res = (await this.api.get<{
         versions?: {
+          hash?: string;
           key?: string;
           version?: number;
           label?: string;
+          builtIn?: boolean;
           retiredAt?: string | null;
           retired?: boolean;
         }[];
       }>("GET /api/qa/flow-versions", undefined, "limit=500")) as {
         versions?: {
+          hash?: string;
           key?: string;
           version?: number;
           label?: string;
+          builtIn?: boolean;
           retiredAt?: string | null;
           retired?: boolean;
         }[];
       } | null;
+      const versions = res?.versions ?? [];
+      const builtInKeys = new Set<string>();
+      for (const v of versions) {
+        if (v.builtIn === true && v.key) {
+          builtInKeys.add(v.key);
+        }
+      }
       const items: {
         ref: string;
         key: string;
         version: number;
         label: string;
+        hint?: string;
         benchmark: boolean;
       }[] = [];
-      for (const v of res?.versions ?? []) {
+      for (const v of versions) {
         if (v.retiredAt || v.retired || !v.key) continue;
         const ver = v.version ?? 1;
+        const hash = (v.hash ?? "").trim();
+        const isBuiltInV1Override =
+          !v.builtIn && ver === 1 && builtInKeys.has(v.key) && hash !== "";
+        const ref = isBuiltInV1Override ? hash : `${v.key}@${ver}`;
+        const hint = isBuiltInV1Override ? `${v.key}@v1 (override)` : undefined;
         items.push({
-          ref: `${v.key}@${ver}`,
+          ref,
           key: v.key,
           version: ver,
           label: formatQaFlowLabel(v.key, v.label),
+          hint,
           benchmark: isBenchmarkQaFlow(v.key, v.label),
         });
       }
@@ -4720,9 +4746,16 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
               .filter((v) => !v.benchmark)
               .map((v) => v.key),
           );
+          for (const f of this.store.qaFlows()) {
+            if (f.id && !isBenchmarkQaFlow(f.id, f.label)) {
+              primaryKeys.add(f.id);
+            }
+          }
           if (primaryKeys.size > 0) return primaryKeys.size;
         }
-        return this.store.qaFlows().length;
+        return this.store
+          .qaFlows()
+          .filter((f) => f.id && !isBenchmarkQaFlow(f.id, f.label)).length;
       }
     }
   }
