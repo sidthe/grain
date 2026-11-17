@@ -82,7 +82,7 @@ test("Processes -> Quality checks and Task Detail -> Pre-PR quality checks work 
 
   const inspTitle = page.getByTestId("qa-flow-insp-title");
   const detailCard = page.getByTestId("qa-flow-detail-card");
-  await expect(inspTitle).toContainText("golden-v1-minimal (Recommended)");
+  await expect(inspTitle).toContainText("Recommended baseline");
   await expect(page.getByTestId("qa-mobile-back")).toBeHidden();
 
   // All stages start collapsed by default; expanding reveals stage substeps & rule hooks.
@@ -110,19 +110,15 @@ test("Processes -> Quality checks and Task Detail -> Pre-PR quality checks work 
   expect(axeProcLight.violations).toEqual([]);
 
   await detRow.click();
-  await expect(inspTitle).toContainText(
-    "deterministic-s3-only (Zero-LLM Ablation)",
-  );
+  await expect(inspTitle).toContainText("Deterministic checks only");
   await expect(detailCard).toContainText("disabled");
   await goldenRow.click();
-  await expect(inspTitle).toContainText("golden-v1-minimal (Recommended)");
+  await expect(inspTitle).toContainText("Recommended baseline");
   // Browser Back twice: first back to ?flow=deterministic-s3-only, then back to bare /next/processes/quality.
   await page.goBack();
-  await expect(inspTitle).toContainText(
-    "deterministic-s3-only (Zero-LLM Ablation)",
-  );
+  await expect(inspTitle).toContainText("Deterministic checks only");
   await page.goBack();
-  await expect(inspTitle).toContainText("golden-v1-minimal (Recommended)");
+  await expect(inspTitle).toContainText("Recommended baseline");
 
   // 3. Create a real task via POST /api/tasks and record a Pre-PR S3 check run + finding.
   const createTaskRes = await fetch(`${demoServer}/api/tasks`, {

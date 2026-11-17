@@ -746,6 +746,7 @@ export class QaV3StudioComponent {
   readonly embedded = input<boolean>(false);
   readonly isFork = input<boolean>(false);
   readonly draftKey = input<string>("");
+  readonly draftSchema = input<string>("");
   readonly draftExtends = input<string>("");
   readonly draftLabel = input<string>("");
   readonly draftSummary = input<string>("");
@@ -2556,9 +2557,12 @@ export class QaV3StudioComponent {
     if (s5Human && s5Human.length > 0) {
       s5Yaml += `    require-human-tiers: ${yamlJson(s5Human)}\n`;
     }
+    const resolvedSchema = this.editing()
+      ? this.draftSchema() || "grain.dev/qa-flow/v4"
+      : "grain.dev/qa-flow/v4";
     const verifierTokensLine =
       verifierTokens !== undefined ? `  max-tokens: ${verifierTokens}\n` : "";
-    return `schema: ${yamlQuote("grain.dev/qa-flow/v4")}\nkey: ${yamlQuote(resolvedKey)}\nextends: ${yamlQuote(resolvedExtends)}\nlabel: ${yamlQuote(resolvedLabel)}\nsummary: ${yamlQuote(resolvedSummary)}\nskill:\n  mode: ${yamlQuote(skillMode)}\n  text: ${yamlQuote(skillText)}\n  max-bytes: ${skillMaxBytes}\n${builtinSection}decompose:\n  enabled: ${this.decomposeEnabled()}\n  mode: ${yamlQuote(this.decomposeMode())}\n  complexities: ${yamlJson(decomposeComplexities)}\n  max-subtasks: ${this.decomposeMaxSubtasks()}\n  target-diff-lines: ${this.decomposeTargetDiffLines()}\ncontext:\n  enabled: ${this.contextEnabled()}\n  include-callers: ${this.contextIncludeCallers()}\n  include-memory: ${this.contextIncludeMemory()}\n  max-tokens: ${this.contextMaxTokens()}\n  extra-paths: ${yamlJson(this.contextExtraPaths())}\n${packsSection}${stepsSection}pr-contract:\n  enabled: ${this.prEnabled()}\n  mode: ${yamlQuote(this.prMode())}\n  max-subject-chars: ${this.prMaxSubjectChars()}\n  required-sections: ${yamlJson(prSections)}\n  audit-lint-suppressions: ${this.prAuditLint()}\n  guidance-text: ${yamlQuote(this.prGuidanceText())}\nstop-nudge: ${this.stopNudge()}\nverifier:\n  enabled: ${this.verifierEnabled()}\n  tiers: ${yamlJson(verifierTiers)}\n  max-repair-rounds: ${verifierRounds}\n  max-seconds: ${verifierSeconds}\n${verifierTokensLine}  checklist: ${yamlQuote(verifierChecklist)}\nstages:\n${s0Yaml}${s2Yaml}${s5Yaml}${stagesSection}${checksSection}`;
+    return `schema: ${yamlQuote(resolvedSchema)}\nkey: ${yamlQuote(resolvedKey)}\nextends: ${yamlQuote(resolvedExtends)}\nlabel: ${yamlQuote(resolvedLabel)}\nsummary: ${yamlQuote(resolvedSummary)}\nskill:\n  mode: ${yamlQuote(skillMode)}\n  text: ${yamlQuote(skillText)}\n  max-bytes: ${skillMaxBytes}\n${builtinSection}decompose:\n  enabled: ${this.decomposeEnabled()}\n  mode: ${yamlQuote(this.decomposeMode())}\n  complexities: ${yamlJson(decomposeComplexities)}\n  max-subtasks: ${this.decomposeMaxSubtasks()}\n  target-diff-lines: ${this.decomposeTargetDiffLines()}\ncontext:\n  enabled: ${this.contextEnabled()}\n  include-callers: ${this.contextIncludeCallers()}\n  include-memory: ${this.contextIncludeMemory()}\n  max-tokens: ${this.contextMaxTokens()}\n  extra-paths: ${yamlJson(this.contextExtraPaths())}\n${packsSection}${stepsSection}pr-contract:\n  enabled: ${this.prEnabled()}\n  mode: ${yamlQuote(this.prMode())}\n  max-subject-chars: ${this.prMaxSubjectChars()}\n  required-sections: ${yamlJson(prSections)}\n  audit-lint-suppressions: ${this.prAuditLint()}\n  guidance-text: ${yamlQuote(this.prGuidanceText())}\nstop-nudge: ${this.stopNudge()}\nverifier:\n  enabled: ${this.verifierEnabled()}\n  tiers: ${yamlJson(verifierTiers)}\n  max-repair-rounds: ${verifierRounds}\n  max-seconds: ${verifierSeconds}\n${verifierTokensLine}  checklist: ${yamlQuote(verifierChecklist)}\nstages:\n${s0Yaml}${s2Yaml}${s5Yaml}${stagesSection}${checksSection}`;
   }
 
   async runFixtureSelfTest(): Promise<void> {

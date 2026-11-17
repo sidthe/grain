@@ -666,6 +666,8 @@ describe("QaFlowsPanelComponent", () => {
     fixture.detectChanges();
 
     expect(comp.draftSkillBytes()).toBe(0);
+    expect(comp.effectiveDraftSchema()).toBe("grain.dev/qa-flow/v2");
+    expect(st?.buildYaml()).toContain('schema: "grain.dev/qa-flow/v2"');
     const v2Draft = comp.prepareDraft();
     expect(v2Draft.schema).toBe("grain.dev/qa-flow/v2");
     expect(v2Draft.skill.mode).toBe("inherit");
@@ -682,6 +684,8 @@ describe("QaFlowsPanelComponent", () => {
     // Enabling a V4 stage upgrades draft.schema to grain.dev/qa-flow/v4
     st?.s0Intent.set(true);
     fixture.detectChanges();
+    expect(comp.effectiveDraftSchema()).toBe("grain.dev/qa-flow/v4");
+    expect(st?.buildYaml()).toContain('schema: "grain.dev/qa-flow/v4"');
     const upgradedDraft = comp.prepareDraft();
     expect(upgradedDraft.schema).toBe("grain.dev/qa-flow/v4");
     expect(upgradedDraft.stages?.["s0-intent"]).toEqual({
@@ -975,7 +979,7 @@ describe("QaFlowsPanelComponent", () => {
     expect(comp.canWriteSettings()).toBe(false);
   });
 
-  it("syncs shadowed @v1 (built-in) by hash in ?flow= and Set as default, and pins non-shadowed older versions via key@version", async () => {
+  it("resolves built-in vs custom overrides in settings.qaFlowId, preserves ?flow= sync, and humanizes built-in toolbar titles", async () => {
     const qp$ = new BehaviorSubject(convertToParamMap({}));
     TestBed.overrideProvider(ActivatedRoute, {
       useValue: {
@@ -986,11 +990,14 @@ describe("QaFlowsPanelComponent", () => {
     const router = TestBed.inject(Router);
     const navSpy = vi.spyOn(router, "navigate").mockResolvedValue(true);
 
+    const builtinHash = "builtin:golden-v3@1#1";
+    const customV1Hash = "a".repeat(64);
+    const customV2Hash = "b".repeat(64);
     const seededVersions = [
       {
         key: "golden-v3",
         version: 1,
-        hash: "sha256:builtin-v1",
+        hash: builtinHash,
         label: "Golden V3",
         summary: "Built-in v1",
         builtIn: true,
@@ -998,7 +1005,7 @@ describe("QaFlowsPanelComponent", () => {
       {
         key: "golden-v3",
         version: 1,
-        hash: "sha256:custom-v1",
+        hash: customV1Hash,
         label: "Custom Override V1",
         summary: "DB v1 override",
         builtIn: false,
@@ -1006,8 +1013,8 @@ describe("QaFlowsPanelComponent", () => {
       {
         key: "golden-v3",
         version: 2,
-        hash: "sha256:custom-v2",
-        label: "Custom V2",
+        hash: customV2Hash,
+        label: "Golden V3",
         summary: "DB v2",
         builtIn: false,
       },
@@ -1024,16 +1031,23 @@ describe("QaFlowsPanelComponent", () => {
 
     const fixture = TestBed.createComponent(QaFlowsPanelComponent);
     const comp = fixture.componentInstance;
+    const root = fixture.nativeElement as HTMLElement;
     await new Promise((r) => setTimeout(r, 0));
 
-    // 1. Selecting shadowed built-in v1 resets isFork, writes hash (not golden-v3@1) to ?flow=, and persists hash on Set as default
+    // 1. Selecting shadowed built-in v1 resets isFork, writes hash to ?flow=, humanizes title, and persists bare key "golden-v3" on Set as default
     comp.isFork.set(true);
-    await comp.doSelectVersion("sha256:builtin-v1", true);
+    await comp.doSelectVersion(builtinHash, true);
+    fixture.detectChanges();
     expect(comp.isFork()).toBe(false);
+    expect(
+      root
+        .querySelector('[data-testid="qa-flow-insp-title"]')
+        ?.textContent?.trim(),
+    ).toBe("Plan critic & shadow triage");
     expect(navSpy).toHaveBeenLastCalledWith(
       [],
       expect.objectContaining({
-        queryParams: { flow: "sha256:builtin-v1" },
+        queryParams: { flow: builtinHash },
       }),
     );
 
@@ -1043,7 +1057,7 @@ describe("QaFlowsPanelComponent", () => {
     expect(api.put).toHaveBeenLastCalledWith(
       "PUT /api/settings",
       undefined,
-      expect.objectContaining({ qaFlowId: "sha256:builtin-v1" }),
+      expect.objectContaining({ qaFlowId: "golden-v3" }),
     );
     expect(comp.activeFlowFamilyKey()).toBe("golden-v3");
     const selBuiltin = comp.selectedDetail();
@@ -1051,14 +1065,33 @@ describe("QaFlowsPanelComponent", () => {
       true,
     );
 
-    // 2. Selecting non-shadowed custom v1 (when v2 is latest) writes golden-v3@1 to ?flow= and Set as default
-    await comp.doSelectVersion("sha256:custom-v1", true);
+    // 2. Selecting custom v1 override while activeFlowId === "golden-v3": must NOT show Active, must keep Set as default... visible, and persist 64-hex hash
+    await comp.doSelectVersion(customV1Hash, true);
+    fixture.detectChanges();
+    expect(
+      root
+        .querySelector('[data-testid="qa-flow-insp-title"]')
+        ?.textContent?.trim(),
+    ).toBe("Custom Override V1");
     expect(navSpy).toHaveBeenLastCalledWith(
       [],
       expect.objectContaining({
         queryParams: { flow: "golden-v3@1" },
       }),
     );
+    const selCustomV1 = comp.selectedDetail();
+    expect(selCustomV1 ? comp.isVersionActiveDefault(selCustomV1) : true).toBe(
+      false,
+    );
+    expect(
+      root
+        .querySelector('[data-testid="qa-rollout-status-pill"]')
+        ?.textContent?.trim(),
+    ).toBe("Available");
+    expect(
+      root.querySelector('[data-testid="qa-set-default-btn"]'),
+    ).toBeTruthy();
+
     expect(comp.nextVersionNum()).toBe(3);
     comp.confirmSetAsDefault();
     comp.onConfirmDone(true);
@@ -1066,7 +1099,31 @@ describe("QaFlowsPanelComponent", () => {
     expect(api.put).toHaveBeenLastCalledWith(
       "PUT /api/settings",
       undefined,
-      expect.objectContaining({ qaFlowId: "golden-v3@1" }),
+      expect.objectContaining({ qaFlowId: customV1Hash }),
+    );
+    expect(selCustomV1 ? comp.isVersionActiveDefault(selCustomV1) : false).toBe(
+      true,
+    );
+
+    // 3. Selecting custom v2 override (with unchanged built-in label): humanizes title and persists "golden-v3@2" on Set as default
+    await comp.doSelectVersion(customV2Hash, true);
+    fixture.detectChanges();
+    expect(
+      root
+        .querySelector('[data-testid="qa-flow-insp-title"]')
+        ?.textContent?.trim(),
+    ).toBe("Plan critic & shadow triage");
+    comp.confirmSetAsDefault();
+    comp.onConfirmDone(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(api.put).toHaveBeenLastCalledWith(
+      "PUT /api/settings",
+      undefined,
+      expect.objectContaining({ qaFlowId: "golden-v3@2" }),
+    );
+    const selCustomV2 = comp.selectedDetail();
+    expect(selCustomV2 ? comp.isVersionActiveDefault(selCustomV2) : false).toBe(
+      true,
     );
   });
 

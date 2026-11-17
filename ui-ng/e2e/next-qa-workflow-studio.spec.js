@@ -211,7 +211,7 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
 
   await v4Row.click();
   await expect(page.getByTestId("qa-flow-insp-title")).toContainText(
-    "engineering workflow v4",
+    "Full 8-stage workflow",
   );
   await expect(page.getByTestId("qa-schema-pill")).toContainText("v4");
 

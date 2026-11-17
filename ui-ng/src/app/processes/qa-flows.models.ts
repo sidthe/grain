@@ -1341,8 +1341,66 @@ export function validateSafeRe2Pattern(pattern: string): string | null {
   if (/\(\?(?:=|<|!)/.test(pattern) || /\\[1-9]/.test(pattern)) {
     return "Unsupported non-RE2 syntax (lookarounds and backreferences are disallowed)";
   }
-  if (/\([^)]*[+*][^)]*\)[+*?{]/.test(pattern)) {
+  if (/(?:\.\*|\.\+){2,}/.test(pattern)) {
     return "Nested repetition quantifiers (ReDoS risk) are disallowed";
+  }
+  const frames: { hasInnerQuantifier: boolean; hasAlternation: boolean }[] = [];
+  let inCharClass = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === "\\") {
+      i++;
+      continue;
+    }
+    if (inCharClass) {
+      if (ch === "]") inCharClass = false;
+      continue;
+    }
+    if (ch === "[") {
+      inCharClass = true;
+      continue;
+    }
+    if (ch === "(") {
+      frames.push({ hasInnerQuantifier: false, hasAlternation: false });
+      if (pattern[i + 1] === "?") {
+        i++;
+      }
+      continue;
+    }
+    if (ch === ")") {
+      const closed = frames.pop();
+      if (!closed) continue;
+      const next = pattern[i + 1] ?? "";
+      const groupRepeated =
+        next === "+" ||
+        next === "*" ||
+        (next === "{" &&
+          /^\{(?:\d+,|\d*[2-9]|\d{2,})/.test(pattern.slice(i + 1)));
+      if (
+        groupRepeated &&
+        (closed.hasInnerQuantifier || closed.hasAlternation)
+      ) {
+        return "Nested repetition quantifiers (ReDoS risk) are disallowed";
+      }
+      if (frames.length > 0) {
+        const parent = frames[frames.length - 1];
+        if (closed.hasInnerQuantifier || groupRepeated) {
+          parent.hasInnerQuantifier = true;
+        }
+        if (closed.hasAlternation) {
+          parent.hasAlternation = true;
+        }
+      }
+      continue;
+    }
+    if (frames.length > 0) {
+      const top = frames[frames.length - 1];
+      if (ch === "|") {
+        top.hasAlternation = true;
+      } else if (ch === "+" || ch === "*" || ch === "?" || ch === "{") {
+        top.hasInnerQuantifier = true;
+      }
+    }
   }
   try {
     new RegExp(pattern);

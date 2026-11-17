@@ -22,6 +22,7 @@ import {
   evaluateFixturesClientSide,
   matchesGlobPattern,
   synthesizeDiffBudgetFixtures,
+  validateSafeRe2Pattern,
   type FlowDeclarationV3,
   type FlowDeclarationV4,
 } from "./qa-flows.models";
@@ -1278,5 +1279,52 @@ describe("QaV3StudioComponent", () => {
     });
     expect(outOfScopeLinesEval.failTrapOk).toBe(false);
     expect(outOfScopeLinesEval.passed).toBe(false);
+  });
+
+  it("rejects nested-group, bounded-quantifier, and alternation ReDoS patterns in linear time and reflects draftSchema in buildYaml()", () => {
+    const hostileInput = `${"a".repeat(32)}!`;
+    const redosPatterns = [
+      "((a)+)+$",
+      "(a{1,2})+$",
+      "(a|a)+$",
+      "((a|a))+$",
+      ".*.*foo",
+    ];
+    for (const pat of redosPatterns) {
+      expect(validateSafeRe2Pattern(pat)).toContain(
+        "Nested repetition quantifiers",
+      );
+      const res = evaluateFixturesClientSide({
+        id: "custom:redos-check",
+        engine: "pattern",
+        forbidAdded: pat,
+        failJson: JSON.stringify([
+          { name: "hostile", "added-lines": [hostileInput] },
+        ]),
+        passJson: JSON.stringify([{ name: "clean", "added-lines": ["ok"] }]),
+      });
+      expect(res.passed).toBe(false);
+      expect(res.failTrapOk).toBe(false);
+      expect(res.summary).toContain("Nested repetition quantifiers");
+    }
+
+    // Legitimate RE2 patterns (non-repeated alternation, escaped parens, non-capturing literal repeats, char classes) remain allowed
+    expect(validateSafeRe2Pattern("(?:foo|bar)")).toBeNull();
+    expect(validateSafeRe2Pattern("(?:abc)+")).toBeNull();
+    expect(validateSafeRe2Pattern("\\bfmt\\.Println\\(")).toBeNull();
+    expect(validateSafeRe2Pattern("([a+b])+")).toBeNull();
+
+    // draftSchema input controls buildYaml() schema header while editing
+    fixture.componentRef.setInput("editing", true);
+    fixture.componentRef.setInput("draftSchema", "grain.dev/qa-flow/v2");
+    fixture.detectChanges();
+    expect(fixture.componentInstance.buildYaml()).toContain(
+      'schema: "grain.dev/qa-flow/v2"',
+    );
+    fixture.componentRef.setInput("draftSchema", "grain.dev/qa-flow/v4");
+    fixture.detectChanges();
+    expect(fixture.componentInstance.buildYaml()).toContain(
+      'schema: "grain.dev/qa-flow/v4"',
+    );
   });
 });

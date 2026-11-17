@@ -44,7 +44,7 @@ import {
   PillSelectComponent,
 } from "../shared/pill-select.component";
 import { StatusIconComponent } from "../shared/status-icon.component";
-import { TipDirective } from "../shared/tip.directive";
+import { TipDirective, dismissActiveTooltip } from "../shared/tip.directive";
 import {
   BUILT_IN_CHECK_CATALOG,
   type FlowDeclarationV2,
@@ -127,6 +127,7 @@ import { QaWorkflowCatalogComponent } from "./qa-workflow-catalog.component";
             [isFamilyActiveDefault]="activeFlowFamilyKey() === detail.key"
             [isFork]="isFork()"
             [draftKey]="draftDeclaration().key"
+            [draftSchema]="effectiveDraftSchema()"
             [draftExtends]="draftDeclaration().extends || ''"
             [draftLabel]="draftDeclaration().label"
             [draftSummary]="draftDeclaration().summary || ''"
@@ -153,7 +154,7 @@ import { QaWorkflowCatalogComponent } from "./qa-workflow-catalog.component";
             (toggleParentDiffReq)="toggleParentDiff()"
             (enterDraftReq)="enterDraftFromStudio()"
             (stepSelected)="onStudioStepSelected()"
-            (drawerClosed)="mobileDrawerOpen.set(false)"
+            (drawerClosed)="onMobileDrawerClosed()"
             (settingsNavReq)="onGuardedLinkClick($event, '/settings/tasks')"
             (draftKeyChange)="setDraftField('key', $event)"
             (draftLabelChange)="setDraftField('label', $event)"
@@ -663,9 +664,20 @@ export class QaFlowsPanelComponent {
   );
 
   readonly activeResolvedHash = computed(() => {
-    const raw = this.activeFlowId().trim();
-    if (!raw) return "";
-    return this.resolveVersionParam(raw);
+    return this.resolveSettingsFlowHash(this.activeFlowId()) ?? "";
+  });
+
+  readonly effectiveDraftSchema = computed<string>(() => {
+    const draft = this.draftDeclaration();
+    const st = this.studio();
+    if (
+      draft.schema === "grain.dev/qa-flow/v4" ||
+      draft.schema === "grain.dev/qa-flow/v3" ||
+      st?.hasV4Customizations()
+    ) {
+      return "grain.dev/qa-flow/v4";
+    }
+    return draft.schema || "grain.dev/qa-flow/v2";
   });
 
   readonly activeFlowFamilyKey = computed(() => {
@@ -993,8 +1005,14 @@ export class QaFlowsPanelComponent {
   }
 
   protected onMobileBackToCatalog(): void {
+    dismissActiveTooltip(500);
     this.mobileDrawerOpen.set(false);
     this.mobileInspectorOpen.set(false);
+  }
+
+  protected onMobileDrawerClosed(): void {
+    dismissActiveTooltip(500);
+    this.mobileDrawerOpen.set(false);
   }
 
   protected onDocumentClick(ev: Event): void {
@@ -1090,6 +1108,7 @@ export class QaFlowsPanelComponent {
 
   private openMobileDrawerIfPhone(): void {
     if (typeof window !== "undefined" && window.innerWidth < 600) {
+      dismissActiveTooltip(500);
       this.mobileInspectorOpen.set(true);
       this.mobileDrawerOpen.set(true);
     }
@@ -1121,6 +1140,46 @@ export class QaFlowsPanelComponent {
         void this.doSelectVersion(hash, true);
       }
     });
+  }
+
+  private resolveSettingsFlowHash(raw: string): string | null {
+    const trimmed = raw.trim();
+    if (!trimmed) return null;
+    const exactNonKeyHash = this.versions().find(
+      (v) => v.hash === trimmed && v.hash !== v.key,
+    );
+    if (exactNonKeyHash) return exactNonKeyHash.hash;
+    const normRaw =
+      trimmed === "golden-v4-composable"
+        ? "engineering-workflow-v4"
+        : trimmed === "golden-v4-composable@1"
+          ? "engineering-workflow-v4@1"
+          : trimmed;
+    const builtInMatch = this.versions().find(
+      (v) =>
+        Boolean(v.builtIn) &&
+        (v.key === normRaw ||
+          `${v.key}@${v.version}` === normRaw ||
+          trimmed.startsWith(`builtin:${v.key}@${v.version}`)),
+    );
+    if (builtInMatch) return builtInMatch.hash;
+    return this.resolveVersionParam(normRaw) || null;
+  }
+
+  private computeSettingsFlowId(detail: QAFlowVersionItem): string {
+    if (detail.builtIn) {
+      return detail.key;
+    }
+    const hasBuiltInInFamily = this.versions().some(
+      (v) => v.key === detail.key && Boolean(v.builtIn),
+    );
+    if (hasBuiltInInFamily) {
+      if (detail.version === 1) {
+        return detail.hash;
+      }
+      return `${detail.key}@${detail.version}`;
+    }
+    return this.computeCanonicalFlowParam(detail);
   }
 
   private resolveVersionParam(raw: string): string {
@@ -1227,7 +1286,24 @@ export class QaFlowsPanelComponent {
 
   protected toolbarTitle(detail: QAFlowVersionDetail): string {
     const rawLabel = (detail.label || "").trim();
-    if (rawLabel && rawLabel !== detail.key) {
+    if (detail.builtIn) {
+      const legacyFlowsOnly =
+        this.versions().length > 0 &&
+        this.versions().every((v) => v.hash === v.key);
+      if (
+        legacyFlowsOnly &&
+        rawLabel &&
+        !rawLabel.toLowerCase().startsWith(detail.key.toLowerCase())
+      ) {
+        return rawLabel;
+      }
+      return humanizeWorkflowKey(detail.key, rawLabel);
+    }
+    const builtInSeed = this.versions().find(
+      (v) => v.key === detail.key && Boolean(v.builtIn),
+    );
+    const builtInLabel = (builtInSeed?.label || "").trim();
+    if (rawLabel && rawLabel !== detail.key && rawLabel !== builtInLabel) {
       return rawLabel;
     }
     return humanizeWorkflowKey(detail.key, rawLabel);
@@ -1305,7 +1381,7 @@ export class QaFlowsPanelComponent {
       qaShadowOnControl: this.qaShadowOnControl(),
     };
     const nextPct = prev.qaRolloutPct > 0 ? prev.qaRolloutPct : 100;
-    const targetFlowId = this.computeCanonicalFlowParam(detail);
+    const targetFlowId = this.computeSettingsFlowId(detail);
     const friendly = this.toolbarTitle(detail);
     const displayTarget =
       targetFlowId === detail.key
@@ -1615,6 +1691,7 @@ export class QaFlowsPanelComponent {
     this.isEditing.set(false);
     this.isFork.set(false);
     this.dryRunResult.set(null);
+    dismissActiveTooltip(500);
     this.mobileDrawerOpen.set(false);
     this.closeMenus();
     if (syncQueryParam) {
