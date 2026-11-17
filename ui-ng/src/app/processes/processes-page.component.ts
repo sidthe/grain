@@ -55,8 +55,14 @@ import {
 import { SplitController } from "../shared/split-controller";
 import { StatusIconComponent } from "../shared/status-icon.component";
 import { TipDirective } from "../shared/tip.directive";
+import { GrantsPickerComponent } from "../shared/grants-picker.component";
+import { ModelPickerComponent } from "../shared/model-picker.component";
+import { type ModelBackendLike, modelGroups } from "../shared/model-catalog";
 import { CompositionViewComponent } from "./composition-view.component";
 import {
+  ADMISSION_OPTIONS,
+  HOSTING_OPTIONS,
+  sameList,
   type Composition,
   type CreateScheduleRequest,
   type CreateSuiteRequest,
@@ -427,6 +433,8 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
     CompositionViewComponent,
     DialogTrapDirective,
     PillSelectComponent,
+    GrantsPickerComponent,
+    ModelPickerComponent,
     MarkdownDirective,
     QaFlowsPanelComponent,
   ],
@@ -1340,7 +1348,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                         <button
                           type="button"
                           class="btn-text proc-mobile-back"
-                          (click)="mobileDetailOpen.set(false)"
+                          (click)="closeMobileDetail()"
                         >
                           ← Back
                         </button>
@@ -1647,7 +1655,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                             <button
                               type="button"
                               class="btn-text proc-mobile-back"
-                              (click)="mobileDetailOpen.set(false)"
+                              (click)="closeMobileDetail()"
                             >
                               ← Back
                             </button>
@@ -1768,7 +1776,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                         <button
                           type="button"
                           class="btn-text proc-mobile-back"
-                          (click)="mobileDetailOpen.set(false)"
+                          (click)="closeMobileDetail()"
                         >
                           ← Back
                         </button>
@@ -1968,7 +1976,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                         <button
                           type="button"
                           class="btn-text proc-mobile-back"
-                          (click)="mobileDetailOpen.set(false)"
+                          (click)="closeMobileDetail()"
                         >
                           ← Back
                         </button>
@@ -1988,7 +1996,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                         <button
                           type="button"
                           class="btn-tonal"
-                          (click)="selectSuite(sr.suiteId, false)"
+                          (click)="selectSuite(sr.suiteId, true)"
                         >
                           Inspect suite definition
                         </button>
@@ -2092,7 +2100,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                         <button
                           type="button"
                           class="btn-text proc-mobile-back"
-                          (click)="mobileDetailOpen.set(false)"
+                          (click)="closeMobileDetail()"
                         >
                           ← Back
                         </button>
@@ -2238,7 +2246,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                         <button
                           type="button"
                           class="btn-text proc-mobile-back"
-                          (click)="mobileDetailOpen.set(false)"
+                          (click)="closeMobileDetail()"
                         >
                           ← Back
                         </button>
@@ -2563,7 +2571,7 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
             data-testid="sched-system-banner"
           >
             Built-in Grain schedule — target and prompt are managed by Grain;
-            cadence and overlap policy can be customized.
+            model, cadence and overlap policy can be customized.
           </p>
         } @else {
           <div class="field">
@@ -2738,6 +2746,110 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
                 (input)="sDraftBase.set($any($event.target).value)"
               />
             </label>
+          </div>
+
+          @if (schedTargetKind() === "prompt") {
+            <div class="switch-row" style="margin-top: 14px">
+              <button
+                type="button"
+                role="switch"
+                class="g-switch"
+                aria-label="Keep running"
+                data-testid="sched-keep-running"
+                [attr.aria-checked]="sDraftKeepRunning()"
+                (click)="sDraftKeepRunning.set(!sDraftKeepRunning())"
+              ></button>
+              <span
+                >Keep running
+                <span class="muted"
+                  >— restart every task this schedule files when its run exits,
+                  instead of completing or parking it</span
+                ></span
+              >
+            </div>
+            <div class="proc-field-grid">
+              <div class="field">
+                <span>Admission</span>
+                <g-pill-select
+                  [options]="admissionOptions"
+                  [value]="sDraftAdmission()"
+                  ariaLabel="Admission"
+                  align="left"
+                  testid="sched-admission"
+                  (valueChange)="sDraftAdmission.set($event)"
+                />
+                <p
+                  class="muted proc-field-help"
+                  data-testid="sched-admission-help"
+                >
+                  {{ admissionHelp(sDraftAdmission()) }} Applies to every task
+                  this schedule files.
+                </p>
+              </div>
+              <div class="field">
+                <span>Hosting</span>
+                <g-pill-select
+                  [options]="hostingOptions"
+                  [value]="sDraftHosting()"
+                  ariaLabel="Hosting"
+                  align="left"
+                  testid="sched-hosting"
+                  (valueChange)="sDraftHosting.set($event)"
+                />
+                <p
+                  class="muted proc-field-help"
+                  data-testid="sched-hosting-help"
+                >
+                  {{ hostingHelp(sDraftHosting()) }} Applies to every task this
+                  schedule files.
+                </p>
+              </div>
+            </div>
+            <div class="field">
+              <span>Grants</span>
+              <g-grants-picker
+                testid="sched-grants"
+                [offered]="offeredCapabilities()"
+                [held]="sDraftCaps()"
+                [repo]="sDraftRepo().trim() || undefined"
+                [policyVerdicts]="true"
+                (heldChange)="sDraftCaps.set($event)"
+              />
+            </div>
+          } @else if (schedTargetKind() === "template") {
+            <p class="muted proc-field-help" data-testid="sched-template-note">
+              Admission, hosting, grants and keep running come from the selected
+              template, and stay in sync with it.
+            </p>
+          }
+        }
+
+        @if (schedTargetKind() !== "suite") {
+          <div class="field">
+            <span>Model</span>
+            <div class="proc-model-row">
+              <g-model-picker
+                [groups]="modelGroups()"
+                [value]="sDraftModel()"
+                [placeholder]="schedModelPlaceholder()"
+                ariaLabel="Model"
+                testid="sched-model"
+                (valueChange)="sDraftModel.set($event)"
+              />
+              @if (sDraftModel()) {
+                <button
+                  type="button"
+                  class="btn-text"
+                  data-testid="sched-model-clear"
+                  (click)="sDraftModel.set('')"
+                >
+                  Use default
+                </button>
+              }
+            </div>
+            <p class="muted proc-field-help">
+              The model every task this schedule files asks for.
+            </p>
           </div>
         }
 
@@ -3292,6 +3404,93 @@ const NO_RUNS: DerivedRuns = { lastRunAt: null, nextRunAt: null };
             (click)="tDraftAutoMerge.set(!tDraftAutoMerge())"
           ></button>
           <span>Auto-merge passing pull requests</span>
+        </div>
+        <div class="switch-row" style="margin-top: 14px">
+          <button
+            type="button"
+            role="switch"
+            class="g-switch"
+            aria-label="Keep running"
+            data-testid="tmpl-keep-running"
+            [attr.aria-checked]="tDraftKeepRunning()"
+            (click)="tDraftKeepRunning.set(!tDraftKeepRunning())"
+          ></button>
+          <span
+            >Keep running
+            <span class="muted"
+              >— restart every task this template files when its run exits,
+              instead of completing or parking it</span
+            ></span
+          >
+        </div>
+        <div class="proc-field-grid">
+          <div class="field">
+            <span>Admission</span>
+            <g-pill-select
+              [options]="admissionOptions"
+              [value]="tDraftAdmission()"
+              ariaLabel="Admission"
+              align="left"
+              testid="tmpl-admission"
+              (valueChange)="tDraftAdmission.set($event)"
+            />
+            <p class="muted proc-field-help" data-testid="tmpl-admission-help">
+              {{ admissionHelp(tDraftAdmission()) }} Applies to every task this
+              template files.
+            </p>
+          </div>
+          <div class="field">
+            <span>Hosting</span>
+            <g-pill-select
+              [options]="hostingOptions"
+              [value]="tDraftHosting()"
+              ariaLabel="Hosting"
+              align="left"
+              testid="tmpl-hosting"
+              (valueChange)="tDraftHosting.set($event)"
+            />
+            <p class="muted proc-field-help" data-testid="tmpl-hosting-help">
+              {{ hostingHelp(tDraftHosting()) }} Applies to every task this
+              template files.
+            </p>
+          </div>
+        </div>
+        <div class="field">
+          <span>Grants</span>
+          <g-grants-picker
+            testid="tmpl-grants"
+            [offered]="offeredCapabilities()"
+            [held]="tDraftCaps()"
+            [repo]="tDraftRepo().trim() || undefined"
+            [policyVerdicts]="true"
+            (heldChange)="tDraftCaps.set($event)"
+          />
+        </div>
+        <div class="field">
+          <span>Model</span>
+          <div class="proc-model-row">
+            <g-model-picker
+              [groups]="modelGroups()"
+              [value]="tDraftModel()"
+              [placeholder]="'Deployment default model'"
+              ariaLabel="Model"
+              testid="tmpl-model"
+              (valueChange)="tDraftModel.set($event)"
+            />
+            @if (tDraftModel()) {
+              <button
+                type="button"
+                class="btn-text"
+                data-testid="tmpl-model-clear"
+                (click)="tDraftModel.set('')"
+              >
+                Use default
+              </button>
+            }
+          </div>
+          <p class="muted proc-field-help">
+            The model every task this template files asks for.
+          </p>
         </div>
         <!-- Beside the actions, so a refused save is in view where the
              Save was pressed, on a phone as on a desktop. -->
@@ -3894,6 +4093,14 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly sDraftGitRefRepo = signal("");
   protected readonly sDraftGitRef = signal("refs/heads/main");
   protected readonly sDraftOverlap = signal("skip");
+  // What every firing of an inline-prompt schedule carries beside its
+  // prompt (model.Schedule): a template-backed schedule takes these from
+  // its template, so only the model is the schedule's own there.
+  protected readonly sDraftModel = signal("");
+  protected readonly sDraftKeepRunning = signal(false);
+  protected readonly sDraftAdmission = signal("standard");
+  protected readonly sDraftHosting = signal("unattended");
+  protected readonly sDraftCaps = signal<string[]>([]);
   protected readonly sDraftQaFlowRef = signal("");
   protected readonly draftSchedComposition = signal<Composition | null>(null);
 
@@ -3915,6 +4122,40 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
   protected readonly tDraftParamsCsv = signal("");
   protected readonly tDraftFields = signal<TemplateField[]>([]);
   protected readonly tDraftAutoMerge = signal(false);
+  protected readonly tDraftModel = signal("");
+  protected readonly tDraftKeepRunning = signal(false);
+  protected readonly tDraftAdmission = signal("standard");
+  protected readonly tDraftHosting = signal("unattended");
+  protected readonly tDraftCaps = signal<string[]>([]);
+
+  // The vocabularies the schedule and template forms share: the
+  // deployment's model catalog (one group per connection), the
+  // capabilities it offers, and the admission and hosting settings.
+  protected readonly modelGroups = computed(() =>
+    modelGroups(
+      (this.access.rawConfig()?.agentBackends ?? []) as ModelBackendLike[],
+    ),
+  );
+  protected readonly offeredCapabilities = computed(
+    () => this.access.rawConfig()?.capabilities ?? [],
+  );
+  protected readonly admissionOptions: PillOption[] = ADMISSION_OPTIONS.map(
+    (o) => ({ value: o.value, label: o.label }),
+  );
+  protected readonly hostingOptions: PillOption[] = HOSTING_OPTIONS.map(
+    (o) => ({ value: o.value, label: o.label }),
+  );
+  protected readonly schedModelPlaceholder = computed(() =>
+    this.schedTargetKind() === "template" && !this.editingSchedule()?.system
+      ? "The template's model"
+      : "Deployment default model",
+  );
+  protected admissionHelp(v: string): string {
+    return ADMISSION_OPTIONS.find((o) => o.value === v)?.help ?? "";
+  }
+  protected hostingHelp(v: string): string {
+    return HOSTING_OPTIONS.find((o) => o.value === v)?.help ?? "";
+  }
   protected readonly tDraftQaFlowRef = signal("");
 
   // Create/Edit suite dialog state
@@ -4266,8 +4507,11 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     return t ? t.name || t.title || t.id : "Select template";
   });
 
+  private writingQ = 0;
   private handledDeepLinkKey = "";
   private handledItemLinkKey = "";
+  private handledItemTab: ProcessTab | null = null;
+  private missingItemError: string | null = null;
 
   constructor() {
     afterNextRender(() => this.sp.attach());
@@ -4302,11 +4546,10 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     // in flight, the ?q= it passes through is an echo of what was typed,
     // possibly already overtaken by the next keystroke, so it must not
     // refill the box.
-    let writingQ = 0;
     effect(() => {
       const q = this.q() ?? "";
       untracked(() => {
-        if (writingQ === 0 && q !== this.filter.query()) {
+        if (this.writingQ === 0 && q !== this.filter.query()) {
           this.filter.query.set(q);
         }
       });
@@ -4315,14 +4558,14 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       const typed = this.filter.query();
       untracked(() => {
         if (typed === (this.q() ?? "")) return;
-        writingQ++;
+        this.writingQ++;
         void this.router
           .navigate([], {
             queryParams: { q: typed || null },
             queryParamsHandling: "merge",
             replaceUrl: true,
           })
-          .finally(() => writingQ--);
+          .finally(() => this.writingQ--);
       });
     });
 
@@ -4332,15 +4575,34 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       const tab = this.activeTab();
       const item = this.itemId();
       const run = this.runId();
-      const key = `${loaded}:${tab}:${item ?? ""}:${run ?? ""}`;
+      const key = this.itemLinkKey(tab, item, run);
       untracked(() => {
         if (!loaded) return;
         if (!item && !run) {
+          const prevTab = this.handledItemTab;
           this.handledItemLinkKey = "";
+          this.handledItemTab = null;
+          if (prevTab) {
+            this.mobileDetailOpen.set(false);
+            this.clearMissingItemError();
+            if (prevTab === "schedules") {
+              this.selectedScheduleId.set(null);
+              this.selectedTrigger.set(null);
+              this.scheduleComposition.set(null);
+            } else if (prevTab === "templates") {
+              this.selectedTemplateId.set(null);
+              this.templateComposition.set(null);
+            } else if (prevTab === "suites") {
+              this.selectedSuiteRunId.set(null);
+              this.selectedSuiteId.set(null);
+              this.suiteComposition.set(null);
+            }
+          }
           return;
         }
         if (key === this.handledItemLinkKey) return;
         this.handledItemLinkKey = key;
+        this.handledItemTab = tab;
         if (run) {
           this.suitesView.set("runs");
           const parsed = Number(run);
@@ -4349,47 +4611,50 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
             parsed > 0 &&
             this.store.suiteRuns().some((r) => r.id === parsed)
           ) {
-            this.selectSuiteRun(parsed, true);
+            this.selectSuiteRun(parsed, true, false);
           } else {
-            this.store.actionError.set(`No suite run "${run}".`);
+            this.setMissingItemError(`No suite run "${run}".`);
           }
           return;
         }
         if (!item) return;
         if (tab === "schedules") {
           if (this.store.schedules().some((s) => s.id === item)) {
-            this.selectSchedule(item, true);
+            this.selectSchedule(item, true, false);
           } else {
-            this.store.actionError.set(`No schedule "${item}".`);
+            this.setMissingItemError(`No schedule "${item}".`);
           }
         } else if (tab === "templates") {
           if (this.store.templates().some((t) => t.id === item)) {
-            this.selectTemplate(item, true);
+            this.selectTemplate(item, true, false);
           } else {
-            this.store.actionError.set(`No template "${item}".`);
+            this.setMissingItemError(`No template "${item}".`);
           }
         } else if (tab === "suites") {
           this.suitesView.set("suites");
           if (this.store.suites().some((s) => s.id === item)) {
-            this.selectSuite(item, true);
+            this.selectSuite(item, true, false);
           } else {
-            this.store.actionError.set(`No suite "${item}".`);
+            this.setMissingItemError(`No suite "${item}".`);
           }
         }
       });
     });
 
-    // Auto-select top item per tab on desktop when data loads.
+    // Auto-select top item per tab on desktop when data loads or returns to a
+    // bare tab route.
     effect(() => {
       const tab = this.activeTab();
       const loaded = this.store.loaded();
+      const item = this.itemId();
+      const run = this.runId();
       const scheds = this.sortedSchedules();
       const trigs = this.filteredTriggers();
       const tmpls = this.sortedTemplates();
       const suites = this.sortedSuites();
       const repos = this.filteredDeclRepos();
       untracked(() => {
-        if (!loaded || this.itemId() || this.runId()) return;
+        if (!loaded || item || run) return;
         const isDesktop = (this.doc.defaultView?.innerWidth ?? 1280) >= 600;
         if (!isDesktop) return;
         if (
@@ -4785,10 +5050,102 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     return this.store.suites().find((x) => x.id === id)?.name ?? "";
   }
 
-  protected selectSchedule(id: string, fromClick: boolean): void {
+  private itemLinkKey(
+    tab: ProcessTab,
+    itemId?: string,
+    runId?: string,
+  ): string {
+    return `${this.store.loaded()}:${tab}:${itemId ?? ""}:${runId ?? ""}`;
+  }
+
+  private preserveQueryExtras() {
+    return this.writingQ > 0
+      ? {
+          queryParams: { q: this.filter.query() || null },
+          queryParamsHandling: "merge" as const,
+        }
+      : { queryParamsHandling: "preserve" as const };
+  }
+
+  private setMissingItemError(msg: string): void {
+    this.missingItemError = msg;
+    this.store.actionError.set(msg);
+  }
+
+  private clearMissingItemError(): void {
+    if (
+      this.missingItemError &&
+      this.store.actionError() === this.missingItemError
+    ) {
+      this.store.actionError.set(null);
+    }
+    this.missingItemError = null;
+  }
+
+  // Push a history entry for an explicit row or item selection so reload,
+  // copy/paste, and Back/Forward land on that item while keeping ?q=, ?sort=,
+  // and ?kind=. Auto-selection on arrival passes fromClick: false and leaves
+  // the URL alone so Back out of Processes or across ?sort= stays predictable.
+  private syncItemUrl(
+    tab: "schedules" | "templates" | "suites",
+    itemId?: string,
+    runId?: number,
+  ): void {
+    if (runId !== undefined) {
+      const runStr = String(runId);
+      const targetKey = this.itemLinkKey("suites", undefined, runStr);
+      if (this.runId() === runStr && this.handledItemLinkKey === targetKey) {
+        return;
+      }
+      this.handledItemLinkKey = targetKey;
+      this.handledItemTab = "suites";
+      void this.router.navigate(
+        ["/processes", "suites", "runs", runStr],
+        this.preserveQueryExtras(),
+      );
+      return;
+    }
+    if (itemId !== undefined) {
+      const targetKey = this.itemLinkKey(tab, itemId);
+      if (
+        this.tab() === tab &&
+        this.itemId() === itemId &&
+        !this.runId() &&
+        this.handledItemLinkKey === targetKey
+      ) {
+        return;
+      }
+      this.handledItemLinkKey = targetKey;
+      this.handledItemTab = tab;
+      void this.router.navigate(
+        ["/processes", tab, itemId],
+        this.preserveQueryExtras(),
+      );
+    }
+  }
+
+  protected closeMobileDetail(): void {
+    this.mobileDetailOpen.set(false);
+    if (this.itemId() || this.runId()) {
+      void this.router.navigate(
+        ["/processes", this.activeTab()],
+        this.preserveQueryExtras(),
+      );
+    }
+  }
+
+  protected selectSchedule(
+    id: string,
+    fromClick: boolean,
+    syncUrl = fromClick,
+  ): void {
     this.selectedTrigger.set(null);
     this.selectedScheduleId.set(id);
-    if (fromClick) this.mobileDetailOpen.set(true);
+    if (fromClick) {
+      this.mobileDetailOpen.set(true);
+      this.clearMissingItemError();
+    }
+    if (syncUrl) this.syncItemUrl("schedules", id);
     this.scheduleComposition.set(null);
     if (this.access.can("GET /api/schedules/{id}/composition")) {
       void this.store
@@ -4806,7 +5163,18 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     this.triggerYamlText.set("");
     this.triggerYamlLoading.set(false);
     this.selectedTrigger.set(tr);
-    if (fromClick) this.mobileDetailOpen.set(true);
+    if (fromClick) {
+      this.mobileDetailOpen.set(true);
+      this.clearMissingItemError();
+      if (this.itemId()) {
+        this.handledItemLinkKey = "";
+        this.handledItemTab = null;
+        void this.router.navigate(
+          ["/processes", "schedules"],
+          this.preserveQueryExtras(),
+        );
+      }
+    }
     if (!tr.detail && !this.store.repoDefaults()[tr.repo]?.declarationsStatus) {
       void this.store.loadRepoInspect(tr.repo);
     }
@@ -4814,15 +5182,25 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
 
   protected openTriggerTemplate(id: string): void {
     this.tmplFilter.set("all");
-    this.selectTemplate(id, true);
-    void this.router.navigate(["/processes", "templates"], {
+    this.selectTemplate(id, true, false);
+    this.handledItemLinkKey = this.itemLinkKey("templates", id);
+    this.handledItemTab = "templates";
+    void this.router.navigate(["/processes", "templates", id], {
       state: { selectTemplateId: id },
     });
   }
 
-  protected selectTemplate(id: string, fromClick: boolean): void {
+  protected selectTemplate(
+    id: string,
+    fromClick: boolean,
+    syncUrl = fromClick,
+  ): void {
     this.selectedTemplateId.set(id);
-    if (fromClick) this.mobileDetailOpen.set(true);
+    if (fromClick) {
+      this.mobileDetailOpen.set(true);
+      this.clearMissingItemError();
+    }
+    if (syncUrl) this.syncItemUrl("templates", id);
     this.templateComposition.set(null);
     const tmpl = this.store.templates().find((t) => t.id === id);
     if (tmpl && this.access.can("GET /api/templates/{id}/composition")) {
@@ -4852,10 +5230,19 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     }
   }
 
-  protected selectSuite(id: string, fromClick: boolean): void {
+  protected selectSuite(
+    id: string,
+    fromClick: boolean,
+    syncUrl = fromClick,
+  ): void {
     this.selectedSuiteRunId.set(null);
     this.selectedSuiteId.set(id);
-    if (fromClick) this.mobileDetailOpen.set(true);
+    if (fromClick) {
+      this.suitesView.set("suites");
+      this.mobileDetailOpen.set(true);
+      this.clearMissingItemError();
+    }
+    if (syncUrl) this.syncItemUrl("suites", id);
     this.suiteComposition.set(null);
     if (this.access.can("GET /api/suites/{id}/composition")) {
       void this.store
@@ -4867,9 +5254,18 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     }
   }
 
-  protected selectSuiteRun(id: number, fromClick: boolean): void {
+  protected selectSuiteRun(
+    id: number,
+    fromClick: boolean,
+    syncUrl = fromClick,
+  ): void {
     this.selectedSuiteRunId.set(id);
-    if (fromClick) this.mobileDetailOpen.set(true);
+    if (fromClick) {
+      this.suitesView.set("runs");
+      this.mobileDetailOpen.set(true);
+      this.clearMissingItemError();
+    }
+    if (syncUrl) this.syncItemUrl("suites", undefined, id);
     if (this.access.can("GET /api/suite-runs/{id}")) {
       void this.store.fetchSuiteRunDetail(id).catch(() => undefined);
     }
@@ -5194,6 +5590,13 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
         await this.store.deleteSchedule(s.id);
         if (this.selectedScheduleId() === s.id) {
           this.selectedScheduleId.set(null);
+          this.scheduleComposition.set(null);
+        }
+        if (this.activeTab() === "schedules" && this.itemId() === s.id) {
+          void this.router.navigate(["/processes", "schedules"], {
+            ...this.preserveQueryExtras(),
+            replaceUrl: true,
+          });
         }
         this.snackbar.show("Schedule deleted.");
       },
@@ -5258,6 +5661,11 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
         existing.recurrence?.gitRef?.ref ?? "refs/heads/main",
       );
       this.sDraftOverlap.set(existing.overlap || "skip");
+      this.sDraftModel.set(existing.model || "");
+      this.sDraftKeepRunning.set(!!existing.keepRunning);
+      this.sDraftAdmission.set(existing.admission || "standard");
+      this.sDraftHosting.set(existing.hosting || "unattended");
+      this.sDraftCaps.set([...(existing.capabilities ?? [])]);
       this.sDraftQaFlowRef.set(existing.qaFlowRef || "");
     } else {
       this.schedTargetKind.set("prompt");
@@ -5280,6 +5688,11 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       this.sDraftGitRefRepo.set("");
       this.sDraftGitRef.set("refs/heads/main");
       this.sDraftOverlap.set("skip");
+      this.sDraftModel.set("");
+      this.sDraftKeepRunning.set(false);
+      this.sDraftAdmission.set("standard");
+      this.sDraftHosting.set("unattended");
+      this.sDraftCaps.set([]);
       this.sDraftQaFlowRef.set("");
     }
     this.schedDialogOpen.set(true);
@@ -5376,6 +5789,11 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       timeZone: this.sDraftTz().trim() || undefined,
       overlap: this.sDraftOverlap(),
     };
+    // A suite decides the model of everything it runs; the API refuses
+    // one beside a suiteId. "" is the default, the same as saying nothing.
+    if (tk !== "suite" && this.sDraftModel()) {
+      baseReq.model = this.sDraftModel();
+    }
     if (tk === "template") {
       baseReq.templateId = this.sDraftTemplateId();
     } else if (tk === "suite") {
@@ -5383,7 +5801,16 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     } else {
       baseReq.title = this.sDraftTitle().trim();
       baseReq.description = this.sDraftDesc().trim();
-      baseReq.capabilities = [];
+      baseReq.keepRunning = this.sDraftKeepRunning();
+      // Only when it differs from the default: raising admission is
+      // gated for a limited role, so a form that says nothing must not ask.
+      if (this.sDraftAdmission() !== "standard") {
+        baseReq.admission = this.sDraftAdmission();
+      }
+      if (this.sDraftHosting() !== "unattended") {
+        baseReq.hosting = this.sDraftHosting();
+      }
+      baseReq.capabilities = [...this.sDraftCaps()];
       baseReq.reads = [];
       baseReq.writes = [];
     }
@@ -5394,12 +5821,49 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     return baseReq;
   }
 
+  /**
+   * buildSchedulePreviewPayload is the create body as the draft
+   * composition endpoint must see it. That endpoint has no saved row to
+   * fall back on, so the model, admission and hosting in force are always
+   * sent -- for a template-backed schedule, the saved schedule's own
+   * (a declared schedule may raise its template's admission), and its own
+   * capabilities, which its firings grant beside the template's
+   * (ScheduleOverlay.jsx previewRequest).
+   */
+  private buildSchedulePreviewPayload(): CreateScheduleRequest {
+    const req = this.buildScheduleCreatePayload();
+    const tk = this.schedTargetKind();
+    if (tk === "suite") return req;
+    const editing = this.editingSchedule();
+    const sameTemplate =
+      tk === "template" &&
+      !!editing?.templateId &&
+      editing.templateId === this.sDraftTemplateId();
+    req.model = this.sDraftModel();
+    if (tk === "prompt") {
+      req.admission = this.sDraftAdmission();
+      req.hosting = this.sDraftHosting();
+    } else {
+      req.admission = sameTemplate ? editing?.admission || "" : "";
+      req.hosting = sameTemplate ? editing?.hosting || "" : "";
+      if (sameTemplate && (editing?.capabilities ?? []).length > 0) {
+        req.capabilities = [...(editing?.capabilities ?? [])];
+      }
+    }
+    return req;
+  }
+
   private buildScheduleUpdatePayload(editing: Schedule): UpdateScheduleRequest {
     if (editing.system) {
+      // One of grain's own schedules: its model is the deployment's to
+      // choose, like its cadence (ui.UpdateScheduleRequest.Model).
       return {
         recurrence: this.buildRecurrenceDraft(),
         timeZone: this.sDraftTz().trim() || undefined,
         overlap: this.sDraftOverlap(),
+        ...(this.sDraftModel() !== (editing.model || "")
+          ? { model: this.sDraftModel() }
+          : {}),
         revision: editing.revision,
       };
     }
@@ -5416,6 +5880,13 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     if (qaFlowRef || editing.qaFlowRef) {
       patchReq.qaFlowRef = qaFlowRef;
     }
+    // Each setting below only when it changed, as the classic form sends
+    // them: absent leaves the saved value alone (ui.UpdateScheduleRequest),
+    // and resending an unchanged admission would ask a limited role's
+    // grant gate for a raise nobody made.
+    if (tk !== "suite" && this.sDraftModel() !== (editing.model || "")) {
+      patchReq.model = this.sDraftModel();
+    }
     if (tk === "template") {
       patchReq.templateId = this.sDraftTemplateId();
     } else if (tk === "suite") {
@@ -5426,6 +5897,18 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       if (editing.templateId) {
         patchReq.templateId = "";
       }
+      if (this.sDraftKeepRunning() !== !!editing.keepRunning) {
+        patchReq.keepRunning = this.sDraftKeepRunning();
+      }
+      if (this.sDraftAdmission() !== (editing.admission || "standard")) {
+        patchReq.admission = this.sDraftAdmission();
+      }
+      if (this.sDraftHosting() !== (editing.hosting || "unattended")) {
+        patchReq.hosting = this.sDraftHosting();
+      }
+      if (!sameList(this.sDraftCaps(), editing.capabilities)) {
+        patchReq.capabilities = [...this.sDraftCaps()];
+      }
     }
     return patchReq;
   }
@@ -5434,7 +5917,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     this.dialogError.set(null);
     try {
       const comp = await this.store.previewDraftSchedule(
-        this.buildScheduleCreatePayload(),
+        this.buildSchedulePreviewPayload(),
       );
       this.draftSchedComposition.set(comp);
     } catch (err) {
@@ -5459,7 +5942,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
         const created = await this.store.createSchedule(
           this.buildScheduleCreatePayload(),
         );
-        this.selectSchedule(created.id, false);
+        this.selectSchedule(created.id, true);
         this.snackbar.show("Schedule created.");
       }
       this.closeScheduleDialog();
@@ -5541,6 +6024,11 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       this.tDraftFields.set(clonedFields);
       this.tDraftParamsCsv.set(clonedFields.map((f) => f.name).join(", "));
       this.tDraftAutoMerge.set(existing.autoMerge);
+      this.tDraftModel.set(existing.model || "");
+      this.tDraftKeepRunning.set(!!existing.keepRunning);
+      this.tDraftAdmission.set(existing.admission || "standard");
+      this.tDraftHosting.set(existing.hosting || "unattended");
+      this.tDraftCaps.set([...(existing.capabilities ?? [])]);
       this.tDraftQaFlowRef.set(existing.qaFlowRef || "");
     } else {
       this.tDraftName.set("");
@@ -5550,6 +6038,11 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       this.tDraftFields.set([]);
       this.tDraftParamsCsv.set("");
       this.tDraftAutoMerge.set(false);
+      this.tDraftModel.set("");
+      this.tDraftKeepRunning.set(false);
+      this.tDraftAdmission.set("standard");
+      this.tDraftHosting.set("unattended");
+      this.tDraftCaps.set([]);
       this.tDraftQaFlowRef.set("");
     }
     this.tmplDialogOpen.set(true);
@@ -5604,6 +6097,42 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
     return this.access.can(route, targetRepo);
   }
 
+  /**
+   * buildTemplateUpdatePayload is the PATCH for an edited template: its
+   * text, binding and fields as before, and each setting below only when
+   * it changed (TemplateOverlay.jsx): absent leaves the saved value alone.
+   */
+  private buildTemplateUpdatePayload(
+    editing: Template,
+    fields: TemplateField[],
+  ): UpdateTemplateRequest {
+    const req: UpdateTemplateRequest = {
+      name: this.tDraftName().trim(),
+      title: this.tDraftTitle().trim(),
+      description: this.tDraftDesc(),
+      repo: this.tDraftRepo().trim(),
+      fields,
+      autoMerge: this.tDraftAutoMerge(),
+      revision: editing.revision,
+    };
+    if (this.tDraftModel() !== (editing.model || "")) {
+      req.model = this.tDraftModel();
+    }
+    if (this.tDraftKeepRunning() !== !!editing.keepRunning) {
+      req.keepRunning = this.tDraftKeepRunning();
+    }
+    if (this.tDraftAdmission() !== (editing.admission || "standard")) {
+      req.admission = this.tDraftAdmission();
+    }
+    if (this.tDraftHosting() !== (editing.hosting || "unattended")) {
+      req.hosting = this.tDraftHosting();
+    }
+    if (!sameList(this.tDraftCaps(), editing.capabilities)) {
+      req.capabilities = [...this.tDraftCaps()];
+    }
+    return req;
+  }
+
   protected async saveTemplateDialog(): Promise<void> {
     if (this.submitting() || !this.canSaveTemplate()) return;
     this.dialogError.set(null);
@@ -5613,15 +6142,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       const editing = this.editingTemplate();
       const qaFlowRef = this.tDraftQaFlowRef().trim();
       if (editing) {
-        const patchReq: UpdateTemplateRequest = {
-          name: this.tDraftName().trim(),
-          title: this.tDraftTitle().trim(),
-          description: this.tDraftDesc(),
-          repo: this.tDraftRepo().trim(),
-          fields,
-          autoMerge: this.tDraftAutoMerge(),
-          revision: editing.revision,
-        };
+        const patchReq = this.buildTemplateUpdatePayload(editing, fields);
         if (qaFlowRef || editing.qaFlowRef) {
           patchReq.qaFlowRef = qaFlowRef;
         }
@@ -5640,7 +6161,15 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
           repo: this.tDraftRepo().trim(),
           fields: fields.length ? fields : undefined,
           autoMerge: this.tDraftAutoMerge(),
-          capabilities: [],
+          keepRunning: this.tDraftKeepRunning(),
+          ...(this.tDraftModel() ? { model: this.tDraftModel() } : {}),
+          ...(this.tDraftAdmission() !== "standard"
+            ? { admission: this.tDraftAdmission() }
+            : {}),
+          ...(this.tDraftHosting() !== "unattended"
+            ? { hosting: this.tDraftHosting() }
+            : {}),
+          capabilities: [...this.tDraftCaps()],
           reads: [],
           writes: [],
           customFields: {},
@@ -5649,7 +6178,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
           createReq.qaFlowRef = qaFlowRef;
         }
         const created = await this.store.createTemplate(createReq);
-        this.selectTemplate(created.id, false);
+        this.selectTemplate(created.id, true);
         this.snackbar.show("Template created.");
       }
       this.tmplDialogOpen.set(false);
@@ -5670,6 +6199,13 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
         await this.store.deleteTemplate(t.id);
         if (this.selectedTemplateId() === t.id) {
           this.selectedTemplateId.set(null);
+          this.templateComposition.set(null);
+        }
+        if (this.activeTab() === "templates" && this.itemId() === t.id) {
+          void this.router.navigate(["/processes", "templates"], {
+            ...this.preserveQueryExtras(),
+            replaceUrl: true,
+          });
         }
         this.snackbar.show("Template deleted.");
       },
@@ -5806,7 +6342,7 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
         this.snackbar.show("Suite updated.");
       } else {
         const created = await this.store.createSuite(payload);
-        this.selectSuite(created.id, false);
+        this.selectSuite(created.id, true);
         this.snackbar.show("Suite created.");
       }
       this.suiteDialogOpen.set(false);
@@ -5825,7 +6361,16 @@ export class ProcessesPageComponent implements OnInit, OnDestroy {
       destructive: true,
       run: async () => {
         await this.store.deleteSuite(st.id);
-        if (this.selectedSuiteId() === st.id) this.selectedSuiteId.set(null);
+        if (this.selectedSuiteId() === st.id) {
+          this.selectedSuiteId.set(null);
+          this.suiteComposition.set(null);
+        }
+        if (this.activeTab() === "suites" && this.itemId() === st.id) {
+          void this.router.navigate(["/processes", "suites"], {
+            ...this.preserveQueryExtras(),
+            replaceUrl: true,
+          });
+        }
         this.snackbar.show("Suite deleted.");
       },
     });

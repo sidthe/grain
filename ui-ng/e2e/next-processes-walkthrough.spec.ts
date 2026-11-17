@@ -279,7 +279,7 @@ test("templates with required parameters preview without 400, workflow Run now c
     "pull_request",
   );
   await page.getByTestId("trigger-template-link").click();
-  await expect(page).toHaveURL(/\/next\/processes\/templates$/);
+  await expect(page).toHaveURL(/\/next\/processes\/templates\/.+/);
   await expect(page.getByTestId("tmpl-detail-title")).toHaveText("Docs Check");
 
   // Workflow schedule Run now asks confirmation explaining immediate CI run.
