@@ -31,6 +31,7 @@ import {
 import { StatusIconComponent } from "../shared/status-icon.component";
 import { TipDirective } from "../shared/tip.directive";
 import {
+  type CustomStageRow,
   type FixtureSelfTestReport,
   MAX_PROMPT_BUDGET_BYTES,
   type QADryRunResponse,
@@ -54,13 +55,8 @@ export type CustomCheckEngine =
 export type InsertAfterStage = "s2" | "s3" | "s4";
 export type StudioInspectorTab = "definition" | "empirical" | "yaml";
 
-export interface EditableCustomStage {
-  readonly uid: number;
-  readonly id: string;
-  readonly label: string;
-  readonly insertAfter: InsertAfterStage;
-  readonly timeoutSeconds: number;
-}
+export type EditableCustomStage = CustomStageRow;
+export type { CustomStageRow };
 
 export interface EditableCustomCheck {
   readonly uid: number;
@@ -472,7 +468,14 @@ function readInputChecked(ev: Event): boolean {
                         </div>
                       } @else if (ccReadonly.engine === "diff-budget") {
                         <div class="qa-kv-val">
-                          Max {{ ccReadonly.maxChangedLines }} added lines
+                          @if (
+                            ccReadonly.maxChangedLines <= 0 &&
+                            ccReadonly.maxFiles > 0
+                          ) {
+                            Max {{ ccReadonly.maxFiles }} changed files
+                          } @else {
+                            Max {{ ccReadonly.maxChangedLines }} added lines
+                          }
                         </div>
                       } @else if (ccReadonly.engine === "jsonschema") {
                         <div class="qa-kv-val s-mono">
@@ -1261,11 +1264,15 @@ function readInputChecked(ev: Event): boolean {
                             >Auto-verified diff-budget test cases</span
                           >
                           <div class="qa-example-row">
-                            <span class="qa-kv-val"
-                              >1. Diff with
-                              {{ budgetPreview.failLineCount }} added
-                              lines</span
-                            >
+                            <span class="qa-kv-val">{{
+                              cc.maxChangedLines <= 0 && cc.maxFiles > 0
+                                ? "1. Diff touching " +
+                                  budgetPreview.failFileCount +
+                                  " files"
+                                : "1. Diff with " +
+                                  budgetPreview.failLineCount +
+                                  " added lines"
+                            }}</span>
                             <span
                               [class]="
                                 'status-pill ' +
@@ -1277,13 +1284,17 @@ function readInputChecked(ev: Event): boolean {
                                   liveEval.failTrapOk ? 'healthy' : 'error'
                                 "
                               />
-                              Caught
+                              {{
+                                liveEval.failTrapOk ? "Caught" : "Not caught"
+                              }}
                             </span>
                           </div>
                           <div class="qa-example-row">
-                            <span class="qa-kv-val"
-                              >2. Diff with 1 added line</span
-                            >
+                            <span class="qa-kv-val">{{
+                              cc.maxChangedLines <= 0 && cc.maxFiles > 0
+                                ? "2. Diff touching 1 file"
+                                : "2. Diff with 1 added line"
+                            }}</span>
                             <span
                               [class]="
                                 'status-pill ' +
@@ -1295,7 +1306,7 @@ function readInputChecked(ev: Event): boolean {
                                   liveEval.cleanPassOk ? 'healthy' : 'error'
                                 "
                               />
-                              Allowed
+                              {{ liveEval.cleanPassOk ? "Allowed" : "Blocked" }}
                             </span>
                           </div>
                         </div>
@@ -2340,7 +2351,13 @@ export class QaStepDrawerComponent {
   protected jsonSchemaPreview(cc: EditableCustomCheck): {
     sampleFile: string;
   } {
-    const syn = synthesizeJsonSchemaFixtures(cc.requiredKeys, cc.paths);
+    const syn = synthesizeJsonSchemaFixtures(
+      cc.requiredKeys,
+      cc.paths,
+      cc.schemaJson,
+      false,
+      cc.exclude,
+    );
     return { sampleFile: syn.sampleFile };
   }
 
@@ -2354,9 +2371,18 @@ export class QaStepDrawerComponent {
 
   protected diffBudgetPreview(cc: EditableCustomCheck): {
     failLineCount: number;
+    failFileCount: number;
   } {
-    const syn = synthesizeDiffBudgetFixtures(cc.maxChangedLines, cc.paths);
-    return { failLineCount: syn.failLineCount };
+    const syn = synthesizeDiffBudgetFixtures(
+      cc.maxChangedLines,
+      cc.paths,
+      cc.exclude,
+      cc.maxFiles,
+    );
+    return {
+      failLineCount: syn.failLineCount,
+      failFileCount: syn.failFileCount,
+    };
   }
 
   protected textVal(ev: Event): string {

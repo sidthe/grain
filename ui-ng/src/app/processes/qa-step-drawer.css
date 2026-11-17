@@ -257,8 +257,14 @@ g-qa-step-drawer {
   border: 1px solid var(--md-sys-color-outline);
   background: var(--md-sys-color-surface);
   color: var(--md-sys-color-on-surface);
+  font-family: inherit;
   font-size: 13px;
   line-height: 19px;
+}
+
+.qa-step-inspector .s-mono.s-mono,
+.qa-step-inspector .qa-mono.qa-mono {
+  font-family: var(--g-font-mono, var(--grain-font-mono));
 }
 
 .qa-inline-check {

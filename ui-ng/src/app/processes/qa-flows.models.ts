@@ -158,10 +158,26 @@ export interface CustomStageDeclarationV3 {
   readonly whenPaths?: readonly string[];
   readonly "min-tier"?: string;
   readonly minTier?: string;
+  readonly timeout?: number;
   readonly "timeout-seconds"?: number;
   readonly timeoutSeconds?: number;
   readonly "check-ids"?: readonly string[];
   readonly checkIds?: readonly string[];
+  readonly "skill-ref"?: string;
+  readonly skillRef?: string;
+}
+
+export interface CustomStageRow {
+  readonly uid: number;
+  readonly id: string;
+  readonly label: string;
+  readonly insertAfter: CustomStageAnchor;
+  readonly timeoutSeconds: number;
+  readonly kind?: string;
+  readonly whenPaths?: readonly string[];
+  readonly minTier?: string;
+  readonly checkIds?: readonly string[];
+  readonly skillRef?: string;
 }
 
 export interface FlowDeclarationV3 {
@@ -178,8 +194,11 @@ export interface FlowDeclarationV3 {
           readonly enabled?: boolean;
           readonly complexities?: readonly string[];
           readonly "max-seconds"?: number;
+          readonly maxSeconds?: number;
           readonly "max-tokens"?: number;
+          readonly maxTokens?: number;
           readonly "on-clarification"?: string;
+          readonly onClarification?: string;
         };
     readonly "s1-risk"?: boolean | Readonly<Record<string, unknown>>;
     readonly "s2-plan-critic"?:
@@ -189,8 +208,11 @@ export interface FlowDeclarationV3 {
           readonly complexities?: readonly string[];
           readonly tiers?: readonly string[];
           readonly "max-seconds"?: number;
+          readonly maxSeconds?: number;
           readonly "max-tokens"?: number;
+          readonly maxTokens?: number;
           readonly "max-bounces"?: number;
+          readonly maxBounces?: number;
         };
     readonly "s5-merge-triage"?:
       | "off"
@@ -199,7 +221,9 @@ export interface FlowDeclarationV3 {
       | {
           readonly mode?: "off" | "shadow" | "enforced";
           readonly "auto-merge-tiers"?: readonly string[];
+          readonly autoMergeTiers?: readonly string[];
           readonly "require-human-tiers"?: readonly string[];
+          readonly requireHumanTiers?: readonly string[];
         };
     readonly custom?: readonly CustomStageDeclarationV3[];
   };
@@ -902,6 +926,7 @@ export function buildClientWorkflowStagesView(
 
   // Stage 2: s1-context
   const ctxMaxTokens = ctxDecl.maxTokens ?? ctxDecl["max-tokens"] ?? 12000;
+  const ctxExtraPaths = ctxDecl.extraPaths ?? ctxDecl["extra-paths"];
   const s1Steps: WorkflowStepView[] = [
     {
       id: "s1:blast-radius",
@@ -923,8 +948,9 @@ export function buildClientWorkflowStagesView(
       enabled: Boolean(ctxDecl.enabled),
       mode: ctxDecl.enabled ? "active" : "off",
       scope:
-        (ctxDecl.extraPaths ?? ctxDecl["extra-paths"])?.join(", ") ||
-        "design/design/**, docs/**",
+        ctxExtraPaths !== undefined
+          ? ctxExtraPaths.join(", ") || "callers & memory"
+          : "design/design/**, docs/**",
       summary: `Discovers sibling callers and repository memory (up to ${ctxMaxTokens} tokens).`,
     },
   ];
@@ -1539,8 +1565,12 @@ export function evaluateFixturesClientSide(check: {
         const overLines =
           (check.maxChangedLines ?? 0) > 0 &&
           lines.length > (check.maxChangedLines ?? 0);
+        const scopedFiles = files.filter((f) =>
+          matchesFixturePathScope(f, check.paths, check.exclude),
+        );
         const overFiles =
-          (check.maxFiles ?? 0) > 0 && files.length > (check.maxFiles ?? 0);
+          (check.maxFiles ?? 0) > 0 &&
+          scopedFiles.length > (check.maxFiles ?? 0);
         triggered = overLines || overFiles;
       } else {
         triggered = expectFinding;
@@ -1921,12 +1951,27 @@ export function resolvePatternSamplePath(
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  for (const g of pathsList) {
+  const effectiveGlobs = pathsList.length > 0 ? pathsList : ["**/*"];
+  for (const g of effectiveGlobs) {
     const base = globToSamplePath(g);
-    const shallow = base.replace("/sub/", "/");
-    const altDir = base.replace("/sub/", "/core/");
+    const shallow = base.replace(/(^|\/)sub\//, "$1");
+    const altDir = base.replace(/(^|\/)sub\//, "$1core/");
+    const altServiceDir = base.replace(/(^|\/)sample\//, "$1core/");
     const altName = base.replace(/sample(\.[^./]+)?$/, "handler$1");
-    for (const candidate of [base, shallow, altDir, altName]) {
+    const altConfig = base.replace(/(?:sample|file)(\.[^./]+)?$/, "config$1");
+    const altAltDirName = altDir.replace(/sample(\.[^./]+)?$/, "handler$1");
+    for (const candidate of [
+      base,
+      shallow,
+      altDir,
+      altServiceDir,
+      altName,
+      altConfig,
+      altAltDirName,
+      "src/core/service.ts",
+      "config/settings.json",
+      "pkg/core/handler.go",
+    ]) {
       if (
         candidate &&
         matchesFixturePathScope(candidate, pathsList, excludeList)
@@ -1936,6 +1981,91 @@ export function resolvePatternSamplePath(
     }
   }
   return globToSamplePath(pathsList[0] || "");
+}
+
+function expandGlobSampleVariant(rawGlob: string, idx: number): string[] {
+  const g = rawGlob.trim();
+  if (!g || g === "**/*" || g === "*") {
+    return [
+      `pkg/core/file_${idx}.go`,
+      `src/app/item_${idx}.ts`,
+      `config/item_${idx}.json`,
+    ];
+  }
+  if (!g.includes("*")) {
+    return [g];
+  }
+  const extMatch = g.match(/\*\.([a-zA-Z0-9]+)$/);
+  const ext = extMatch ? extMatch[1] : "go";
+  const withDir = g
+    .replace(/\*\*\//g, `dir_${idx}/`)
+    .replace(/\*\*/g, `item_${idx}.${ext}`)
+    .replace(/\*/g, `item_${idx}`);
+  const shallow = g
+    .replace(/\*\*\//g, "")
+    .replace(/\*\*/g, `item_${idx}.${ext}`)
+    .replace(/\*/g, `item_${idx}`);
+  const nested = g
+    .replace(/\*\*\//g, `core/sub_${idx}/`)
+    .replace(/\*\*/g, `handler_${idx}.${ext}`)
+    .replace(/\*/g, `handler_${idx}`);
+  return [withDir, shallow, nested];
+}
+
+export function resolveDistinctSamplePaths(
+  count: number,
+  pathsCsv = "",
+  excludeCsv = "",
+): string[] {
+  const boundedCount = Math.min(200, Math.max(1, Math.floor(count)));
+  const pathsList = pathsCsv
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const excludeList = excludeCsv
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const effectiveGlobs = pathsList.length > 0 ? pathsList : ["**/*"];
+  const results: string[] = [];
+  const seen = new Set<string>();
+
+  const tryAdd = (cand: string): boolean => {
+    if (
+      cand &&
+      !seen.has(cand) &&
+      matchesFixturePathScope(cand, pathsList, excludeList)
+    ) {
+      seen.add(cand);
+      results.push(cand);
+      return results.length >= boundedCount;
+    }
+    return false;
+  };
+
+  if (tryAdd(resolvePatternSamplePath(pathsCsv, excludeList.join(", ")))) {
+    return results;
+  }
+
+  for (let idx = 1; idx <= boundedCount * 4 + 4; idx++) {
+    for (const g of effectiveGlobs) {
+      for (const cand of expandGlobSampleVariant(g, idx)) {
+        if (tryAdd(cand)) {
+          return results;
+        }
+      }
+    }
+  }
+
+  const fallbackBase = resolvePatternSamplePath(pathsCsv, excludeCsv);
+  for (let idx = 1; results.length < boundedCount; idx++) {
+    const fallback = fallbackBase.replace(/(\.[^./]+)?$/, `_${idx}$1`);
+    if (!seen.has(fallback)) {
+      seen.add(fallback);
+      results.push(fallback);
+    }
+  }
+  return results;
 }
 
 export function serializePatternFixtures(
@@ -2080,6 +2210,7 @@ export function synthesizeJsonSchemaFixtures(
   pathsCsv: string,
   baseSchemaJson?: Readonly<Record<string, unknown>>,
   mergeRequired = true,
+  excludeCsv = "",
 ): {
   readonly requiredKeys: readonly string[];
   readonly schemaJson: Readonly<Record<string, unknown>>;
@@ -2091,12 +2222,8 @@ export function synthesizeJsonSchemaFixtures(
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  const firstGlob =
-    pathsCsv
-      .split(",")
-      .map((s) => s.trim())
-      .find(Boolean) || "**/*.json";
-  const sampleFile = globToSamplePath(firstGlob);
+  const effectivePaths = pathsCsv.trim() || "**/*.json";
+  const sampleFile = resolvePatternSamplePath(effectivePaths, excludeCsv);
 
   let schemaJson: Readonly<Record<string, unknown>>;
   if (baseSchemaJson && !mergeRequired) {
@@ -2242,24 +2369,54 @@ export function synthesizeCompanionFixtures(
 export function synthesizeDiffBudgetFixtures(
   maxChangedLines: number,
   pathsCsv: string,
+  excludeCsv = "",
+  maxFiles = 0,
 ): {
   readonly failJson: string;
   readonly passJson: string;
   readonly failLineCount: number;
+  readonly failFileCount: number;
 } {
+  const hasScope = Boolean(pathsCsv.trim() || excludeCsv.trim());
+  const sampleFile = hasScope
+    ? resolvePatternSamplePath(pathsCsv, excludeCsv)
+    : undefined;
+
+  if (maxChangedLines <= 0 && maxFiles > 0) {
+    const failFileCount = Math.min(200, Math.max(1, Math.floor(maxFiles)) + 1);
+    const failFiles = resolveDistinctSamplePaths(
+      failFileCount,
+      pathsCsv,
+      excludeCsv,
+    );
+    return {
+      failLineCount: 0,
+      failFileCount,
+      failJson: JSON.stringify([
+        {
+          name: "exceeds-file-budget",
+          "changed-files": failFiles,
+        },
+      ]),
+      passJson: JSON.stringify([
+        {
+          name: "within-budget",
+          ...(sampleFile ? { file: sampleFile } : {}),
+          "added-lines": ["added line 1"],
+        },
+      ]),
+    };
+  }
+
   const cap = Math.max(1, Math.floor(maxChangedLines || 250));
   const failLineCount = cap + 1;
-  const firstGlob = pathsCsv
-    .split(",")
-    .map((s) => s.trim())
-    .find(Boolean);
-  const sampleFile = firstGlob ? globToSamplePath(firstGlob) : undefined;
   const overLines = Array.from(
     { length: failLineCount },
     (_, i) => `added line ${i + 1}`,
   );
   return {
     failLineCount,
+    failFileCount: 1,
     failJson: JSON.stringify([
       {
         name: "exceeds-budget",

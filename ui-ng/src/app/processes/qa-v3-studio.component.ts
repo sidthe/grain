@@ -175,7 +175,7 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
     case "diff-budget": {
       const paths = "pkg/**/*.go";
       const maxChangedLines = 250;
-      const syn = synthesizeDiffBudgetFixtures(maxChangedLines, paths);
+      const syn = synthesizeDiffBudgetFixtures(maxChangedLines, paths, "", 0);
       return {
         paths,
         forbidAdded: "",
@@ -192,7 +192,13 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
     case "jsonschema": {
       const paths = "**/*.json";
       const requiredKeys = "name, version";
-      const syn = synthesizeJsonSchemaFixtures(requiredKeys, paths);
+      const syn = synthesizeJsonSchemaFixtures(
+        requiredKeys,
+        paths,
+        undefined,
+        true,
+        "",
+      );
       return {
         paths,
         forbidAdded: "",
@@ -795,10 +801,19 @@ export class QaV3StudioComponent {
   readonly inspectorTab = signal<StudioInspectorTab>("definition");
 
   readonly s0Intent = signal(false);
+  readonly s0Complexities = signal<readonly string[]>(["medium", "high"]);
+  readonly s0MaxSeconds = signal<number | undefined>(undefined);
+  readonly s0MaxTokens = signal<number | undefined>(undefined);
+  readonly s0OnClarification = signal<string | undefined>(undefined);
+
   readonly decomposeEnabled = signal(false);
   readonly decomposeMode = signal<"off" | "slice_plan" | "propose_dag">(
     "slice_plan",
   );
+  readonly decomposeComplexities = signal<readonly string[]>([
+    "medium",
+    "high",
+  ]);
   readonly decomposeMaxSubtasks = signal(4);
   readonly decomposeTargetDiffLines = signal(400);
 
@@ -806,8 +821,17 @@ export class QaV3StudioComponent {
   readonly contextIncludeCallers = signal(true);
   readonly contextIncludeMemory = signal(true);
   readonly contextMaxTokens = signal(12000);
+  readonly contextExtraPaths = signal<readonly string[]>([
+    "design/design/**",
+    "docs/**",
+  ]);
 
   readonly s2PlanCritic = signal(false);
+  readonly s2Complexities = signal<readonly string[]>(["high"]);
+  readonly s2Tiers = signal<readonly string[] | undefined>(undefined);
+  readonly s2MaxSeconds = signal<number | undefined>(undefined);
+  readonly s2MaxTokens = signal<number | undefined>(undefined);
+  readonly s2MaxBounces = signal<number | undefined>(undefined);
 
   readonly codingSkillMode = signal<"replace" | "append" | "inherit">(
     "replace",
@@ -831,13 +855,15 @@ export class QaV3StudioComponent {
   readonly prMaxSubjectChars = signal(72);
   readonly prRequiredSections = signal("Summary, Verification");
   readonly prAuditLint = signal(true);
-  readonly prGuidanceText = signal(
-    "Explain root cause, verification commands, and any intentional trade-offs.",
-  );
+  readonly prGuidanceText = signal("");
   readonly stopNudge = signal(true);
   readonly verifierEnabled = signal(false);
 
   readonly s5Triage = signal<"off" | "shadow" | "enforced">("off");
+  readonly s5AutoMergeTiers = signal<readonly string[] | undefined>(undefined);
+  readonly s5RequireHumanTiers = signal<readonly string[] | undefined>(
+    undefined,
+  );
   readonly customStages = signal<readonly EditableCustomStage[]>([]);
   readonly customChecks = signal<readonly EditableCustomCheck[]>([]);
 
@@ -911,7 +937,7 @@ export class QaV3StudioComponent {
       decompose: {
         enabled: this.decomposeEnabled(),
         mode: this.decomposeMode(),
-        complexities: ["medium", "high"],
+        complexities: [...this.decomposeComplexities()],
         maxSubtasks: this.decomposeMaxSubtasks(),
         targetDiffLines: this.decomposeTargetDiffLines(),
       },
@@ -920,6 +946,7 @@ export class QaV3StudioComponent {
         includeCallers: this.contextIncludeCallers(),
         includeMemory: this.contextIncludeMemory(),
         maxTokens: this.contextMaxTokens(),
+        extraPaths: [...this.contextExtraPaths()],
       },
       readabilityPacks: this.readabilityPacks(),
       skillSteps: this.skillSteps(),
@@ -1114,6 +1141,25 @@ export class QaV3StudioComponent {
     });
   }
 
+  resetToDetail(
+    det: QAFlowVersionDetail | null = this.detail(),
+    skillOverride?: {
+      readonly mode: "inherit" | "append" | "replace";
+      readonly text: string;
+    },
+  ): void {
+    const d3 = det?.declarationV3 ?? det?.declaration?.declarationV3;
+    const d4 = det?.declarationV4 ?? det?.declaration?.declarationV4;
+    this.hydrateFromDeclarations(d3, d4, det);
+    if (skillOverride) {
+      this.codingSkillMode.set(skillOverride.mode);
+      this.codingSkillText.set(skillOverride.text);
+    }
+    this.addingForStageId.set(null);
+    this.fixtureReport.set(null);
+    this.dryRunResult.set(null);
+  }
+
   private hydrateFromDeclarations(
     d3: FlowDeclarationV3 | undefined,
     d4: FlowDeclarationV4 | undefined,
@@ -1136,30 +1182,62 @@ export class QaV3StudioComponent {
     const stages = effectiveV4?.stages ?? effectiveV3?.stages;
 
     const s0 = stages?.["s0-intent"];
-    if (typeof s0 === "boolean") {
-      this.s0Intent.set(s0);
-    } else if (s0 && typeof s0 === "object") {
+    if (s0 && typeof s0 === "object") {
       this.s0Intent.set(Boolean(s0.enabled));
+      this.s0Complexities.set(
+        s0.complexities?.length ? [...s0.complexities] : ["medium", "high"],
+      );
+      this.s0MaxSeconds.set(s0["max-seconds"] ?? s0.maxSeconds);
+      this.s0MaxTokens.set(s0["max-tokens"] ?? s0.maxTokens);
+      this.s0OnClarification.set(s0["on-clarification"] ?? s0.onClarification);
     } else {
-      this.s0Intent.set(Boolean(det?.resolved?.s0Intent ?? (isV4 || isV3)));
+      this.s0Intent.set(
+        typeof s0 === "boolean"
+          ? s0
+          : Boolean(det?.resolved?.s0Intent ?? (isV4 || isV3)),
+      );
+      this.s0Complexities.set(["medium", "high"]);
+      this.s0MaxSeconds.set(undefined);
+      this.s0MaxTokens.set(undefined);
+      this.s0OnClarification.set(undefined);
     }
 
     const s2 = stages?.["s2-plan-critic"];
-    if (typeof s2 === "boolean") {
-      this.s2PlanCritic.set(s2);
-    } else if (s2 && typeof s2 === "object") {
+    if (s2 && typeof s2 === "object") {
       this.s2PlanCritic.set(Boolean(s2.enabled));
+      this.s2Complexities.set(
+        s2.complexities?.length ? [...s2.complexities] : ["high"],
+      );
+      this.s2Tiers.set(s2.tiers?.length ? [...s2.tiers] : undefined);
+      this.s2MaxSeconds.set(s2["max-seconds"] ?? s2.maxSeconds);
+      this.s2MaxTokens.set(s2["max-tokens"] ?? s2.maxTokens);
+      this.s2MaxBounces.set(s2["max-bounces"] ?? s2.maxBounces);
     } else {
       this.s2PlanCritic.set(
-        Boolean(det?.resolved?.s2PlanCritic ?? (isV4 || isV3)),
+        typeof s2 === "boolean"
+          ? s2
+          : Boolean(det?.resolved?.s2PlanCritic ?? (isV4 || isV3)),
       );
+      this.s2Complexities.set(["high"]);
+      this.s2Tiers.set(undefined);
+      this.s2MaxSeconds.set(undefined);
+      this.s2MaxTokens.set(undefined);
+      this.s2MaxBounces.set(undefined);
     }
 
     const s5 = stages?.["s5-merge-triage"];
     if (typeof s5 === "string") {
       this.s5Triage.set(s5);
+      this.s5AutoMergeTiers.set(undefined);
+      this.s5RequireHumanTiers.set(undefined);
     } else if (s5 && typeof s5 === "object") {
       this.s5Triage.set(s5.mode ?? "off");
+      const autoTiers = s5["auto-merge-tiers"] ?? s5.autoMergeTiers;
+      const humanTiers = s5["require-human-tiers"] ?? s5.requireHumanTiers;
+      this.s5AutoMergeTiers.set(autoTiers?.length ? [...autoTiers] : undefined);
+      this.s5RequireHumanTiers.set(
+        humanTiers?.length ? [...humanTiers] : undefined,
+      );
     } else {
       const resolvedTriage = det?.resolved?.s5MergeTriage;
       if (resolvedTriage === "enforced" || resolvedTriage === "shadow") {
@@ -1167,6 +1245,8 @@ export class QaV3StudioComponent {
       } else {
         this.s5Triage.set(isV4 || isV3 ? "shadow" : "off");
       }
+      this.s5AutoMergeTiers.set(undefined);
+      this.s5RequireHumanTiers.set(undefined);
     }
 
     if (effectiveV4?.decompose) {
@@ -1174,6 +1254,11 @@ export class QaV3StudioComponent {
       const dm = effectiveV4.decompose.mode;
       this.decomposeMode.set(
         dm === "off" || dm === "propose_dag" ? dm : "slice_plan",
+      );
+      this.decomposeComplexities.set(
+        effectiveV4.decompose.complexities?.length
+          ? [...effectiveV4.decompose.complexities]
+          : ["medium", "high"],
       );
       this.decomposeMaxSubtasks.set(
         effectiveV4.decompose.maxSubtasks ??
@@ -1188,6 +1273,7 @@ export class QaV3StudioComponent {
     } else {
       this.decomposeEnabled.set(isV4);
       this.decomposeMode.set("slice_plan");
+      this.decomposeComplexities.set(["medium", "high"]);
       this.decomposeMaxSubtasks.set(4);
       this.decomposeTargetDiffLines.set(400);
     }
@@ -1209,11 +1295,19 @@ export class QaV3StudioComponent {
           effectiveV4.context["max-tokens"] ??
           12000,
       );
+      const rawExtra =
+        effectiveV4.context.extraPaths ?? effectiveV4.context["extra-paths"];
+      this.contextExtraPaths.set(
+        Array.isArray(rawExtra)
+          ? [...rawExtra]
+          : ["design/design/**", "docs/**"],
+      );
     } else {
       this.contextEnabled.set(isV4);
       this.contextIncludeCallers.set(true);
       this.contextIncludeMemory.set(true);
       this.contextMaxTokens.set(12000);
+      this.contextExtraPaths.set(["design/design/**", "docs/**"]);
     }
 
     const explicitSk = extractExplicitSkillDecl(effectiveV4, det?.declaration);
@@ -1294,15 +1388,14 @@ export class QaV3StudioComponent {
       this.prAuditLint.set(
         pr.auditLintSuppressions ?? pr["audit-lint-suppressions"] ?? true,
       );
-      if (pr.guidanceText ?? pr["guidance-text"]) {
-        this.prGuidanceText.set(pr.guidanceText ?? pr["guidance-text"] ?? "");
-      }
+      this.prGuidanceText.set(pr.guidanceText ?? pr["guidance-text"] ?? "");
     } else {
       this.prEnabled.set(isV4);
       this.prMode.set("warn");
       this.prMaxSubjectChars.set(72);
       this.prRequiredSections.set("Summary, Verification");
       this.prAuditLint.set(true);
+      this.prGuidanceText.set("");
     }
 
     this.stopNudge.set(
@@ -1324,6 +1417,12 @@ export class QaV3StudioComponent {
 
     const cStages = (stages?.custom ?? []).map((cs) => {
       const rawAfter = cs["insert-after"] ?? cs.insertAfter;
+      const rawWhenPaths = normalizeStringList(
+        cs["when-paths"] ?? cs.whenPaths,
+      );
+      const rawCheckIds = normalizeStringList(cs["check-ids"] ?? cs.checkIds);
+      const rawMinTier = cs["min-tier"] ?? cs.minTier;
+      const rawSkillRef = cs["skill-ref"] ?? cs.skillRef;
       return {
         uid: this.nextUid++,
         id: cs.id,
@@ -1331,8 +1430,16 @@ export class QaV3StudioComponent {
         insertAfter: isCustomStageAnchor(rawAfter) ? rawAfter : "s3",
         timeoutSeconds: Math.min(
           120,
-          Math.max(10, cs["timeout-seconds"] ?? cs.timeoutSeconds ?? 30),
+          Math.max(
+            10,
+            cs["timeout-seconds"] ?? cs.timeoutSeconds ?? cs.timeout ?? 30,
+          ),
         ),
+        ...(cs.kind ? { kind: cs.kind } : {}),
+        ...(rawWhenPaths.length > 0 ? { whenPaths: rawWhenPaths } : {}),
+        ...(rawMinTier ? { minTier: rawMinTier } : {}),
+        ...(rawCheckIds.length > 0 ? { checkIds: rawCheckIds } : {}),
+        ...(rawSkillRef ? { skillRef: rawSkillRef } : {}),
       };
     });
     this.customStages.set(cStages);
@@ -1416,7 +1523,12 @@ export class QaV3StudioComponent {
           failJson = syn.failJson;
           passJson = syn.passJson;
         } else if (!cc.fixtures?.fail && engine === "diff-budget") {
-          const syn = synthesizeDiffBudgetFixtures(maxChangedLines, paths);
+          const syn = synthesizeDiffBudgetFixtures(
+            maxChangedLines,
+            paths,
+            exclude,
+            maxFiles,
+          );
           failJson = syn.failJson;
           passJson = syn.passJson;
         } else if (!cc.fixtures?.fail && engine === "jsonschema") {
@@ -1425,6 +1537,7 @@ export class QaV3StudioComponent {
             paths || def.paths,
             rawSchemaJson,
             false,
+            exclude,
           );
           failJson = syn.failJson;
           passJson = syn.passJson;
@@ -1866,22 +1979,28 @@ export class QaV3StudioComponent {
           );
           return { ...next, failJson: syn.failJson, passJson: syn.passJson };
         }
-        if (next.engine === "diff-budget" && field === "paths") {
+        if (
+          next.engine === "diff-budget" &&
+          (field === "paths" || field === "exclude")
+        ) {
           const syn = synthesizeDiffBudgetFixtures(
             next.maxChangedLines,
             next.paths,
+            next.exclude,
+            next.maxFiles,
           );
           return { ...next, failJson: syn.failJson, passJson: syn.passJson };
         }
         if (
           next.engine === "jsonschema" &&
-          (field === "requiredKeys" || field === "paths")
+          (field === "requiredKeys" || field === "paths" || field === "exclude")
         ) {
           const syn = synthesizeJsonSchemaFixtures(
             next.requiredKeys,
             next.paths,
             c.schemaJson,
             field === "requiredKeys",
+            next.exclude,
           );
           return {
             ...next,
@@ -1899,10 +2018,35 @@ export class QaV3StudioComponent {
     this.customChecks.update((list) =>
       list.map((c) => {
         if (c.uid !== uid) return c;
-        const syn = synthesizeDiffBudgetFixtures(maxChangedLines, c.paths);
+        const syn = synthesizeDiffBudgetFixtures(
+          maxChangedLines,
+          c.paths,
+          c.exclude,
+          c.maxFiles,
+        );
         return {
           ...c,
           maxChangedLines,
+          failJson: syn.failJson,
+          passJson: syn.passJson,
+        };
+      }),
+    );
+  }
+
+  updateCheckMaxFiles(uid: number, maxFiles: number): void {
+    this.customChecks.update((list) =>
+      list.map((c) => {
+        if (c.uid !== uid) return c;
+        const syn = synthesizeDiffBudgetFixtures(
+          c.maxChangedLines,
+          c.paths,
+          c.exclude,
+          maxFiles,
+        );
+        return {
+          ...c,
+          maxFiles,
           failJson: syn.failJson,
           passJson: syn.passJson,
         };
@@ -1958,8 +2102,13 @@ export class QaV3StudioComponent {
     return this.customStages().map((s) => ({
       id: s.id,
       label: s.label,
+      ...(s.kind ? { kind: s.kind } : {}),
       "insert-after": s.insertAfter,
+      ...(s.whenPaths?.length ? { "when-paths": [...s.whenPaths] } : {}),
+      ...(s.minTier ? { "min-tier": s.minTier } : {}),
       "timeout-seconds": s.timeoutSeconds,
+      ...(s.checkIds?.length ? { "check-ids": [...s.checkIds] } : {}),
+      ...(s.skillRef ? { "skill-ref": s.skillRef } : {}),
     }));
   }
 
@@ -2033,6 +2182,27 @@ export class QaV3StudioComponent {
     const customChecks = this.exportCustomChecks();
     const mode = this.codingSkillMode() || "replace";
     const skillText = mode === "inherit" ? "" : this.codingSkillText().trim();
+    const s0Complexities =
+      this.s0Complexities().length > 0
+        ? [...this.s0Complexities()]
+        : ["medium", "high"];
+    const s2Complexities =
+      this.s2Complexities().length > 0 ? [...this.s2Complexities()] : ["high"];
+    const s2Tiers = this.s2Tiers();
+    const s0MaxSeconds = this.s0MaxSeconds();
+    const s0MaxTokens = this.s0MaxTokens();
+    const s0OnClarification = this.s0OnClarification();
+    const s2MaxSeconds = this.s2MaxSeconds();
+    const s2MaxTokens = this.s2MaxTokens();
+    const s2MaxBounces = this.s2MaxBounces();
+    const s5AutoTiers = this.s5AutoMergeTiers();
+    const s5HumanTiers = this.s5RequireHumanTiers();
+    const decomposeComplexities =
+      this.decomposeComplexities().length > 0
+        ? [...this.decomposeComplexities()]
+        : ["medium", "high"];
+    const baseVerifier =
+      det?.declarationV4?.verifier ?? det?.declaration?.verifier;
     return {
       schema: "grain.dev/qa-flow/v4",
       key: meta?.key || det?.key || "engineering-workflow-v4",
@@ -2049,15 +2219,44 @@ export class QaV3StudioComponent {
         maxBytes: meta?.maxSkillBytes || 4096,
       },
       stages: {
-        "s0-intent": { enabled: this.s0Intent() },
-        "s2-plan-critic": { enabled: this.s2PlanCritic() },
-        "s5-merge-triage": { mode: this.s5Triage() },
+        "s0-intent": {
+          enabled: this.s0Intent(),
+          complexities: s0Complexities,
+          ...(s0MaxSeconds !== undefined
+            ? { "max-seconds": s0MaxSeconds }
+            : {}),
+          ...(s0MaxTokens !== undefined ? { "max-tokens": s0MaxTokens } : {}),
+          ...(s0OnClarification
+            ? { "on-clarification": s0OnClarification }
+            : {}),
+        },
+        "s2-plan-critic": {
+          enabled: this.s2PlanCritic(),
+          complexities: s2Complexities,
+          ...(s2Tiers?.length ? { tiers: [...s2Tiers] } : {}),
+          ...(s2MaxSeconds !== undefined
+            ? { "max-seconds": s2MaxSeconds }
+            : {}),
+          ...(s2MaxTokens !== undefined ? { "max-tokens": s2MaxTokens } : {}),
+          ...(s2MaxBounces !== undefined
+            ? { "max-bounces": s2MaxBounces }
+            : {}),
+        },
+        "s5-merge-triage": {
+          mode: this.s5Triage(),
+          ...(s5AutoTiers?.length
+            ? { "auto-merge-tiers": [...s5AutoTiers] }
+            : {}),
+          ...(s5HumanTiers?.length
+            ? { "require-human-tiers": [...s5HumanTiers] }
+            : {}),
+        },
         ...(customStages.length > 0 ? { custom: customStages } : {}),
       },
       decompose: {
         enabled: this.decomposeEnabled(),
         mode: this.decomposeMode(),
-        complexities: ["medium", "high"],
+        complexities: decomposeComplexities,
         maxSubtasks: this.decomposeMaxSubtasks(),
         targetDiffLines: this.decomposeTargetDiffLines(),
       },
@@ -2066,7 +2265,7 @@ export class QaV3StudioComponent {
         includeCallers: this.contextIncludeCallers(),
         includeMemory: this.contextIncludeMemory(),
         maxTokens: this.contextMaxTokens(),
-        extraPaths: ["design/design/**", "docs/**"],
+        extraPaths: [...this.contextExtraPaths()],
       },
       readabilityPacks: this.readabilityPacks().map((p) => ({
         id: p.id,
@@ -2098,11 +2297,16 @@ export class QaV3StudioComponent {
       stopNudge: this.stopNudge(),
       verifier: {
         enabled: this.verifierEnabled(),
-        tiers: ["T2", "T3"],
-        maxRepairRounds: 1,
-        maxSeconds: 60,
-        maxTokens: 50000,
-        checklist: "escape-classes-v1",
+        tiers: baseVerifier?.tiers?.length
+          ? [...baseVerifier.tiers]
+          : ["T2", "T3"],
+        maxRepairRounds:
+          baseVerifier?.maxRepairRounds ??
+          det?.resolved?.maxS4RepairRounds ??
+          1,
+        maxSeconds: baseVerifier?.maxSeconds ?? 60,
+        maxTokens: baseVerifier?.maxTokens ?? 50000,
+        checklist: baseVerifier?.checklist ?? "escape-classes-v1",
       },
       ...(customChecks.length > 0 ? { customChecks } : {}),
     };
@@ -2183,7 +2387,24 @@ export class QaV3StudioComponent {
     }
     let customStagesYaml = "";
     for (const s of this.customStages()) {
-      customStagesYaml += `    - id: ${yamlQuote(s.id)}\n      label: ${yamlQuote(s.label || s.id)}\n      insert-after: ${yamlQuote(s.insertAfter)}\n      timeout-seconds: ${Math.min(120, Math.max(10, s.timeoutSeconds))}\n`;
+      customStagesYaml += `    - id: ${yamlQuote(s.id)}\n      label: ${yamlQuote(s.label || s.id)}\n`;
+      if (s.kind) {
+        customStagesYaml += `      kind: ${yamlQuote(s.kind)}\n`;
+      }
+      customStagesYaml += `      insert-after: ${yamlQuote(s.insertAfter)}\n`;
+      if (s.whenPaths && s.whenPaths.length > 0) {
+        customStagesYaml += `      when-paths: ${yamlJson(s.whenPaths)}\n`;
+      }
+      if (s.minTier) {
+        customStagesYaml += `      min-tier: ${yamlQuote(s.minTier)}\n`;
+      }
+      customStagesYaml += `      timeout-seconds: ${Math.min(120, Math.max(10, s.timeoutSeconds))}\n`;
+      if (s.checkIds && s.checkIds.length > 0) {
+        customStagesYaml += `      check-ids: ${yamlJson(s.checkIds)}\n`;
+      }
+      if (s.skillRef) {
+        customStagesYaml += `      skill-ref: ${yamlQuote(s.skillRef)}\n`;
+      }
     }
     let packsYaml = "";
     for (const p of this.readabilityPacks()) {
@@ -2289,11 +2510,59 @@ export class QaV3StudioComponent {
       det?.declarationV4?.verifier?.maxSeconds ??
       det?.declaration?.verifier?.maxSeconds ??
       60;
+    const verifierTokens =
+      det?.declarationV4?.verifier?.maxTokens ??
+      det?.declaration?.verifier?.maxTokens;
     const verifierChecklist =
       det?.declarationV4?.verifier?.checklist ??
       det?.declaration?.verifier?.checklist ??
       "escape-classes-v1";
-    return `schema: ${yamlQuote("grain.dev/qa-flow/v4")}\nkey: ${yamlQuote(resolvedKey)}\nextends: ${yamlQuote(resolvedExtends)}\nlabel: ${yamlQuote(resolvedLabel)}\nsummary: ${yamlQuote(resolvedSummary)}\nskill:\n  mode: ${yamlQuote(skillMode)}\n  text: ${yamlQuote(skillText)}\n  max-bytes: ${skillMaxBytes}\n${builtinSection}decompose:\n  enabled: ${this.decomposeEnabled()}\n  mode: ${yamlQuote(this.decomposeMode())}\n  max-subtasks: ${this.decomposeMaxSubtasks()}\n  target-diff-lines: ${this.decomposeTargetDiffLines()}\ncontext:\n  enabled: ${this.contextEnabled()}\n  include-callers: ${this.contextIncludeCallers()}\n  include-memory: ${this.contextIncludeMemory()}\n  max-tokens: ${this.contextMaxTokens()}\n${packsSection}${stepsSection}pr-contract:\n  enabled: ${this.prEnabled()}\n  mode: ${yamlQuote(this.prMode())}\n  max-subject-chars: ${this.prMaxSubjectChars()}\n  required-sections: ${yamlJson(prSections)}\n  audit-lint-suppressions: ${this.prAuditLint()}\n  guidance-text: ${yamlQuote(this.prGuidanceText())}\nstop-nudge: ${this.stopNudge()}\nverifier:\n  enabled: ${this.verifierEnabled()}\n  tiers: ${yamlJson(verifierTiers)}\n  max-repair-rounds: ${verifierRounds}\n  max-seconds: ${verifierSeconds}\n  checklist: ${yamlQuote(verifierChecklist)}\nstages:\n  s0-intent:\n    enabled: ${this.s0Intent()}\n  s2-plan-critic:\n    enabled: ${this.s2PlanCritic()}\n  s5-merge-triage:\n    mode: ${yamlQuote(this.s5Triage())}\n${stagesSection}${checksSection}`;
+    const s0Complexities =
+      this.s0Complexities().length > 0
+        ? [...this.s0Complexities()]
+        : ["medium", "high"];
+    const s2Complexities =
+      this.s2Complexities().length > 0 ? [...this.s2Complexities()] : ["high"];
+    const decomposeComplexities =
+      this.decomposeComplexities().length > 0
+        ? [...this.decomposeComplexities()]
+        : ["medium", "high"];
+    let s0Yaml = `  s0-intent:\n    enabled: ${this.s0Intent()}\n    complexities: ${yamlJson(s0Complexities)}\n`;
+    if (this.s0MaxSeconds() !== undefined) {
+      s0Yaml += `    max-seconds: ${this.s0MaxSeconds()}\n`;
+    }
+    if (this.s0MaxTokens() !== undefined) {
+      s0Yaml += `    max-tokens: ${this.s0MaxTokens()}\n`;
+    }
+    if (this.s0OnClarification()) {
+      s0Yaml += `    on-clarification: ${yamlQuote(this.s0OnClarification() ?? "")}\n`;
+    }
+    let s2Yaml = `  s2-plan-critic:\n    enabled: ${this.s2PlanCritic()}\n    complexities: ${yamlJson(s2Complexities)}\n`;
+    const s2Tiers = this.s2Tiers();
+    if (s2Tiers && s2Tiers.length > 0) {
+      s2Yaml += `    tiers: ${yamlJson(s2Tiers)}\n`;
+    }
+    if (this.s2MaxSeconds() !== undefined) {
+      s2Yaml += `    max-seconds: ${this.s2MaxSeconds()}\n`;
+    }
+    if (this.s2MaxTokens() !== undefined) {
+      s2Yaml += `    max-tokens: ${this.s2MaxTokens()}\n`;
+    }
+    if (this.s2MaxBounces() !== undefined) {
+      s2Yaml += `    max-bounces: ${this.s2MaxBounces()}\n`;
+    }
+    let s5Yaml = `  s5-merge-triage:\n    mode: ${yamlQuote(this.s5Triage())}\n`;
+    const s5Auto = this.s5AutoMergeTiers();
+    if (s5Auto && s5Auto.length > 0) {
+      s5Yaml += `    auto-merge-tiers: ${yamlJson(s5Auto)}\n`;
+    }
+    const s5Human = this.s5RequireHumanTiers();
+    if (s5Human && s5Human.length > 0) {
+      s5Yaml += `    require-human-tiers: ${yamlJson(s5Human)}\n`;
+    }
+    const verifierTokensLine =
+      verifierTokens !== undefined ? `  max-tokens: ${verifierTokens}\n` : "";
+    return `schema: ${yamlQuote("grain.dev/qa-flow/v4")}\nkey: ${yamlQuote(resolvedKey)}\nextends: ${yamlQuote(resolvedExtends)}\nlabel: ${yamlQuote(resolvedLabel)}\nsummary: ${yamlQuote(resolvedSummary)}\nskill:\n  mode: ${yamlQuote(skillMode)}\n  text: ${yamlQuote(skillText)}\n  max-bytes: ${skillMaxBytes}\n${builtinSection}decompose:\n  enabled: ${this.decomposeEnabled()}\n  mode: ${yamlQuote(this.decomposeMode())}\n  complexities: ${yamlJson(decomposeComplexities)}\n  max-subtasks: ${this.decomposeMaxSubtasks()}\n  target-diff-lines: ${this.decomposeTargetDiffLines()}\ncontext:\n  enabled: ${this.contextEnabled()}\n  include-callers: ${this.contextIncludeCallers()}\n  include-memory: ${this.contextIncludeMemory()}\n  max-tokens: ${this.contextMaxTokens()}\n  extra-paths: ${yamlJson(this.contextExtraPaths())}\n${packsSection}${stepsSection}pr-contract:\n  enabled: ${this.prEnabled()}\n  mode: ${yamlQuote(this.prMode())}\n  max-subject-chars: ${this.prMaxSubjectChars()}\n  required-sections: ${yamlJson(prSections)}\n  audit-lint-suppressions: ${this.prAuditLint()}\n  guidance-text: ${yamlQuote(this.prGuidanceText())}\nstop-nudge: ${this.stopNudge()}\nverifier:\n  enabled: ${this.verifierEnabled()}\n  tiers: ${yamlJson(verifierTiers)}\n  max-repair-rounds: ${verifierRounds}\n  max-seconds: ${verifierSeconds}\n${verifierTokensLine}  checklist: ${yamlQuote(verifierChecklist)}\nstages:\n${s0Yaml}${s2Yaml}${s5Yaml}${stagesSection}${checksSection}`;
   }
 
   async runFixtureSelfTest(): Promise<void> {

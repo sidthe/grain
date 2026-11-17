@@ -450,7 +450,7 @@ import { QaWorkflowCatalogComponent } from "./qa-workflow-catalog.component";
                               type="button"
                               role="menuitem"
                               data-testid="qa-fork-flow-btn"
-                              (click)="closeMenus(); forkFlow()"
+                              (click)="closeMenus(); onForkFlowMenuClick()"
                             >
                               Fork as new workflow
                             </button>
@@ -508,7 +508,10 @@ import { QaWorkflowCatalogComponent } from "./qa-workflow-catalog.component";
                           >
                         </li>
                         @if (
-                          canAdmin() && !detail.builtIn && !detail.retiredAt
+                          canAdmin() &&
+                          !isEditing() &&
+                          !detail.builtIn &&
+                          !detail.retiredAt
                         ) {
                           <li role="none">
                             <button
@@ -1674,6 +1677,23 @@ export class QaFlowsPanelComponent {
     this.initDraft();
   }
 
+  onForkFlowMenuClick(): void {
+    if (!this.isEditing()) {
+      this.forkFlow();
+      return;
+    }
+    this.confirmRequest.set({
+      title: "Discard draft and fork",
+      message:
+        "Discard your unpublished draft changes and start a new workflow fork?",
+      accept: "Discard and fork",
+      destructive: true,
+      run: async () => {
+        this.forkFlow();
+      },
+    });
+  }
+
   forkFlow(): void {
     ++this.dryRunSeq;
     this.dryRunBusy.set(false);
@@ -1787,6 +1807,7 @@ export class QaFlowsPanelComponent {
     this.draftChecks.set(checks);
     this.draftCheckParams.set(params);
     this.draftDeclaration.set(draft);
+    this.studio()?.resetToDetail(detail, draft.skill);
   }
 
   cancelEdit(): void {

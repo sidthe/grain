@@ -684,7 +684,10 @@ describe("QaFlowsPanelComponent", () => {
     fixture.detectChanges();
     const upgradedDraft = comp.prepareDraft();
     expect(upgradedDraft.schema).toBe("grain.dev/qa-flow/v4");
-    expect(upgradedDraft.stages?.["s0-intent"]).toEqual({ enabled: true });
+    expect(upgradedDraft.stages?.["s0-intent"]).toEqual({
+      enabled: true,
+      complexities: ["medium", "high"],
+    });
   });
 
   it("customizes engineering-workflow-v4 with exclude fixtures losslessly and delegates dry-run in read-only vs draft modes", async () => {
@@ -1204,5 +1207,104 @@ describe("QaFlowsPanelComponent", () => {
       text: "",
       maxBytes: 1800,
     });
+  });
+
+  it("hides Retire version during Customize draft mode, confirms before Forking an active draft, and resets stale studio mutations", async () => {
+    const customV4Detail = {
+      key: "team-v4",
+      version: 2,
+      hash: "sha256:team-v4-v2",
+      label: "Team V4",
+      summary: "Custom editable workflow",
+      builtIn: false,
+      schema: "grain.dev/qa-flow/v4",
+      qaEngineRev: 4,
+      declarationV4: {
+        schema: "grain.dev/qa-flow/v4" as const,
+        key: "team-v4",
+        extends: "engineering-workflow-v4@1",
+        label: "Team V4",
+        summary: "Custom editable workflow",
+        stages: {
+          "s0-intent": { enabled: true, complexities: ["medium", "high"] },
+          "s2-plan-critic": { enabled: true, complexities: ["high"] },
+          "s5-merge-triage": { mode: "shadow" },
+        },
+      },
+      resolved: {
+        id: "team-v4",
+        label: "Team V4",
+        summary: "Custom editable workflow",
+        injectSkill: true,
+        skillBytes: 500,
+        stopNudge: true,
+        stagingIsolation: true,
+        enableS4: true,
+        maxS4RepairRounds: 1,
+        rules: [],
+      },
+    };
+    api.get.mockImplementation(async (route: string) => {
+      if (route === "GET /api/qa/flow-versions") {
+        return { versions: [customV4Detail] };
+      }
+      if (route === "GET /api/qa/flow-versions/{hash}") {
+        return customV4Detail;
+      }
+      return {};
+    });
+
+    const fixture = TestBed.createComponent(QaFlowsPanelComponent);
+    const comp = fixture.componentInstance;
+    await new Promise((r) => setTimeout(r, 0));
+    comp.selectedHash.set(customV4Detail.hash);
+    comp.selectedDetail.set(customV4Detail);
+    comp.moreMenuOpen.set(true);
+    fixture.detectChanges();
+
+    const root = fixture.nativeElement as HTMLElement;
+    // Read-only mode: Retire version is visible for custom non-built-in workflow
+    expect(
+      root.querySelector('[data-testid="qa-retire-flow-btn"]'),
+    ).toBeTruthy();
+
+    // Enter Customize draft mode: Retire version must be hidden
+    comp.newVersion();
+    comp.moreMenuOpen.set(true);
+    fixture.detectChanges();
+    expect(root.querySelector('[data-testid="qa-retire-flow-btn"]')).toBeNull();
+
+    // Mutate studio state inside draft
+    const st = comp.studio();
+    expect(st).toBeTruthy();
+    st?.s0Intent.set(false);
+    st?.addCheck("pattern");
+    fixture.detectChanges();
+    expect(st?.s0Intent()).toBe(false);
+    expect(st?.customChecks().length).toBe(1);
+
+    // Clicking Fork while editing must open confirm dialog instead of silently overwriting
+    comp.onForkFlowMenuClick();
+    fixture.detectChanges();
+    expect(comp.confirmRequest()?.title).toBe("Discard draft and fork");
+    expect(comp.isFork()).toBe(false);
+
+    // Cancelling preserves draft mutations
+    comp.onConfirmDone(false);
+    fixture.detectChanges();
+    expect(comp.isFork()).toBe(false);
+    expect(st?.s0Intent()).toBe(false);
+    expect(st?.customChecks().length).toBe(1);
+
+    // Confirming starts fork AND re-hydrates studio, wiping stale mutations
+    comp.onForkFlowMenuClick();
+    comp.onConfirmDone(true);
+    await new Promise((r) => setTimeout(r, 0));
+    fixture.detectChanges();
+    expect(comp.isEditing()).toBe(true);
+    expect(comp.isFork()).toBe(true);
+    expect(comp.draftDeclaration().key).toBe("team-v4-fork");
+    expect(st?.s0Intent()).toBe(true);
+    expect(st?.customChecks().length).toBe(0);
   });
 });

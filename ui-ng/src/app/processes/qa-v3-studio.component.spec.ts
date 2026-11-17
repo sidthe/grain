@@ -916,4 +916,235 @@ describe("QaV3StudioComponent", () => {
     expect(yaml).toContain("stop-nudge:");
     expect(yaml).toContain("verifier:");
   });
+
+  it("round-trips stage options, custom stage fields, empty extraPaths, prGuidanceText reset, disabled s0/s2 complexities, exclude-aware diff-budget/jsonschema fixtures, and honest diff-budget status pills", async () => {
+    const richV4: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      key: "team-strict-v4",
+      extends: "engineering-workflow-v4@1",
+      stages: {
+        "s0-intent": {
+          enabled: true,
+          complexities: ["low", "high"],
+          "max-seconds": 45,
+          "max-tokens": 4000,
+          "on-clarification": "proceed",
+        },
+        "s2-plan-critic": {
+          enabled: true,
+          complexities: ["medium", "high"],
+          tiers: ["T2", "T3"],
+          "max-seconds": 90,
+          "max-tokens": 12000,
+          "max-bounces": 2,
+        },
+        "s5-merge-triage": {
+          mode: "enforced",
+          "auto-merge-tiers": ["T1"],
+          "require-human-tiers": ["T3"],
+        },
+        custom: [
+          {
+            id: "custom:s3b-companion-checks",
+            label: "Companion checks",
+            kind: "check-bundle",
+            "insert-after": "s3",
+            "when-paths": ["pkg/**"],
+            "min-tier": "T2",
+            "timeout-seconds": 45,
+            "check-ids": ["custom:pair"],
+            "skill-ref": "skills/companion.md",
+          },
+        ],
+      },
+      decompose: {
+        enabled: true,
+        mode: "propose_dag",
+        complexities: ["high"],
+        "max-subtasks": 5,
+        "target-diff-lines": 320,
+      },
+      context: {
+        enabled: true,
+        "include-callers": true,
+        "include-memory": false,
+        "max-tokens": 9000,
+        "extra-paths": [],
+      },
+      "pr-contract": {
+        enabled: true,
+        mode: "blocking",
+        "max-subject-chars": 72,
+        "required-sections": ["Summary", "Verification"],
+        "audit-lint-suppressions": true,
+        "guidance-text": "Old guidance text",
+      },
+    };
+
+    fixture.componentRef.setInput("editing", true);
+    fixture.componentRef.setInput("declV4", richV4);
+    fixture.detectChanges();
+
+    const comp = fixture.componentInstance;
+    const root = fixture.nativeElement as HTMLElement;
+
+    // 1. Lossless round-trip of s0-intent, s2-plan-critic, s5-merge-triage, stages.custom, decompose.complexities, empty context.extraPaths
+    const exportedEnabled = comp.exportDeclarationV4();
+    expect(exportedEnabled.stages?.["s0-intent"]).toEqual({
+      enabled: true,
+      complexities: ["low", "high"],
+      "max-seconds": 45,
+      "max-tokens": 4000,
+      "on-clarification": "proceed",
+    });
+    expect(exportedEnabled.stages?.["s2-plan-critic"]).toEqual({
+      enabled: true,
+      complexities: ["medium", "high"],
+      tiers: ["T2", "T3"],
+      "max-seconds": 90,
+      "max-tokens": 12000,
+      "max-bounces": 2,
+    });
+    expect(exportedEnabled.stages?.["s5-merge-triage"]).toEqual({
+      mode: "enforced",
+      "auto-merge-tiers": ["T1"],
+      "require-human-tiers": ["T3"],
+    });
+    expect(exportedEnabled.stages?.custom).toEqual([
+      {
+        id: "custom:s3b-companion-checks",
+        label: "Companion checks",
+        kind: "check-bundle",
+        "insert-after": "s3",
+        "when-paths": ["pkg/**"],
+        "min-tier": "T2",
+        "timeout-seconds": 45,
+        "check-ids": ["custom:pair"],
+        "skill-ref": "skills/companion.md",
+      },
+    ]);
+    expect(exportedEnabled.decompose?.complexities).toEqual(["high"]);
+    expect(exportedEnabled.context?.extraPaths).toEqual([]);
+
+    // Disabling s0-intent and s2-plan-critic must still emit non-empty complexities so inheritance does not re-enable them
+    comp.s0Intent.set(false);
+    comp.s2PlanCritic.set(false);
+    fixture.detectChanges();
+    const exportedDisabled = comp.exportDeclarationV4();
+    const s0Disabled = exportedDisabled.stages?.["s0-intent"];
+    const s2Disabled = exportedDisabled.stages?.["s2-plan-critic"];
+    expect(typeof s0Disabled === "object" && s0Disabled?.enabled).toBe(false);
+    expect(typeof s0Disabled === "object" && s0Disabled?.complexities).toEqual([
+      "low",
+      "high",
+    ]);
+    expect(typeof s2Disabled === "object" && s2Disabled?.enabled).toBe(false);
+    expect(typeof s2Disabled === "object" && s2Disabled?.complexities).toEqual([
+      "medium",
+      "high",
+    ]);
+
+    const yaml = comp.buildYaml();
+    expect(yaml).toContain('kind: "check-bundle"');
+    expect(yaml).toContain('when-paths: ["pkg/**"]');
+    expect(yaml).toContain('min-tier: "T2"');
+    expect(yaml).toContain('check-ids: ["custom:pair"]');
+    expect(yaml).toContain('skill-ref: "skills/companion.md"');
+    expect(yaml).toContain('complexities: ["low","high"]');
+    expect(yaml).toContain("max-bounces: 2");
+    expect(yaml).toContain('on-clarification: "proceed"');
+    expect(yaml).toContain('auto-merge-tiers: ["T1"]');
+    expect(yaml).toContain("extra-paths: []");
+
+    // 2. diff-budget exclude glob + max-files-only synthesis + honest status pill labels
+    comp.addCheck("diff-budget");
+    fixture.detectChanges();
+    const budget = comp.customChecks().find((c) => c.engine === "diff-budget");
+    expect(budget).toBeTruthy();
+    if (budget) {
+      comp.updateCheckField(budget.uid, "paths", "pkg/**/*.go");
+      comp.updateCheckField(budget.uid, "exclude", "pkg/sub/**");
+      fixture.detectChanges();
+      const afterExclude = comp
+        .customChecks()
+        .find((c) => c.uid === budget.uid);
+      expect(afterExclude?.failJson).toContain('"pkg/sample.go"');
+      await comp.runFixtureSelfTest();
+      expect(comp.fixtureReport()?.passed).toBe(true);
+      const okText =
+        root.querySelector('[data-testid="qa-budget-examples"]')?.textContent ??
+        "";
+      expect(okText).toContain("Caught");
+      expect(okText).toContain("Allowed");
+
+      // Max-files-only budget synthesizes maxFiles + 1 distinct in-scope non-excluded files
+      comp.updateCheckMaxLines(budget.uid, 0);
+      comp.updateCheckMaxFiles(budget.uid, 3);
+      fixture.detectChanges();
+      const filesOnly = comp.customChecks().find((c) => c.uid === budget.uid);
+      const parsedFail = JSON.parse(filesOnly?.failJson ?? "[]") as {
+        "changed-files"?: string[];
+      }[];
+      expect(parsedFail[0]?.["changed-files"]?.length).toBe(4);
+      expect(
+        parsedFail[0]?.["changed-files"]?.every(
+          (p) => p.startsWith("pkg/") && !p.startsWith("pkg/sub/"),
+        ),
+      ).toBe(true);
+      await comp.runFixtureSelfTest();
+      expect(comp.fixtureReport()?.passed).toBe(true);
+
+      // Corrupt fixtures -> pills must show Not caught / Blocked (not hardcoded Caught / Allowed)
+      comp.updateFixture({
+        uid: budget.uid,
+        kind: "fail",
+        val: JSON.stringify([
+          { name: "too small", "changed-files": ["pkg/a.go"] },
+        ]),
+      });
+      comp.updateFixture({
+        uid: budget.uid,
+        kind: "pass",
+        val: JSON.stringify([
+          {
+            name: "too large",
+            "changed-files": ["pkg/a.go", "pkg/b.go", "pkg/c.go", "pkg/d.go"],
+          },
+        ]),
+      });
+      fixture.detectChanges();
+      const badText =
+        root.querySelector('[data-testid="qa-budget-examples"]')?.textContent ??
+        "";
+      expect(badText).toContain("Not caught");
+      expect(badText).toContain("Blocked");
+    }
+
+    // 3. jsonschema exclude glob re-synthesizes non-excluded fixture file path
+    comp.addCheck("jsonschema");
+    fixture.detectChanges();
+    const js = comp.customChecks().find((c) => c.engine === "jsonschema");
+    expect(js).toBeTruthy();
+    if (js) {
+      comp.updateCheckField(js.uid, "paths", "configs/**/*.json");
+      comp.updateCheckField(js.uid, "exclude", "configs/sub/**");
+      fixture.detectChanges();
+      const afterExclude = comp.customChecks().find((c) => c.uid === js.uid);
+      expect(afterExclude?.failJson).toContain('"configs/sample.json"');
+      await comp.runFixtureSelfTest();
+      expect(comp.fixtureReport()?.passed).toBe(true);
+    }
+
+    // 4. Switching to a declaration without pr-contract.guidance-text resets prGuidanceText to ""
+    fixture.componentRef.setInput("editing", false);
+    fixture.componentRef.setInput("declV4", {
+      schema: "grain.dev/qa-flow/v4",
+      "pr-contract": {
+        enabled: true,
+        mode: "warn",
+      },
+    });
+    fixture.detectChanges();
+    expect(comp.prGuidanceText()).toBe("");
+  });
 });
