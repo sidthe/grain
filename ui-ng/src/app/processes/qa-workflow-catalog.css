@@ -189,6 +189,13 @@ g-qa-workflow-catalog {
   color: var(--md-sys-color-on-surface);
 }
 
+.qa-flow-family-card:focus-visible,
+.qa-catalog-collapse-btn:focus-visible,
+.qa-archived-toggle:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
+}
+
 @media (max-width: 599.95px) {
   .qa-catalog-collapse-btn {
     display: none;

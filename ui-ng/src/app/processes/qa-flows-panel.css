@@ -91,7 +91,8 @@ g-qa-flows-panel {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 30px;
+  min-height: 36px;
+  box-sizing: border-box;
   padding: 0 10px;
   border-radius: var(--md-sys-shape-corner-full);
   border: 1px solid var(--md-sys-color-outline-variant);
@@ -201,6 +202,14 @@ g-qa-flows-panel {
   color: var(--md-sys-color-error);
 }
 
+.qa-flows-panel .qa-more-btn:focus-visible,
+.qa-flows-panel .qa-action-pop button:focus-visible,
+.qa-flows-panel .qa-action-pop a:focus-visible,
+.qa-flows-panel .qa-mobile-back:focus-visible {
+  outline: 2px solid var(--md-sys-color-primary);
+  outline-offset: 2px;
+}
+
 .qa-flows-panel .qa-empty-detail {
   padding: 32px;
   color: var(--md-sys-color-on-surface-variant);
@@ -258,6 +267,5 @@ g-qa-flows-panel {
   .qa-flows-panel.has-mobile-inspector .qa-studio-columns > g-qa-v3-studio {
     height: auto;
     flex: none;
-    padding-bottom: calc(var(--grain-bottombar-height, 92px) + 16px);
   }
 }

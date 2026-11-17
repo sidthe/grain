@@ -22,6 +22,7 @@ import {
 } from "@angular/core";
 import { RouterLink } from "@angular/router";
 import type { DiffPreviewFile } from "../api/models";
+import { MarkdownDirective } from "../shared/code-highlight";
 import { DiffViewerComponent } from "../shared/diff-viewer.component";
 import {
   type PillOption,
@@ -120,6 +121,7 @@ function readInputChecked(ev: Event): boolean {
   selector: "g-qa-step-drawer",
   imports: [
     RouterLink,
+    MarkdownDirective,
     DiffViewerComponent,
     PillSelectComponent,
     StatusIconComponent,
@@ -134,6 +136,7 @@ function readInputChecked(ev: Event): boolean {
       aria-label="Workflow guide and substep inspector"
       data-testid="qa-step-inspector"
     >
+      <h2 class="sr-only">Workflow substep inspector</h2>
       <div
         class="tab-strip qa-inspector-tabs"
         role="tablist"
@@ -144,8 +147,17 @@ function readInputChecked(ev: Event): boolean {
           role="tab"
           class="tab-link"
           data-testid="qa-insp-tab-definition"
+          [tabindex]="inspectorTab() === 'definition' ? 0 : -1"
+          [gTip]="
+            addingForStage()
+              ? 'Choose a substep to add to this stage'
+              : selectedStep()
+                ? 'Inspect or edit the selected substep'
+                : 'Workflow guide, rollout status, and live insights'
+          "
           [attr.aria-selected]="inspectorTab() === 'definition'"
           (click)="tabChange.emit('definition')"
+          (keydown)="onTablistKeydown($event)"
         >
           {{
             addingForStage()
@@ -160,9 +172,11 @@ function readInputChecked(ev: Event): boolean {
           role="tab"
           class="tab-link"
           data-testid="qa-insp-tab-empirical"
+          [tabindex]="inspectorTab() === 'empirical' ? 0 : -1"
           gTip="Empirical stats &amp; historical PR dry-run"
           [attr.aria-selected]="inspectorTab() === 'empirical'"
           (click)="tabChange.emit('empirical')"
+          (keydown)="onTablistKeydown($event)"
         >
           Stats &amp; dry-run
         </button>
@@ -171,14 +185,26 @@ function readInputChecked(ev: Event): boolean {
           role="tab"
           class="tab-link"
           data-testid="qa-insp-tab-yaml"
+          [tabindex]="inspectorTab() === 'yaml' ? 0 : -1"
+          gTip="Immutable lineage hash, parent diff, and generated YAML"
           [attr.aria-selected]="inspectorTab() === 'yaml'"
           (click)="tabChange.emit('yaml')"
+          (keydown)="onTablistKeydown($event)"
         >
           Lineage &amp; YAML
         </button>
       </div>
 
       <div class="qa-inspector-inner" data-testid="proc-inspector">
+        <button
+          type="button"
+          class="btn-text qa-mobile-back-stages"
+          data-testid="qa-mobile-back-stages"
+          aria-label="Back to stages"
+          (click)="closeStep.emit()"
+        >
+          ← Back to stages
+        </button>
         @if (dryRunResult(); as dr) {
           <div class="qa-drawer-card" data-testid="qa-dry-run-banner">
             <div class="qa-drawer-head">
@@ -479,12 +505,14 @@ function readInputChecked(ev: Event): boolean {
                           }}
                         </button>
                       </div>
-                      <pre
-                        class="s-mono skill-text-readonly"
+                      <div
+                        class="g-pane skill-text-readonly"
+                        data-testid="qa-step-prompt-markdown"
                         tabindex="0"
                         role="region"
                         aria-label="Substep prompt markdown"
-                        >{{ step.text }}</pre>
+                        [gMarkdown]="step.text"
+                      ></div>
                     </div>
                   }
 
@@ -679,10 +707,26 @@ function readInputChecked(ev: Event): boolean {
                           >
                         </div>
                       } @else {
-                        <div class="qa-field">
-                          <label for="codingSkillTextarea"
-                            >Coding contract (Markdown)</label
+                        @if (codingSkillMode() === "append") {
+                          <div
+                            class="qa-example-box"
+                            data-testid="qa-parent-skill-excerpt"
                           >
+                            <span class="qa-kv-label"
+                              >Appending to parent coding contract</span
+                            >
+                            <span class="qa-kv-val"
+                              >Instructions entered below are appended after the
+                              parent coding contract.</span
+                            >
+                          </div>
+                        }
+                        <div class="qa-field">
+                          <label for="codingSkillTextarea">{{
+                            codingSkillMode() === "append"
+                              ? "Appended coding instructions (Markdown)"
+                              : "Coding contract (Markdown)"
+                          }}</label>
                           <textarea
                             id="codingSkillTextarea"
                             rows="6"
@@ -902,43 +946,33 @@ function readInputChecked(ev: Event): boolean {
                         </div>
                       </div>
 
-                      <div class="qa-field-row">
-                        <div class="qa-field">
-                          <label [attr.for]="'cc-id-' + cc.uid"
-                            >Rule identifier</label
-                          >
-                          <input
-                            [id]="'cc-id-' + cc.uid"
-                            type="text"
-                            class="s-mono"
-                            data-testid="qa-check-id-input"
-                            [value]="cc.id"
-                            (input)="
-                              customCheckMetaChange.emit({
-                                uid: cc.uid,
-                                field: 'id',
-                                val: textVal($event),
-                              })
-                            "
-                          />
-                        </div>
-                        <button
-                          type="button"
-                          class="btn-text qa-danger-btn"
-                          data-testid="qa-remove-check-btn"
-                          (click)="removeCustomCheckReq.emit(cc.uid)"
+                      <div class="qa-field">
+                        <label [attr.for]="'cc-id-' + cc.uid"
+                          >Rule identifier</label
                         >
-                          Remove check
-                        </button>
+                        <input
+                          [id]="'cc-id-' + cc.uid"
+                          type="text"
+                          class="s-mono"
+                          data-testid="qa-check-id-input"
+                          [value]="cc.id"
+                          (input)="
+                            customCheckMetaChange.emit({
+                              uid: cc.uid,
+                              field: 'id',
+                              val: textVal($event),
+                            })
+                          "
+                        />
                       </div>
 
                       <div class="qa-field">
                         <label [attr.for]="'cc-msg-' + cc.uid"
                           >Remediation message shown on failure</label
                         >
-                        <input
+                        <textarea
                           [id]="'cc-msg-' + cc.uid"
-                          type="text"
+                          rows="2"
                           data-testid="qa-check-message-input"
                           [value]="cc.message"
                           (input)="
@@ -948,7 +982,7 @@ function readInputChecked(ev: Event): boolean {
                               val: textVal($event),
                             })
                           "
-                        />
+                        ></textarea>
                       </div>
 
                       @if (
@@ -1010,6 +1044,7 @@ function readInputChecked(ev: Event): boolean {
                           <input
                             [id]="'cc-forbid-' + cc.uid"
                             type="text"
+                            maxlength="512"
                             class="s-mono"
                             data-testid="qa-check-forbid-input"
                             [value]="cc.forbidAdded"
@@ -1337,19 +1372,29 @@ function readInputChecked(ev: Event): boolean {
                       }
 
                       <div class="qa-field-row">
+                        @if (canDryRun()) {
+                          <button
+                            type="button"
+                            class="btn-tonal"
+                            data-testid="qa-run-fixtures-btn"
+                            [disabled]="verifying()"
+                            gTip="Verify check examples and dry-run against recent pull requests."
+                            (click)="runFixtureSelfTestReq.emit()"
+                          >
+                            {{
+                              verifying()
+                                ? "Running self-test…"
+                                : "Run fixture self-test"
+                            }}
+                          </button>
+                        }
                         <button
                           type="button"
-                          class="btn-tonal"
-                          data-testid="qa-run-fixtures-btn"
-                          [disabled]="verifying()"
-                          gTip="Verify check examples and dry-run against recent pull requests."
-                          (click)="runFixtureSelfTestReq.emit()"
+                          class="btn-text qa-danger-btn"
+                          data-testid="qa-remove-check-btn"
+                          (click)="removeCustomCheckReq.emit(cc.uid)"
                         >
-                          {{
-                            verifying()
-                              ? "Running self-test…"
-                              : "Run fixture self-test"
-                          }}
+                          Remove check
                         </button>
                       </div>
                     </div>
@@ -1458,6 +1503,7 @@ function readInputChecked(ev: Event): boolean {
                             align="left"
                             testid="qa-builtin-check-severity"
                             ariaLabel="Built-in check enforcement"
+                            [disabled]="!step.enabled"
                             [options]="severityOptions"
                             [value]="
                               step.mode === 'off'
@@ -1636,7 +1682,10 @@ function readInputChecked(ev: Event): boolean {
                       >
                     </div>
                     <span class="qa-kv-val">{{ rep.summary }}</span>
-                    @for (c of rep.cases; track c.name) {
+                    @for (
+                      c of rep.cases;
+                      track c.kind + ":" + c.name + ":" + $index
+                    ) {
                       <span class="qa-kv-label s-mono"
                         >{{ c.name }}: {{ c.detail }}</span
                       >
@@ -1677,23 +1726,33 @@ function readInputChecked(ev: Event): boolean {
                     </div>
                     <div class="qa-field">
                       <label for="draftFlowSummary">One-line summary</label>
-                      <input
+                      <textarea
                         id="draftFlowSummary"
-                        type="text"
+                        rows="2"
                         data-testid="qa-draft-summary-input"
                         [value]="draftSummary()"
                         (input)="draftSummaryChange.emit(textVal($event))"
-                      />
+                      ></textarea>
                     </div>
                   </div>
                 }
 
                 <div class="qa-drawer-card">
-                  <div class="qa-drawer-title-group">
-                    <span class="qa-drawer-eyebrow">Workflow guide</span>
-                    <h3 class="qa-drawer-title">
-                      Calm progressive quality gates
-                    </h3>
+                  <div class="qa-drawer-head">
+                    <div class="qa-drawer-title-group">
+                      <span class="qa-drawer-eyebrow">Workflow guide</span>
+                      <h3 class="qa-drawer-title">
+                        Calm progressive quality gates
+                      </h3>
+                    </div>
+                    <button
+                      type="button"
+                      class="qa-help-btn"
+                      aria-label="About workflow studio"
+                      gTip="Select any stage substep to inspect it, or click Customize to draft and verify changes safely before publishing."
+                    >
+                      ?
+                    </button>
                   </div>
                   <ol class="qa-guide-steps">
                     <li>
@@ -1727,6 +1786,7 @@ function readInputChecked(ev: Event): boolean {
                       class="qa-rollout-link"
                       data-testid="qa-configure-rollout-link"
                       gTip="Configure global rollout percentage and shadow evaluation in Settings."
+                      (click)="settingsNavReq.emit($event)"
                       >Settings → Tasks</a
                     >
                   </div>
@@ -1792,49 +1852,72 @@ function readInputChecked(ev: Event): boolean {
 
           @case ("empirical") {
             <div class="qa-drawer-card">
-              <div class="qa-drawer-title-group">
-                <span class="qa-drawer-eyebrow">Empirical validation</span>
-                <h3 class="qa-drawer-title">
-                  Dry-run &amp; blast-radius simulation
-                </h3>
+              <div class="qa-drawer-head">
+                <div class="qa-drawer-title-group">
+                  <span class="qa-drawer-eyebrow">Empirical validation</span>
+                  <h3 class="qa-drawer-title">
+                    Dry-run &amp; blast-radius simulation
+                  </h3>
+                  <p class="qa-drawer-sub">
+                    Evaluate custom check examples and measure how this workflow
+                    behaves on recent pull requests before changing rollout.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  class="qa-help-btn"
+                  aria-label="About empirical validation"
+                  gTip="Dry-runs evaluate deterministic checks against recent pull requests without altering live task execution."
+                >
+                  ?
+                </button>
+              </div>
+              @if (canDryRun() || canProbe()) {
+                <div class="qa-field-row">
+                  @if (canDryRun()) {
+                    <button
+                      type="button"
+                      class="btn-tonal"
+                      data-testid="qa-run-fixtures-btn"
+                      [disabled]="verifying()"
+                      gTip="Run custom check test cases and dry-run against recent pull requests."
+                      (click)="runFixtureSelfTestReq.emit()"
+                    >
+                      {{
+                        verifying()
+                          ? "Running dry-run…"
+                          : "Run self-test & dry-run"
+                      }}
+                    </button>
+                    <button
+                      type="button"
+                      class="btn-tonal"
+                      data-testid="qa-v3-verify-dry-run"
+                      [disabled]="verifying()"
+                      gTip="Dry-run this workflow against recent pull requests."
+                      (click)="verifyDryRunReq.emit()"
+                    >
+                      Dry run on recent PRs
+                    </button>
+                  }
+                  @if (canProbe()) {
+                    <button
+                      type="button"
+                      class="btn-tonal"
+                      [disabled]="verifying()"
+                      gTip="Simulate blast-radius tier and stage triggers for a sample file list."
+                      (click)="openProbeReq.emit()"
+                    >
+                      Simulate file paths…
+                    </button>
+                  }
+                </div>
+              } @else {
                 <p class="qa-drawer-sub">
-                  Evaluate custom check examples and measure how this workflow
-                  behaves on recent pull requests before changing rollout.
+                  Dry-run and path simulation require global quality
+                  permissions.
                 </p>
-              </div>
-              <div class="qa-field-row">
-                <button
-                  type="button"
-                  class="btn-tonal"
-                  data-testid="qa-run-fixtures-btn"
-                  [disabled]="verifying()"
-                  gTip="Run custom check test cases and dry-run against recent pull requests."
-                  (click)="runFixtureSelfTestReq.emit()"
-                >
-                  {{
-                    verifying() ? "Running dry-run…" : "Run self-test & dry-run"
-                  }}
-                </button>
-                <button
-                  type="button"
-                  class="btn-tonal"
-                  data-testid="qa-v3-verify-dry-run"
-                  [disabled]="verifying()"
-                  gTip="Dry-run this workflow against recent pull requests."
-                  (click)="verifyDryRunReq.emit()"
-                >
-                  Dry run on recent PRs
-                </button>
-                <button
-                  type="button"
-                  class="btn-tonal"
-                  [disabled]="verifying()"
-                  gTip="Simulate blast-radius tier and stage triggers for a sample file list."
-                  (click)="openProbeReq.emit()"
-                >
-                  Simulate file paths…
-                </button>
-              </div>
+              }
 
               @if (fixtureReport(); as rep) {
                 <div
@@ -1851,7 +1934,10 @@ function readInputChecked(ev: Event): boolean {
                     >
                   </div>
                   <span class="qa-kv-val">{{ rep.summary }}</span>
-                  @for (c of rep.cases; track c.name) {
+                  @for (
+                    c of rep.cases;
+                    track c.kind + ":" + c.name + ":" + $index
+                  ) {
                     <span class="qa-kv-label s-mono"
                       >{{ c.name }}: {{ c.detail }}</span
                     >
@@ -1920,6 +2006,10 @@ export class QaStepDrawerComponent {
   readonly inspectorTab = input<StudioInspectorTab>("definition");
   readonly editing = input<boolean>(false);
   readonly canEdit = input<boolean>(true);
+  readonly canDryRun = input<boolean>(true);
+  readonly canProbe = input<boolean>(true);
+  readonly isVersionActiveDefault = input<boolean>(false);
+  readonly isFamilyActiveDefault = input<boolean>(false);
   readonly isFork = input<boolean>(false);
   readonly draftKey = input<string>("");
   readonly draftLabel = input<string>("");
@@ -1966,6 +2056,7 @@ export class QaStepDrawerComponent {
 
   readonly tabChange = output<StudioInspectorTab>();
   readonly closeStep = output<void>();
+  readonly settingsNavReq = output<Event>();
   readonly enterDraftReq = output<void>();
   readonly toggleParentDiffReq = output<void>();
   readonly openProbeReq = output<void>();
@@ -2127,11 +2218,17 @@ export class QaStepDrawerComponent {
   protected readonly rolloutProvenanceTitle = computed(() => {
     const d = this.detail();
     if (!d) return "Available workflow";
-    if (this.activeFlowId() === d.key) {
+    const versionActive =
+      this.isVersionActiveDefault() ||
+      (!this.isFamilyActiveDefault() && this.activeFlowId() === d.key);
+    if (versionActive) {
       if (this.qaEnabled() && this.activeRolloutPct() > 0) {
         return `Default workflow (${this.activeRolloutPct()}% of new tasks)`;
       }
       return "Selected default · Rollout paused (0%)";
+    }
+    if (this.isFamilyActiveDefault()) {
+      return "Historical version · Another version in family is default";
     }
     return "Available for schedules, suites, and experiments";
   });
@@ -2139,11 +2236,17 @@ export class QaStepDrawerComponent {
   protected readonly rolloutProvenanceBody = computed(() => {
     const d = this.detail();
     if (!d) return "";
-    if (this.activeFlowId() === d.key) {
+    const versionActive =
+      this.isVersionActiveDefault() ||
+      (!this.isFamilyActiveDefault() && this.activeFlowId() === d.key);
+    if (versionActive) {
       if (this.qaEnabled() && this.activeRolloutPct() > 0) {
         return `Runs automatically on ${this.activeRolloutPct()}% of eligible tasks across repositories, and can be pinned on individual schedules or suites.`;
       }
       return "Configured as the default workflow in Settings → Tasks, but quality rollout is currently paused at 0%.";
+    }
+    if (this.isFamilyActiveDefault()) {
+      return "Another version in this workflow family is currently the active global default. Click Set as default… above to switch rollout to this exact version.";
     }
     return "Not currently set as the global default. Pin this workflow on specific schedules or suites, compare it in an A/B experiment, or click Set as default… above.";
   });
@@ -2266,5 +2369,36 @@ export class QaStepDrawerComponent {
 
   protected checkedVal(ev: Event): boolean {
     return readInputChecked(ev);
+  }
+
+  protected onTablistKeydown(ev: KeyboardEvent): void {
+    const order: readonly StudioInspectorTab[] = [
+      "definition",
+      "empirical",
+      "yaml",
+    ];
+    const currentIdx = order.indexOf(this.inspectorTab());
+    let nextIdx = -1;
+    if (ev.key === "ArrowRight") {
+      nextIdx = (currentIdx + 1) % order.length;
+    } else if (ev.key === "ArrowLeft") {
+      nextIdx = (currentIdx - 1 + order.length) % order.length;
+    } else if (ev.key === "Home") {
+      nextIdx = 0;
+    } else if (ev.key === "End") {
+      nextIdx = order.length - 1;
+    }
+    if (nextIdx < 0) return;
+    ev.preventDefault();
+    const nextTab = order[nextIdx];
+    this.tabChange.emit(nextTab);
+    const tablist =
+      ev.currentTarget instanceof HTMLElement
+        ? ev.currentTarget.closest('[role="tablist"]')
+        : null;
+    if (tablist) {
+      const tabs = tablist.querySelectorAll<HTMLButtonElement>('[role="tab"]');
+      tabs[nextIdx]?.focus();
+    }
   }
 }

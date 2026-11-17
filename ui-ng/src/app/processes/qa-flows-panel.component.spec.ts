@@ -13,7 +13,13 @@
 // limitations under the License.
 
 import { TestBed } from "@angular/core/testing";
-import { ActivatedRoute, provideRouter } from "@angular/router";
+import {
+  ActivatedRoute,
+  Router,
+  convertToParamMap,
+  provideRouter,
+} from "@angular/router";
+import { BehaviorSubject } from "rxjs";
 import { GrainApi } from "../api/grain-api.service";
 import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
@@ -22,20 +28,32 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 
 describe("QaFlowsPanelComponent", () => {
   let api: {
+    config: import("vitest").Mock;
     get: import("vitest").Mock;
     post: import("vitest").Mock;
     put: import("vitest").Mock;
   };
-  let access: { can: import("vitest").Mock };
+  let access: {
+    can: import("vitest").Mock;
+    configLoaded: import("vitest").Mock;
+    setConfig: import("vitest").Mock;
+    repoLimits: import("vitest").Mock;
+  };
   let snackbar: { show: import("vitest").Mock };
 
   beforeEach(() => {
     api = {
+      config: vi.fn().mockResolvedValue({ access: { full: true } }),
       get: vi.fn().mockResolvedValue({ versions: [] }),
       post: vi.fn().mockResolvedValue({}),
       put: vi.fn().mockResolvedValue({}),
     };
-    access = { can: vi.fn().mockReturnValue(true) };
+    access = {
+      can: vi.fn().mockReturnValue(true),
+      configLoaded: vi.fn().mockReturnValue(true),
+      setConfig: vi.fn(),
+      repoLimits: vi.fn().mockReturnValue({}),
+    };
     snackbar = { show: vi.fn() };
 
     TestBed.configureTestingModule({
@@ -304,7 +322,7 @@ describe("QaFlowsPanelComponent", () => {
       root.querySelector('[data-testid="qa-schema-pill"]')?.textContent?.trim(),
     ).toBe("v4");
 
-    // Read-only inspect mode has zero disabled form inputs and explicit Customize as v2 CTA
+    // Read-only inspect mode has zero disabled form inputs and explicit Customize as v1 override CTA on built-in family
     expect(
       root.querySelectorAll(
         "input:disabled, textarea:disabled, select:disabled",
@@ -314,7 +332,7 @@ describe("QaFlowsPanelComponent", () => {
       root
         .querySelector('[data-testid="qa-new-version-btn"]')
         ?.textContent?.trim(),
-    ).toBe("Customize as v2");
+    ).toBe("Customize as v1 override");
 
     const stageTree = root.querySelector('[data-testid="qa-stage-tree"]');
     expect(stageTree).toBeTruthy();
@@ -444,7 +462,9 @@ describe("QaFlowsPanelComponent", () => {
     setDefaultBtn?.click();
     fixture.detectChanges();
 
-    expect(comp.confirmRequest()?.title).toContain("Set Golden V3 as default");
+    expect(comp.confirmRequest()?.title).toContain(
+      "Set Golden V3 (v1) as default",
+    );
     comp.onConfirmDone(true);
     await new Promise((r) => setTimeout(r, 0));
     fixture.detectChanges();
@@ -459,10 +479,22 @@ describe("QaFlowsPanelComponent", () => {
         qaShadowOnControl: true,
       }),
     );
-    expect(comp.rolloutStatusLabel("golden-v3")).toBe("Active (100%)");
+    const activeDet = comp.selectedDetail();
+    expect(activeDet ? comp.rolloutStatusLabel(activeDet) : "").toBe(
+      "Active (100%)",
+    );
     expect(snackbar.show).toHaveBeenCalledWith(
       expect.stringContaining("Golden V3"),
       expect.objectContaining({ label: "Undo" }),
+    );
+
+    // Undo error shows explicit failure snackbar instead of unhandled rejection
+    const undoAction = snackbar.show.mock.calls.at(-1)?.[1] as
+      { run?: () => Promise<void> } | undefined;
+    api.put.mockRejectedValueOnce(new Error("network down"));
+    await undoAction?.run?.();
+    expect(snackbar.show).toHaveBeenCalledWith(
+      "Failed to undo default workflow change",
     );
   });
 
@@ -894,5 +926,283 @@ describe("QaFlowsPanelComponent", () => {
 
     expect(comp.studio()?.declV4()).toBeUndefined();
     expect(comp.studio()?.s0Intent()).toBe(false);
+  });
+
+  it("awaits api.config() on cold load before GETs and hides global mutations for repo-limited roles", async () => {
+    const callOrder: string[] = [];
+    access.configLoaded.mockReturnValue(false);
+    api.config.mockImplementation(async () => {
+      callOrder.push("GET /api/config");
+      access.repoLimits.mockReturnValue({
+        "qa:admin": ["acme/repo"],
+        "qa:read": ["acme/repo"],
+        "settings:read": ["acme/repo"],
+        "settings:write": ["acme/repo"],
+      });
+      return {
+        access: {
+          full: false,
+          scopes: ["qa:admin", "qa:read", "settings:read", "settings:write"],
+          repoLimits: {
+            "qa:admin": ["acme/repo"],
+            "qa:read": ["acme/repo"],
+            "settings:read": ["acme/repo"],
+            "settings:write": ["acme/repo"],
+          },
+        },
+      };
+    });
+    api.get.mockImplementation(async (route: string) => {
+      callOrder.push(route);
+      return { versions: [] };
+    });
+
+    const fixture = TestBed.createComponent(QaFlowsPanelComponent);
+    const comp = fixture.componentInstance;
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(callOrder[0]).toBe("GET /api/config");
+    expect(access.setConfig).toHaveBeenCalled();
+    // Repo-limited scopes must not fire global GETs or enable global mutations
+    expect(callOrder).toEqual(["GET /api/config"]);
+    expect(comp.canAdmin()).toBe(false);
+    expect(comp.canDryRun()).toBe(false);
+    expect(comp.canProbe()).toBe(false);
+    expect(comp.canAdopt()).toBe(false);
+    expect(comp.canWriteSettings()).toBe(false);
+  });
+
+  it("syncs shadowed @v1 (built-in) by hash in ?flow= and Set as default, and pins non-shadowed older versions via key@version", async () => {
+    const qp$ = new BehaviorSubject(convertToParamMap({}));
+    TestBed.overrideProvider(ActivatedRoute, {
+      useValue: {
+        snapshot: { queryParamMap: convertToParamMap({}) },
+        queryParamMap: qp$.asObservable(),
+      },
+    });
+    const router = TestBed.inject(Router);
+    const navSpy = vi.spyOn(router, "navigate").mockResolvedValue(true);
+
+    const seededVersions = [
+      {
+        key: "golden-v3",
+        version: 1,
+        hash: "sha256:builtin-v1",
+        label: "Golden V3",
+        summary: "Built-in v1",
+        builtIn: true,
+      },
+      {
+        key: "golden-v3",
+        version: 1,
+        hash: "sha256:custom-v1",
+        label: "Custom Override V1",
+        summary: "DB v1 override",
+        builtIn: false,
+      },
+      {
+        key: "golden-v3",
+        version: 2,
+        hash: "sha256:custom-v2",
+        label: "Custom V2",
+        summary: "DB v2",
+        builtIn: false,
+      },
+    ];
+    api.get.mockImplementation(
+      async (route: string, params?: { hash?: string }) => {
+        if (route === "GET /api/qa/flow-versions") {
+          return { versions: seededVersions };
+        }
+        const found = seededVersions.find((v) => v.hash === params?.hash);
+        return found ?? {};
+      },
+    );
+
+    const fixture = TestBed.createComponent(QaFlowsPanelComponent);
+    const comp = fixture.componentInstance;
+    await new Promise((r) => setTimeout(r, 0));
+
+    // 1. Selecting shadowed built-in v1 resets isFork, writes hash (not golden-v3@1) to ?flow=, and persists hash on Set as default
+    comp.isFork.set(true);
+    await comp.doSelectVersion("sha256:builtin-v1", true);
+    expect(comp.isFork()).toBe(false);
+    expect(navSpy).toHaveBeenLastCalledWith(
+      [],
+      expect.objectContaining({
+        queryParams: { flow: "sha256:builtin-v1" },
+      }),
+    );
+
+    comp.confirmSetAsDefault();
+    comp.onConfirmDone(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(api.put).toHaveBeenLastCalledWith(
+      "PUT /api/settings",
+      undefined,
+      expect.objectContaining({ qaFlowId: "sha256:builtin-v1" }),
+    );
+    expect(comp.activeFlowFamilyKey()).toBe("golden-v3");
+    const selBuiltin = comp.selectedDetail();
+    expect(selBuiltin ? comp.isVersionActiveDefault(selBuiltin) : false).toBe(
+      true,
+    );
+
+    // 2. Selecting non-shadowed custom v1 (when v2 is latest) writes golden-v3@1 to ?flow= and Set as default
+    await comp.doSelectVersion("sha256:custom-v1", true);
+    expect(navSpy).toHaveBeenLastCalledWith(
+      [],
+      expect.objectContaining({
+        queryParams: { flow: "golden-v3@1" },
+      }),
+    );
+    expect(comp.nextVersionNum()).toBe(3);
+    comp.confirmSetAsDefault();
+    comp.onConfirmDone(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(api.put).toHaveBeenLastCalledWith(
+      "PUT /api/settings",
+      undefined,
+      expect.objectContaining({ qaFlowId: "golden-v3@1" }),
+    );
+  });
+
+  it("never copies summary into skill.text on initDraft, enforces 4096 B parent+append skill cap, guards unsaved drafts, and drops stale dry-run responses", async () => {
+    const qp$ = new BehaviorSubject(convertToParamMap({ flow: "golden-v3" }));
+    TestBed.overrideProvider(ActivatedRoute, {
+      useValue: {
+        snapshot: { queryParamMap: convertToParamMap({ flow: "golden-v3" }) },
+        queryParamMap: qp$.asObservable(),
+      },
+    });
+    const router = TestBed.inject(Router);
+    const navSpy = vi.spyOn(router, "navigate").mockResolvedValue(true);
+
+    let resolveSlowDryRun: ((v: unknown) => void) | undefined;
+    api.post.mockImplementation(() => {
+      return new Promise((resolve) => {
+        resolveSlowDryRun = resolve;
+      });
+    });
+
+    const seeded = [
+      {
+        key: "golden-v3",
+        version: 1,
+        hash: "sha256:g3",
+        label: "Golden V3",
+        summary: "Never leak this summary into skill.text",
+        builtIn: true,
+        resolved: {
+          id: "golden-v3",
+          label: "Golden V3",
+          summary: "Never leak this summary into skill.text",
+          injectSkill: true,
+          skillBytes: 3500,
+          stopNudge: true,
+          stagingIsolation: true,
+          enableS4: true,
+          maxS4RepairRounds: 1,
+          rules: [],
+        },
+      },
+      {
+        key: "deterministic-s3-only",
+        version: 1,
+        hash: "sha256:det",
+        label: "Deterministic S3",
+        summary: "Zero-LLM ablation",
+        builtIn: true,
+        resolved: {
+          id: "deterministic-s3-only",
+          label: "Deterministic S3",
+          summary: "Zero-LLM ablation",
+          injectSkill: false,
+          skillBytes: 0,
+          stopNudge: false,
+          stagingIsolation: true,
+          enableS4: false,
+          maxS4RepairRounds: 0,
+          rules: [],
+        },
+      },
+    ];
+    api.get.mockImplementation(
+      async (route: string, params?: { hash?: string }) => {
+        if (route === "GET /api/qa/flow-versions") {
+          return { versions: seeded };
+        }
+        if (route === "GET /api/qa/flow-versions/{hash}") {
+          return seeded.find((v) => v.hash === params?.hash) ?? {};
+        }
+        return {};
+      },
+    );
+
+    const fixture = TestBed.createComponent(QaFlowsPanelComponent);
+    const comp = fixture.componentInstance;
+    await new Promise((r) => setTimeout(r, 0));
+    comp.selectedHash.set("sha256:g3");
+    comp.selectedDetail.set(seeded[0]);
+    fixture.detectChanges();
+
+    // 1. Start slow read-only dry-run, then customize: initDraft uses mode="inherit", text="" (no summary leak!)
+    const slowDryRunPromise = comp.dryRun();
+    expect(comp.dryRunBusy()).toBe(true);
+
+    comp.newVersion();
+    fixture.detectChanges();
+    expect(comp.dryRunBusy()).toBe(false);
+    expect(comp.draftDeclaration().skill).toEqual({
+      mode: "inherit",
+      text: "",
+      maxBytes: 1800,
+    });
+    expect(
+      (fixture.nativeElement as HTMLElement).getAttribute(
+        "data-qa-unsaved-draft",
+      ),
+    ).toBe("true");
+
+    // Stale read-only dry-run completion must be ignored
+    resolveSlowDryRun?.({ sampledPRs: 10, wouldBlockPRs: 9, results: [] });
+    await slowDryRunPromise;
+    expect(comp.dryRunResult()).toBeNull();
+
+    // 2. Append mode includes 3500 B parent skill in 4096 B cap (700 B appended -> 4200 > 4096 overflow)
+    const st = comp.studio();
+    st?.codingSkillMode.set("append");
+    st?.codingSkillText.set("a".repeat(700));
+    comp.onStudioSkillChange({ mode: "append", text: "a".repeat(700) });
+    fixture.detectChanges();
+    expect(comp.parentSkillBytes()).toBe(3500);
+    expect(comp.skillByteOverflow()).toBe(true);
+
+    // 3. Unsaved draft guard intercepts queryParamMap transition and internal link click
+    qp$.next(convertToParamMap({ flow: "deterministic-s3-only" }));
+    expect(comp.confirmRequest()?.title).toBe("Unsaved changes");
+    expect(comp.isEditing()).toBe(true);
+    comp.onConfirmDone(false);
+
+    const clickEv = new MouseEvent("click", { cancelable: true });
+    comp.onGuardedLinkClick(clickEv, "/settings/tasks");
+    expect(clickEv.defaultPrevented).toBe(true);
+    expect(comp.confirmRequest()?.title).toBe("Unsaved changes");
+    comp.onConfirmDone(true);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(comp.isEditing()).toBe(false);
+    expect(navSpy).toHaveBeenLastCalledWith(["/settings/tasks"], {
+      queryParams: undefined,
+    });
+
+    // 4. injectSkill === false initializes draft skill to replace + ""
+    comp.selectedHash.set("sha256:det");
+    comp.selectedDetail.set(seeded[1]);
+    comp.newVersion();
+    expect(comp.draftDeclaration().skill).toEqual({
+      mode: "replace",
+      text: "",
+      maxBytes: 1800,
+    });
   });
 });

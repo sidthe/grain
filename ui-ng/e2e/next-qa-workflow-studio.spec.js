@@ -274,9 +274,14 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
   );
   await expect(page.getByTestId("qa-workflow-guide")).toBeVisible();
 
-  // Customize & publish engineering-workflow-v4 (V4): verify exclude fixture survival, zero-JSON jsonschema check, and historical dry-run.
+  // Customize & publish engineering-workflow-v4 (V4): verify Customize as v1 override CTA, exclude fixture survival, zero-JSON jsonschema check, and historical dry-run.
+  await expect(page.getByTestId("qa-new-version-btn")).toHaveText(
+    "Customize as v1 override",
+  );
   await page.getByTestId("qa-new-version-btn").click();
-  await expect(page.getByTestId("qa-publish-version-btn")).toBeVisible();
+  await expect(page.getByTestId("qa-publish-version-btn")).toHaveText(
+    "Publish v1",
+  );
   const draftFieldBox = await page
     .getByTestId("qa-draft-meta-card")
     .locator(".qa-field")
@@ -284,6 +289,25 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
     .boundingBox();
   expect(draftFieldBox).not.toBeNull();
   expect(draftFieldBox.height).toBeLessThan(95);
+
+  // Verify S2 coding:skill never leaks workflow summary and switching to Append to parent clears unmodified parent text.
+  await page.getByTestId("qa-stage-toggle-s2-coding").click();
+  await page.getByTestId("qa-step-row-coding:skill").click();
+  await expect(page.locator("textarea#codingSkillTextarea")).not.toContainText(
+    "End-to-end 8-stage engineering workflow",
+  );
+  await page.getByTestId("qa-coding-skill-mode").click();
+  await page
+    .getByTestId("qa-coding-skill-mode-menu")
+    .getByRole("option", { name: /^Append$/ })
+    .click();
+  await expect(page.getByTestId("qa-parent-skill-excerpt")).toBeVisible();
+  await expect(page.locator("textarea#codingSkillTextarea")).toHaveValue("");
+  await page.getByTestId("qa-coding-skill-mode").click();
+  await page
+    .getByTestId("qa-coding-skill-mode-menu")
+    .getByRole("option", { name: /^Inherit$/ })
+    .click();
 
   await page.getByTestId("qa-stage-toggle-s3-checks").click();
   await page.getByTestId("qa-step-row-custom:no-fmt-println-pkg").click();
@@ -308,7 +332,11 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
   await page.getByTestId("qa-v3-add-jsonschema").click();
   const jsonSchemaCard = page.getByTestId("qa-v3-custom-check-row");
   await expect(jsonSchemaCard).toBeVisible();
-  expect(await jsonSchemaCard.locator("textarea").count()).toBe(0);
+  expect(
+    await jsonSchemaCard
+      .locator('textarea:not([data-testid="qa-check-message-input"])')
+      .count(),
+  ).toBe(0);
   await expect(page.getByTestId("qa-check-required-keys")).toHaveValue(
     "name, version",
   );
@@ -318,6 +346,18 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
   await expect(page.getByTestId("qa-jsonschema-examples")).toContainText(
     "Allowed",
   );
+
+  // Verify unsaved-draft guard intercepts catalog switching and "Keep editing" preserves the draft.
+  await expect(page.locator("g-qa-flows-panel")).toHaveAttribute(
+    "data-qa-unsaved-draft",
+    "true",
+  );
+  await v3Row.click();
+  await expect(page.getByTestId("confirm-dialog")).toContainText(
+    "Unsaved changes",
+  );
+  await page.getByTestId("confirm-cancel").click();
+  await expect(page.getByTestId("confirm-dialog")).toHaveCount(0);
 
   await page.getByTestId("qa-test-menu-btn").click();
   await page.getByTestId("qa-dry-run-btn").click();
@@ -379,15 +419,24 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
     "Customize as v3",
   );
 
-  // Switch back to @v1 via qa-version-switcher -> URL carries ?flow=golden-v1-minimal@1.
+  // Switch back to @v1 via qa-version-switcher -> URL carries ?flow=golden-v1-minimal@1; shadowed @v1 (built-in) carries pinned hash.
   await page.getByTestId("qa-version-switcher").click();
   await page
     .getByTestId("qa-version-switcher-menu")
-    .getByRole("option", { name: "@v1", exact: false })
-    .first()
+    .getByRole("option", { name: /^@v1\s(?!\(built-in\))/ })
     .click();
   await expect(page).toHaveURL(/flow=golden-v1-minimal(@|%40)1/);
   await expect(page.getByTestId("qa-version-switcher")).toContainText("@v1");
+
+  await page.getByTestId("qa-version-switcher").click();
+  await page
+    .getByTestId("qa-version-switcher-menu")
+    .getByRole("option", { name: /@v1 \(built-in\)/ })
+    .click();
+  await expect(page).not.toHaveURL(/flow=golden-v1-minimal(@|%40)1($|&)/);
+  await expect(page.getByTestId("qa-version-switcher")).toContainText(
+    "@v1 (built-in)",
+  );
 
   // Verify at 1024x860 while viewing @v1 that qa-flow-switcher still shows the family title and tabs remain unclipped.
   await page.setViewportSize({ width: 1024, height: 860 });
@@ -444,6 +493,16 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
   const axeDesktop = await new AxeBuilder({ page }).analyze();
   expect(axeDesktop.violations).toEqual([]);
 
+  // Verify dark mode contrast and 0 axe violations at 1440x900.
+  await page.evaluate(() => {
+    document.documentElement.setAttribute("data-theme", "dark");
+  });
+  const axeDesktopDark = await new AxeBuilder({ page }).analyze();
+  expect(axeDesktopDark.violations).toEqual([]);
+  await page.evaluate(() => {
+    document.documentElement.removeAttribute("data-theme");
+  });
+
   // Verify 1024x860 container-query 2-column layout (catalog hidden, qa-flow-switcher shown) and 0 axe violations.
   await page.setViewportSize({ width: 1024, height: 860 });
   await expect(catalog).toBeHidden();
@@ -458,7 +517,7 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
   const axeTablet = await new AxeBuilder({ page }).analyze();
   expect(axeTablet.violations).toEqual([]);
 
-  // Verify 390x844 phone viewport: cold load starts on single-column catalog, clicking row opens mobile detail with Back button, 0 overflow, and 0 axe violations.
+  // Verify 390x844 phone viewport 3-step progressive view: Step 1 Catalog -> Step 2 Stage Spine -> Step 3 Focused Drawer, 0 overflow, and 0 axe violations.
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/next/processes/quality");
   await expect(page.getByTestId("quality-flows-list")).toBeVisible();
@@ -468,24 +527,42 @@ test("Telemetry tab-strip active border, Processes full-width composition body w
   const axePhoneCatalog = await new AxeBuilder({ page }).analyze();
   expect(axePhoneCatalog.violations).toEqual([]);
 
+  // Step 2: selecting a workflow opens the stage spine while keeping the right drawer tucked until a substep or Guide is chosen.
   await page.getByTestId("qa-flow-row-engineering-workflow-v4").click();
   await expect(page.getByTestId("qa-mobile-back")).toBeVisible();
   await expect(stageTree).toBeVisible();
-  await expect(stepInspector).toBeVisible();
-  const phoneTreeBox = await stageTree.boundingBox();
-  const phoneInspBox = await stepInspector.boundingBox();
-  expect(phoneTreeBox).not.toBeNull();
-  expect(phoneInspBox).not.toBeNull();
-  expect(phoneInspBox.y).toBeGreaterThanOrEqual(
-    phoneTreeBox.y + phoneTreeBox.height - 2,
-  );
-  const phoneStudioOverflow = await page.evaluate(
+  await expect(stepInspector).toBeHidden();
+  const phoneSpineOverflow = await page.evaluate(
     () =>
       document.documentElement.scrollWidth -
       document.documentElement.clientWidth,
   );
-  expect(phoneStudioOverflow).toBeLessThanOrEqual(0);
+  expect(phoneSpineOverflow).toBeLessThanOrEqual(0);
 
-  const axePhoneDetail = await new AxeBuilder({ page }).analyze();
-  expect(axePhoneDetail.violations).toEqual([]);
+  const axePhoneSpine = await new AxeBuilder({ page }).analyze();
+  expect(axePhoneSpine.violations).toEqual([]);
+
+  // Step 3: selecting a substep opens the full-screen drawer with <- Back to stages.
+  await page.getByTestId("qa-stage-toggle-s3-checks").click();
+  await page.getByTestId("qa-step-row-custom:no-fmt-println-pkg").click();
+  await expect(stepInspector).toBeVisible();
+  await expect(page.getByTestId("qa-mobile-back-stages")).toBeVisible();
+  await expect(stageTree).toBeHidden();
+  const phoneDrawerOverflow = await page.evaluate(
+    () =>
+      document.documentElement.scrollWidth -
+      document.documentElement.clientWidth,
+  );
+  expect(phoneDrawerOverflow).toBeLessThanOrEqual(0);
+
+  const axePhoneDrawer = await new AxeBuilder({ page }).analyze();
+  expect(axePhoneDrawer.violations).toEqual([]);
+
+  // Back to stages -> Step 2, then Back -> Step 1 catalog.
+  await page.getByTestId("qa-mobile-back-stages").click();
+  await expect(stageTree).toBeVisible();
+  await expect(stepInspector).toBeHidden();
+  await page.getByTestId("qa-mobile-back").click();
+  await expect(page.getByTestId("quality-flows-list")).toBeVisible();
+  await expect(stageTree).toBeHidden();
 });

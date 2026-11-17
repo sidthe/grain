@@ -26,6 +26,7 @@ import {
 } from "@angular/core";
 import { GrainApi } from "../api/grain-api.service";
 import type { DiffPreviewFile } from "../api/models";
+import { AccessService } from "../services/access.service";
 import { SnackbarService } from "../services/snackbar.service";
 import { errorText } from "../sessions/session-helpers";
 import { DialogTrapDirective } from "../shared/dialog-trap.directive";
@@ -51,14 +52,17 @@ import {
   buildClientWorkflowStagesView,
   computeActivePromptBytes,
   evaluateFixturesClientSide,
+  extractExplicitSkillDecl,
   extractPatternExampleLines,
   formatStageModeLabel,
   formatStepModeLabel,
-  globToSamplePath,
+  isCustomStageAnchor,
+  resolvePatternSamplePath,
   serializePatternFixtures,
   stageModePillClass,
   stageModeTip,
   stepModePillClass,
+  syncPatternFailFixtureScope,
   synthesizeCompanionFixtures,
   synthesizeDiffBudgetFixtures,
   synthesizeJsonSchemaFixtures,
@@ -121,6 +125,20 @@ function normalizeStringList(
     return [raw.trim()];
   }
   return [];
+}
+
+function yamlQuote(val: string): string {
+  return JSON.stringify(val)
+    .replace(/\r/g, "\\r")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+}
+
+function yamlJson(val: unknown): string {
+  return JSON.stringify(val)
+    .replace(/\r/g, "\\r")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
 }
 
 function defaultFixturesForEngine(engine: CustomCheckEngine): {
@@ -194,7 +212,7 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
       const paths = "pkg/**/*.go";
       const failLine = 'console.log("debug")';
       const passLine = "const ready = true;";
-      const ser = serializePatternFixtures(failLine, passLine);
+      const ser = serializePatternFixtures(failLine, passLine, paths);
       return {
         paths,
         forbidAdded: "console\\.log\\(",
@@ -224,7 +242,10 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
   encapsulation: ViewEncapsulation.None,
   template: `
     <div class="qa-v3-studio" data-testid="qa-v3-studio">
-      <div class="qa-workbench-split">
+      <div
+        class="qa-workbench-split"
+        [class.is-mobile-drawer-open]="mobileDrawerOpen()"
+      >
         <!-- CENTER COLUMN: HEADER + LIFECYCLE STAGE SPINE -->
         <div class="qa-spine-col">
           <ng-content select="[qaCenterHeader]" />
@@ -277,6 +298,7 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
                     class="qa-kind-chip"
                     [attr.aria-pressed]="kindFilter() === opt.id"
                     [attr.data-testid]="'qa-kind-filter-' + opt.id"
+                    [gTip]="opt.tip"
                     (click)="kindFilter.set(opt.id)"
                   >
                     {{ opt.label }}
@@ -329,6 +351,11 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
                           class="qa-step-node"
                           [class.is-selected]="
                             selectedStepId() === step.id && !addingForStageId()
+                          "
+                          [attr.aria-current]="
+                            selectedStepId() === step.id && !addingForStageId()
+                              ? 'true'
+                              : null
                           "
                           [attr.data-testid]="'qa-step-row-' + step.id"
                           (click)="selectStep(stage.id, step.id)"
@@ -411,6 +438,10 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
           [inspectorTab]="inspectorTab()"
           [editing]="editing()"
           [canEdit]="canEdit()"
+          [canDryRun]="canDryRun()"
+          [canProbe]="canProbe()"
+          [isVersionActiveDefault]="isVersionActiveDefault()"
+          [isFamilyActiveDefault]="isFamilyActiveDefault()"
           [isFork]="isFork()"
           [draftKey]="draftKey()"
           [draftLabel]="draftLabel()"
@@ -424,7 +455,7 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
           [diffFiles]="diffFiles()"
           [dryRunResult]="effectiveDryRun()"
           [fixtureReport]="fixtureReport()"
-          [verifying]="verifying()"
+          [verifying]="effectiveVerifying()"
           [yamlPreview]="yamlPreviewText()"
           [s0Intent]="s0Intent()"
           [decomposeEnabled]="decomposeEnabled()"
@@ -452,7 +483,8 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
           [verifierEnabled]="verifierEnabled()"
           [s5Triage]="s5Triage()"
           (tabChange)="inspectorTab.set($event)"
-          (closeStep)="openGuide()"
+          (closeStep)="onDrawerCloseStep()"
+          (settingsNavReq)="settingsNavReq.emit($event)"
           (enterDraftReq)="enterDraftReq.emit()"
           (toggleParentDiffReq)="toggleParentDiffReq.emit()"
           (openProbeReq)="showProbe.set(true)"
@@ -585,7 +617,7 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
                 class="btn-primary"
                 data-testid="qa-v3-submit-adopt"
                 (click)="doAdopt()"
-                [disabled]="adopting()"
+                [disabled]="adopting() || !canAdoptForRepo()"
               >
                 Import
               </button>
@@ -690,6 +722,7 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
 })
 export class QaV3StudioComponent {
   private readonly api = inject(GrainApi);
+  private readonly access = inject(AccessService);
   private readonly snackbar = inject(SnackbarService);
 
   readonly decl = input<FlowDeclarationV3 | undefined>(undefined);
@@ -697,6 +730,13 @@ export class QaV3StudioComponent {
   readonly detail = input<QAFlowVersionDetail | null>(null);
   readonly editing = input<boolean>(true);
   readonly canEdit = input<boolean>(true);
+  readonly canDryRun = input<boolean>(true);
+  readonly canProbe = input<boolean>(true);
+  readonly canAdopt = input<boolean>(true);
+  readonly externalVerifying = input<boolean>(false);
+  readonly mobileDrawerOpen = input<boolean>(false);
+  readonly isVersionActiveDefault = input<boolean>(false);
+  readonly isFamilyActiveDefault = input<boolean>(false);
   readonly embedded = input<boolean>(false);
   readonly isFork = input<boolean>(false);
   readonly draftKey = input<string>("");
@@ -725,6 +765,8 @@ export class QaV3StudioComponent {
   readonly toggleParentDiffReq = output<void>();
   readonly enterDraftReq = output<void>();
   readonly stepSelected = output<string>();
+  readonly drawerClosed = output<void>();
+  readonly settingsNavReq = output<Event>();
   readonly draftKeyChange = output<string>();
   readonly draftLabelChange = output<string>();
   readonly draftSummaryChange = output<string>();
@@ -820,12 +862,38 @@ export class QaV3StudioComponent {
   readonly kindFilterOptions: readonly {
     id: StepKindFilter;
     label: string;
+    tip: string;
   }[] = [
-    { id: "all", label: "All" },
-    { id: "skills", label: "Skills" },
-    { id: "checks", label: "Checks" },
-    { id: "agents", label: "Critics" },
+    { id: "all", label: "All", tip: "Show all workflow substeps" },
+    {
+      id: "skills",
+      label: "Skills",
+      tip: "Show prompt skills, readability packs, and PR guidance",
+    },
+    {
+      id: "checks",
+      label: "Checks",
+      tip: "Show built-in and custom deterministic checks",
+    },
+    {
+      id: "agents",
+      label: "Critics",
+      tip: "Show fresh-context plan critics and adversarial verifiers",
+    },
   ];
+
+  readonly effectiveVerifying = computed(
+    () => this.verifying() || this.externalVerifying(),
+  );
+
+  readonly canAdoptForRepo = computed(() => {
+    if (!this.canAdopt()) return false;
+    const repo = this.adoptRepo().trim();
+    if (!repo) return true;
+    return typeof this.access.can === "function"
+      ? this.access.can("POST /api/qa/flow-versions/adopt", repo)
+      : true;
+  });
 
   readonly workflowStages = computed<readonly WorkflowStageView[]>(() => {
     const det = this.detail();
@@ -1148,26 +1216,18 @@ export class QaV3StudioComponent {
       this.contextMaxTokens.set(12000);
     }
 
-    const sk = effectiveV4?.skill ?? det?.declaration?.skill;
-    if (sk) {
-      this.codingSkillMode.set(sk.mode || "replace");
-      this.codingSkillText.set(sk.text || "");
+    const explicitSk = extractExplicitSkillDecl(effectiveV4, det?.declaration);
+    if (explicitSk) {
+      this.codingSkillMode.set(explicitSk.mode);
+      this.codingSkillText.set(explicitSk.text);
     } else if (det?.resolved?.injectSkill === false) {
       this.codingSkillMode.set("replace");
       this.codingSkillText.set("");
-    } else if (
-      det &&
-      (det.parentHash ||
-        effectiveV4?.extends ||
-        effectiveV3?.extends ||
-        det.declaration?.extends)
-    ) {
+    } else if (det) {
       this.codingSkillMode.set("inherit");
       this.codingSkillText.set("");
-    } else if (det) {
-      this.codingSkillMode.set("replace");
-      this.codingSkillText.set(det.summary || "");
     } else {
+      this.codingSkillMode.set("replace");
       this.codingSkillText.set("");
     }
 
@@ -1262,18 +1322,19 @@ export class QaV3StudioComponent {
       ),
     );
 
-    const cStages = (stages?.custom ?? []).map((cs) => ({
-      uid: this.nextUid++,
-      id: cs.id,
-      label: cs.label ?? cs.id,
-      insertAfter: (cs["insert-after"] ??
-        cs.insertAfter ??
-        "s3") as InsertAfterStage,
-      timeoutSeconds: Math.min(
-        120,
-        Math.max(10, cs["timeout-seconds"] ?? cs.timeoutSeconds ?? 30),
-      ),
-    }));
+    const cStages = (stages?.custom ?? []).map((cs) => {
+      const rawAfter = cs["insert-after"] ?? cs.insertAfter;
+      return {
+        uid: this.nextUid++,
+        id: cs.id,
+        label: cs.label ?? cs.id,
+        insertAfter: isCustomStageAnchor(rawAfter) ? rawAfter : "s3",
+        timeoutSeconds: Math.min(
+          120,
+          Math.max(10, cs["timeout-seconds"] ?? cs.timeoutSeconds ?? 30),
+        ),
+      };
+    });
     this.customStages.set(cStages);
 
     const rawChecks =
@@ -1314,9 +1375,11 @@ export class QaV3StudioComponent {
               ? [def.requireChanged]
               : []
         ).join(", ");
-        const maxChangedLines =
-          cc["max-changed-lines"] ?? cc.maxChangedLines ?? def.maxChangedLines;
         const maxFiles = cc["max-files"] ?? cc.maxFiles ?? 0;
+        const maxChangedLines =
+          cc["max-changed-lines"] ??
+          cc.maxChangedLines ??
+          (maxFiles > 0 ? 0 : def.maxChangedLines);
         const allowWaiver = Boolean(cc["allow-waiver"] ?? cc.allowWaiver);
         const paths = normalizeStringList(cc.paths).join(", ");
         const exclude = normalizeStringList(cc.exclude).join(", ");
@@ -1326,8 +1389,9 @@ export class QaV3StudioComponent {
               (k): k is string => typeof k === "string" && k.length > 0,
             )
           : [];
-        const requiredKeys =
-          schemaReqArr.length > 0 ? schemaReqArr.join(", ") : def.requiredKeys;
+        const requiredKeys = rawSchemaJson
+          ? schemaReqArr.join(", ")
+          : def.requiredKeys;
         const schemaJson =
           rawSchemaJson ??
           (engine === "jsonschema" ? def.schemaJson : undefined);
@@ -1338,7 +1402,16 @@ export class QaV3StudioComponent {
         let passJson = cc.fixtures?.pass
           ? JSON.stringify(cc.fixtures.pass)
           : def.passJson;
-        if (!cc.fixtures?.fail && engine === "companion") {
+        if (!cc.fixtures?.fail && engine === "pattern") {
+          const ser = serializePatternFixtures(
+            def.failLine,
+            def.passLine,
+            paths || def.paths,
+            exclude,
+          );
+          failJson = ser.failJson;
+          passJson = ser.passJson;
+        } else if (!cc.fixtures?.fail && engine === "companion") {
           const syn = synthesizeCompanionFixtures(whenChanged, requireChanged);
           failJson = syn.failJson;
           passJson = syn.passJson;
@@ -1350,6 +1423,8 @@ export class QaV3StudioComponent {
           const syn = synthesizeJsonSchemaFixtures(
             requiredKeys,
             paths || def.paths,
+            rawSchemaJson,
+            false,
           );
           failJson = syn.failJson;
           passJson = syn.passJson;
@@ -1444,6 +1519,11 @@ export class QaV3StudioComponent {
     this.selectedStepId.set(null);
     this.addingForStageId.set(null);
     this.inspectorTab.set("definition");
+  }
+
+  protected onDrawerCloseStep(): void {
+    this.openGuide();
+    this.drawerClosed.emit();
   }
 
   selectStep(stageId: string, stepId: string): void {
@@ -1765,6 +1845,20 @@ export class QaV3StudioComponent {
       list.map((c) => {
         if (c.uid !== uid) return c;
         const next = { ...c, [field]: val };
+        if (
+          next.engine === "pattern" &&
+          (field === "paths" || field === "exclude")
+        ) {
+          return {
+            ...next,
+            failJson: syncPatternFailFixtureScope(
+              c.failJson,
+              next.failLine,
+              next.paths,
+              next.exclude,
+            ),
+          };
+        }
         if (next.engine === "companion") {
           const syn = synthesizeCompanionFixtures(
             next.whenChanged,
@@ -1786,6 +1880,8 @@ export class QaV3StudioComponent {
           const syn = synthesizeJsonSchemaFixtures(
             next.requiredKeys,
             next.paths,
+            c.schemaJson,
+            field === "requiredKeys",
           );
           return {
             ...next,
@@ -1818,14 +1914,8 @@ export class QaV3StudioComponent {
     this.customChecks.update((list) =>
       list.map((c) => {
         if (c.uid !== uid) return c;
-        const firstGlob = c.paths
-          .split(",")
-          .map((s) => s.trim())
-          .find(Boolean);
-        const fallbackFile = firstGlob
-          ? globToSamplePath(firstGlob)
-          : undefined;
         if (kind === "fail") {
+          const fallbackFile = resolvePatternSamplePath(c.paths, c.exclude);
           return {
             ...c,
             failLine: line,
@@ -1834,6 +1924,8 @@ export class QaV3StudioComponent {
               "fail",
               line,
               fallbackFile,
+              c.paths,
+              c.exclude,
             ),
           };
         }
@@ -2017,6 +2109,7 @@ export class QaV3StudioComponent {
   }
 
   buildYaml(): string {
+    const det = this.detail();
     const checks = this.customChecks();
     let customChecksYaml = "";
     for (let i = 0; i < checks.length; i++) {
@@ -2037,28 +2130,42 @@ export class QaV3StudioComponent {
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean);
-      customChecksYaml += `  - id: ${JSON.stringify(c.id || `custom:check-${i}`)}\n`;
-      customChecksYaml += `    label: ${JSON.stringify(c.label || c.id || `Custom check ${i}`)}\n`;
-      customChecksYaml += `    kind: ${c.engine}\n`;
-      customChecksYaml += `    severity: ${c.severity}\n`;
-      customChecksYaml += `    message: ${JSON.stringify(c.message || "Failed")}\n`;
+      let passArr: unknown[] = [];
+      let failArr: unknown[] = [];
+      try {
+        const p: unknown = JSON.parse(c.passJson || "[]");
+        passArr = Array.isArray(p) ? p : [];
+      } catch {
+        passArr = [];
+      }
+      try {
+        const f: unknown = JSON.parse(c.failJson || "[]");
+        failArr = Array.isArray(f) ? f : [];
+      } catch {
+        failArr = [];
+      }
+      customChecksYaml += `  - id: ${yamlQuote(c.id || `custom:check-${i}`)}\n`;
+      customChecksYaml += `    label: ${yamlQuote(c.label || c.id || `Custom check ${i}`)}\n`;
+      customChecksYaml += `    kind: ${yamlQuote(c.engine)}\n`;
+      customChecksYaml += `    severity: ${yamlQuote(c.severity)}\n`;
+      customChecksYaml += `    message: ${yamlQuote(c.message || "Failed")}\n`;
       if (paths.length > 0) {
-        customChecksYaml += `    paths: ${JSON.stringify(paths)}\n`;
+        customChecksYaml += `    paths: ${yamlJson(paths)}\n`;
       }
       if (exclude.length > 0) {
-        customChecksYaml += `    exclude: ${JSON.stringify(exclude)}\n`;
+        customChecksYaml += `    exclude: ${yamlJson(exclude)}\n`;
       }
       if (c.forbidAdded) {
-        customChecksYaml += `    forbid-added: ${JSON.stringify(c.forbidAdded)}\n`;
+        customChecksYaml += `    forbid-added: ${yamlQuote(c.forbidAdded)}\n`;
       }
       if (c.requireAdded) {
-        customChecksYaml += `    require-added: ${JSON.stringify(c.requireAdded)}\n`;
+        customChecksYaml += `    require-added: ${yamlQuote(c.requireAdded)}\n`;
       }
       if (whenChanged.length > 0) {
-        customChecksYaml += `    when-changed: ${JSON.stringify(whenChanged)}\n`;
+        customChecksYaml += `    when-changed: ${yamlJson(whenChanged)}\n`;
       }
       if (requireChanged.length > 0) {
-        customChecksYaml += `    require-changed: ${JSON.stringify(requireChanged)}\n`;
+        customChecksYaml += `    require-changed: ${yamlJson(requireChanged)}\n`;
       }
       if (c.maxChangedLines > 0) {
         customChecksYaml += `    max-changed-lines: ${c.maxChangedLines}\n`;
@@ -2070,31 +2177,62 @@ export class QaV3StudioComponent {
         customChecksYaml += `    allow-waiver: true\n`;
       }
       if (c.schemaJson) {
-        customChecksYaml += `    schema-json: ${JSON.stringify(c.schemaJson)}\n`;
+        customChecksYaml += `    schema-json: ${yamlJson(c.schemaJson)}\n`;
       }
-      customChecksYaml += `    fixtures:\n      pass: ${c.passJson.replace(/\n/g, "")}\n      fail: ${c.failJson.replace(/\n/g, "")}\n`;
+      customChecksYaml += `    fixtures:\n      pass: ${yamlJson(passArr)}\n      fail: ${yamlJson(failArr)}\n`;
     }
     let customStagesYaml = "";
     for (const s of this.customStages()) {
-      customStagesYaml += `    - id: ${JSON.stringify(s.id)}\n      label: ${JSON.stringify(s.label || s.id)}\n      insert-after: ${s.insertAfter}\n      timeout-seconds: ${Math.min(120, Math.max(10, s.timeoutSeconds))}\n`;
+      customStagesYaml += `    - id: ${yamlQuote(s.id)}\n      label: ${yamlQuote(s.label || s.id)}\n      insert-after: ${yamlQuote(s.insertAfter)}\n      timeout-seconds: ${Math.min(120, Math.max(10, s.timeoutSeconds))}\n`;
     }
     let packsYaml = "";
     for (const p of this.readabilityPacks()) {
-      packsYaml += `  - id: ${p.id}\n    enabled: ${p.enabled}\n    activation: ${p.activation || "auto"}\n`;
+      packsYaml += `  - id: ${yamlQuote(p.id)}\n    enabled: ${p.enabled}\n    activation: ${yamlQuote(p.activation || "auto")}\n`;
       if (p.globs && p.globs.length > 0) {
-        packsYaml += `    globs: ${JSON.stringify(p.globs)}\n`;
+        packsYaml += `    globs: ${yamlJson(p.globs)}\n`;
       }
       if (p.customText) {
-        packsYaml += `    custom-text: ${JSON.stringify(p.customText)}\n`;
+        packsYaml += `    custom-text: ${yamlQuote(p.customText)}\n`;
       }
     }
     let stepsYaml = "";
     for (const s of this.skillSteps()) {
-      stepsYaml += `  - id: ${JSON.stringify(s.id)}\n    label: ${JSON.stringify(s.label || s.id)}\n    stage: ${s.stage || "coding"}\n    enabled: ${s.enabled}\n    max-bytes: ${s.maxBytes || 600}\n`;
+      stepsYaml += `  - id: ${yamlQuote(s.id)}\n    label: ${yamlQuote(s.label || s.id)}\n    stage: ${yamlQuote(s.stage || "coding")}\n    enabled: ${s.enabled}\n    max-bytes: ${s.maxBytes || 600}\n`;
       if (s.globs && s.globs.length > 0) {
-        stepsYaml += `    globs: ${JSON.stringify(s.globs)}\n`;
+        stepsYaml += `    globs: ${yamlJson(s.globs)}\n`;
       }
-      stepsYaml += `    text: ${JSON.stringify(s.text || "")}\n`;
+      stepsYaml += `    text: ${yamlQuote(s.text || "")}\n`;
+    }
+    const rawBuiltinChecks:
+      | Readonly<
+          Record<
+            string,
+            {
+              readonly enabled?: boolean;
+              readonly severity?: string;
+              readonly params?: Readonly<Record<string, unknown>>;
+            }
+          >
+        >
+      | undefined = this.editing()
+      ? this.builtinCheckOverrides()
+      : (det?.declarationV4?.checks ??
+        det?.declarationV3?.checks ??
+        det?.declaration?.checks);
+    let builtinChecksYaml = "";
+    if (rawBuiltinChecks && Object.keys(rawBuiltinChecks).length > 0) {
+      for (const [ruleId, cfg] of Object.entries(rawBuiltinChecks)) {
+        builtinChecksYaml += `  ${yamlQuote(ruleId)}:\n`;
+        if (cfg.enabled !== undefined) {
+          builtinChecksYaml += `    enabled: ${Boolean(cfg.enabled)}\n`;
+        }
+        if (cfg.severity) {
+          builtinChecksYaml += `    severity: ${yamlQuote(cfg.severity)}\n`;
+        }
+        if (cfg.params && Object.keys(cfg.params).length > 0) {
+          builtinChecksYaml += `    params: ${yamlJson(cfg.params)}\n`;
+        }
+      }
     }
     const prSections = this.prRequiredSections()
       .split(",")
@@ -2106,9 +2244,11 @@ export class QaV3StudioComponent {
     const checksSection = customChecksYaml
       ? `custom-checks:\n${customChecksYaml}`
       : "";
+    const builtinSection = builtinChecksYaml
+      ? `checks:\n${builtinChecksYaml}`
+      : "";
     const packsSection = packsYaml ? `readability-packs:\n${packsYaml}` : "";
     const stepsSection = stepsYaml ? `skill-steps:\n${stepsYaml}` : "";
-    const det = this.detail();
     const resolvedKey = this.editing()
       ? this.draftKey() || det?.key || "draft-v4-preview"
       : det?.key || "draft-v4-preview";
@@ -2125,7 +2265,35 @@ export class QaV3StudioComponent {
     const resolvedLabel = this.editing()
       ? this.draftLabel() || det?.label || resolvedKey
       : det?.label || resolvedKey;
-    return `schema: "grain.dev/qa-flow/v4"\nkey: ${JSON.stringify(resolvedKey)}\nextends: ${JSON.stringify(resolvedExtends)}\nlabel: ${JSON.stringify(resolvedLabel)}\ndecompose:\n  enabled: ${this.decomposeEnabled()}\n  mode: ${this.decomposeMode()}\n  max-subtasks: ${this.decomposeMaxSubtasks()}\n  target-diff-lines: ${this.decomposeTargetDiffLines()}\ncontext:\n  enabled: ${this.contextEnabled()}\n  include-callers: ${this.contextIncludeCallers()}\n  include-memory: ${this.contextIncludeMemory()}\n  max-tokens: ${this.contextMaxTokens()}\n${packsSection}${stepsSection}pr-contract:\n  enabled: ${this.prEnabled()}\n  mode: ${this.prMode()}\n  max-subject-chars: ${this.prMaxSubjectChars()}\n  required-sections: ${JSON.stringify(prSections)}\n  audit-lint-suppressions: ${this.prAuditLint()}\nstages:\n  s0-intent:\n    enabled: ${this.s0Intent()}\n  s2-plan-critic:\n    enabled: ${this.s2PlanCritic()}\n  s5-merge-triage:\n    mode: ${this.s5Triage()}\n${stagesSection}${checksSection}`;
+    const resolvedSummary = this.editing()
+      ? this.draftSummary() || det?.summary || ""
+      : det?.summary || "";
+    const skillMode = this.codingSkillMode() || "replace";
+    const skillText =
+      skillMode === "inherit" ? "" : this.codingSkillText().trim();
+    const skillMaxBytes =
+      skillMode === "append"
+        ? 4096
+        : this.draftSkill()?.maxBytes ||
+          det?.declarationV4?.skill?.maxBytes ||
+          det?.declaration?.skill?.maxBytes ||
+          4096;
+    const verifierTiers = det?.declarationV4?.verifier?.tiers ??
+      det?.declaration?.verifier?.tiers ?? ["T2", "T3"];
+    const verifierRounds =
+      det?.declarationV4?.verifier?.maxRepairRounds ??
+      det?.declaration?.verifier?.maxRepairRounds ??
+      det?.resolved?.maxS4RepairRounds ??
+      1;
+    const verifierSeconds =
+      det?.declarationV4?.verifier?.maxSeconds ??
+      det?.declaration?.verifier?.maxSeconds ??
+      60;
+    const verifierChecklist =
+      det?.declarationV4?.verifier?.checklist ??
+      det?.declaration?.verifier?.checklist ??
+      "escape-classes-v1";
+    return `schema: ${yamlQuote("grain.dev/qa-flow/v4")}\nkey: ${yamlQuote(resolvedKey)}\nextends: ${yamlQuote(resolvedExtends)}\nlabel: ${yamlQuote(resolvedLabel)}\nsummary: ${yamlQuote(resolvedSummary)}\nskill:\n  mode: ${yamlQuote(skillMode)}\n  text: ${yamlQuote(skillText)}\n  max-bytes: ${skillMaxBytes}\n${builtinSection}decompose:\n  enabled: ${this.decomposeEnabled()}\n  mode: ${yamlQuote(this.decomposeMode())}\n  max-subtasks: ${this.decomposeMaxSubtasks()}\n  target-diff-lines: ${this.decomposeTargetDiffLines()}\ncontext:\n  enabled: ${this.contextEnabled()}\n  include-callers: ${this.contextIncludeCallers()}\n  include-memory: ${this.contextIncludeMemory()}\n  max-tokens: ${this.contextMaxTokens()}\n${packsSection}${stepsSection}pr-contract:\n  enabled: ${this.prEnabled()}\n  mode: ${yamlQuote(this.prMode())}\n  max-subject-chars: ${this.prMaxSubjectChars()}\n  required-sections: ${yamlJson(prSections)}\n  audit-lint-suppressions: ${this.prAuditLint()}\n  guidance-text: ${yamlQuote(this.prGuidanceText())}\nstop-nudge: ${this.stopNudge()}\nverifier:\n  enabled: ${this.verifierEnabled()}\n  tiers: ${yamlJson(verifierTiers)}\n  max-repair-rounds: ${verifierRounds}\n  max-seconds: ${verifierSeconds}\n  checklist: ${yamlQuote(verifierChecklist)}\nstages:\n  s0-intent:\n    enabled: ${this.s0Intent()}\n  s2-plan-critic:\n    enabled: ${this.s2PlanCritic()}\n  s5-merge-triage:\n    mode: ${yamlQuote(this.s5Triage())}\n${stagesSection}${checksSection}`;
   }
 
   async runFixtureSelfTest(): Promise<void> {
@@ -2178,7 +2346,7 @@ export class QaV3StudioComponent {
   }
 
   async verifyDryRun(): Promise<void> {
-    if (this.verifying()) return;
+    if (!this.canDryRun() || this.effectiveVerifying()) return;
     if (this.delegateDryRun()) {
       this.dryRunReq.emit();
       return;
@@ -2212,7 +2380,7 @@ export class QaV3StudioComponent {
   }
 
   async doAdopt(): Promise<void> {
-    if (this.adopting()) return;
+    if (this.adopting() || !this.canAdoptForRepo()) return;
     this.adopting.set(true);
     try {
       const res = await this.api.post<QAAdoptResponse>(
@@ -2237,7 +2405,7 @@ export class QaV3StudioComponent {
   }
 
   async doProbe(): Promise<void> {
-    if (this.probing()) return;
+    if (this.probing() || !this.canProbe()) return;
     this.probing.set(true);
     try {
       const files = this.probeFiles()

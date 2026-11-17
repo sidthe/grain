@@ -15,8 +15,10 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  ElementRef,
   ViewEncapsulation,
   effect,
+  inject,
   input,
   output,
   signal,
@@ -40,7 +42,9 @@ import type { WorkflowFamilyGroup } from "./qa-flows.models";
     >
       <div class="qa-catalog-header">
         @if (!collapsed()) {
-          <h2 class="qa-catalog-heading">Workflows</h2>
+          <h2 class="qa-catalog-heading">
+            Workflows ({{ primaryGroups().length }})
+          </h2>
         }
         <button
           type="button"
@@ -170,6 +174,8 @@ import type { WorkflowFamilyGroup } from "./qa-flows.models";
   `,
 })
 export class QaWorkflowCatalogComponent {
+  private readonly elRef = inject<ElementRef<HTMLElement>>(ElementRef);
+
   readonly primaryGroups = input<readonly WorkflowFamilyGroup[]>([]);
   readonly archivedGroups = input<readonly WorkflowFamilyGroup[]>([]);
   readonly selectedKey = input<string>("");
@@ -177,6 +183,7 @@ export class QaWorkflowCatalogComponent {
   readonly flowQueryParam = input<string>("");
   readonly qaEnabled = input<boolean>(false);
   readonly activeFlowId = input<string>("");
+  readonly activeFlowFamilyKey = input<string>("");
   readonly activeRolloutPct = input<number>(0);
   readonly collapsed = input<boolean>(false);
 
@@ -202,13 +209,27 @@ export class QaWorkflowCatalogComponent {
           ),
       );
       if (matchesArchived) {
+        const wasHidden = !this.showArchived();
         this.showArchived.set(true);
+        if (wasHidden) {
+          setTimeout(() => {
+            const card = this.elRef.nativeElement.querySelector<HTMLElement>(
+              ".qa-archived-list .qa-flow-family-card.is-selected",
+            );
+            card?.scrollIntoView?.({ block: "nearest" });
+          }, 0);
+        }
       }
     });
   }
 
+  private isFamilyActiveDefault(flowKey: string): boolean {
+    const familyKey = this.activeFlowFamilyKey() || this.activeFlowId();
+    return Boolean(familyKey) && familyKey === flowKey;
+  }
+
   protected rolloutPillClass(flowKey: string): string {
-    if (this.activeFlowId() === flowKey) {
+    if (this.isFamilyActiveDefault(flowKey)) {
       if (this.qaEnabled() && this.activeRolloutPct() > 0) {
         return "healthy";
       }
@@ -218,7 +239,7 @@ export class QaWorkflowCatalogComponent {
   }
 
   protected rolloutLabel(flowKey: string): string {
-    if (this.activeFlowId() === flowKey) {
+    if (this.isFamilyActiveDefault(flowKey)) {
       if (this.qaEnabled() && this.activeRolloutPct() > 0) {
         return `Active (${this.activeRolloutPct()}%)`;
       }

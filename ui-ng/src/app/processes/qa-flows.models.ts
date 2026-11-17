@@ -142,12 +142,18 @@ export interface CustomCheckDeclarationV3 {
   };
 }
 
+export type CustomStageAnchor = "s2" | "s3" | "s4";
+
+export function isCustomStageAnchor(val: unknown): val is CustomStageAnchor {
+  return val === "s2" || val === "s3" || val === "s4";
+}
+
 export interface CustomStageDeclarationV3 {
   readonly id: string;
   readonly label?: string;
   readonly kind?: string;
-  readonly "insert-after"?: "s2" | "s3" | "s4";
-  readonly insertAfter?: "s2" | "s3" | "s4";
+  readonly "insert-after"?: CustomStageAnchor;
+  readonly insertAfter?: CustomStageAnchor;
   readonly "when-paths"?: readonly string[];
   readonly whenPaths?: readonly string[];
   readonly "min-tier"?: string;
@@ -271,6 +277,12 @@ export interface FlowDeclarationV2 {
   };
 }
 
+export type QAFlowInfo = QAFlowSpec & {
+  s0Intent?: boolean;
+  s2PlanCritic?: boolean;
+  s5MergeTriage?: string;
+};
+
 export interface QAFlowVersionItem {
   hash: string;
   key: string;
@@ -294,15 +306,12 @@ export interface QAFlowVersionItem {
   sourceRepo?: string;
   sourcePath?: string;
   sourceCommit?: string;
-  resolved?: QAFlowSpec & {
-    s0Intent?: boolean;
-    s2PlanCritic?: boolean;
-    s5MergeTriage?: string;
-  };
+  resolved?: QAFlowInfo;
 }
 
 export interface QAFlowVersionDetail extends QAFlowVersionItem {
-  lineage?: QAFlowVersionItem[];
+  readonly lineage?: QAFlowVersionItem[];
+  readonly spec?: QAFlowInfo;
 }
 
 export interface QAFlowVersionsResponse {
@@ -549,6 +558,57 @@ export const CANONICAL_STAGE_LABELS: Readonly<Record<string, string>> = {
   "s5-triage": "8 · Scorecard & merge triage",
 };
 
+export interface ExplicitSkillDecl {
+  readonly mode: "inherit" | "append" | "replace";
+  readonly text: string;
+  readonly maxBytes?: number;
+}
+
+export function extractExplicitSkillDecl(
+  v4?: FlowDeclarationV4,
+  v2?: FlowDeclarationV2,
+): ExplicitSkillDecl | undefined {
+  if (v4?.skill && Boolean(v4.skill.mode || v4.skill.text)) {
+    const m = v4.skill.mode;
+    return {
+      mode: m === "inherit" || m === "append" ? m : "replace",
+      text: v4.skill.text || "",
+      maxBytes: v4.skill.maxBytes,
+    };
+  }
+  const codingRaw = v4?.skills?.["coding"];
+  if (typeof codingRaw === "string" && codingRaw.length > 0) {
+    return { mode: "replace", text: codingRaw };
+  }
+  if (codingRaw && typeof codingRaw === "object") {
+    const rec = codingRaw as Record<string, unknown>;
+    const m = typeof rec["mode"] === "string" ? rec["mode"] : "";
+    const t = typeof rec["text"] === "string" ? rec["text"] : "";
+    const mb =
+      typeof rec["maxBytes"] === "number"
+        ? rec["maxBytes"]
+        : typeof rec["max-bytes"] === "number"
+          ? rec["max-bytes"]
+          : undefined;
+    if (m || t) {
+      return {
+        mode: m === "inherit" || m === "append" ? m : "replace",
+        text: t,
+        maxBytes: mb,
+      };
+    }
+  }
+  if (v2?.skill && Boolean(v2.skill.mode || v2.skill.text)) {
+    const m = v2.skill.mode;
+    return {
+      mode: m === "inherit" || m === "append" ? m : "replace",
+      text: v2.skill.text || "",
+      maxBytes: v2.skill.maxBytes,
+    };
+  }
+  return undefined;
+}
+
 export function isLockedFloorRule(ruleId: string): boolean {
   return (
     ruleId === "golden:test-integrity-guard" ||
@@ -655,18 +715,18 @@ export function buildClientWorkflowStagesView(
       ? s2Raw
       : (s2Raw?.enabled ?? Boolean(v4 || v3)));
 
+  const explicitSkill = extractExplicitSkillDecl(v4, v2);
   const injectSkillAllowed =
     options?.preferLiveDraft || options?.codingSkillText !== undefined
       ? true
       : (res?.injectSkill ?? true);
   const rawSkillText =
     options?.codingSkillText ??
-    v4?.skill?.text ??
-    v2?.skill?.text ??
-    (injectSkillAllowed ? item?.sourceYaml || item?.summary || "" : "");
+    explicitSkill?.text ??
+    (injectSkillAllowed ? item?.sourceYaml || "" : "");
   const skillText = injectSkillAllowed ? rawSkillText : "";
   const skillMode =
-    options?.codingSkillMode ?? v4?.skill?.mode ?? v2?.skill?.mode ?? "replace";
+    options?.codingSkillMode ?? explicitSkill?.mode ?? "replace";
   const skillBytes =
     !injectSkillAllowed || (options?.preferLiveDraft && skillMode === "inherit")
       ? 0
@@ -890,7 +950,8 @@ export function buildClientWorkflowStagesView(
 
   // Stage 4: s2-coding
   const codingSkillActive =
-    injectSkillAllowed && (skillMode === "inherit" || skillBytes > 0);
+    injectSkillAllowed &&
+    (skillMode === "inherit" || skillMode === "append" || skillBytes > 0);
   const codingSteps: WorkflowStepView[] = [
     {
       id: "coding:skill",
@@ -1207,8 +1268,11 @@ function parseFixtureDiff(diff: string): { file?: string; lines: string[] } {
   return { file, lines: added };
 }
 
-function matchesGlobPattern(glob: string, target: string): boolean {
-  const g = glob.trim();
+export function matchesGlobPattern(glob: string, target: string): boolean {
+  const g = glob
+    .trim()
+    .replace(/\*{2,}/g, "**")
+    .replace(/(?:\*\*\/){2,}/g, "**/");
   const t = target.trim();
   if (!g || g === "**/*" || g === "*") return true;
   if (g === t) return true;
@@ -1227,7 +1291,7 @@ function matchesGlobPattern(glob: string, target: string): boolean {
   }
 }
 
-function matchesFixturePathScope(
+export function matchesFixturePathScope(
   file: string | undefined,
   paths?: readonly string[],
   exclude?: readonly string[],
@@ -1242,6 +1306,25 @@ function matchesFixturePathScope(
     if (excluded) return false;
   }
   return true;
+}
+
+export function validateSafeRe2Pattern(pattern: string): string | null {
+  if (!pattern) return null;
+  if (utf8ByteCount(pattern) > 512) {
+    return "Pattern exceeds 512-byte safety budget";
+  }
+  if (/\(\?(?:=|<|!)/.test(pattern) || /\\[1-9]/.test(pattern)) {
+    return "Unsupported non-RE2 syntax (lookarounds and backreferences are disallowed)";
+  }
+  if (/\([^)]*[+*][^)]*\)[+*?{]/.test(pattern)) {
+    return "Nested repetition quantifiers (ReDoS risk) are disallowed";
+  }
+  try {
+    new RegExp(pattern);
+  } catch (err: unknown) {
+    return `Invalid regular expression: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  return null;
 }
 
 function validateClientJsonSchema(
@@ -1348,6 +1431,21 @@ export function evaluateFixturesClientSide(check: {
   failJson: string;
   passJson: string;
 }): FixtureSelfTestReport {
+  if (check.engine === "pattern") {
+    const patternErr =
+      validateSafeRe2Pattern(check.forbidAdded || "") ??
+      validateSafeRe2Pattern(check.requireAdded || "");
+    if (patternErr) {
+      return {
+        checkId: check.id,
+        passed: false,
+        failTrapOk: false,
+        cleanPassOk: false,
+        summary: patternErr,
+        cases: [],
+      };
+    }
+  }
   let failItems: CustomCheckFixtureItem[] = [];
   let passItems: CustomCheckFixtureItem[] = [];
   try {
@@ -1402,7 +1500,7 @@ export function evaluateFixturesClientSide(check: {
         if (check.forbidAdded && lines.length > 0) {
           try {
             const re = new RegExp(check.forbidAdded);
-            triggered = lines.some((l) => re.test(l));
+            triggered = lines.some((l) => re.test(l.slice(0, 4096)));
           } catch {
             triggered = false;
           }
@@ -1410,13 +1508,13 @@ export function evaluateFixturesClientSide(check: {
         if (!triggered && check.requireAdded && lines.length > 0) {
           try {
             const re = new RegExp(check.requireAdded);
-            triggered = !lines.some((l) => re.test(l));
+            triggered = !lines.some((l) => re.test(l.slice(0, 4096)));
           } catch {
             triggered = false;
           }
         }
       } else if (lines.length > 0) {
-        triggered = lines.some((l) => /console\.log\(/.test(l));
+        triggered = lines.some((l) => /console\.log\(/.test(l.slice(0, 4096)));
       } else {
         triggered = expectFinding;
       }
@@ -1623,11 +1721,15 @@ export function groupWorkflowFamilies(versions: readonly QAFlowVersionItem[]): {
       (sum, s) => sum + s.steps.filter((st) => st.enabled).length,
       0,
     );
+    const repExplicitSkill = extractExplicitSkillDecl(
+      rep.declarationV4,
+      rep.declaration,
+    );
     const fallbackBytes =
       rep.resolved?.injectSkill === false
         ? 0
-        : rep.declaration?.skill?.text
-          ? utf8ByteCount(rep.declaration.skill.text)
+        : repExplicitSkill?.text
+          ? utf8ByteCount(repExplicitSkill.text)
           : (rep.resolved?.skillBytes ?? 0);
     const promptBytes = computeActivePromptBytes(stages, fallbackBytes);
 
@@ -1807,13 +1909,45 @@ export function extractPatternExampleLines(
   };
 }
 
+export function resolvePatternSamplePath(
+  pathsCsv = "",
+  excludeCsv = "",
+): string {
+  const pathsList = pathsCsv
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const excludeList = excludeCsv
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const g of pathsList) {
+    const base = globToSamplePath(g);
+    const shallow = base.replace("/sub/", "/");
+    const altDir = base.replace("/sub/", "/core/");
+    const altName = base.replace(/sample(\.[^./]+)?$/, "handler$1");
+    for (const candidate of [base, shallow, altDir, altName]) {
+      if (
+        candidate &&
+        matchesFixturePathScope(candidate, pathsList, excludeList)
+      ) {
+        return candidate;
+      }
+    }
+  }
+  return globToSamplePath(pathsList[0] || "");
+}
+
 export function serializePatternFixtures(
   failLine: string,
   passLine: string,
+  pathsCsv = "",
+  excludeCsv = "",
 ): { readonly failJson: string; readonly passJson: string } {
+  const sampleFile = resolvePatternSamplePath(pathsCsv, excludeCsv);
   return {
     failJson: JSON.stringify([
-      { name: "caught-example", "added-lines": [failLine] },
+      { name: "caught-example", file: sampleFile, "added-lines": [failLine] },
     ]),
     passJson: JSON.stringify([
       { name: "allowed-example", "added-lines": [passLine] },
@@ -1826,7 +1960,19 @@ export function updateSinglePatternFixtureJson(
   kind: "fail" | "pass",
   line: string,
   fallbackFile?: string,
+  pathsCsv = "",
+  excludeCsv = "",
 ): string {
+  const pathsList = pathsCsv
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const excludeList = excludeCsv
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const scopedFallback =
+    fallbackFile || resolvePatternSamplePath(pathsCsv, excludeCsv);
   try {
     const parsed: unknown = JSON.parse(existingJson || "[]");
     if (Array.isArray(parsed) && parsed.length > 0) {
@@ -1841,10 +1987,15 @@ export function updateSinglePatternFixtureJson(
         updatedFirst["name"] =
           kind === "fail" ? "caught-example" : "allowed-example";
       }
-      if (typeof firstRaw["file"] === "string" && firstRaw["file"]) {
-        updatedFirst["file"] = firstRaw["file"];
-      } else if (kind === "fail" && fallbackFile) {
-        updatedFirst["file"] = fallbackFile;
+      const existingFile =
+        typeof firstRaw["file"] === "string" ? firstRaw["file"].trim() : "";
+      if (kind === "fail") {
+        const validExisting =
+          Boolean(existingFile) &&
+          matchesFixturePathScope(existingFile, pathsList, excludeList);
+        updatedFirst["file"] = validExisting ? existingFile : scopedFallback;
+      } else if (existingFile) {
+        updatedFirst["file"] = existingFile;
       }
       updatedFirst["added-lines"] = [line];
       return JSON.stringify([updatedFirst, ...parsed.slice(1)]);
@@ -1855,15 +2006,80 @@ export function updateSinglePatternFixtureJson(
   return JSON.stringify([
     {
       name: kind === "fail" ? "caught-example" : "allowed-example",
-      ...(kind === "fail" && fallbackFile ? { file: fallbackFile } : {}),
+      ...(kind === "fail" ? { file: scopedFallback } : {}),
       "added-lines": [line],
     },
+  ]);
+}
+
+export function syncPatternFailFixtureScope(
+  existingFailJson: string,
+  failLine: string,
+  pathsCsv: string,
+  excludeCsv: string,
+): string {
+  const pathsList = pathsCsv
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const excludeList = excludeCsv
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const scopedFallback = resolvePatternSamplePath(pathsCsv, excludeCsv);
+  try {
+    const parsed: unknown = JSON.parse(existingFailJson || "[]");
+    if (Array.isArray(parsed) && parsed.length > 0) {
+      const firstRaw =
+        typeof parsed[0] === "object" && parsed[0] !== null
+          ? (parsed[0] as Record<string, unknown>)
+          : {};
+      const diffFile =
+        typeof firstRaw["diff"] === "string"
+          ? parseFixtureDiff(firstRaw["diff"]).file
+          : undefined;
+      const existingFile =
+        (typeof firstRaw["file"] === "string" && firstRaw["file"].trim()) ||
+        diffFile ||
+        "";
+      const validExisting =
+        Boolean(existingFile) &&
+        matchesFixturePathScope(existingFile, pathsList, excludeList);
+      if (validExisting && typeof firstRaw["file"] === "string") {
+        return existingFailJson;
+      }
+      const updatedFirst: Record<string, unknown> = {
+        ...firstRaw,
+        name:
+          typeof firstRaw["name"] === "string" && firstRaw["name"]
+            ? firstRaw["name"]
+            : "caught-example",
+        file: validExisting ? existingFile : scopedFallback,
+      };
+      if (
+        !Array.isArray(updatedFirst["added-lines"]) &&
+        !Array.isArray(updatedFirst["addedLines"]) &&
+        !Array.isArray(updatedFirst["added"]) &&
+        typeof updatedFirst["diff"] !== "string" &&
+        typeof updatedFirst["content"] !== "string"
+      ) {
+        updatedFirst["added-lines"] = [failLine];
+      }
+      return JSON.stringify([updatedFirst, ...parsed.slice(1)]);
+    }
+  } catch {
+    // Re-serialize cleanly below if existing JSON was malformed.
+  }
+  return JSON.stringify([
+    { name: "caught-example", file: scopedFallback, "added-lines": [failLine] },
   ]);
 }
 
 export function synthesizeJsonSchemaFixtures(
   requiredKeysCsv: string,
   pathsCsv: string,
+  baseSchemaJson?: Readonly<Record<string, unknown>>,
+  mergeRequired = true,
 ): {
   readonly requiredKeys: readonly string[];
   readonly schemaJson: Readonly<Record<string, unknown>>;
@@ -1881,23 +2097,98 @@ export function synthesizeJsonSchemaFixtures(
       .map((s) => s.trim())
       .find(Boolean) || "**/*.json";
   const sampleFile = globToSamplePath(firstGlob);
-  const schemaJson: Readonly<Record<string, unknown>> =
-    requiredKeys.length > 0
-      ? { type: "object", required: requiredKeys }
-      : { type: "object" };
-  const validObj: Record<string, string> = {};
-  for (const k of requiredKeys) {
-    validObj[k] = "sample";
+
+  let schemaJson: Readonly<Record<string, unknown>>;
+  if (baseSchemaJson && !mergeRequired) {
+    schemaJson = baseSchemaJson;
+  } else if (baseSchemaJson) {
+    const next: Record<string, unknown> = {
+      ...baseSchemaJson,
+      type:
+        typeof baseSchemaJson["type"] === "string"
+          ? baseSchemaJson["type"]
+          : "object",
+    };
+    if (requiredKeys.length > 0) {
+      next["required"] = requiredKeys;
+      const rawProps = next["properties"];
+      if (
+        next["additionalProperties"] === false &&
+        typeof rawProps === "object" &&
+        rawProps !== null &&
+        !Array.isArray(rawProps)
+      ) {
+        const nextProps: Record<string, unknown> = {
+          ...(rawProps as Record<string, unknown>),
+        };
+        for (const k of requiredKeys) {
+          if (!(k in nextProps)) {
+            nextProps[k] = { type: "string" };
+          }
+        }
+        next["properties"] = nextProps;
+      }
+    } else {
+      delete next["required"];
+    }
+    schemaJson = next;
+  } else {
+    schemaJson =
+      requiredKeys.length > 0
+        ? { type: "object", required: requiredKeys }
+        : { type: "object" };
   }
-  const failContent = requiredKeys.length > 0 ? "{}" : "123";
+
+  const effectiveReqRaw = schemaJson["required"];
+  const effectiveReq = Array.isArray(effectiveReqRaw)
+    ? effectiveReqRaw.filter((k): k is string => typeof k === "string")
+    : [];
+  const rawProps = schemaJson["properties"];
+  const propsObj =
+    typeof rawProps === "object" &&
+    rawProps !== null &&
+    !Array.isArray(rawProps)
+      ? (rawProps as Record<string, unknown>)
+      : null;
+
+  const validObj: Record<string, unknown> = {};
+  for (const k of effectiveReq) {
+    const propDef =
+      propsObj &&
+      typeof propsObj[k] === "object" &&
+      propsObj[k] !== null &&
+      !Array.isArray(propsObj[k])
+        ? (propsObj[k] as Record<string, unknown>)
+        : null;
+    const propType = propDef ? propDef["type"] : undefined;
+    switch (propType) {
+      case "number":
+      case "integer":
+        validObj[k] = 1;
+        break;
+      case "boolean":
+        validObj[k] = true;
+        break;
+      case "array":
+        validObj[k] = [];
+        break;
+      case "object":
+        validObj[k] = {};
+        break;
+      default:
+        validObj[k] = "sample";
+        break;
+    }
+  }
+  const failContent = effectiveReq.length > 0 ? "{}" : "123";
   return {
-    requiredKeys,
+    requiredKeys: effectiveReq,
     schemaJson,
     sampleFile,
     failJson: JSON.stringify([
       {
         name:
-          requiredKeys.length > 0 ? "missing-required-keys" : "non-object-json",
+          effectiveReq.length > 0 ? "missing-required-keys" : "non-object-json",
         file: sampleFile,
         content: failContent,
       },

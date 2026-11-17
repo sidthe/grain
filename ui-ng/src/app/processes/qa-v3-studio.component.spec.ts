@@ -246,10 +246,17 @@ describe("QaV3StudioComponent", () => {
     ).click();
     fixture.detectChanges();
 
-    // Zero raw JSON textareas in custom check editor; 2 single-line example inputs instead
+    // Zero raw JSON textareas in custom check editor; failure message uses a 2-row textarea and examples use single-line inputs
     expect(
-      root.querySelector('[data-testid="qa-v3-custom-check-row"] textarea'),
+      root.querySelector(
+        '[data-testid="qa-v3-custom-check-row"] textarea:not([data-testid="qa-check-message-input"])',
+      ),
     ).toBeNull();
+    expect(
+      root
+        .querySelector('[data-testid="qa-check-message-input"]')
+        ?.getAttribute("rows"),
+    ).toBe("2");
     const failInput = mustEl<HTMLInputElement>(
       root,
       '[data-testid="qa-check-fail-line"]',
@@ -286,7 +293,7 @@ describe("QaV3StudioComponent", () => {
     expect(postSpy.mock.calls[0][0]).toBe("POST /api/qa/flow-versions");
     expect(postSpy.mock.calls[0][3]).toBe("dryRun=1");
     const yamlBody = (postSpy.mock.calls[0][2] as { yaml: string }).yaml;
-    expect(yamlBody).toContain("insert-after: s3");
+    expect(yamlBody).toContain('insert-after: "s3"');
     expect(yamlBody).toContain("timeout-seconds: 30");
     expect(root.textContent).toContain("sha256:v3preview");
 
@@ -539,6 +546,8 @@ describe("QaV3StudioComponent", () => {
     expect(resultsBox).toBeTruthy();
     expect(resultsBox?.textContent).toContain("Fail trap: PASS");
     expect(resultsBox?.textContent).toContain("Clean pass: PASS");
+    expect(resultsBox?.textContent).toContain("debugger statement");
+    expect(resultsBox?.textContent).toContain("clean statement");
     expect(postSpy).toHaveBeenCalledWith(
       "POST /api/qa/flow-versions",
       undefined,
@@ -763,5 +772,148 @@ describe("QaV3StudioComponent", () => {
           ?.timeoutSeconds,
       ).toBe(120);
     }
+  });
+
+  it("rejects unsafe non-RE2/ReDoS regexes, syncs pattern fail fixture path scope, preserves jsonschema properties & diff-budget max-files-only, and quotes YAML scalars", async () => {
+    const declV4: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      "pr-contract": {
+        enabled: true,
+        "conventional-commits": true,
+        "max-subject-chars": 72,
+        "required-sections": ["Summary", "Verification"],
+        "guidance-text": "Include #ticket: summary & rollback plan.",
+      },
+      "custom-checks": [
+        {
+          id: "custom:strict-schema",
+          label: "Strict package schema",
+          kind: "jsonschema",
+          severity: "blocking",
+          paths: ["configs/**/*.json"],
+          "schema-json": {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              version: { type: "number" },
+              enabled: { type: "boolean" },
+            },
+            required: [],
+          },
+          fixtures: {
+            fail: [{ name: "bad", files: { "configs/a.json": "[]" } }],
+            pass: [
+              {
+                name: "good",
+                files: { "configs/a.json": '{"version":1,"enabled":true}' },
+              },
+            ],
+          },
+        },
+        {
+          id: "custom:files-only-budget",
+          label: "Max touched files only",
+          kind: "diff-budget",
+          severity: "warn",
+          "max-files": 8,
+          fixtures: {
+            fail: [{ name: "too many", "changed-files": 9 }],
+            pass: [{ name: "ok", "changed-files": 3 }],
+          },
+        },
+      ],
+    };
+
+    fixture.componentRef.setInput("editing", true);
+    fixture.componentRef.setInput("draftKey", "safe-flow");
+    fixture.componentRef.setInput("draftSummary", "Guardrail: #1 safety");
+    fixture.componentRef.setInput("builtinCheckOverrides", {
+      "golden:mutation-hardening": { enabled: false, severity: "warn" },
+    });
+    fixture.componentRef.setInput("declV4", declV4);
+    fixture.detectChanges();
+
+    const comp = fixture.componentInstance;
+    const root = fixture.nativeElement as HTMLElement;
+
+    // 1. jsonschema with empty required[] stays "" (not "name, version") and preserves properties on paths edit
+    const jsCheck = comp
+      .customChecks()
+      .find((c) => c.id === "custom:strict-schema");
+    expect(jsCheck?.requiredKeys).toBe("");
+    if (jsCheck) {
+      comp.updateCheckField(jsCheck.uid, "paths", "manifests/**/*.json");
+      comp.updateCheckField(jsCheck.uid, "requiredKeys", "version");
+    }
+    const updatedJs = comp
+      .customChecks()
+      .find((c) => c.id === "custom:strict-schema");
+    expect(updatedJs?.schemaJson).toEqual({
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        version: { type: "number" },
+        enabled: { type: "boolean" },
+      },
+      required: ["version"],
+    });
+
+    // 2. diff-budget with max-files only keeps maxChangedLines === 0 (never inflated to 250)
+    const budgetCheck = comp
+      .customChecks()
+      .find((c) => c.id === "custom:files-only-budget");
+    expect(budgetCheck?.maxFiles).toBe(8);
+    expect(budgetCheck?.maxChangedLines).toBe(0);
+
+    // 3. pattern check syncs fail[0].file when paths/exclude change, and rejects ReDoS / lookahead
+    comp.addCheck("pattern");
+    fixture.detectChanges();
+    const patCheck = comp.customChecks().find((c) => c.engine === "pattern");
+    expect(patCheck).toBeTruthy();
+    if (patCheck) {
+      comp.updateCheckField(patCheck.uid, "paths", "ui-ng/**/*.ts");
+      const afterPaths = comp
+        .customChecks()
+        .find((c) => c.uid === patCheck.uid);
+      expect(afterPaths?.failJson).toContain('"ui-ng/sub/sample.ts"');
+
+      comp.updateCheckField(patCheck.uid, "exclude", "ui-ng/sub/**");
+      const afterExclude = comp
+        .customChecks()
+        .find((c) => c.uid === patCheck.uid);
+      expect(afterExclude?.failJson).toContain('"ui-ng/sample.ts"');
+
+      // ReDoS nested quantifier and PCRE lookahead must fail client-side validation safely
+      comp.updateCheckField(patCheck.uid, "forbidAdded", "(a+)+b");
+      await comp.runFixtureSelfTest();
+      const redosEval = comp.fixtureReport();
+      expect(redosEval?.passed).toBe(false);
+      expect(redosEval?.failTrapOk).toBe(false);
+      expect(redosEval?.summary).toContain("Nested repetition quantifiers");
+
+      comp.updateCheckField(patCheck.uid, "forbidAdded", "foo(?=bar)");
+      await comp.runFixtureSelfTest();
+      expect(comp.fixtureReport()?.passed).toBe(false);
+      expect(comp.fixtureReport()?.failTrapOk).toBe(false);
+    }
+
+    // 4. Disabled built-in check disables severity pill-select button
+    comp.selectStep("s3-checks", "golden:mutation-hardening");
+    fixture.detectChanges();
+    const sevBtn = root.querySelector<HTMLButtonElement>(
+      '[data-testid="qa-builtin-check-severity"]',
+    );
+    expect(sevBtn?.disabled).toBe(true);
+
+    // 5. buildYaml quotes special scalars and emits summary, skill, checks, pr-contract.guidance-text, stop-nudge, verifier
+    const yaml = comp.buildYaml();
+    expect(yaml).toContain('summary: "Guardrail: #1 safety"');
+    expect(yaml).toContain("skill:");
+    expect(yaml).toContain("checks:");
+    expect(yaml).toContain(
+      'guidance-text: "Include #ticket: summary & rollback plan."',
+    );
+    expect(yaml).toContain("stop-nudge:");
+    expect(yaml).toContain("verifier:");
   });
 });
