@@ -959,6 +959,12 @@ var attributedRoutes = map[string]attributedRoute{
 		setup: func(t *testing.T, client *ui.Client, _ sender) string {
 			t.Helper()
 			id := fileTask(true)(t, client, nil)
+			if err := client.Store.UpdateTask(context.Background(), id, func(tk *model.Task) error {
+				tk.Target = &model.RepoRef{Owner: "acme", Name: "widgets"}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
 			client.Config.PullRequests = &stubS3BypassPRs{store: client.Store}
 			return id
 		},
