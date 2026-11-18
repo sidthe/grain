@@ -1150,9 +1150,10 @@ func (c *HTTPClient) RecordTaskQACheckRuns(ctx context.Context, id string, entri
 }
 
 // BypassTaskQAS3 overrides a blocked S3 staging gate for task id and opens its pull request (POST /api/tasks/{id}/qa/bypass-s3).
-func (c *HTTPClient) BypassTaskQAS3(ctx context.Context, id, reason string) (PullRequestStatus, error) {
+// When head is non-empty, the server refuses the override if the branch moved from that commit.
+func (c *HTTPClient) BypassTaskQAS3(ctx context.Context, id, reason, head string) (PullRequestStatus, error) {
 	var out PullRequestStatus
-	if err := c.do(ctx, http.MethodPost, "/api/tasks/"+strings.TrimSpace(id)+"/qa/bypass-s3", BypassS3Request{Reason: reason}, &out); err != nil {
+	if err := c.do(ctx, http.MethodPost, "/api/tasks/"+strings.TrimSpace(id)+"/qa/bypass-s3", BypassS3Request{Reason: reason, Head: head}, &out); err != nil {
 		return PullRequestStatus{}, err
 	}
 	return out, nil

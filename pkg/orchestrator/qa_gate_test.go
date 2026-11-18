@@ -1392,8 +1392,18 @@ func TestQABaseResolutionMergeBaseWithoutRESTAndOperatorS3Bypass(t *testing.T) {
 	}
 
 	// 3. Operator override ("Bypass S3 gate & open PR") on a task blocked at S3 promotes
-	// grain-qa-stage/<id> to task.BranchName(), opens the PR, and records qa:s3-operator-bypass.
+	// grain-qa-stage/<id> to task.BranchName(), opens the PR, disables AutoMerge pending
+	// human review, enforces commit pinning, and records qa:s3-operator-bypass.
 	task3 := filedTask(t, ctx, store, "s3-bypass", repo)
+	if err := store.UpdateTask(ctx, task3.ID, func(tk *model.Task) error {
+		tk.AutoMerge = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if fresh3, _ := store.GetTask(ctx, task3.ID); fresh3 != nil {
+		task3 = *fresh3
+	}
 	if _, err := store.EnsureQAAssignment(ctx, model.QAAssignment{
 		RootOrigin:         model.ResolveQARootOrigin(task3.WorkOrigin, task3.ID),
 		Epoch:              1,
@@ -1409,6 +1419,10 @@ func TestQABaseResolutionMergeBaseWithoutRESTAndOperatorS3Bypass(t *testing.T) {
 	sha3 := commitAndPushFile(t, sim.BareRepo, stage3, "pkg/feature/bad_test.go",
 		"package feature\nimport \"testing\"\nfunc TestNothing(t *testing.T) {}\n",
 		"Add empty test\n\nBody.")
+	// Before S3 has blocked sha3, BypassS3 must be refused.
+	if _, err := orchestrator.BypassS3AndOpenPullRequestForTask(ctx, store, baseClient, task3, "alice@example.com", "premature", sha3); err == nil {
+		t.Fatal("expected BypassS3AndOpenPullRequestForTask to reject task before S3 has failed on sha3")
+	}
 	if _, err := orchestrator.OpenPullRequestForTaskWithQA(ctx, store, baseClient, task3, orchestrator.QAOpenPROptions{}); err == nil {
 		t.Fatal("expected S3 test-integrity-guard to block OpenPullRequestForTaskWithQA before bypass")
 	}
@@ -1416,12 +1430,27 @@ func TestQABaseResolutionMergeBaseWithoutRESTAndOperatorS3Bypass(t *testing.T) {
 		t.Fatalf("PR branch %s must not exist while blocked at S3", task3.BranchName())
 	}
 
-	bypassStatus, err := orchestrator.BypassS3AndOpenPullRequestForTask(ctx, store, baseClient, task3, "alice@example.com", "False positive; verified manually")
+	// TOCTOU protection: stale expectedHead must be refused without promoting stage3.
+	if _, err := orchestrator.BypassS3AndOpenPullRequestForTask(ctx, store, baseClient, task3, "alice@example.com", "stale commit", "0000000000000000000000000000000000000000"); err == nil {
+		t.Fatal("expected BypassS3AndOpenPullRequestForTask to reject stale expectedHead")
+	}
+	if exists, _ := baseClient.BranchExists(repo.Owner, repo.Name, task3.BranchName()); exists {
+		t.Fatalf("PR branch %s must not be promoted when expectedHead mismatches", task3.BranchName())
+	}
+
+	bypassStatus, err := orchestrator.BypassS3AndOpenPullRequestForTask(ctx, store, baseClient, task3, "alice@example.com", "False positive; verified manually", sha3)
 	if err != nil {
 		t.Fatalf("BypassS3AndOpenPullRequestForTask: %v", err)
 	}
 	if bypassStatus.PullRequest.Number == 0 {
 		t.Fatalf("expected opened PR after S3 bypass, got %+v", bypassStatus)
+	}
+	afterBypass, err := store.GetTask(ctx, task3.ID)
+	if err != nil || afterBypass == nil {
+		t.Fatalf("GetTask after bypass: %v", err)
+	}
+	if afterBypass.AutoMerge || !model.AutoMergeAwaitsPerson(*afterBypass) {
+		t.Fatalf("BypassS3 must disable AutoMerge and await person review; AutoMerge=%v awaitsPerson=%v", afterBypass.AutoMerge, model.AutoMergeAwaitsPerson(*afterBypass))
 	}
 	prHead, err := baseClient.GetBranchHead(repo.Owner, repo.Name, task3.BranchName())
 	if err != nil || prHead == nil || prHead.SHA != sha3 {
@@ -1429,6 +1458,20 @@ func TestQABaseResolutionMergeBaseWithoutRESTAndOperatorS3Bypass(t *testing.T) {
 	}
 	if stageStillThere, _ := baseClient.BranchExists(repo.Owner, repo.Name, stage3); stageStillThere {
 		t.Fatalf("staging branch %s should be deleted after operator bypass promotion", stage3)
+	}
+	// Once PR is open and stage3 is deleted, BypassS3 must refuse to run again even if a new S3 failure were recorded.
+	if _, err := store.RecordQACheckRun(ctx, model.QACheckRun{
+		TaskID:    task3.ID,
+		CommitSHA: sha3,
+		Stage:     "S3",
+		CheckID:   "golden:test-integrity-guard",
+		Arm:       model.QAArmTreatment,
+		Verdict:   "fail",
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := orchestrator.BypassS3AndOpenPullRequestForTask(ctx, store, baseClient, *afterBypass, "alice@example.com", "try clearing open PR gate", sha3); err == nil {
+		t.Fatal("expected BypassS3AndOpenPullRequestForTask to refuse bypassing on an already-open PR with no staging branch")
 	}
 	runs3, _ := store.ListQACheckRunsForTask(ctx, task3.ID)
 	foundBypass := false

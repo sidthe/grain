@@ -288,6 +288,7 @@ test("Blocked S3 staging gate renders staging branch, operator bypass bar, acces
   await expect(blockedBar).toHaveCount(0);
   expect(postedBody).toEqual({
     reason: "False positive on generated fixture test; verified manually",
+    head: headSha,
   });
   await expect(qaSection).toContainText("qa:s3-operator-bypass");
   await expect(qaSection).toContainText("bypassed");

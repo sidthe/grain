@@ -929,3 +929,27 @@ export class StudioComponent {}
 		t.Fatal("expected explicit blocking opt-in to block PR creation")
 	}
 }
+
+func TestMirrorWorkspaceRejectsInvalidBranchesAndStripsURLCredentials(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	for _, bad := range []string{"-evil", "foo:refs/heads/bar", "../escape", "bad..ref", "bad@{0}", "has space"} {
+		if _, err := OpenMirrorWorkspace(ctx, tmp, "/tmp/unused.git", "", bad, "main"); err == nil {
+			t.Errorf("expected OpenMirrorWorkspace to reject baseBranch %q", bad)
+		}
+		if _, err := OpenMirrorWorkspace(ctx, tmp, "/tmp/unused.git", "", "main", bad); err == nil {
+			t.Errorf("expected OpenMirrorWorkspace to reject headBranch %q", bad)
+		}
+	}
+	got := mirrorStableURL("https://x-access-token:ghs_supersecret@github.com/acme/widgets.git")
+	if strings.Contains(got, "ghs_supersecret") || strings.Contains(got, "x-access-token") {
+		t.Fatalf("mirrorStableURL leaked embedded credentials: %q", got)
+	}
+	if got != "https://github.com/acme/widgets.git" {
+		t.Fatalf("mirrorStableURL = %q, want https://github.com/acme/widgets.git", got)
+	}
+	gotLocal := mirrorStableURL("http://x-access-token:secret@127.0.0.1:41234/acme/widgets.git")
+	if gotLocal != "gitproxy/acme/widgets.git" {
+		t.Fatalf("mirrorStableURL(local) = %q, want gitproxy/acme/widgets.git", gotLocal)
+	}
+}

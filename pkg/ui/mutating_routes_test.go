@@ -958,11 +958,22 @@ var attributedRoutes = map[string]attributedRoute{
 	"POST /api/tasks/{id}/qa/bypass-s3": {
 		setup: func(t *testing.T, client *ui.Client, _ sender) string {
 			t.Helper()
+			ctx := context.Background()
 			id := fileTask(true)(t, client, nil)
-			if err := client.Store.UpdateTask(context.Background(), id, func(tk *model.Task) error {
+			if err := client.Store.UpdateTask(ctx, id, func(tk *model.Task) error {
 				tk.Target = &model.RepoRef{Owner: "acme", Name: "widgets"}
 				return nil
 			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Store.RecordQACheckRun(ctx, model.QACheckRun{
+				TaskID:    id,
+				CommitSHA: "deadbeef00000000000000000000000000000001",
+				Stage:     "S3",
+				CheckID:   "golden:test-integrity-guard",
+				Arm:       model.QAArmTreatment,
+				Verdict:   "fail",
+			}, nil); err != nil {
 				t.Fatal(err)
 			}
 			client.Config.PullRequests = &stubS3BypassPRs{store: client.Store}
@@ -995,7 +1006,7 @@ func (s *stubS3BypassPRs) OpenForTask(context.Context, string) (ui.PullRequestSt
 	return ui.PullRequestStatus{Number: 1, URL: "https://github.com/acme/widgets/pull/1"}, nil
 }
 
-func (s *stubS3BypassPRs) BypassS3ForTask(ctx context.Context, taskID, bypassedBy, reason string) (ui.PullRequestStatus, error) {
+func (s *stubS3BypassPRs) BypassS3ForTask(ctx context.Context, taskID, bypassedBy, reason, _ string) (ui.PullRequestStatus, error) {
 	detail, _ := json.Marshal(map[string]string{"bypassedBy": bypassedBy, "reason": reason})
 	if _, err := s.store.RecordQACheckRun(ctx, model.QACheckRun{
 		TaskID:     taskID,

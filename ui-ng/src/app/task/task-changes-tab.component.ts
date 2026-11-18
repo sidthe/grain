@@ -860,10 +860,11 @@ export class TaskChangesTabComponent {
   protected emitBypassS3(): void {
     const t = this.task();
     const qa = this.taskQa();
+    const head = qa?.s3HeadSha || this.preview()?.head || t.ci?.commit;
     this.bypassS3.emit({
       task: t,
       stageBranch: qa?.stageBranch,
-      head: qa?.s3HeadSha || this.preview()?.head || t.ci?.commit,
+      head,
       run: (reason) =>
         this.store
           .act(
@@ -872,7 +873,7 @@ export class TaskChangesTabComponent {
               this.api.post(
                 "POST /api/tasks/{id}/qa/bypass-s3",
                 { id },
-                { reason },
+                { reason, ...(head ? { head } : {}) },
               ),
             t.id,
           )

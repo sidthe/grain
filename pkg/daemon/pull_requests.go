@@ -65,7 +65,7 @@ func (o *PullRequestOpener) OpenForTaskWithOptions(ctx context.Context, taskID s
 }
 
 // BypassS3ForTask is ui.PullRequestsWithS3Bypass over orchestrator.BypassS3AndOpenPullRequestForTask.
-func (o *PullRequestOpener) BypassS3ForTask(ctx context.Context, taskID, bypassedBy, reason string) (ui.PullRequestStatus, error) {
+func (o *PullRequestOpener) BypassS3ForTask(ctx context.Context, taskID, bypassedBy, reason, expectedHead string) (ui.PullRequestStatus, error) {
 	task, err := o.Store.GetTask(ctx, taskID)
 	if err != nil {
 		return ui.PullRequestStatus{}, err
@@ -73,7 +73,7 @@ func (o *PullRequestOpener) BypassS3ForTask(ctx context.Context, taskID, bypasse
 	if task == nil {
 		return ui.PullRequestStatus{}, fmt.Errorf("no task %s", taskID)
 	}
-	status, err := orchestrator.BypassS3AndOpenPullRequestForTask(ctx, o.Store, o.Client, *task, bypassedBy, reason)
+	status, err := orchestrator.BypassS3AndOpenPullRequestForTask(ctx, o.Store, o.Client, *task, bypassedBy, reason, expectedHead)
 	if err != nil {
 		return ui.PullRequestStatus{}, err
 	}
@@ -247,14 +247,14 @@ func (PullRequestGate) OpenForTaskWithOptions(ctx context.Context, taskID string
 	return opener.OpenForTaskWithOptions(ctx, taskID, opts)
 }
 
-func (PullRequestGate) BypassS3ForTask(ctx context.Context, taskID, bypassedBy, reason string) (ui.PullRequestStatus, error) {
+func (PullRequestGate) BypassS3ForTask(ctx context.Context, taskID, bypassedBy, reason, expectedHead string) (ui.PullRequestStatus, error) {
 	opener := LivePullRequests.Load()
 	if opener == nil {
 		return ui.PullRequestStatus{}, errors.New(
 			"this daemon has no GitHub client yet, so it cannot bypass S3 and open a pull request: " +
 				"its reconcile loop has not started (or has failed -- check the daemon log)")
 	}
-	return opener.BypassS3ForTask(ctx, taskID, bypassedBy, reason)
+	return opener.BypassS3ForTask(ctx, taskID, bypassedBy, reason, expectedHead)
 }
 
 // ReattachForTask is the same gate for ui.PullRequestReattacher.

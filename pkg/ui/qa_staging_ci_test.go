@@ -125,9 +125,10 @@ func (f *fakeBranchChecker) GetBranchHead(_, _, branch string) (*github.BranchHe
 
 type bypassPRMock struct {
 	calls []struct {
-		taskID     string
-		bypassedBy string
-		reason     string
+		taskID       string
+		bypassedBy   string
+		reason       string
+		expectedHead string
 	}
 	store *model.Store
 }
@@ -136,12 +137,13 @@ func (b *bypassPRMock) OpenForTask(context.Context, string) (ui.PullRequestStatu
 	return ui.PullRequestStatus{Number: 1, URL: "https://github.com/acme/app/pull/1"}, nil
 }
 
-func (b *bypassPRMock) BypassS3ForTask(ctx context.Context, taskID, bypassedBy, reason string) (ui.PullRequestStatus, error) {
+func (b *bypassPRMock) BypassS3ForTask(ctx context.Context, taskID, bypassedBy, reason, expectedHead string) (ui.PullRequestStatus, error) {
 	b.calls = append(b.calls, struct {
-		taskID     string
-		bypassedBy string
-		reason     string
-	}{taskID: taskID, bypassedBy: bypassedBy, reason: reason})
+		taskID       string
+		bypassedBy   string
+		reason       string
+		expectedHead string
+	}{taskID: taskID, bypassedBy: bypassedBy, reason: reason, expectedHead: expectedHead})
 	detail, _ := json.Marshal(map[string]string{"bypassedBy": bypassedBy, "reason": reason})
 	_, err := b.store.RecordQACheckRun(ctx, model.QACheckRun{
 		TaskID:     taskID,
@@ -371,20 +373,58 @@ func TestBypassS3APIAuthAndStateTransition(t *testing.T) {
 		t.Fatalf("stageBranch = %q, want %q", qaBefore.StageBranch, model.QAStageBranchName("22"))
 	}
 
-	// 2. Agent principal is strictly forbidden from calling POST /api/tasks/22/qa/bypass-s3.
-	agentCtx := ui.WithPrincipal(ctx, model.Principal{Kind: model.PrincipalAgent, ID: "agent-run-1"})
-	agentReq := httptest.NewRequest(http.MethodPost, "/api/tasks/22/qa/bypass-s3", bytes.NewBufferString(`{"reason":"self bypass"}`)).WithContext(agentCtx)
-	agentRec := httptest.NewRecorder()
-	srv.ServeHTTP(agentRec, agentReq)
-	if agentRec.Code != http.StatusForbidden {
-		t.Fatalf("agent bypass status = %d, want 403: %s", agentRec.Code, agentRec.Body.String())
+	// 2. Non-human principals (agent, service account, CI automation) are strictly forbidden.
+	for _, tc := range []struct {
+		name string
+		p    model.Principal
+	}{
+		{"agent", model.Principal{Kind: model.PrincipalAgent, ID: "agent-run-1"}},
+		{"service", model.Principal{Kind: model.PrincipalService, ID: "bot@example.iam.gserviceaccount.com"}},
+		{"automation", model.Principal{Kind: model.PrincipalAutomation, ID: "ci-api"}},
+	} {
+		pCtx := ui.WithPrincipal(ctx, tc.p)
+		pReq := httptest.NewRequest(http.MethodPost, "/api/tasks/22/qa/bypass-s3", bytes.NewBufferString(`{"reason":"self bypass"}`)).WithContext(pCtx)
+		pRec := httptest.NewRecorder()
+		srv.ServeHTTP(pRec, pReq)
+		if pRec.Code != http.StatusForbidden {
+			t.Fatalf("%s bypass status = %d, want 403: %s", tc.name, pRec.Code, pRec.Body.String())
+		}
 	}
 	if len(mockPRs.calls) != 0 {
-		t.Fatalf("agent bypass must not invoke PullRequestsWithS3Bypass")
+		t.Fatalf("non-human bypass must not invoke PullRequestsWithS3Bypass")
 	}
 
-	// 3. Human operator succeeds, opens PR, and clears s3Blocked.
-	opReq := httptest.NewRequest(http.MethodPost, "/api/tasks/22/qa/bypass-s3", bytes.NewBufferString(`{"reason":"verified false positive"}`))
+	// 2b. Empty/whitespace reason and mismatched commit SHA are refused.
+	for _, tc := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{"empty body", "", http.StatusBadRequest},
+		{"blank reason", `{"reason":"   "}`, http.StatusBadRequest},
+		{"short head", `{"reason":"ok","head":"dead"}`, http.StatusBadRequest},
+		{"mismatched head", `{"reason":"ok","head":"1111111111111111"}`, http.StatusConflict},
+	} {
+		badReq := httptest.NewRequest(http.MethodPost, "/api/tasks/22/qa/bypass-s3", bytes.NewBufferString(tc.body))
+		badRec := httptest.NewRecorder()
+		srv.ServeHTTP(badRec, badReq)
+		if badRec.Code != tc.want {
+			t.Fatalf("%s status = %d, want %d: %s", tc.name, badRec.Code, tc.want, badRec.Body.String())
+		}
+	}
+
+	// 2c. POST /api/tasks/22/qa/check-runs must reject forged operator-bypass entries.
+	forgeReq := httptest.NewRequest(http.MethodPost, "/api/tasks/22/qa/check-runs", bytes.NewBufferString(`{
+		"entries":[{"run":{"stage":"S3","checkId":"qa:s3-operator-bypass","commitSha":"deadbeef00000000000000000000000000000001","arm":"treatment","verdict":"bypassed"}}]
+	}`))
+	forgeRec := httptest.NewRecorder()
+	srv.ServeHTTP(forgeRec, forgeReq)
+	if forgeRec.Code != http.StatusBadRequest {
+		t.Fatalf("forged check-runs bypass status = %d, want 400: %s", forgeRec.Code, forgeRec.Body.String())
+	}
+
+	// 3. Human operator with matching pinned head succeeds, opens PR, and clears s3Blocked.
+	opReq := httptest.NewRequest(http.MethodPost, "/api/tasks/22/qa/bypass-s3", bytes.NewBufferString(`{"reason":"verified false positive","head":"deadbeef00000000000000000000000000000001"}`))
 	opRec := httptest.NewRecorder()
 	srv.ServeHTTP(opRec, opReq)
 	if opRec.Code != http.StatusOK {
@@ -394,11 +434,12 @@ func TestBypassS3APIAuthAndStateTransition(t *testing.T) {
 	if err := json.Unmarshal(opRec.Body.Bytes(), &prStatus); err != nil {
 		t.Fatalf("decode prStatus: %v", err)
 	}
-	if prStatus.Number != 42 || len(mockPRs.calls) != 1 || mockPRs.calls[0].reason != "verified false positive" {
+	if prStatus.Number != 42 || len(mockPRs.calls) != 1 || mockPRs.calls[0].reason != "verified false positive" ||
+		mockPRs.calls[0].expectedHead != "deadbeef00000000000000000000000000000001" {
 		t.Fatalf("unexpected bypass result: status=%+v calls=%+v", prStatus, mockPRs.calls)
 	}
 
-	// 4. Subsequent GET /api/tasks/22/qa reports s3Blocked=false.
+	// 4. Subsequent GET /api/tasks/22/qa reports s3Blocked=false, and repeating bypass-s3 is refused (409).
 	recAfter := httptest.NewRecorder()
 	srv.ServeHTTP(recAfter, httptest.NewRequest(http.MethodGet, "/api/tasks/22/qa", nil))
 	var qaAfter ui.TaskQAResponse
@@ -407,5 +448,23 @@ func TestBypassS3APIAuthAndStateTransition(t *testing.T) {
 	}
 	if qaAfter.S3Blocked {
 		t.Fatalf("expected s3Blocked=false after bypass, got %+v", qaAfter)
+	}
+	repeatRec := httptest.NewRecorder()
+	srv.ServeHTTP(repeatRec, httptest.NewRequest(http.MethodPost, "/api/tasks/22/qa/bypass-s3", bytes.NewBufferString(`{"reason":"again"}`)))
+	if repeatRec.Code != http.StatusConflict {
+		t.Fatalf("repeat bypass on non-blocked task = %d, want 409: %s", repeatRec.Code, repeatRec.Body.String())
+	}
+
+	// 5. Closed task cannot bypass S3.
+	now := time.Now().UTC()
+	if err := store.ObserveField(ctx, "22", now, func(o *model.Observation) {
+		o.ClosedAt = &now
+	}); err != nil {
+		t.Fatalf("close task 22: %v", err)
+	}
+	closedRec := httptest.NewRecorder()
+	srv.ServeHTTP(closedRec, httptest.NewRequest(http.MethodPost, "/api/tasks/22/qa/bypass-s3", bytes.NewBufferString(`{"reason":"closed bypass"}`)))
+	if closedRec.Code != http.StatusBadRequest {
+		t.Fatalf("closed task bypass = %d, want 400: %s", closedRec.Code, closedRec.Body.String())
 	}
 }

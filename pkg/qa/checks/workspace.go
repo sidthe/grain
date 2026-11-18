@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -151,7 +152,7 @@ func (w *SandboxWorkspace) resolveBaseRef(ctx context.Context) (string, error) {
 	baseHint := strings.TrimSpace(w.BaseBranch)
 	var script strings.Builder
 	fmt.Fprintf(&script, "cd %s && ", shellSingleQuote(w.workDir()))
-	script.WriteString(`try_mb() { if git rev-parse --verify --quiet "$1" >/dev/null 2>&1; then mb=$(git merge-base -- "$1" HEAD 2>/dev/null) && [ -n "$mb" ] && printf '%s\n' "$mb" && return 0; fi; return 1; }; `)
+	script.WriteString(`try_mb() { if git rev-parse --verify --quiet --end-of-options "$1" >/dev/null 2>&1; then mb=$(git merge-base -- "$1" HEAD 2>/dev/null) && [ -n "$mb" ] && printf '%s\n' "$mb" && return 0; fi; return 1; }; `)
 	if baseHint != "" {
 		qOrigin := shellSingleQuote("origin/" + baseHint)
 		qLocal := shellSingleQuote(baseHint)
@@ -403,6 +404,24 @@ func isLikelyGitSHA(s string) bool {
 	return true
 }
 
+func validateMirrorBranchName(branch string) error {
+	if branch == "" {
+		return fmt.Errorf("empty branch name")
+	}
+	if strings.HasPrefix(branch, "-") || strings.HasPrefix(branch, "/") || strings.HasSuffix(branch, "/") {
+		return fmt.Errorf("invalid branch name %q", branch)
+	}
+	if strings.Contains(branch, "..") || strings.Contains(branch, "@{") || strings.ContainsAny(branch, ":~^?*[\\ \t\r\n\x00") {
+		return fmt.Errorf("invalid branch name %q", branch)
+	}
+	for _, r := range branch {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("invalid control character in branch name %q", branch)
+		}
+	}
+	return nil
+}
+
 // OpenMirrorWorkspace fetches baseBranch and headBranch into a reusable bare git mirror under
 // cacheRoot and returns a MirrorWorkspace pinned to merge-base(baseBranch, headBranch)..headSHA.
 // When baseBranch is empty, it resolves the remote's default branch via git (never REST and never
@@ -413,8 +432,13 @@ func OpenMirrorWorkspace(ctx context.Context, cacheRoot, remoteURL, bearerToken,
 	if strings.TrimSpace(cacheRoot) == "" || strings.TrimSpace(remoteURL) == "" || headBranch == "" {
 		return nil, fmt.Errorf("qa/checks: cacheRoot, remoteURL, and headBranch are required for mirror workspace")
 	}
-	if strings.HasPrefix(headBranch, "-") || strings.HasPrefix(baseBranch, "-") {
-		return nil, fmt.Errorf("qa/checks: invalid branch name starting with '-'")
+	if err := validateMirrorBranchName(headBranch); err != nil {
+		return nil, fmt.Errorf("qa/checks: %w", err)
+	}
+	if baseBranch != "" {
+		if err := validateMirrorBranchName(baseBranch); err != nil {
+			return nil, fmt.Errorf("qa/checks: %w", err)
+		}
 	}
 	mirrorKey := sanitizePathKey(mirrorStableURL(remoteURL))
 	bareDir := filepath.Join(cacheRoot, mirrorKey+".git")
@@ -438,6 +462,9 @@ func OpenMirrorWorkspace(ctx context.Context, cacheRoot, remoteURL, bearerToken,
 			return nil, defErr
 		}
 		if defBranch != "" {
+			if err := validateMirrorBranchName(defBranch); err != nil {
+				return nil, fmt.Errorf("%w: remote advertised invalid default branch: %v", ErrBaseResolutionFailed, err)
+			}
 			baseBranch = defBranch
 			baseRefspec = fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", baseBranch, baseBranch)
 			baseLocalRef = "refs/remotes/origin/" + baseBranch
@@ -468,7 +495,7 @@ func OpenMirrorWorkspace(ctx context.Context, cacheRoot, remoteURL, bearerToken,
 		return nil, fmt.Errorf("qa/checks: git fetch mirror: %v (%s)", fetchErr, redacted)
 	}
 
-	headOut, err := runBareGit(ctx, bareDir, "", "rev-parse", "--verify", "refs/remotes/origin/"+headBranch)
+	headOut, err := runBareGit(ctx, bareDir, "", "rev-parse", "--verify", "--end-of-options", "refs/remotes/origin/"+headBranch)
 	if err != nil {
 		return nil, fmt.Errorf("qa/checks: resolving mirror head %s: %w", headBranch, err)
 	}
@@ -721,14 +748,14 @@ func sanitizePathKey(raw string) string {
 
 func mirrorStableURL(remoteURL string) string {
 	trimmed := strings.TrimSpace(remoteURL)
-	for _, scheme := range []string{"http://", "https://"} {
-		if strings.HasPrefix(trimmed, scheme) {
-			rest := strings.TrimPrefix(trimmed, scheme)
-			hostPort, repoPath, ok := strings.Cut(rest, "/")
-			if ok && repoPath != "" && (strings.HasPrefix(hostPort, "127.0.0.1:") || strings.HasPrefix(hostPort, "localhost:") || strings.HasPrefix(hostPort, "[::1]:")) {
-				return "gitproxy/" + repoPath
-			}
+	if u, err := url.Parse(trimmed); err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+		u.User = nil
+		hostPort := u.Host
+		repoPath := strings.TrimPrefix(u.Path, "/")
+		if repoPath != "" && (strings.HasPrefix(hostPort, "127.0.0.1:") || strings.HasPrefix(hostPort, "localhost:") || strings.HasPrefix(hostPort, "[::1]:")) {
+			return "gitproxy/" + repoPath
 		}
+		return u.String()
 	}
 	return trimmed
 }

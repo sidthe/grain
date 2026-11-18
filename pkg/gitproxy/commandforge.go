@@ -360,7 +360,11 @@ func (t *CommandForgeTransport) RoundTrip(req *http.Request) (*http.Response, er
 	}
 	resp.Request = req
 	if commandForgeNoBody(req.Method, resp.StatusCode) {
-		_, _ = io.Copy(io.Discard, br)
+		const maxNoBodyDrain = 64 << 10
+		n, _ := io.Copy(io.Discard, io.LimitReader(br, maxNoBodyDrain+1))
+		if n > maxNoBodyDrain {
+			run.cancel()
+		}
 		run.wait()
 		resp.Body = http.NoBody
 		resp.ContentLength = 0

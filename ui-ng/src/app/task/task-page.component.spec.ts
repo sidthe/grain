@@ -1944,7 +1944,10 @@ describe("duration", () => {
       method: "POST",
       route: "POST /api/tasks/{id}/qa/bypass-s3",
       params: { id: "7" },
-      body: { reason: "False positive on generated fixture test" },
+      body: {
+        reason: "False positive on generated fixture test",
+        head: "deadbeef12345678",
+      },
     });
     expect(q(f, '[data-testid="bypass-s3-dialog"]')).toBeNull();
     expect(q(f, '[data-testid="qa-s3-blocked-bar"]')).toBeNull();

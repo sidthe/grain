@@ -414,9 +414,9 @@ func (p *GitProxy) serveCIRuns(w http.ResponseWriter, r *http.Request, scope nam
 		if scope.TaskStageBranch != "" {
 			// When staging isolation is active, CI runs may be recorded on
 			// grain-qa-stage/<id> before S3 promotes to task.BranchName().
-			prPage := store.Find(ci.RunFilter{Repo: repo, Ref: scope.TaskBranch, Descending: true}, 1)
-			stagePage := store.Find(ci.RunFilter{Repo: repo, Ref: scope.TaskStageBranch, Descending: true}, 1)
-			if len(stagePage.Runs) > 0 && (len(prPage.Runs) == 0 || runStartedAfter(stagePage.Runs[0], prPage.Runs[0])) {
+			prRun, hasPR := latestExactRefRun(store, repo, scope.TaskBranch)
+			stageRun, hasStage := latestExactRefRun(store, repo, scope.TaskStageBranch)
+			if hasStage && (!hasPR || runStartedAfter(stageRun, prRun)) {
 				ref = scope.TaskStageBranch
 			}
 		}
@@ -972,15 +972,28 @@ func (p *GitProxy) servePRStatus(w http.ResponseWriter, r *http.Request, scope n
 		branch := scope.TaskBranch
 		if scope.TaskStageBranch != "" {
 			if repoName, store, err := p.ciReadRepo(scope, repo); err == nil && repoName != "" {
-				prPage := store.Find(ci.RunFilter{Repo: repoName, Ref: scope.TaskBranch, Descending: true}, 1)
-				stagePage := store.Find(ci.RunFilter{Repo: repoName, Ref: scope.TaskStageBranch, Descending: true}, 1)
-				if len(stagePage.Runs) > 0 && (len(prPage.Runs) == 0 || runStartedAfter(stagePage.Runs[0], prPage.Runs[0])) {
+				prRun, hasPR := latestExactRefRun(store, repoName, scope.TaskBranch)
+				stageRun, hasStage := latestExactRefRun(store, repoName, scope.TaskStageBranch)
+				if hasStage && (!hasPR || runStartedAfter(stageRun, prRun)) {
 					branch = scope.TaskStageBranch
 				}
 			}
 		}
 		p.serveBranchStatus(w, scope, repo, branch, "this task's branch")
 	}
+}
+
+func latestExactRefRun(store ci.RunStore, repo, ref string) (ci.Run, bool) {
+	if store == nil || ref == "" {
+		return ci.Run{}, false
+	}
+	page := store.Find(ci.RunFilter{Repo: repo, Ref: ref, Descending: true}, 50)
+	for _, run := range page.Runs {
+		if strings.EqualFold(run.Ref, ref) {
+			return run, true
+		}
+	}
+	return ci.Run{}, false
 }
 
 func runStartedAfter(a, b ci.Run) bool {

@@ -1225,4 +1225,33 @@ func TestCLICIWaitAndRetriggerHonorsQAStageBranch(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), stageRef) {
 		t.Fatalf("GET /cli/pr/status: %d %s", rec.Code, rec.Body.String())
 	}
+
+	// 4. Exact ref matching: a newer run on grain-qa-stage/110 must NOT hijack
+	// task 11's promoted branch status when grain-qa-stage/11 has no newer run.
+	later := now.Add(time.Minute)
+	newest := now.Add(2 * time.Minute)
+	prRun := ci.Run{
+		ID:         "ci-pr-11",
+		Repo:       "experimental/product-studio",
+		Ref:        "grain/ee5afe06/task-11-demo",
+		Commit:     "2222222222222222222222222222222222222222",
+		Conclusion: ci.ConclusionSuccess,
+		StartedAt:  &later,
+		FinishedAt: &later,
+	}
+	siblingStageRun := ci.Run{
+		ID:         "ci-stage-110",
+		Repo:       "experimental/product-studio",
+		Ref:        model.QAStageBranchName("110"),
+		Commit:     "3333333333333333333333333333333333333333",
+		Conclusion: ci.ConclusionFailure,
+		StartedAt:  &newest,
+		FinishedAt: &newest,
+	}
+	ciStore.Put(prRun)
+	ciStore.Put(siblingStageRun)
+	rec = send(h, http.MethodGet, "tok-stage", "/cli/pr/status", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), prRun.ID) || strings.Contains(rec.Body.String(), stageRef) {
+		t.Fatalf("GET /cli/pr/status hijacked by sibling stage ref 110: %d %s", rec.Code, rec.Body.String())
+	}
 }

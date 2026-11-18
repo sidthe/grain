@@ -666,6 +666,8 @@ func (s *Server) checkDelegatedPersonOnly(r *http.Request, pattern string, a *ac
 	case "POST /api/tasks/{id}/access-request/grant",
 		"POST /api/tasks/{id}/access-request/deny":
 		return fmt.Errorf("%s cannot call %s: deciding an access request requires a person acting directly", a.label(), pattern)
+	case "POST /api/tasks/{id}/qa/bypass-s3":
+		return fmt.Errorf("%s cannot call %s: bypassing the S3 pre-PR quality gate requires a person acting directly", a.label(), pattern)
 	case "POST /api/external-agents/tokens":
 		body, err := peekBody(r)
 		if err == nil && len(body) > 0 {

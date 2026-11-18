@@ -101,7 +101,7 @@ type PullRequestsWithOptions interface {
 // PullRequestsWithS3Bypass is an optional extension on PullRequests for explicit human
 // operator overrides of a blocked S3 pre-PR quality gate.
 type PullRequestsWithS3Bypass interface {
-	BypassS3ForTask(ctx context.Context, taskID, bypassedBy, reason string) (PullRequestStatus, error)
+	BypassS3ForTask(ctx context.Context, taskID, bypassedBy, reason, expectedHead string) (PullRequestStatus, error)
 }
 
 // PullRequestReattacher is the optional half of PullRequests that takes
