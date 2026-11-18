@@ -941,15 +941,45 @@ func TestMirrorWorkspaceRejectsInvalidBranchesAndStripsURLCredentials(t *testing
 			t.Errorf("expected OpenMirrorWorkspace to reject headBranch %q", bad)
 		}
 	}
-	got := mirrorStableURL("https://x-access-token:ghs_supersecret@github.com/acme/widgets.git")
-	if strings.Contains(got, "ghs_supersecret") || strings.Contains(got, "x-access-token") {
-		t.Fatalf("mirrorStableURL leaked embedded credentials: %q", got)
+	got := mirrorStableURL("https://x-access-token:ghs_supersecret@github.com/acme/widgets.git?token=qsecret#frag")
+	if strings.Contains(got, "ghs_supersecret") || strings.Contains(got, "x-access-token") || strings.Contains(got, "qsecret") || strings.Contains(got, "frag") {
+		t.Fatalf("mirrorStableURL leaked embedded credentials/query: %q", got)
 	}
 	if got != "https://github.com/acme/widgets.git" {
 		t.Fatalf("mirrorStableURL = %q, want https://github.com/acme/widgets.git", got)
 	}
-	gotLocal := mirrorStableURL("http://x-access-token:secret@127.0.0.1:41234/acme/widgets.git")
+	gotSSH := mirrorStableURL("ssh://bot:ssh_secret@git.example.com/acme/widgets.git")
+	if gotSSH != "ssh://git.example.com/acme/widgets.git" {
+		t.Fatalf("mirrorStableURL(ssh) = %q, want ssh://git.example.com/acme/widgets.git", gotSSH)
+	}
+	gotLocal := mirrorStableURL("http://x-access-token:secret@127.0.0.1:41234/acme/widgets.git?token=localq")
 	if gotLocal != "gitproxy/acme/widgets.git" {
 		t.Fatalf("mirrorStableURL(local) = %q, want gitproxy/acme/widgets.git", gotLocal)
+	}
+
+	// redactMirrorOutput must scrub embedded URL credentials, query tokens, and bearer tokens
+	// even when bearerToken is empty.
+	rawOut := "fatal: unable to access 'https://ghp_useronly_secret@github.com/acme/widgets.git/?token=query_secret': exit 128\n" +
+		"also saw https://alice:pass_secret@git.example.com/acme/widgets.git/"
+	redacted := redactMirrorOutput(rawOut, "https://ghp_useronly_secret@github.com/acme/widgets.git?token=query_secret", "")
+	for _, secret := range []string{"ghp_useronly_secret", "query_secret", "pass_secret", "alice:pass_secret"} {
+		if strings.Contains(redacted, secret) {
+			t.Fatalf("redactMirrorOutput leaked %q in %q", secret, redacted)
+		}
+	}
+
+	// End-to-end: OpenMirrorWorkspace errors on ls-remote (empty baseBranch) and fetch
+	// (explicit baseBranch) must never leak embedded URL credentials or query tokens.
+	badRemote := "http://ghp_embed_user:embed_pass_secret@127.0.0.1:1/acme/widgets.git?token=embed_query_secret"
+	for _, base := range []string{"", "main"} {
+		_, err := OpenMirrorWorkspace(ctx, tmp, badRemote, "bearer_secret_tok", base, "grain-qa-stage/99")
+		if err == nil {
+			t.Fatalf("expected OpenMirrorWorkspace(base=%q) to fail against unreachable remote", base)
+		}
+		for _, secret := range []string{"ghp_embed_user", "embed_pass_secret", "embed_query_secret", "bearer_secret_tok"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("OpenMirrorWorkspace(base=%q) error leaked %q: %v", base, secret, err)
+			}
+		}
 	}
 }

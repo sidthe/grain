@@ -360,6 +360,9 @@ func computeTaskS3Blocked(task *model.Task, closedAt *time.Time, runs []model.QA
 			if r.Shadow || !isPrePRS3Stage(r.Stage) {
 				continue
 			}
+			if strings.TrimSpace(r.CommitSHA) != "" {
+				return false, ""
+			}
 			if r.CheckID == model.QACheckIDS3OperatorBypass && r.Verdict == "bypassed" {
 				return false, ""
 			}
@@ -442,7 +445,7 @@ func (s *Server) handleRecordTaskQACheckRuns(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusBadRequest, fmt.Errorf("unsupported check run stage %q", entry.Run.Stage))
 			return
 		}
-		if strings.TrimSpace(entry.Run.CheckID) == model.QACheckIDS3OperatorBypass ||
+		if strings.EqualFold(strings.TrimSpace(entry.Run.CheckID), model.QACheckIDS3OperatorBypass) ||
 			strings.EqualFold(strings.TrimSpace(entry.Run.Verdict), "bypassed") {
 			writeError(w, http.StatusBadRequest, errors.New("operator S3 bypass records may only be recorded via POST /api/tasks/{id}/qa/bypass-s3"))
 			return

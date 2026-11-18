@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -363,7 +364,7 @@ var mirrorMu sync.Mutex
 func resolveRemoteDefaultBranch(ctx context.Context, bareDir, bearerToken, remoteURL string) (branchName, headSHA string, err error) {
 	out, lsErr := runBareGit(ctx, bareDir, bearerToken, "ls-remote", "--symref", "--end-of-options", remoteURL, "HEAD")
 	if lsErr != nil {
-		return "", "", fmt.Errorf("%w: git ls-remote HEAD failed: %v (%s)", ErrBaseResolutionFailed, lsErr, redactMirrorOutput(out, bearerToken))
+		return "", "", fmt.Errorf("%w: git ls-remote HEAD failed: %v (%s)", ErrBaseResolutionFailed, lsErr, redactMirrorOutput(out, remoteURL, bearerToken))
 	}
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
@@ -451,7 +452,7 @@ func OpenMirrorWorkspace(ctx context.Context, cacheRoot, remoteURL, bearerToken,
 	}
 	if _, err := os.Stat(filepath.Join(bareDir, "HEAD")); err != nil {
 		if initOut, initErr := runBareGit(ctx, "", "", "init", "--bare", "--", bareDir); initErr != nil {
-			return nil, fmt.Errorf("qa/checks: git init --bare: %v (%s)", initErr, redactMirrorOutput(initOut, bearerToken))
+			return nil, fmt.Errorf("qa/checks: git init --bare: %v (%s)", initErr, redactMirrorOutput(initOut, remoteURL, bearerToken))
 		}
 	}
 
@@ -488,7 +489,7 @@ func OpenMirrorWorkspace(ctx context.Context, cacheRoot, remoteURL, bearerToken,
 
 	fetchArgs := append([]string{"fetch", "--quiet", "--depth=64", "--end-of-options", remoteURL}, refspecs...)
 	if fetchOut, fetchErr := runBareGit(ctx, bareDir, bearerToken, fetchArgs...); fetchErr != nil {
-		redacted := redactMirrorOutput(fetchOut, bearerToken)
+		redacted := redactMirrorOutput(fetchOut, remoteURL, bearerToken)
 		if baseBranch != "" && strings.Contains(redacted, "refs/heads/"+baseBranch) {
 			return nil, fmt.Errorf("%w: git fetch base %s failed: %v (%s)", ErrBaseResolutionFailed, baseDesc, fetchErr, redacted)
 		}
@@ -746,25 +747,54 @@ func sanitizePathKey(raw string) string {
 	return out
 }
 
+var mirrorURLUserinfoRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)([^/\s@'"]+)@`)
+
 func mirrorStableURL(remoteURL string) string {
 	trimmed := strings.TrimSpace(remoteURL)
-	if u, err := url.Parse(trimmed); err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+	if u, err := url.Parse(trimmed); err == nil && u.Scheme != "" && u.Host != "" {
 		u.User = nil
-		hostPort := u.Host
-		repoPath := strings.TrimPrefix(u.Path, "/")
-		if repoPath != "" && (strings.HasPrefix(hostPort, "127.0.0.1:") || strings.HasPrefix(hostPort, "localhost:") || strings.HasPrefix(hostPort, "[::1]:")) {
-			return "gitproxy/" + repoPath
+		u.RawQuery = ""
+		u.Fragment = ""
+		if u.Scheme == "http" || u.Scheme == "https" {
+			hostPort := u.Host
+			repoPath := strings.TrimPrefix(u.Path, "/")
+			if repoPath != "" && (strings.HasPrefix(hostPort, "127.0.0.1:") || strings.HasPrefix(hostPort, "localhost:") || strings.HasPrefix(hostPort, "[::1]:")) {
+				return "gitproxy/" + repoPath
+			}
 		}
 		return u.String()
 	}
 	return trimmed
 }
 
-func redactMirrorOutput(out, bearerToken string) string {
-	if bearerToken == "" || out == "" {
-		return out
+func redactMirrorOutput(out, remoteURL, bearerToken string) string {
+	if out == "" {
+		return ""
 	}
-	redacted := strings.ReplaceAll(out, bearerToken, "[redacted]")
-	basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + bearerToken))
-	return strings.ReplaceAll(redacted, basic, "[redacted]")
+	redacted := out
+	if trimmed := strings.TrimSpace(remoteURL); trimmed != "" {
+		if u, err := url.Parse(trimmed); err == nil && u.Scheme != "" && u.Host != "" {
+			if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+				redacted = strings.ReplaceAll(redacted, trimmed, mirrorStableURL(trimmed))
+			}
+			if u.User != nil {
+				if pass, ok := u.User.Password(); ok && pass != "" {
+					redacted = strings.ReplaceAll(redacted, pass, "[redacted]")
+				}
+				if userinfo := u.User.String(); userinfo != "" {
+					redacted = strings.ReplaceAll(redacted, userinfo+"@", "[redacted]@")
+				}
+			}
+			if u.RawQuery != "" {
+				redacted = strings.ReplaceAll(redacted, "?"+u.RawQuery, "?[redacted]")
+			}
+		}
+	}
+	redacted = mirrorURLUserinfoRe.ReplaceAllString(redacted, "${1}[redacted]@")
+	if bearerToken != "" {
+		redacted = strings.ReplaceAll(redacted, bearerToken, "[redacted]")
+		basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + bearerToken))
+		redacted = strings.ReplaceAll(redacted, basic, "[redacted]")
+	}
+	return redacted
 }

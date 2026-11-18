@@ -413,14 +413,17 @@ func TestBypassS3APIAuthAndStateTransition(t *testing.T) {
 		}
 	}
 
-	// 2c. POST /api/tasks/22/qa/check-runs must reject forged operator-bypass entries.
-	forgeReq := httptest.NewRequest(http.MethodPost, "/api/tasks/22/qa/check-runs", bytes.NewBufferString(`{
-		"entries":[{"run":{"stage":"S3","checkId":"qa:s3-operator-bypass","commitSha":"deadbeef00000000000000000000000000000001","arm":"treatment","verdict":"bypassed"}}]
-	}`))
-	forgeRec := httptest.NewRecorder()
-	srv.ServeHTTP(forgeRec, forgeReq)
-	if forgeRec.Code != http.StatusBadRequest {
-		t.Fatalf("forged check-runs bypass status = %d, want 400: %s", forgeRec.Code, forgeRec.Body.String())
+	// 2c. POST /api/tasks/22/qa/check-runs must reject forged operator-bypass entries (including case variants).
+	for _, payload := range []string{
+		`{"entries":[{"run":{"stage":"S3","checkId":"qa:s3-operator-bypass","commitSha":"deadbeef00000000000000000000000000000001","arm":"treatment","verdict":"bypassed"}}]}`,
+		`{"entries":[{"run":{"stage":"S3","checkId":"QA:S3-OPERATOR-BYPASS","commitSha":"deadbeef00000000000000000000000000000001","arm":"treatment","verdict":"pass"}}]}`,
+	} {
+		forgeReq := httptest.NewRequest(http.MethodPost, "/api/tasks/22/qa/check-runs", bytes.NewBufferString(payload))
+		forgeRec := httptest.NewRecorder()
+		srv.ServeHTTP(forgeRec, forgeReq)
+		if forgeRec.Code != http.StatusBadRequest {
+			t.Fatalf("forged check-runs bypass (%s) status = %d, want 400: %s", payload, forgeRec.Code, forgeRec.Body.String())
+		}
 	}
 
 	// 3. Human operator with matching pinned head succeeds, opens PR, and clears s3Blocked.
