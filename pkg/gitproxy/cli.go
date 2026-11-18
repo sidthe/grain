@@ -155,9 +155,13 @@ func (p *GitProxy) serveCLIRoute(w http.ResponseWriter, r *http.Request, scope n
 	case route == "context":
 		// What the CLI needs to build namespace paths for this run.
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		_ = json.NewEncoder(w).Encode(map[string]string{
+		ctxMap := map[string]string{
 			"task": scope.TaskIDStr, "repo": scope.TaskRepo, "branch": scope.TaskBranch, "base": scope.TaskBase,
-		})
+		}
+		if scope.TaskStageBranch != "" {
+			ctxMap["stage_branch"] = scope.TaskStageBranch
+		}
+		_ = json.NewEncoder(w).Encode(ctxMap)
 	case route == "ci/runs":
 		p.serveCIRuns(w, r, scope)
 	case route == "ci/run":
@@ -407,6 +411,15 @@ func (p *GitProxy) serveCIRuns(w http.ResponseWriter, r *http.Request, scope nam
 			return
 		}
 		ref = scope.TaskBranch
+		if scope.TaskStageBranch != "" {
+			// When staging isolation is active, CI runs may be recorded on
+			// grain-qa-stage/<id> before S3 promotes to task.BranchName().
+			prPage := store.Find(ci.RunFilter{Repo: repo, Ref: scope.TaskBranch, Descending: true}, 1)
+			stagePage := store.Find(ci.RunFilter{Repo: repo, Ref: scope.TaskStageBranch, Descending: true}, 1)
+			if len(stagePage.Runs) > 0 && (len(prPage.Runs) == 0 || runStartedAfter(stagePage.Runs[0], prPage.Runs[0])) {
+				ref = scope.TaskStageBranch
+			}
+		}
 	}
 	f := ci.RunFilter{
 		Repo:       repo,
@@ -956,8 +969,28 @@ func (p *GitProxy) servePRStatus(w http.ResponseWriter, r *http.Request, scope n
 			cliError(w, errNoTaskRepo)
 			return
 		}
-		p.serveBranchStatus(w, scope, repo, scope.TaskBranch, "this task's branch")
+		branch := scope.TaskBranch
+		if scope.TaskStageBranch != "" {
+			if repoName, store, err := p.ciReadRepo(scope, repo); err == nil && repoName != "" {
+				prPage := store.Find(ci.RunFilter{Repo: repoName, Ref: scope.TaskBranch, Descending: true}, 1)
+				stagePage := store.Find(ci.RunFilter{Repo: repoName, Ref: scope.TaskStageBranch, Descending: true}, 1)
+				if len(stagePage.Runs) > 0 && (len(prPage.Runs) == 0 || runStartedAfter(stagePage.Runs[0], prPage.Runs[0])) {
+					branch = scope.TaskStageBranch
+				}
+			}
+		}
+		p.serveBranchStatus(w, scope, repo, branch, "this task's branch")
 	}
+}
+
+func runStartedAfter(a, b ci.Run) bool {
+	if a.StartedAt != nil && b.StartedAt != nil {
+		return a.StartedAt.After(*b.StartedAt)
+	}
+	if a.StartedAt != nil {
+		return true
+	}
+	return false
 }
 
 // serveBranchStatus reports the latest CI on branch in repo ("" is the

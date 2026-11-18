@@ -5713,6 +5713,7 @@ type NamespaceScope struct {
 	Attempt         int
 	TaskRepo        string
 	TaskBranch      string
+	TaskStageBranch string
 	TaskBase        string
 	ConfigRepo      string
 	Grants          []string
@@ -5784,6 +5785,12 @@ func (s *Store) SandboxNamespaceScope(ctx context.Context, sandbox string) (scop
 	var attempt int
 	_ = s.db.QueryRowContext(ctx, "SELECT `attempt` FROM `task_run` WHERE `id` = ?", runID).Scan(&attempt)
 	taskBranch := Task{ID: taskID, Branch: storedBranch.String}.BranchName()
+	var taskStageBranch string
+	if ActiveQAResolution != nil {
+		if arm, err := ActiveQAResolution(ctx, s, taskID); err == nil && arm == QAArmTreatment {
+			taskStageBranch = QAStageBranchName(taskID)
+		}
+	}
 	taskBase := strings.TrimSpace(storedBase.String)
 
 	allowed := make(map[string]bool)
@@ -5924,6 +5931,7 @@ func (s *Store) SandboxNamespaceScope(ctx context.Context, sandbox string) (scop
 		Attempt:           attempt,
 		TaskRepo:          taskRepo,
 		TaskBranch:        taskBranch,
+		TaskStageBranch:   taskStageBranch,
 		TaskBase:          taskBase,
 		ConfigRepo:        cfgRepo.String(),
 		Grants:            grantNames,

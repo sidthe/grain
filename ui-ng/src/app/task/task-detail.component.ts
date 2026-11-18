@@ -108,6 +108,10 @@ import {
   AcceptFindingsDialogComponent,
   type AcceptFindingsRequest,
 } from "./accept-findings-dialog.component";
+import {
+  BypassS3DialogComponent,
+  type BypassS3Request,
+} from "./bypass-s3-dialog.component";
 import { TaskEditPanelComponent } from "./task-edit-panel.component";
 import { TaskObservationsComponent } from "./task-observations.component";
 import { TaskGatesBarComponent } from "./task-gates-bar.component";
@@ -172,6 +176,7 @@ export function duration(from?: string, to?: string): string {
     TaskDocsTabComponent,
     ForceMergeDialogComponent,
     AcceptFindingsDialogComponent,
+    BypassS3DialogComponent,
     TaskEditPanelComponent,
     ConversationComponent,
   ],
@@ -200,7 +205,11 @@ export function duration(from?: string, to?: string): string {
       [attr.tabindex]="current() === 'details' ? 0 : null"
       aria-labelledby="task-title"
       [attr.inert]="
-        confirming() || forceMergeReq() || acceptFindingsReq() || docModalOpen()
+        confirming() ||
+        forceMergeReq() ||
+        acceptFindingsReq() ||
+        bypassS3Req() ||
+        docModalOpen()
           ? ''
           : null
       "
@@ -1181,6 +1190,7 @@ export function duration(from?: string, to?: string): string {
                     [pane]="pane()"
                     (forceMerge)="forceMergeReq.set($event)"
                     (acceptFindings)="acceptFindingsReq.set($event)"
+                    (bypassS3)="bypassS3Req.set($event)"
                     [task]="t"
                     [prUrl]="prUrl()"
                     [prLabel]="prLabel()"
@@ -1555,6 +1565,10 @@ export function duration(from?: string, to?: string): string {
       />
     }
 
+    @if (bypassS3Req(); as b) {
+      <g-bypass-s3-dialog [request]="b" (done)="bypassS3Req.set(null)" />
+    }
+
     <dialog
       #docModal
       class="doc-reader-modal"
@@ -1806,6 +1820,7 @@ export class TaskDetailComponent implements OnDestroy {
   protected readonly acceptFindingsReq = signal<AcceptFindingsRequest | null>(
     null,
   );
+  protected readonly bypassS3Req = signal<BypassS3Request | null>(null);
   protected readonly editOpen = signal(false);
   protected readonly moreMenuOpen = signal(false);
   protected readonly compactOpen = signal(false);

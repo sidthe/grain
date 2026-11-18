@@ -1175,6 +1175,11 @@ export interface QAFinding {
 export interface TaskQAResponse {
   taskId: string;
   enabled: boolean;
+  experimentId?: string;
+  armId?: string;
+  stageBranch?: string;
+  s3Blocked?: boolean;
+  s3HeadSha?: string;
   assignment?: QAAssignment;
   checkRuns: QACheckRun[];
   findings: QAFinding[];

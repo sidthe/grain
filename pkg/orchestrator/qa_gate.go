@@ -17,6 +17,7 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"path/filepath"
@@ -172,6 +173,26 @@ func OpenPullRequestForTaskWithQA(
 	if headSHA != "" && (!s3Ran || (!s3Passed && strings.TrimSpace(opts.CallerNotes) != "")) {
 		rep, ran, s3Err := runMirrorS3IfConfigured(ctx, store, task, assign, false, checkBranch, opts.CallerNotes)
 		if s3Err != nil {
+			if errors.Is(s3Err, checks.ErrBaseResolutionFailed) {
+				recordBaseResolutionErrorCheckRun(ctx, store, task, assign, headSHA, s3Err)
+				if opts.AllowHoldAfterS3Cap {
+					if stageExists {
+						if _, pErr := promoteQAStageBranch(client, *task.Target, stageBranch, task.BranchName(), headSHA); pErr != nil {
+							return PullRequestStatus{}, fmt.Errorf("orchestrator: promoting held staging branch %s to %s: %w",
+								stageBranch, task.BranchName(), pErr)
+						}
+					}
+					if hErr := holdTaskForQA(ctx, store, task.ID, headSHA, fmt.Sprintf("pre-PR S3 base resolution failed: %v", s3Err), time.Now().UTC()); hErr != nil {
+						return PullRequestStatus{}, hErr
+					}
+					status, oErr := OpenPullRequestForTask(ctx, store, client, task)
+					if oErr == nil {
+						maybeEvaluateQACircuitBreakerThrottled(ctx, store, client, time.Now().UTC())
+					}
+					return status, oErr
+				}
+				return PullRequestStatus{}, fmt.Errorf("orchestrator: pre-PR S3 base resolution failed on %s: %w", checkBranch, s3Err)
+			}
 			if rt := LiveQARuntime(); rt != nil && rt.DataDir != "" {
 				return PullRequestStatus{}, fmt.Errorf("orchestrator: running pre-PR S3 checks on %s: %w", checkBranch, s3Err)
 			}
@@ -1169,23 +1190,69 @@ func isPrePRDeterministicOrCustomStage(stage string) bool {
 	}
 }
 
+func recordBaseResolutionErrorCheckRun(ctx context.Context, store *model.Store, task model.Task, assign *resolve.Resolution, headSHA string, resErr error) {
+	if store == nil || resErr == nil {
+		return
+	}
+	var expID, armID, flowHash string
+	var engineRev int
+	if assign != nil {
+		expID = assign.ExperimentID
+		armID = assign.ArmID
+		flowHash = assign.FlowHash
+		engineRev = assign.QAEngineRev
+	}
+	detailBytes, _ := json.Marshal(map[string]string{
+		"error": resErr.Error(),
+	})
+	_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
+		TaskID:       task.ID,
+		CommitSHA:    headSHA,
+		Stage:        "S3",
+		CheckID:      model.QACheckIDBaseResolution,
+		Arm:          model.QAArmTreatment,
+		Shadow:       false,
+		Verdict:      "error",
+		DetailJSON:   string(detailBytes),
+		ExperimentID: expID,
+		ArmID:        armID,
+		FlowHash:     flowHash,
+		QAEngineRev:  engineRev,
+		Model:        task.Model,
+	}, []model.QAFinding{{
+		TaskID:   task.ID,
+		Stage:    "S3",
+		RuleID:   model.QACheckIDBaseResolution,
+		Severity: "error",
+		Summary:  "Pre-PR S3 could not resolve a verified merge-base against the target base branch.",
+		Evidence: resErr.Error(),
+	}})
+}
+
 func loadRecordedS3Outcome(ctx context.Context, store *model.Store, taskID, headSHA string) (passed, ran bool, tier qa.BlastTier, summary string) {
 	runs, err := store.ListQACheckRunsForTask(ctx, taskID)
 	if err != nil || len(runs) == 0 {
 		return false, false, qa.BlastT1, ""
 	}
-	passed = true
 	tier = qa.BlastT1
-	runIDs := map[int64]bool{}
+	latestVerdict := map[string]string{}
+	latestRunID := map[string]int64{}
+	bypassed := false
 	for _, r := range runs {
 		if r.Shadow || !isPrePRDeterministicOrCustomStage(r.Stage) || r.CommitSHA != headSHA {
 			continue
 		}
-		ran = true
-		runIDs[r.ID] = true
-		if r.Verdict == "fail" {
-			passed = false
+		if r.CheckID == model.QACheckIDS3OperatorBypass && r.Verdict == "bypassed" {
+			bypassed = true
+			continue
 		}
+		if r.CheckID == model.QACheckIDBaseResolution && r.Verdict == "error" {
+			// Do not cache transient base-resolution infrastructure errors as a completed S3 run.
+			continue
+		}
+		ran = true
+		latestVerdict[r.CheckID] = r.Verdict
+		latestRunID[r.CheckID] = r.ID
 		if r.DetailJSON != "" {
 			var meta struct {
 				BlastTier string `json:"blastTier"`
@@ -1195,14 +1262,25 @@ func loadRecordedS3Outcome(ctx context.Context, store *model.Store, taskID, head
 			}
 		}
 	}
+	if bypassed {
+		return true, true, tier, ""
+	}
 	if !ran {
 		return false, false, qa.BlastT1, ""
+	}
+	passed = true
+	failedRunIDs := map[int64]bool{}
+	for cid, v := range latestVerdict {
+		if v == "fail" {
+			passed = false
+			failedRunIDs[latestRunID[cid]] = true
+		}
 	}
 	if !passed {
 		findings, _ := store.ListQAFindingsForTask(ctx, taskID)
 		var lines []string
 		for _, f := range findings {
-			if runIDs[f.CheckRunID] {
+			if failedRunIDs[f.CheckRunID] {
 				loc := f.FilePath
 				if loc != "" && f.Line > 0 {
 					loc = fmt.Sprintf("%s:%d", loc, f.Line)
@@ -1214,6 +1292,115 @@ func loadRecordedS3Outcome(ctx context.Context, store *model.Store, taskID, head
 			"\nFix these issues, push to your branch, and call `open_pull_request`."
 	}
 	return passed, true, tier, summary
+}
+
+// BypassS3AndOpenPullRequestForTask executes an explicit human operator override of a
+// blocked S3 staging gate: it promotes grain-qa-stage/<id> (when present) to the task's
+// PR branch, clears any GateQA hold, opens/updates the pull request directly without
+// re-enforcing blocking S3/S4 gates, records an auditable qa:s3-operator-bypass check
+// run for the promoted commit, and leaves an audit note on the task.
+func BypassS3AndOpenPullRequestForTask(
+	ctx context.Context,
+	store *model.Store,
+	client github.Client,
+	task model.Task,
+	bypassedBy, reason string,
+) (PullRequestStatus, error) {
+	if store == nil || client == nil || task.Target == nil {
+		return PullRequestStatus{}, fmt.Errorf("orchestrator: cannot bypass S3 gate without store, git client, and target repository")
+	}
+	fresh, err := store.GetTask(ctx, task.ID)
+	if err != nil {
+		return PullRequestStatus{}, err
+	}
+	if fresh != nil {
+		task = *fresh
+	}
+
+	bypassedBy = strings.TrimSpace(bypassedBy)
+	if bypassedBy == "" {
+		bypassedBy = "operator"
+	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "Operator bypassed S3 pre-PR quality gate"
+	}
+
+	stageBranch := model.QAStageBranchName(task.ID)
+	prBranch := task.BranchName()
+	stageHead, err := client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, stageBranch)
+	if err != nil {
+		return PullRequestStatus{}, fmt.Errorf("orchestrator: checking staging branch %s: %w", stageBranch, err)
+	}
+
+	var headSHA string
+	if stageHead != nil && strings.TrimSpace(stageHead.SHA) != "" {
+		promotedSHA, pErr := promoteQAStageBranch(client, *task.Target, stageBranch, prBranch, stageHead.SHA)
+		if pErr != nil {
+			return PullRequestStatus{}, fmt.Errorf("orchestrator: promoting staging branch %s to %s: %w", stageBranch, prBranch, pErr)
+		}
+		headSHA = promotedSHA
+	} else {
+		prHead, pErr := client.GetBranchHead(task.Target.StoredOwner(), task.Target.Name, prBranch)
+		if pErr != nil {
+			return PullRequestStatus{}, fmt.Errorf("orchestrator: checking task branch %s: %w", prBranch, pErr)
+		}
+		if prHead == nil || strings.TrimSpace(prHead.SHA) == "" {
+			return PullRequestStatus{}, fmt.Errorf("orchestrator: neither staging branch %s nor task branch %s exists on %s", stageBranch, prBranch, *task.Target)
+		}
+		headSHA = prHead.SHA
+	}
+
+	clearTaskQAHold(ctx, store, task.ID)
+
+	var expID, armID, flowHash string
+	engineRev := qa.QAEngineRev
+	if assign, _, aErr := resolve.ActiveQAResolutionForTask(ctx, store, task.ID); aErr == nil && assign != nil {
+		expID = assign.ExperimentID
+		armID = assign.ArmID
+		flowHash = assign.FlowHash
+		if assign.QAEngineRev > 0 {
+			engineRev = assign.QAEngineRev
+		}
+	}
+	detailBytes, _ := json.Marshal(map[string]string{
+		"bypassedBy": bypassedBy,
+		"reason":     reason,
+	})
+	if _, rErr := store.RecordQACheckRun(ctx, model.QACheckRun{
+		TaskID:       task.ID,
+		CommitSHA:    headSHA,
+		Stage:        "S3",
+		CheckID:      model.QACheckIDS3OperatorBypass,
+		Arm:          model.QAArmTreatment,
+		Shadow:       false,
+		Verdict:      "bypassed",
+		DetailJSON:   string(detailBytes),
+		ExperimentID: expID,
+		ArmID:        armID,
+		FlowHash:     flowHash,
+		QAEngineRev:  engineRev,
+		Model:        task.Model,
+	}, nil); rErr != nil {
+		return PullRequestStatus{}, fmt.Errorf("orchestrator: recording S3 operator bypass: %w", rErr)
+	}
+
+	status, err := OpenPullRequestForTask(ctx, store, client, task)
+	if err != nil {
+		return PullRequestStatus{}, fmt.Errorf("orchestrator: opening pull request after S3 bypass: %w", err)
+	}
+
+	now := time.Now().UTC()
+	var note string
+	if status.PullRequest.Number > 0 {
+		note = fmt.Sprintf("Operator `%s` bypassed the S3 pre-PR quality gate on `%s` and opened PR #%d.\n\nReason: %s",
+			bypassedBy, shortSHA(headSHA), status.PullRequest.Number, reason)
+	} else {
+		note = fmt.Sprintf("Operator `%s` bypassed the S3 pre-PR quality gate on `%s` and promoted `%s` to `%s`.\n\nReason: %s",
+			bypassedBy, shortSHA(headSHA), stageBranch, prBranch, reason)
+	}
+	_ = noteOnTask(ctx, store, task.ID, note, now)
+	return status, nil
 }
 
 func runFreshContextS4(

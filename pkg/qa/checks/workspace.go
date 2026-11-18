@@ -32,6 +32,11 @@ import (
 // ErrFileNotFound indicates a requested relative file path does not exist at the queried revision.
 var ErrFileNotFound = errors.New("qa/checks: file not found")
 
+// ErrBaseResolutionFailed indicates that S3 could not determine a verified merge-base
+// against the target base branch. Callers must never fall back to the repository's
+// root/initial commit or empty tree.
+var ErrBaseResolutionFailed = errors.New("qa/checks: failed to resolve base commit")
+
 // CallSite records a 1-based line match for an exported symbol across the workspace.
 type CallSite struct {
 	File    string
@@ -146,29 +151,58 @@ func (w *SandboxWorkspace) resolveBaseRef(ctx context.Context) (string, error) {
 	baseHint := strings.TrimSpace(w.BaseBranch)
 	var script strings.Builder
 	fmt.Fprintf(&script, "cd %s && ", shellSingleQuote(w.workDir()))
+	script.WriteString(`try_mb() { if git rev-parse --verify --quiet "$1" >/dev/null 2>&1; then mb=$(git merge-base -- "$1" HEAD 2>/dev/null) && [ -n "$mb" ] && printf '%s\n' "$mb" && return 0; fi; return 1; }; `)
 	if baseHint != "" {
-		fmt.Fprintf(&script, "if git rev-parse --verify --quiet %s >/dev/null 2>&1; then git merge-base %s HEAD; exit 0; fi; ",
-			shellSingleQuote("origin/"+baseHint), shellSingleQuote("origin/"+baseHint))
-		fmt.Fprintf(&script, "if git rev-parse --verify --quiet %s >/dev/null 2>&1; then git merge-base %s HEAD; exit 0; fi; ",
-			shellSingleQuote(baseHint), shellSingleQuote(baseHint))
+		qOrigin := shellSingleQuote("origin/" + baseHint)
+		qLocal := shellSingleQuote(baseHint)
+		fmt.Fprintf(&script, "try_mb %s && exit 0; ", qOrigin)
+		fmt.Fprintf(&script, "try_mb %s && exit 0; ", qLocal)
+		// Fetch the target base branch from origin if missing locally or shallow.
+		fmt.Fprintf(&script, "git fetch --quiet --depth=64 origin %s >/dev/null 2>&1 || true; ", shellSingleQuote("+refs/heads/"+baseHint+":refs/remotes/origin/"+baseHint))
+		fmt.Fprintf(&script, "try_mb %s && exit 0; ", qOrigin)
+		fmt.Fprintf(&script, "git fetch --quiet --deepen=256 origin %s >/dev/null 2>&1 || true; ", shellSingleQuote("+refs/heads/"+baseHint+":refs/remotes/origin/"+baseHint))
+		fmt.Fprintf(&script, "try_mb %s && exit 0; ", qOrigin)
+		fmt.Fprintf(&script, "(git fetch --quiet --unshallow origin %s >/dev/null 2>&1 || git fetch --quiet origin %s >/dev/null 2>&1 || true); ",
+			shellSingleQuote("+refs/heads/"+baseHint+":refs/remotes/origin/"+baseHint),
+			shellSingleQuote("+refs/heads/"+baseHint+":refs/remotes/origin/"+baseHint))
+		fmt.Fprintf(&script, "try_mb %s && exit 0; ", qOrigin)
+		script.WriteString("echo 'could not resolve merge-base against target base branch' >&2; exit 1")
+	} else {
+		script.WriteString("try_mb origin/HEAD && exit 0; ")
+		script.WriteString("try_mb origin/main && exit 0; ")
+		script.WriteString("try_mb origin/master && exit 0; ")
+		// Resolve the remote default branch via git without relying on REST or root-commit fallbacks.
+		script.WriteString(`defref=$(git ls-remote --symref origin HEAD 2>/dev/null | awk '$1 == "ref:" && $3 == "HEAD" { sub("^refs/heads/", "", $2); print $2; exit }'); `)
+		script.WriteString(`if [ -n "$defref" ]; then `)
+		script.WriteString(`git fetch --quiet --depth=64 origin "+refs/heads/$defref:refs/remotes/origin/$defref" >/dev/null 2>&1 || true; `)
+		script.WriteString(`try_mb "refs/remotes/origin/$defref" && exit 0; `)
+		script.WriteString(`git fetch --quiet --deepen=256 origin "+refs/heads/$defref:refs/remotes/origin/$defref" >/dev/null 2>&1 || true; `)
+		script.WriteString(`try_mb "refs/remotes/origin/$defref" && exit 0; `)
+		script.WriteString(`(git fetch --quiet --unshallow origin "+refs/heads/$defref:refs/remotes/origin/$defref" >/dev/null 2>&1 || git fetch --quiet origin "+refs/heads/$defref:refs/remotes/origin/$defref" >/dev/null 2>&1 || true); `)
+		script.WriteString(`try_mb "refs/remotes/origin/$defref" && exit 0; `)
+		script.WriteString(`fi; `)
+		script.WriteString(`git fetch --quiet --depth=64 origin "+HEAD:refs/remotes/origin/__qa_default_head__" >/dev/null 2>&1 || true; `)
+		script.WriteString(`try_mb refs/remotes/origin/__qa_default_head__ && exit 0; `)
+		script.WriteString("echo 'could not resolve merge-base against remote default branch' >&2; exit 1")
 	}
-	script.WriteString("if git rev-parse --verify --quiet origin/HEAD >/dev/null 2>&1; then git merge-base origin/HEAD HEAD; exit 0; fi; ")
-	script.WriteString("if git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then git merge-base origin/main HEAD; exit 0; fi; ")
-	script.WriteString("if git rev-parse --verify --quiet origin/master >/dev/null 2>&1; then git merge-base origin/master HEAD; exit 0; fi; ")
-	script.WriteString("git rev-list --max-parents=0 HEAD | head -n 1")
 
 	out, isErr, err := w.RunCommand(ctx, script.String())
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("%w: %v", ErrBaseResolutionFailed, err)
 	}
 	ref := strings.TrimSpace(firstNonEmptyLine(out))
-	if isErr || ref == "" {
-		return "", fmt.Errorf("qa/checks: resolving base commit in sandbox: %s", strings.TrimSpace(out))
+	if isErr || ref == "" || !isLikelyGitSHA(ref) {
+		return "", fmt.Errorf("%w: resolving base commit in sandbox: %s", ErrBaseResolutionFailed, strings.TrimSpace(out))
 	}
 	w.mu.Lock()
 	w.resolvedRef = ref
 	w.mu.Unlock()
 	return ref, nil
+}
+
+// BaseSHA resolves and returns the verified merge-base commit SHA for the sandbox checkout.
+func (w *SandboxWorkspace) BaseSHA(ctx context.Context) (string, error) {
+	return w.resolveBaseRef(ctx)
 }
 
 func (w *SandboxWorkspace) HeadSHA(ctx context.Context) (string, error) {
@@ -323,8 +357,56 @@ type MirrorWorkspace struct {
 
 var mirrorMu sync.Mutex
 
+// resolveRemoteDefaultBranch discovers remoteURL's default branch via
+// `git ls-remote --symref <remoteURL> HEAD` without relying on forge REST APIs.
+func resolveRemoteDefaultBranch(ctx context.Context, bareDir, bearerToken, remoteURL string) (branchName, headSHA string, err error) {
+	out, lsErr := runBareGit(ctx, bareDir, bearerToken, "ls-remote", "--symref", "--end-of-options", remoteURL, "HEAD")
+	if lsErr != nil {
+		return "", "", fmt.Errorf("%w: git ls-remote HEAD failed: %v (%s)", ErrBaseResolutionFailed, lsErr, redactMirrorOutput(out, bearerToken))
+	}
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "ref:") {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 && fields[2] == "HEAD" && strings.HasPrefix(fields[1], "refs/heads/") {
+				branchName = strings.TrimPrefix(fields[1], "refs/heads/")
+			}
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) >= 2 && fields[1] == "HEAD" && isLikelyGitSHA(fields[0]) {
+			headSHA = fields[0]
+		}
+	}
+	if branchName != "" && headSHA == "" {
+		return "", "", fmt.Errorf("%w: remote HEAD points to unborn branch %q", ErrBaseResolutionFailed, branchName)
+	}
+	if branchName == "" && headSHA == "" {
+		return "", "", fmt.Errorf("%w: remote %s did not advertise HEAD", ErrBaseResolutionFailed, mirrorStableURL(remoteURL))
+	}
+	return branchName, headSHA, nil
+}
+
+func isLikelyGitSHA(s string) bool {
+	if len(s) < 7 || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 // OpenMirrorWorkspace fetches baseBranch and headBranch into a reusable bare git mirror under
 // cacheRoot and returns a MirrorWorkspace pinned to merge-base(baseBranch, headBranch)..headSHA.
+// When baseBranch is empty, it resolves the remote's default branch via git (never REST and never
+// falling back to the repository's initial/root commit).
 func OpenMirrorWorkspace(ctx context.Context, cacheRoot, remoteURL, bearerToken, baseBranch, headBranch string) (*MirrorWorkspace, error) {
 	headBranch = strings.TrimSpace(headBranch)
 	baseBranch = strings.TrimSpace(baseBranch)
@@ -349,15 +431,41 @@ func OpenMirrorWorkspace(ctx context.Context, cacheRoot, remoteURL, bearerToken,
 		}
 	}
 
-	refspecs := []string{
-		fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", headBranch, headBranch),
+	var baseRefspec, baseLocalRef, baseDesc string
+	if baseBranch == "" {
+		defBranch, defSHA, defErr := resolveRemoteDefaultBranch(ctx, bareDir, bearerToken, remoteURL)
+		if defErr != nil {
+			return nil, defErr
+		}
+		if defBranch != "" {
+			baseBranch = defBranch
+			baseRefspec = fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", baseBranch, baseBranch)
+			baseLocalRef = "refs/remotes/origin/" + baseBranch
+			baseDesc = "origin/" + baseBranch
+		} else if defSHA != "" {
+			baseRefspec = "+HEAD:refs/remotes/origin/__qa_default_head__"
+			baseLocalRef = "refs/remotes/origin/__qa_default_head__"
+			baseDesc = "origin/HEAD"
+		}
+	} else {
+		baseRefspec = fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", baseBranch, baseBranch)
+		baseLocalRef = "refs/remotes/origin/" + baseBranch
+		baseDesc = "origin/" + baseBranch
 	}
-	if baseBranch != "" {
-		refspecs = append(refspecs, fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", baseBranch, baseBranch))
+
+	headRefspec := fmt.Sprintf("+refs/heads/%s:refs/remotes/origin/%s", headBranch, headBranch)
+	refspecs := []string{headRefspec}
+	if baseRefspec != "" && baseRefspec != headRefspec {
+		refspecs = append(refspecs, baseRefspec)
 	}
+
 	fetchArgs := append([]string{"fetch", "--quiet", "--depth=64", "--end-of-options", remoteURL}, refspecs...)
 	if fetchOut, fetchErr := runBareGit(ctx, bareDir, bearerToken, fetchArgs...); fetchErr != nil {
-		return nil, fmt.Errorf("qa/checks: git fetch mirror: %v (%s)", fetchErr, redactMirrorOutput(fetchOut, bearerToken))
+		redacted := redactMirrorOutput(fetchOut, bearerToken)
+		if baseBranch != "" && strings.Contains(redacted, "refs/heads/"+baseBranch) {
+			return nil, fmt.Errorf("%w: git fetch base %s failed: %v (%s)", ErrBaseResolutionFailed, baseDesc, fetchErr, redacted)
+		}
+		return nil, fmt.Errorf("qa/checks: git fetch mirror: %v (%s)", fetchErr, redacted)
 	}
 
 	headOut, err := runBareGit(ctx, bareDir, "", "rev-parse", "--verify", "refs/remotes/origin/"+headBranch)
@@ -366,34 +474,36 @@ func OpenMirrorWorkspace(ctx context.Context, cacheRoot, remoteURL, bearerToken,
 	}
 	headSHA := strings.TrimSpace(headOut)
 
+	if _, err := runBareGit(ctx, bareDir, "", "rev-parse", "--verify", "--end-of-options", baseLocalRef); err != nil {
+		return nil, fmt.Errorf("%w: base ref %s missing after fetch: %v", ErrBaseResolutionFailed, baseDesc, err)
+	}
+
 	baseSHA := ""
-	if baseBranch != "" {
-		if mbOut, mbErr := runBareGit(ctx, bareDir, "", "merge-base", "--end-of-options", "refs/remotes/origin/"+baseBranch, headSHA); mbErr == nil {
-			baseSHA = strings.TrimSpace(mbOut)
+	mbOut, mbErr := runBareGit(ctx, bareDir, "", "merge-base", "--end-of-options", baseLocalRef, headSHA)
+	if mbErr == nil {
+		baseSHA = strings.TrimSpace(mbOut)
+	} else {
+		// Shallow 64-commit horizon missed the fork point: deepen and retry merge-base.
+		deepArgs := append([]string{"fetch", "--quiet", "--deepen=256", "--end-of-options", remoteURL}, refspecs...)
+		_, _ = runBareGit(ctx, bareDir, bearerToken, deepArgs...)
+		if mbOut2, mbErr2 := runBareGit(ctx, bareDir, "", "merge-base", "--end-of-options", baseLocalRef, headSHA); mbErr2 == nil {
+			baseSHA = strings.TrimSpace(mbOut2)
 		} else {
-			// Shallow 64-commit horizon missed the fork point: deepen and retry merge-base before falling back.
-			deepArgs := append([]string{"fetch", "--quiet", "--deepen=256", "--end-of-options", remoteURL}, refspecs...)
-			_, _ = runBareGit(ctx, bareDir, bearerToken, deepArgs...)
-			if mbOut2, mbErr2 := runBareGit(ctx, bareDir, "", "merge-base", "--end-of-options", "refs/remotes/origin/"+baseBranch, headSHA); mbErr2 == nil {
-				baseSHA = strings.TrimSpace(mbOut2)
+			unshallowArgs := append([]string{"fetch", "--quiet", "--unshallow", "--end-of-options", remoteURL}, refspecs...)
+			if _, uErr := runBareGit(ctx, bareDir, bearerToken, unshallowArgs...); uErr != nil {
+				// Mirror may already be complete (not shallow); run a full fetch instead.
+				fullArgs := append([]string{"fetch", "--quiet", "--end-of-options", remoteURL}, refspecs...)
+				_, _ = runBareGit(ctx, bareDir, bearerToken, fullArgs...)
+			}
+			if mbOut3, mbErr3 := runBareGit(ctx, bareDir, "", "merge-base", "--end-of-options", baseLocalRef, headSHA); mbErr3 == nil {
+				baseSHA = strings.TrimSpace(mbOut3)
 			} else {
-				unshallowArgs := append([]string{"fetch", "--quiet", "--unshallow", "--end-of-options", remoteURL}, refspecs...)
-				_, _ = runBareGit(ctx, bareDir, bearerToken, unshallowArgs...)
-				if mbOut3, mbErr3 := runBareGit(ctx, bareDir, "", "merge-base", "--end-of-options", "refs/remotes/origin/"+baseBranch, headSHA); mbErr3 == nil {
-					baseSHA = strings.TrimSpace(mbOut3)
-				} else if bOut, bErr := runBareGit(ctx, bareDir, "", "rev-parse", "--verify", "refs/remotes/origin/"+baseBranch); bErr == nil {
-					baseSHA = strings.TrimSpace(bOut)
-				}
+				return nil, fmt.Errorf("%w: could not compute merge-base between %s and %s: %v", ErrBaseResolutionFailed, baseDesc, headBranch, mbErr3)
 			}
 		}
 	}
-	if baseSHA == "" {
-		if rootOut, rErr := runBareGit(ctx, bareDir, "", "rev-list", "--max-parents=0", "--end-of-options", headSHA); rErr == nil {
-			baseSHA = strings.TrimSpace(firstNonEmptyLine(rootOut))
-		}
-	}
-	if baseSHA == "" {
-		baseSHA = headSHA
+	if !isLikelyGitSHA(baseSHA) {
+		return nil, fmt.Errorf("%w: invalid merge-base %q between %s and %s", ErrBaseResolutionFailed, baseSHA, baseDesc, headBranch)
 	}
 	return &MirrorWorkspace{
 		BareDir:    bareDir,
