@@ -2851,6 +2851,88 @@ func TestARetryRecoversFromABusyDatabase(t *testing.T) {
 	}
 }
 
+// A writer waiting on Store's in-process SQLite write queue returns as soon as
+// its context expires rather than sitting through busy_timeout, and leaves the
+// queue healthy for subsequent writes.
+func TestQueuedSQLiteWriteHonorsContextCancellation(t *testing.T) {
+	t.Parallel()
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	inTx := make(chan struct{})
+	release := make(chan struct{})
+	holderErr := make(chan error, 1)
+	go func() {
+		holderErr <- store.UpdateTask(ctx, "a1b2", func(tk *model.Task) error {
+			close(inTx)
+			<-release
+			tk.Title = "holder"
+			return nil
+		})
+	}()
+	<-inTx
+
+	waitCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := store.PutTask(waitCtx, task("c3d4", true))
+	elapsed := time.Since(started)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		close(release)
+		t.Fatalf("queued PutTask error = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed > 2*time.Second {
+		close(release)
+		t.Fatalf("queued PutTask waited %v for cancellation, want prompt exit", elapsed)
+	}
+
+	close(release)
+	if err := <-holderErr; err != nil {
+		t.Fatalf("holder UpdateTask failed: %v", err)
+	}
+	if err := store.PutTask(ctx, task("c3d4", true)); err != nil {
+		t.Fatalf("subsequent PutTask failed: %v", err)
+	}
+}
+
+// A panic inside a write callback must roll back SQLite's immediate write
+// transaction and release Store's in-process write queue so a recovered caller
+// (such as net/http) does not permanently wedge subsequent writes.
+func TestPanickingSQLiteWriteReleasesQueueAndLock(t *testing.T) {
+	t.Parallel()
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_ = store.UpdateTask(ctx, "a1b2", func(tk *model.Task) error {
+			tk.Title = "panicked"
+			panic("boom")
+		})
+	}()
+	if recovered != "boom" {
+		t.Fatalf("recovered = %v, want %q", recovered, "boom")
+	}
+
+	afterCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	if err := store.PutTask(afterCtx, task("c3d4", true)); err != nil {
+		t.Fatalf("PutTask after panicked write failed: %v", err)
+	}
+	got, err := store.GetTask(ctx, "a1b2")
+	if err != nil {
+		t.Fatalf("GetTask after panicked write: %v", err)
+	}
+	if got.Title == "panicked" {
+		t.Fatalf("panicked write was committed; title = %q", got.Title)
+	}
+}
+
 // The answer to "what if it crashes mid-write": an operation that does
 // not reach commit leaves nothing behind. There is no lock left held and
 // no merge to reconcile, so the failure needs no cleanup at all.

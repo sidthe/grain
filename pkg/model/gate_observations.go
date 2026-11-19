@@ -220,21 +220,32 @@ func captureProductReceipt(ctx context.Context, q querier, id string, closedAt *
 // The change belongs only to a leased connection and is restored before reuse;
 // Postgres already honors context while acquiring its advisory writer lock.
 func (s *Store) beginGateObservation(ctx context.Context) (*sql.Tx, func(), error) {
+	unlock, err := s.lockWrite(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	deadline, bounded := ctx.Deadline()
 	if !bounded || IsPostgresDB(s.db) {
 		tx, err := s.db.BeginTx(ctx, nil)
-		return tx, func() {}, err
+		if err != nil {
+			unlock()
+			return nil, nil, err
+		}
+		return tx, unlock, nil
 	}
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
+		unlock()
 		return nil, nil, err
 	}
 	var busy int
 	if err := conn.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&busy); err != nil {
 		_ = conn.Close()
+		unlock()
 		return nil, nil, err
 	}
 	release := func() {
+		defer unlock()
 		// Cleanup must survive the request's cancellation. If restoration
 		// fails, discard the connection rather than changing legacy writers.
 		restore, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -311,7 +322,19 @@ func (s *Store) observeTaskGates(ctx context.Context, id string, now time.Time, 
 		if err != nil {
 			return nil, nil, err
 		}
-		err = func() error {
+		err = func() (retErr error) {
+			defer func() {
+				_ = tx.Rollback()
+				release()
+			}()
+			defer func() {
+				if r := recover(); r != nil {
+					panic(r)
+				}
+				if retErr == nil {
+					retErr = tx.Commit()
+				}
+			}()
 			if err := authorizeObservationTask(ctx, tx, id); err != nil {
 				return err
 			}
@@ -602,13 +625,6 @@ func (s *Store) observeTaskGates(ctx context.Context, id string, now time.Time, 
 			}
 			return nil
 		}()
-		if err == nil {
-			err = tx.Commit()
-		} else {
-			_ = tx.Rollback()
-		}
-		_ = tx.Rollback()
-		release()
 		if err == nil {
 			if transient || !history {
 				return &view, nil, nil

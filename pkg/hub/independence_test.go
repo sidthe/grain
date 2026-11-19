@@ -15,6 +15,7 @@
 package hub_test
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -79,9 +80,11 @@ func runGoListInDir(t *testing.T, dir string, args ...string) []string {
 	cmd := exec.Command("go", append([]string{"list"}, args...)...)
 	cmd.Dir = dir
 	cmd.Env = os.Environ()
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("go list %s (dir=%s): %v\n%s", strings.Join(args, " "), dir, err, out)
+		t.Fatalf("go list %s (dir=%s): %v\n%s%s", strings.Join(args, " "), dir, err, out, stderr.String())
 	}
 	var lines []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {

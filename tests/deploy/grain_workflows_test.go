@@ -26,6 +26,7 @@ package deploy
 // dropped. It runs nothing, so it costs nothing.
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"os/exec"
@@ -1060,9 +1061,11 @@ func TestTheGoJobsCoverEveryPackageInTheModuleOnce(t *testing.T) {
 		args := append([]string{"list"}, patterns...)
 		cmd := exec.Command("go", args...)
 		cmd.Dir = root
-		out, err := cmd.CombinedOutput()
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
 		if err != nil {
-			t.Fatalf("go %s failed: %v\n%s", strings.Join(args, " "), err, out)
+			t.Fatalf("go %s failed: %v\n%s%s", strings.Join(args, " "), err, out, stderr.String())
 		}
 		var pkgs []string
 		for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
@@ -1808,9 +1811,11 @@ func TestEverythingTheGateDoesNotRunTheNightlyDoes(t *testing.T) {
 	// tests in (every one of them skips without it).
 	cmd := exec.Command("go", "list", "-f", "{{.ImportPath}} {{join .TestGoFiles \",\"}}", "./tests/installer/...")
 	cmd.Dir = root
-	out, err := cmd.CombinedOutput()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("go list ./tests/installer/...: %v\n%s", err, out)
+		t.Fatalf("go list ./tests/installer/...: %v\n%s%s", err, out, stderr.String())
 	}
 	const module = "github.com/ai-on-gke/grain/"
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
