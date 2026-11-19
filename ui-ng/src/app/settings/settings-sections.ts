@@ -321,10 +321,18 @@ export const SETTINGS_GROUPS: readonly SettingsGroupDef[] = [
         id: "general",
         label: "General",
         subtitle:
-          "Environment display name, settings UI lock, deployment ID, and live operator broadcast banner.",
+          "Instance display name, header color and pattern theme, settings UI lock, deployment ID, and live operator broadcast banner.",
         keywords: [
           "general",
           "environment",
+          "instance",
+          "instance name",
+          "identity",
+          "header",
+          "color",
+          "pattern",
+          "favicon",
+          "badge",
           "name",
           "broadcast",
           "banner",
@@ -546,7 +554,9 @@ export function filterSettingsGroups(query: string): SettingsGroupDef[] {
 }
 
 export const SETTING_LABELS: Readonly<Record<string, string>> = {
-  environmentName: "Environment name",
+  environmentName: "Instance name",
+  headerColor: "Header color theme",
+  headerPattern: "Header pattern",
   settingsLocked: "Lock settings in UI (require config repo PRs)",
   pollInterval: "Poll interval",
   maxWorkers: "Max worker agents",

@@ -122,6 +122,8 @@ var settingsAppliedLive = map[string]string{
 	"approvedByDefault":   "pkg/ui, which reads grain_config per request",
 	"autoMergeByDefault":  "pkg/ui, which reads grain_config per request",
 	"environmentName":     "pkg/ui, which reads grain_config per request (GET /api/config's own copy)",
+	"headerColor":         "pkg/ui, which reads grain_config per request (GET /api/config's own copy)",
+	"headerPattern":       "pkg/ui, which reads grain_config per request (GET /api/config's own copy)",
 	"upgradeCheckMode": "orchestrator's upgrade-check reconciler, which reads grain_config every cycle " +
 		"(reconcileUpgradeCheck's own upgradeCheckSettings)",
 	"upgradeCheckPausesPipeline": "orchestrator's upgrade-check reconciler, which reads grain_config every cycle " +

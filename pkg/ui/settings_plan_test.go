@@ -226,6 +226,8 @@ func everySettingChanged() ui.UpdateSettingsRequest {
 		NetworkAccess:               ptr(string(model.NetworkAccesses()[0])),
 		ShowClosedByDefault:         ptr(true),
 		EnvironmentName:             ptr("staging"),
+		HeaderColor:                 ptr("ocean"),
+		HeaderPattern:               ptr("waves"),
 		TimeZone:                    ptr("Europe/London"),
 		ApprovedByDefault:           ptr(false),
 		AutoMergeByDefault:          ptr(false),

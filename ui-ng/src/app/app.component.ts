@@ -22,6 +22,7 @@ import {
   NgZone,
   OnDestroy,
   OnInit,
+  afterNextRender,
   computed,
   effect,
   inject,
@@ -68,6 +69,7 @@ import { TipDirective, dismissActiveTooltip } from "./shared/tip.directive";
 import { AccountPopoverComponent } from "./shell/account-popover.component";
 import { CustomizeNavDialogComponent } from "./shell/customize-nav-dialog.component";
 import { HelpDialogComponent } from "./shell/help-dialog.component";
+import { InstanceIdentityPopoverComponent } from "./shell/instance-identity-popover.component";
 import { type Destination, SETTINGS, hrefFor } from "./shell/nav";
 import { DispatchBannerComponent } from "./shell/dispatch-banner.component";
 import { NavProgressComponent } from "./shell/nav-progress.component";
@@ -117,6 +119,7 @@ const ICONS: Record<string, string> = {
   tune: "M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z",
   director:
     "M12 2l2.1 5.9L20 10l-5.9 2.1L12 18l-2.1-5.9L4 10l5.9-2.1L12 2zm6.5 13l1.1 2.9 2.9 1.1-2.9 1.1L18.5 23l-1.1-2.9L14.5 19l2.9-1.1L18.5 15z",
+  edit: "M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a.996.996 0 0 0 0-1.41l-2.34-2.34a.996.996 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z",
 };
 
 type CreateItem =
@@ -176,6 +179,7 @@ export class DeferErrorDirective implements OnInit {
     DispatchBannerComponent,
     HelpDialogComponent,
     AccountPopoverComponent,
+    InstanceIdentityPopoverComponent,
     CustomizeNavDialogComponent,
     DirectorDrawerComponent,
   ],
@@ -533,7 +537,13 @@ export class DeferErrorDirective implements OnInit {
         }
       </ng-template>
 
-      <header class="top-bar" [attr.inert]="modalOpen() ? '' : null">
+      <header
+        class="top-bar"
+        [class.has-identity]="!!theme.effectiveEnvironmentName()"
+        [attr.data-header-color]="theme.effectiveHeaderColor() || null"
+        [attr.data-header-pattern]="theme.effectiveHeaderPattern() || null"
+        [attr.inert]="modalOpen() ? '' : null"
+      >
         <div class="top-brand-cluster">
           <svg
             class="mobile-brand-mark"
@@ -555,6 +565,60 @@ export class DeferErrorDirective implements OnInit {
             aria-label="Grain home: Inbox"
             >Grain</a
           >
+          @if (theme.effectiveEnvironmentName(); as envName) {
+            <span class="top-brand-sep" aria-hidden="true">/</span>
+            @if (canEditIdentity()) {
+              <button
+                #identityBadgeBtn
+                type="button"
+                class="instance-identity-pill is-interactive"
+                data-testid="instance-identity-badge"
+                [attr.aria-expanded]="identityOpen()"
+                aria-controls="instance-identity-popover"
+                [attr.aria-label]="
+                  'Instance identity: ' +
+                  envName +
+                  '. Customize instance name and header'
+                "
+                [gTip]="identityBadgeTip()"
+                (click)="toggleIdentityPopover($event)"
+              >
+                <span class="instance-identity-dot" aria-hidden="true"></span>
+                <span class="instance-identity-name">{{ envName }}</span>
+                <svg
+                  class="instance-identity-edit"
+                  width="13"
+                  height="13"
+                  viewBox="0 0 24 24"
+                  aria-hidden="true"
+                >
+                  <path [attr.d]="icons['edit']" fill="currentColor" />
+                </svg>
+              </button>
+            } @else {
+              <span
+                class="instance-identity-pill"
+                data-testid="instance-identity-badge"
+                [gTip]="identityBadgeTip()"
+              >
+                <span class="instance-identity-dot" aria-hidden="true"></span>
+                <span class="instance-identity-name">{{ envName }}</span>
+              </span>
+            }
+          } @else if (showNameCue()) {
+            <button
+              #identityCueBtn
+              type="button"
+              class="instance-name-cue"
+              data-testid="instance-name-cue"
+              [attr.aria-expanded]="identityOpen()"
+              aria-controls="instance-identity-popover"
+              gTip="Name and style this Grain instance so you can tell it apart from others"
+              (click)="toggleIdentityPopover($event)"
+            >
+              + Name instance
+            </button>
+          }
         </div>
         <div class="top-actions">
           <g-next-up />
@@ -1008,6 +1072,16 @@ export class DeferErrorDirective implements OnInit {
         }
       }
 
+      @defer (when identityOpen()) {
+        @if (identityOpen()) {
+          <g-instance-identity-popover (closed)="onIdentityClosed($event)" />
+        }
+      } @error {
+        @if (identityOpen()) {
+          <span gDeferError (recover)="onDeferError('identity')"></span>
+        }
+      }
+
       @defer (when navConfig.dialogOpen()) {
         @if (navConfig.dialogOpen()) {
           <g-customize-nav-dialog (closed)="onCustomizeNavClosed()" />
@@ -1199,8 +1273,40 @@ export class AppComponent implements OnInit, OnDestroy {
   protected readonly railMorePos = signal({ top: 0, left: 0 });
   protected readonly moreOpen = signal(false);
   protected readonly accountOpen = signal(false);
+  protected readonly identityOpen = signal(false);
   protected readonly prefersReducedMotion = signal(false);
   protected readonly spriteFailed = signal(false);
+
+  protected readonly identitySettingsLocked = computed(() => {
+    const c = this.access.rawConfig();
+    return Boolean(
+      c?.settingsLocked || c?.configRepoOnly || c?.externalConfigRepo,
+    );
+  });
+
+  protected readonly canEditIdentity = computed(
+    () =>
+      this.access.configLoaded() &&
+      this.access.can("POST /api/settings") &&
+      !this.identitySettingsLocked(),
+  );
+
+  protected readonly showNameCue = computed(
+    () => !this.theme.effectiveEnvironmentName() && this.canEditIdentity(),
+  );
+
+  protected readonly identityBadgeTip = computed(() => {
+    const env = this.theme.effectiveEnvironmentName();
+    const depId = (this.access.rawConfig()?.deploymentId ?? "").trim();
+    const parts = [env];
+    if (depId) parts.push(`Deployment ID: ${depId}`);
+    if (this.canEditIdentity()) {
+      parts.push("Click to customize");
+    } else if (this.identitySettingsLocked()) {
+      parts.push("Managed via grain/config PRs");
+    }
+    return parts.join(" · ");
+  });
 
   protected readonly directorLive = computed(
     () => this.sessionsRef()?.directorLiveStatus().live ?? false,
@@ -1265,6 +1371,10 @@ export class AppComponent implements OnInit, OnDestroy {
     viewChild<ElementRef<HTMLInputElement>>("searchInput");
   private readonly avatarBtn =
     viewChild<ElementRef<HTMLButtonElement>>("avatarBtn");
+  private readonly identityBadgeBtn =
+    viewChild<ElementRef<HTMLButtonElement>>("identityBadgeBtn");
+  private readonly identityCueBtn =
+    viewChild<ElementRef<HTMLButtonElement>>("identityCueBtn");
   private readonly directorBtn =
     viewChild<ElementRef<HTMLButtonElement>>("directorBtn");
 
@@ -1588,6 +1698,29 @@ export class AppComponent implements OnInit, OnDestroy {
     }
   }
 
+  protected toggleIdentityPopover(ev: Event): void {
+    ev.stopPropagation();
+    const next = !this.identityOpen();
+    this.closeMenus();
+    this.identityOpen.set(next);
+  }
+
+  protected onIdentityClosed(restoreFocus: boolean): void {
+    this.identityOpen.set(false);
+    this.theme.clearHeaderPreview();
+    if (restoreFocus) {
+      afterNextRender(
+        () => {
+          (
+            this.identityBadgeBtn()?.nativeElement ??
+            this.identityCueBtn()?.nativeElement
+          )?.focus();
+        },
+        { injector: this.injector },
+      );
+    }
+  }
+
   protected toggleDirector(ev: Event): void {
     const opener = ev.currentTarget as HTMLElement | null;
     this.closeMenus();
@@ -1619,7 +1752,8 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   protected onDeferError(
-    which: "create" | "help" | "account" | "customize" | "director",
+    which:
+      "create" | "help" | "account" | "identity" | "customize" | "director",
   ): void {
     const action = { label: "Reload", run: () => this.reloadApp() };
     if (which === "director") {
@@ -1646,6 +1780,12 @@ export class AppComponent implements OnInit, OnDestroy {
       this.onAccountClosed(true);
       this.snackbar.show(
         "Account menu could not load. Reload the page and try again.",
+        action,
+      );
+    } else if (which === "identity") {
+      this.onIdentityClosed(true);
+      this.snackbar.show(
+        "Instance identity popover could not load. Reload the page and try again.",
         action,
       );
     } else {
@@ -1681,6 +1821,10 @@ export class AppComponent implements OnInit, OnDestroy {
     this.railMoreOpen.set(false);
     this.moreOpen.set(false);
     this.accountOpen.set(false);
+    if (this.identityOpen()) {
+      this.identityOpen.set(false);
+      this.theme.clearHeaderPreview();
+    }
   }
 
   open(d: Destination): void {

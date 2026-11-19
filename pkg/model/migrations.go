@@ -1160,6 +1160,14 @@ var Migrations = []Migration{
 		},
 	},
 	{Version: 152, Description: "record pending PR feedback with source identity", Statements: []string{prFeedbackTable}},
+	{
+		Version:     153,
+		Description: "add grain_config.header_color and grain_config.header_pattern for instance header theming",
+		Statements: []string{
+			"ALTER TABLE `grain_config` ADD COLUMN `header_color` TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE `grain_config` ADD COLUMN `header_pattern` TEXT NOT NULL DEFAULT ''",
+		},
+	},
 }
 
 // schema99AutoUpgradeReleaseTable is auto_upgrade_release as schema 99

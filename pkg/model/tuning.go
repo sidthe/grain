@@ -72,6 +72,8 @@ var RecognizedGrainConfigParameters = map[string]struct{}{
 	"task_defaults_on_backfilled":     {},
 	"default_capabilities":            {},
 	"environment_name":                {},
+	"header_color":                    {},
+	"header_pattern":                  {},
 	"prompt_extension":                {},
 	"task_branch_template":            {},
 	"deployment_id":                   {},

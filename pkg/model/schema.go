@@ -692,7 +692,10 @@ import "strconv"
 // 151 adds operator-only `qa_flow_ref` to `template`, `suite`, `schedule`,
 // `repo_config`, and `task`.
 // 152 records PR feedback source receipts and their delivery acknowledgments.
-const SchemaVersion = 152
+// 153 adds `grain_config`.`header_color` and `grain_config`.`header_pattern`
+// (model.Config.HeaderColor, model.Config.HeaderPattern): curated top-bar
+// color and pattern presets for distinguishing simultaneous deployments.
+const SchemaVersion = 153
 
 const qaExperimentTable = `CREATE TABLE IF NOT EXISTS ` + "`qa_experiment`" + ` (
   ` + "`id`" + `                   TEXT     NOT NULL PRIMARY KEY,
@@ -2897,6 +2900,8 @@ var Tables = []string{
   ` + "`sandbox_shape_limits`" + `         TEXT    NOT NULL DEFAULT '',
   ` + "`auto_upgrade_min_interval_hours`" + ` INTEGER NOT NULL DEFAULT 6,
   ` + "`qa`" + `                            TEXT    NOT NULL DEFAULT '',
+  ` + "`header_color`" + `                  TEXT    NOT NULL DEFAULT '',
+  ` + "`header_pattern`" + `                TEXT    NOT NULL DEFAULT '',
   PRIMARY KEY (` + "`id`" + `)
 )`,
 

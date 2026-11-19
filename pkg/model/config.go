@@ -691,6 +691,14 @@ type Config struct {
 	// trims it so a stray space is not the difference between named and
 	// unnamed.
 	EnvironmentName string
+	// HeaderColor is the curated header color preset for this deployment's
+	// top bar and tab favicon ("", "ocean", "teal", "forest", "amber",
+	// "coral", "plum", "slate"). Empty means the default neutral header.
+	HeaderColor string
+	// HeaderPattern is the curated subtle SVG background pattern for this
+	// deployment's top bar ("", "dots", "diagonal", "grid", "waves"). Empty
+	// means solid (no pattern).
+	HeaderPattern string
 	// HubEnvironmentName is the environment name a Grain Hub last gave
 	// this deployment as its default -- a hosted instance's hub entry's
 	// display name or entry name, through -default-environment-name, or a
@@ -1209,6 +1217,121 @@ func ValidUpgradeCheckMode(mode string) bool {
 		return true
 	}
 	return false
+}
+
+// Curated top-bar color presets for Config.HeaderColor. Empty means the
+// default neutral header.
+const (
+	HeaderColorDefault = ""
+	HeaderColorOcean   = "ocean"
+	HeaderColorTeal    = "teal"
+	HeaderColorForest  = "forest"
+	HeaderColorAmber   = "amber"
+	HeaderColorCoral   = "coral"
+	HeaderColorPlum    = "plum"
+	HeaderColorSlate   = "slate"
+)
+
+// Curated top-bar SVG pattern presets for Config.HeaderPattern. Empty means
+// solid (no pattern).
+const (
+	HeaderPatternDefault  = ""
+	HeaderPatternDots     = "dots"
+	HeaderPatternDiagonal = "diagonal"
+	HeaderPatternGrid     = "grid"
+	HeaderPatternWaves    = "waves"
+)
+
+// HeaderColors is the ordered allowlist of valid Config.HeaderColor values.
+func HeaderColors() []string {
+	return []string{
+		HeaderColorDefault,
+		HeaderColorOcean,
+		HeaderColorTeal,
+		HeaderColorForest,
+		HeaderColorAmber,
+		HeaderColorCoral,
+		HeaderColorPlum,
+		HeaderColorSlate,
+	}
+}
+
+// HeaderPatterns is the ordered allowlist of valid Config.HeaderPattern values.
+func HeaderPatterns() []string {
+	return []string{
+		HeaderPatternDefault,
+		HeaderPatternDots,
+		HeaderPatternDiagonal,
+		HeaderPatternGrid,
+		HeaderPatternWaves,
+	}
+}
+
+// ValidHeaderColor reports whether v is an allowed Config.HeaderColor value.
+func ValidHeaderColor(v string) bool {
+	switch v {
+	case HeaderColorDefault,
+		HeaderColorOcean,
+		HeaderColorTeal,
+		HeaderColorForest,
+		HeaderColorAmber,
+		HeaderColorCoral,
+		HeaderColorPlum,
+		HeaderColorSlate:
+		return true
+	}
+	return false
+}
+
+// ValidHeaderPattern reports whether v is an allowed Config.HeaderPattern value.
+func ValidHeaderPattern(v string) bool {
+	switch v {
+	case HeaderPatternDefault,
+		HeaderPatternDots,
+		HeaderPatternDiagonal,
+		HeaderPatternGrid,
+		HeaderPatternWaves:
+		return true
+	}
+	return false
+}
+
+// ParseHeaderColor trims surrounding space and strictly validates a
+// Config.HeaderColor against the curated allowlist.
+func ParseHeaderColor(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if ValidHeaderColor(v) {
+		return v, nil
+	}
+	return "", fmt.Errorf("invalid header color %q: must be empty or one of ocean, teal, forest, amber, coral, plum, slate", raw)
+}
+
+// ParseHeaderPattern trims surrounding space and strictly validates a
+// Config.HeaderPattern against the curated allowlist.
+func ParseHeaderPattern(raw string) (string, error) {
+	v := strings.TrimSpace(raw)
+	if ValidHeaderPattern(v) {
+		return v, nil
+	}
+	return "", fmt.Errorf("invalid header pattern %q: must be empty or one of dots, diagonal, grid, waves", raw)
+}
+
+// NormalizeHeaderColor returns raw if it is a valid preset, or "" otherwise.
+func NormalizeHeaderColor(raw string) string {
+	v := strings.TrimSpace(raw)
+	if ValidHeaderColor(v) {
+		return v
+	}
+	return HeaderColorDefault
+}
+
+// NormalizeHeaderPattern returns raw if it is a valid preset, or "" otherwise.
+func NormalizeHeaderPattern(raw string) string {
+	v := strings.TrimSpace(raw)
+	if ValidHeaderPattern(v) {
+		return v
+	}
+	return HeaderPatternDefault
 }
 
 // DefaultConfig is the configuration a deployment that has never chosen

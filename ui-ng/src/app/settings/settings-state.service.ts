@@ -13,7 +13,14 @@
 // limitations under the License.
 
 import { HttpErrorResponse } from "@angular/common/http";
-import { Injectable, computed, inject, signal } from "@angular/core";
+import {
+  Injectable,
+  computed,
+  effect,
+  inject,
+  signal,
+  untracked,
+} from "@angular/core";
 import { GrainApi } from "../api/grain-api.service";
 import type { GrainConfig } from "../api/models";
 import { AccessService } from "../services/access.service";
@@ -115,6 +122,36 @@ export class SettingsStateService {
   private reachableInflight: Promise<ReachableReposState> | null = null;
   readonly reachableEpoch = signal(0);
   readonly qaRolloutRaw = signal<{ epoch: number; text: string } | null>(null);
+
+  constructor() {
+    effect(() => {
+      const epoch = this.access.configPatchEpoch();
+      if (epoch === 0) return;
+      untracked(() => {
+        const cfg = this.access.rawConfig();
+        if (!cfg || !this.initialized()) return;
+        const draft = this.draft();
+        const cur = this.settings();
+        let changed = false;
+        const next = { ...cur };
+        for (const key of [
+          "environmentName",
+          "headerColor",
+          "headerPattern",
+        ] as const) {
+          if (key in draft || !(key in cfg)) continue;
+          const val = cfg[key] ?? "";
+          if (cur[key] !== val) {
+            next[key] = val;
+            changed = true;
+          }
+        }
+        if (changed) {
+          this.settings.set(next);
+        }
+      });
+    });
+  }
 
   recordError(err: unknown): void {
     const changes = extractRefusedChanges(err);
@@ -487,6 +524,7 @@ export class SettingsStateService {
         );
         if (saved && typeof saved === "object") {
           this.settings.set(saved);
+          this.syncShellConfigFromSaved(saved, settingsPayload);
         }
         this.draft.set({});
         this.qaRolloutRaw.set(null);
@@ -514,6 +552,50 @@ export class SettingsStateService {
       this.recordError(err);
     } finally {
       this.saving.set(false);
+    }
+  }
+
+  private syncShellConfigFromSaved(
+    saved: Record<string, unknown>,
+    payload: Record<string, unknown>,
+  ): void {
+    const patch: Partial<GrainConfig> = {};
+    if (typeof saved["environmentName"] === "string") {
+      patch.environmentName = saved["environmentName"];
+    } else if (typeof payload["environmentName"] === "string") {
+      patch.environmentName = payload["environmentName"].trim();
+    }
+    if (typeof saved["headerColor"] === "string") {
+      patch.headerColor = saved["headerColor"];
+    } else if (typeof payload["headerColor"] === "string") {
+      patch.headerColor = payload["headerColor"];
+    }
+    if (typeof saved["headerPattern"] === "string") {
+      patch.headerPattern = saved["headerPattern"];
+    } else if (typeof payload["headerPattern"] === "string") {
+      patch.headerPattern = payload["headerPattern"];
+    }
+    if (typeof saved["settingsLocked"] === "boolean") {
+      patch.settingsLocked = saved["settingsLocked"];
+    }
+    if (typeof saved["configRepoOnly"] === "boolean") {
+      patch.configRepoOnly = saved["configRepoOnly"];
+    }
+    const savedDepId =
+      typeof saved["deploymentId"] === "string"
+        ? saved["deploymentId"].trim()
+        : "";
+    const defaultDepId =
+      typeof saved["deploymentIdDefault"] === "string"
+        ? saved["deploymentIdDefault"].trim()
+        : "";
+    const resolvedDepId = savedDepId || defaultDepId;
+    if (resolvedDepId) {
+      patch.deploymentId = resolvedDepId;
+    }
+    if (Object.keys(patch).length > 0) {
+      this.access.patchConfig(patch);
+      this.config.update((prev) => (prev ? { ...prev, ...patch } : prev));
     }
   }
 }
