@@ -57,6 +57,7 @@ import {
   formatStageModeLabel,
   formatStepModeLabel,
   isCustomStageAnchor,
+  normalizeDecomposeTierModes,
   resolvePatternSamplePath,
   serializePatternFixtures,
   stageModePillClass,
@@ -827,13 +828,16 @@ export class QaV3StudioComponent {
   readonly s0OnClarification = signal<string | undefined>(undefined);
 
   readonly decomposeEnabled = signal(false);
-  readonly decomposeMode = signal<"off" | "slice_plan" | "propose_dag">(
+  readonly decomposeMode = signal<"" | "off" | "slice_plan" | "propose_dag">(
     "slice_plan",
   );
   readonly decomposeComplexities = signal<readonly string[]>([
     "medium",
     "high",
   ]);
+  readonly decomposeTierModes = signal<
+    Readonly<Record<string, string>> | undefined
+  >(undefined);
   readonly decomposeMaxSubtasks = signal(4);
   readonly decomposeTargetDiffLines = signal(400);
 
@@ -949,6 +953,8 @@ export class QaV3StudioComponent {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean);
+    const tierModes = this.decomposeTierModes();
+    const decomposeMode = this.decomposeMode();
     return buildClientWorkflowStagesView(det, {
       preferLiveDraft: true,
       s0Intent: this.s0Intent(),
@@ -956,8 +962,11 @@ export class QaV3StudioComponent {
       s5Triage: this.s5Triage(),
       decompose: {
         enabled: this.decomposeEnabled(),
-        mode: this.decomposeMode(),
-        complexities: [...this.decomposeComplexities()],
+        ...(decomposeMode ? { mode: decomposeMode } : {}),
+        ...(this.decomposeComplexities().length > 0
+          ? { complexities: [...this.decomposeComplexities()] }
+          : {}),
+        ...(tierModes ? { tierModes: { ...tierModes } } : {}),
         maxSubtasks: this.decomposeMaxSubtasks(),
         targetDiffLines: this.decomposeTargetDiffLines(),
       },
@@ -1082,6 +1091,7 @@ export class QaV3StudioComponent {
     () =>
       this.s0Intent() ||
       this.decomposeEnabled() ||
+      Boolean(this.decomposeTierModes()) ||
       this.contextEnabled() ||
       this.s2PlanCritic() ||
       this.s5Triage() !== "off" ||
@@ -1285,15 +1295,25 @@ export class QaV3StudioComponent {
     }
 
     if (effectiveV4?.decompose) {
+      const rawTierModes = normalizeDecomposeTierModes(effectiveV4.decompose);
       this.decomposeEnabled.set(effectiveV4.decompose.enabled ?? true);
-      const dm = effectiveV4.decompose.mode;
-      this.decomposeMode.set(
-        dm === "off" || dm === "propose_dag" ? dm : "slice_plan",
-      );
+      const dm = (effectiveV4.decompose.mode ?? "").trim();
+      if (dm === "off" || dm === "slice_plan" || dm === "propose_dag") {
+        this.decomposeMode.set(dm);
+      } else if (rawTierModes) {
+        this.decomposeMode.set("");
+      } else {
+        this.decomposeMode.set("slice_plan");
+      }
       this.decomposeComplexities.set(
         effectiveV4.decompose.complexities?.length
           ? [...effectiveV4.decompose.complexities]
-          : ["medium", "high"],
+          : rawTierModes
+            ? []
+            : ["medium", "high"],
+      );
+      this.decomposeTierModes.set(
+        rawTierModes ? { ...rawTierModes } : undefined,
       );
       this.decomposeMaxSubtasks.set(
         effectiveV4.decompose.maxSubtasks ??
@@ -1309,6 +1329,7 @@ export class QaV3StudioComponent {
       this.decomposeEnabled.set(isV4);
       this.decomposeMode.set("slice_plan");
       this.decomposeComplexities.set(["medium", "high"]);
+      this.decomposeTierModes.set(undefined);
       this.decomposeMaxSubtasks.set(4);
       this.decomposeTargetDiffLines.set(400);
     }
@@ -2368,10 +2389,14 @@ export class QaV3StudioComponent {
     const s2MaxBounces = this.s2MaxBounces();
     const s5AutoTiers = this.s5AutoMergeTiers();
     const s5HumanTiers = this.s5RequireHumanTiers();
+    const decomposeTierModes = this.decomposeTierModes();
+    const decomposeMode = this.decomposeMode();
     const decomposeComplexities =
       this.decomposeComplexities().length > 0
         ? [...this.decomposeComplexities()]
-        : ["medium", "high"];
+        : decomposeTierModes
+          ? []
+          : ["medium", "high"];
     const baseVerifier =
       det?.declarationV4?.verifier ?? det?.declaration?.verifier;
     return {
@@ -2426,8 +2451,11 @@ export class QaV3StudioComponent {
       },
       decompose: {
         enabled: this.decomposeEnabled(),
-        mode: this.decomposeMode(),
-        complexities: decomposeComplexities,
+        ...(decomposeMode ? { mode: decomposeMode } : {}),
+        ...(decomposeComplexities.length > 0
+          ? { complexities: decomposeComplexities }
+          : {}),
+        ...(decomposeTierModes ? { tierModes: { ...decomposeTierModes } } : {}),
         maxSubtasks: this.decomposeMaxSubtasks(),
         targetDiffLines: this.decomposeTargetDiffLines(),
       },
@@ -2694,10 +2722,14 @@ export class QaV3StudioComponent {
         : ["medium", "high"];
     const s2Complexities =
       this.s2Complexities().length > 0 ? [...this.s2Complexities()] : ["high"];
+    const decomposeTierModes = this.decomposeTierModes();
+    const decomposeMode = this.decomposeMode();
     const decomposeComplexities =
       this.decomposeComplexities().length > 0
         ? [...this.decomposeComplexities()]
-        : ["medium", "high"];
+        : decomposeTierModes
+          ? []
+          : ["medium", "high"];
     let s0Yaml = `  s0-intent:\n    enabled: ${this.s0Intent()}\n    complexities: ${yamlJson(s0Complexities)}\n`;
     if (this.s0MaxSeconds() !== undefined) {
       s0Yaml += `    max-seconds: ${this.s0MaxSeconds()}\n`;
@@ -2731,6 +2763,32 @@ export class QaV3StudioComponent {
     if (s5Human && s5Human.length > 0) {
       s5Yaml += `    require-human-tiers: ${yamlJson(s5Human)}\n`;
     }
+    let decomposeYaml = `decompose:\n  enabled: ${this.decomposeEnabled()}\n`;
+    if (decomposeMode) {
+      decomposeYaml += `  mode: ${yamlQuote(decomposeMode)}\n`;
+    }
+    if (decomposeComplexities.length > 0) {
+      decomposeYaml += `  complexities: ${yamlJson(decomposeComplexities)}\n`;
+    }
+    if (decomposeTierModes) {
+      const canonicalOrder = ["low", "medium", "high"];
+      const orderedKeys = [
+        ...canonicalOrder.filter((k) =>
+          Object.prototype.hasOwnProperty.call(decomposeTierModes, k),
+        ),
+        ...Object.keys(decomposeTierModes)
+          .filter((k) => !canonicalOrder.includes(k))
+          .sort(),
+      ];
+      if (orderedKeys.length > 0) {
+        decomposeYaml += "  tier-modes:\n";
+        for (const k of orderedKeys) {
+          const yamlKey = /^[a-zA-Z0-9_-]+$/.test(k) ? k : yamlQuote(k);
+          decomposeYaml += `    ${yamlKey}: ${yamlQuote(decomposeTierModes[k])}\n`;
+        }
+      }
+    }
+    decomposeYaml += `  max-subtasks: ${this.decomposeMaxSubtasks()}\n  target-diff-lines: ${this.decomposeTargetDiffLines()}\n`;
     const resolvedSchema = this.editing()
       ? this.draftSchema() || "grain.dev/qa-flow/v4"
       : "grain.dev/qa-flow/v4";
@@ -2739,7 +2797,7 @@ export class QaV3StudioComponent {
     if (resolvedSchema === "grain.dev/qa-flow/v2") {
       return `schema: ${yamlQuote(resolvedSchema)}\nkey: ${yamlQuote(resolvedKey)}\nextends: ${yamlQuote(resolvedExtends)}\nlabel: ${yamlQuote(resolvedLabel)}\nsummary: ${yamlQuote(resolvedSummary)}\nskill:\n  mode: ${yamlQuote(skillMode)}\n  text: ${yamlQuote(skillText)}\n  max-bytes: ${skillMaxBytes}\n${builtinSection}stop-nudge: ${this.stopNudge()}\nverifier:\n  enabled: ${this.verifierEnabled()}\n  tiers: ${yamlJson(verifierTiers)}\n  max-repair-rounds: ${verifierRounds}\n  max-seconds: ${verifierSeconds}\n${verifierTokensLine}  checklist: ${yamlQuote(verifierChecklist)}\n`;
     }
-    return `schema: ${yamlQuote(resolvedSchema)}\nkey: ${yamlQuote(resolvedKey)}\nextends: ${yamlQuote(resolvedExtends)}\nlabel: ${yamlQuote(resolvedLabel)}\nsummary: ${yamlQuote(resolvedSummary)}\nskill:\n  mode: ${yamlQuote(skillMode)}\n  text: ${yamlQuote(skillText)}\n  max-bytes: ${skillMaxBytes}\n${builtinSection}decompose:\n  enabled: ${this.decomposeEnabled()}\n  mode: ${yamlQuote(this.decomposeMode())}\n  complexities: ${yamlJson(decomposeComplexities)}\n  max-subtasks: ${this.decomposeMaxSubtasks()}\n  target-diff-lines: ${this.decomposeTargetDiffLines()}\ncontext:\n  enabled: ${this.contextEnabled()}\n  include-callers: ${this.contextIncludeCallers()}\n  include-memory: ${this.contextIncludeMemory()}\n  max-tokens: ${this.contextMaxTokens()}\n  extra-paths: ${yamlJson(this.contextExtraPaths())}\n${packsSection}${stepsSection}pr-contract:\n  enabled: ${this.prEnabled()}\n  mode: ${yamlQuote(this.prMode())}\n  max-subject-chars: ${this.prMaxSubjectChars()}\n  required-sections: ${yamlJson(prSections)}\n  audit-lint-suppressions: ${this.prAuditLint()}\n  guidance-text: ${yamlQuote(this.prGuidanceText())}\nstop-nudge: ${this.stopNudge()}\nverifier:\n  enabled: ${this.verifierEnabled()}\n  tiers: ${yamlJson(verifierTiers)}\n  max-repair-rounds: ${verifierRounds}\n  max-seconds: ${verifierSeconds}\n${verifierTokensLine}  checklist: ${yamlQuote(verifierChecklist)}\nstages:\n${s0Yaml}${s2Yaml}${s5Yaml}${stagesSection}${checksSection}`;
+    return `schema: ${yamlQuote(resolvedSchema)}\nkey: ${yamlQuote(resolvedKey)}\nextends: ${yamlQuote(resolvedExtends)}\nlabel: ${yamlQuote(resolvedLabel)}\nsummary: ${yamlQuote(resolvedSummary)}\nskill:\n  mode: ${yamlQuote(skillMode)}\n  text: ${yamlQuote(skillText)}\n  max-bytes: ${skillMaxBytes}\n${builtinSection}${decomposeYaml}context:\n  enabled: ${this.contextEnabled()}\n  include-callers: ${this.contextIncludeCallers()}\n  include-memory: ${this.contextIncludeMemory()}\n  max-tokens: ${this.contextMaxTokens()}\n  extra-paths: ${yamlJson(this.contextExtraPaths())}\n${packsSection}${stepsSection}pr-contract:\n  enabled: ${this.prEnabled()}\n  mode: ${yamlQuote(this.prMode())}\n  max-subject-chars: ${this.prMaxSubjectChars()}\n  required-sections: ${yamlJson(prSections)}\n  audit-lint-suppressions: ${this.prAuditLint()}\n  guidance-text: ${yamlQuote(this.prGuidanceText())}\nstop-nudge: ${this.stopNudge()}\nverifier:\n  enabled: ${this.verifierEnabled()}\n  tiers: ${yamlJson(verifierTiers)}\n  max-repair-rounds: ${verifierRounds}\n  max-seconds: ${verifierSeconds}\n${verifierTokensLine}  checklist: ${yamlQuote(verifierChecklist)}\nstages:\n${s0Yaml}${s2Yaml}${s5Yaml}${stagesSection}${checksSection}`;
   }
 
   async runFixtureSelfTest(): Promise<void> {

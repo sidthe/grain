@@ -22,10 +22,93 @@ export interface DecomposeDecl {
   enabled?: boolean;
   mode?: "off" | "slice_plan" | "propose_dag" | string;
   complexities?: string[];
+  tierModes?: Record<string, string>;
+  "tier-modes"?: Record<string, string>;
   maxSubtasks?: number;
   "max-subtasks"?: number;
   targetDiffLines?: number;
   "target-diff-lines"?: number;
+}
+
+const CANONICAL_DECOMPOSE_TIERS = ["low", "medium", "high"] as const;
+type DecomposeTier = (typeof CANONICAL_DECOMPOSE_TIERS)[number];
+
+export function normalizeDecomposeTierModes(
+  decomp: DecomposeDecl | undefined,
+): Record<string, string> | undefined {
+  const raw = decomp?.tierModes ?? decomp?.["tier-modes"];
+  if (!raw || typeof raw !== "object") return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === "string" && v.trim()) {
+      out[k] = v.trim();
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+export function effectiveDecomposeModeForTier(
+  decomp: DecomposeDecl | undefined,
+  tier: DecomposeTier,
+): string {
+  if (!decomp?.enabled) return "";
+  const tierModes = normalizeDecomposeTierModes(decomp);
+  if (tierModes && Object.prototype.hasOwnProperty.call(tierModes, tier)) {
+    const m = tierModes[tier].trim().toLowerCase();
+    return m && m !== "off" ? m : "";
+  }
+  let baseMode = (decomp.mode ?? "").trim().toLowerCase();
+  if (!baseMode && !tierModes) {
+    baseMode = "slice_plan";
+  }
+  if (!baseMode || baseMode === "off") return "";
+  const comps = decomp.complexities;
+  if (comps && comps.length > 0) {
+    const matched = comps.some((c) => {
+      const norm = c.trim().toLowerCase();
+      return (norm === "large" ? "high" : norm) === tier;
+    });
+    if (!matched) return "";
+  }
+  return baseMode;
+}
+
+export function isDecomposeActive(decomp: DecomposeDecl | undefined): boolean {
+  return CANONICAL_DECOMPOSE_TIERS.some(
+    (t) => effectiveDecomposeModeForTier(decomp, t) !== "",
+  );
+}
+
+export function decomposeActiveTiers(
+  decomp: DecomposeDecl | undefined,
+): DecomposeTier[] {
+  return CANONICAL_DECOMPOSE_TIERS.filter(
+    (t) => effectiveDecomposeModeForTier(decomp, t) !== "",
+  );
+}
+
+function decomposeModeRank(mode: string): number {
+  switch (mode.trim().toLowerCase()) {
+    case "propose_dag":
+      return 2;
+    case "slice_plan":
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+export function decomposeDisplayMode(
+  decomp: DecomposeDecl | undefined,
+): string {
+  let best = "";
+  for (const t of CANONICAL_DECOMPOSE_TIERS) {
+    const m = effectiveDecomposeModeForTier(decomp, t);
+    if (decomposeModeRank(m) > decomposeModeRank(best)) {
+      best = m;
+    }
+  }
+  return best || "off";
 }
 
 export interface ContextDiscoveryDecl {
@@ -719,7 +802,9 @@ export function buildClientWorkflowStagesView(
       maxSubtasks: 4,
       targetDiffLines: 400,
     };
-  const decompEnabled = Boolean(decomp.enabled && decomp.mode !== "off");
+  const decompEnabled = isDecomposeActive(decomp);
+  const decompDisplay = decomposeDisplayMode(decomp);
+  const decompTierModes = normalizeDecomposeTierModes(decomp);
 
   const ctxDecl: ContextDiscoveryDecl = options?.context ??
     v4?.context ?? {
@@ -898,6 +983,32 @@ export function buildClientWorkflowStagesView(
       });
 
   // Stage 1: s0-decompose
+  const decompMaxSubtasks = decomp.maxSubtasks ?? decomp["max-subtasks"] ?? 4;
+  const decompTargetDiffLines =
+    decomp.targetDiffLines ?? decomp["target-diff-lines"] ?? 400;
+  const decompScope = decompTierModes
+    ? decomposeActiveTiers(decomp).join(", ") || "none"
+    : (decomp.complexities?.length
+        ? decomp.complexities
+        : ["medium", "high"]
+      ).join(", ");
+  let decompSummary = `Splits complex work into bounded slices (max ${decompMaxSubtasks} subtasks, target ${decompTargetDiffLines} diff lines).`;
+  if (!decompEnabled) {
+    decompSummary = `Decomposition disabled for all complexity tiers (max ${decompMaxSubtasks} subtasks, target ${decompTargetDiffLines} diff lines).`;
+  } else if (decompTierModes) {
+    const parts: string[] = [];
+    for (const tier of CANONICAL_DECOMPOSE_TIERS) {
+      const eff = effectiveDecomposeModeForTier(decomp, tier);
+      if (eff) {
+        parts.push(`${tier}=${eff}`);
+      } else if (Object.prototype.hasOwnProperty.call(decompTierModes, tier)) {
+        parts.push(`${tier}=off`);
+      }
+    }
+    decompSummary = `Per-tier decomposition (${parts.join(", ")}; max ${decompMaxSubtasks} subtasks, target ${decompTargetDiffLines} diff lines).`;
+  } else if (decompDisplay === "propose_dag") {
+    decompSummary = `Decomposes matching workstreams into wave-ordered subtask DAGs (max ${decompMaxSubtasks} subtasks, target ${decompTargetDiffLines} diff lines).`;
+  }
   const s0Steps: WorkflowStepView[] = [
     {
       id: "s0:intent",
@@ -918,9 +1029,9 @@ export function buildClientWorkflowStagesView(
       kind: "decomposition",
       stageId: "s0-decompose",
       enabled: decompEnabled,
-      mode: decompEnabled ? decomp.mode || "slice_plan" : "off",
-      scope: (decomp.complexities || ["medium", "high"]).join(", "),
-      summary: `Splits complex work into bounded slices (max ${decomp.maxSubtasks ?? decomp["max-subtasks"] ?? 4} subtasks, target ${decomp.targetDiffLines ?? decomp["target-diff-lines"] ?? 400} diff lines).`,
+      mode: decompDisplay,
+      scope: decompScope,
+      summary: decompSummary,
     },
     ...stageSkillStepViews("s0", "s0-decompose"),
   ];
@@ -1157,7 +1268,7 @@ export function buildClientWorkflowStagesView(
         decompEnabled ||
         s0Steps.some((s) => s.kind === "skill_step" && s.enabled),
       mode: decompEnabled
-        ? decomp.mode || "slice_plan"
+        ? decompDisplay
         : s0Intent
           ? "warn"
           : s0Steps.some((s) => s.kind === "skill_step" && s.enabled)
@@ -1943,6 +2054,8 @@ export function formatStageModeLabel(stage: WorkflowStageView): string {
       return "Slice plan";
     case "propose_dag":
       return "Subtask DAG";
+    case "tiered":
+      return "Per-tier";
     case "context+blast":
       return "Context + blast";
     case "blast_only":

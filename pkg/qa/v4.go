@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -112,17 +111,30 @@ func (d DecomposeDecl) EffectiveModeWithOverride(tier ComplexityTier, override s
 	return base, false
 }
 
+var canonicalDecomposeTiers = []ComplexityTier{ComplexityLow, ComplexityMedium, ComplexityHigh}
+
 // EffectiveDisplayMode returns the highest active decomposition mode across low/medium/high tiers,
 // or "" when decomposition is inactive for every tier.
 func (d DecomposeDecl) EffectiveDisplayMode() string {
 	best := ""
-	for _, tier := range []ComplexityTier{ComplexityLow, ComplexityMedium, ComplexityHigh} {
+	for _, tier := range canonicalDecomposeTiers {
 		m := d.EffectiveModeForTier(tier)
 		if DecomposeModeRank(m) > DecomposeModeRank(best) {
 			best = m
 		}
 	}
 	return best
+}
+
+// ActiveTiers returns the ordered complexity tiers for which d activates decomposition.
+func (d DecomposeDecl) ActiveTiers() []string {
+	var out []string
+	for _, tier := range canonicalDecomposeTiers {
+		if d.EffectiveModeForTier(tier) != "" {
+			out = append(out, string(tier))
+		}
+	}
+	return out
 }
 
 // IsActive reports whether d produces a non-empty decomposition mode for at least one complexity tier.
@@ -1060,21 +1072,32 @@ func BuildWorkflowStagesView(b FlowVersionBundle) []WorkflowStageView {
 	} else if f.S0Intent {
 		s0Mode = defaultNonEmpty(f.S0IntentConfig.OnClarification, "warn")
 	}
-	decompSummary := fmt.Sprintf("Splits complex work into bounded slices (maxSubtasks=%d, targetDiffLines=%d).", f.Decompose.MaxSubtasks, f.Decompose.TargetDiffLines)
-	if decompDisplayMode == "propose_dag" {
-		decompSummary = fmt.Sprintf("Decomposes matching workstreams into wave-ordered subtask DAGs (maxSubtasks=%d, targetDiffLines=%d).", f.Decompose.MaxSubtasks, f.Decompose.TargetDiffLines)
-	}
+	decompScope := joinOrDefault(f.Decompose.Complexities, "medium, high")
 	if len(f.Decompose.TierModes) > 0 {
-		tiers := make([]string, 0, len(f.Decompose.TierModes))
-		for k := range f.Decompose.TierModes {
-			tiers = append(tiers, k)
+		if active := f.Decompose.ActiveTiers(); len(active) > 0 {
+			decompScope = strings.Join(active, ", ")
+		} else {
+			decompScope = "none"
 		}
-		sort.Strings(tiers)
-		parts := make([]string, 0, len(tiers))
-		for _, k := range tiers {
-			parts = append(parts, fmt.Sprintf("%s=%s", k, f.Decompose.TierModes[k]))
+	}
+	decompSummary := fmt.Sprintf("Splits complex work into bounded slices (maxSubtasks=%d, targetDiffLines=%d).", f.Decompose.MaxSubtasks, f.Decompose.TargetDiffLines)
+	if !decompEnabled {
+		decompSummary = fmt.Sprintf("Decomposition disabled for all complexity tiers (maxSubtasks=%d, targetDiffLines=%d).", f.Decompose.MaxSubtasks, f.Decompose.TargetDiffLines)
+	} else if len(f.Decompose.TierModes) > 0 {
+		parts := make([]string, 0, len(canonicalDecomposeTiers))
+		for _, tier := range canonicalDecomposeTiers {
+			k := string(tier)
+			eff := f.Decompose.EffectiveModeForTier(tier)
+			_, explicit := f.Decompose.TierModes[k]
+			if eff != "" {
+				parts = append(parts, fmt.Sprintf("%s=%s", k, eff))
+			} else if explicit {
+				parts = append(parts, fmt.Sprintf("%s=off", k))
+			}
 		}
 		decompSummary = fmt.Sprintf("Per-tier decomposition (%s; maxSubtasks=%d, targetDiffLines=%d).", strings.Join(parts, ", "), f.Decompose.MaxSubtasks, f.Decompose.TargetDiffLines)
+	} else if decompDisplayMode == "propose_dag" {
+		decompSummary = fmt.Sprintf("Decomposes matching workstreams into wave-ordered subtask DAGs (maxSubtasks=%d, targetDiffLines=%d).", f.Decompose.MaxSubtasks, f.Decompose.TargetDiffLines)
 	}
 	s0Steps := []WorkflowStepView{
 		{
@@ -1096,7 +1119,7 @@ func BuildWorkflowStagesView(b FlowVersionBundle) []WorkflowStageView {
 			StageID: "s0-decompose",
 			Enabled: decompEnabled,
 			Mode:    boolMode(decompEnabled, decompDisplayMode),
-			Scope:   joinOrDefault(f.Decompose.Complexities, "medium, high"),
+			Scope:   decompScope,
 			Summary: decompSummary,
 		},
 	}

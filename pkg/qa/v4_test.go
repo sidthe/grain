@@ -547,8 +547,13 @@ func TestDecomposeEffectiveModeForTierAndStrictTierModesValidation(t *testing.T)
 	for _, stg := range BuildWorkflowStagesView(allOffBundle) {
 		if stg.ID == "s0-decompose" {
 			for _, step := range stg.Steps {
-				if step.ID == "s0:decompose" && step.Enabled {
-					t.Fatalf("expected s0:decompose step disabled when all tier-modes are off, got %+v", step)
+				if step.ID == "s0:decompose" {
+					if step.Enabled || step.Mode != "off" || step.Scope != "none" {
+						t.Fatalf("expected s0:decompose disabled with mode=off scope=none when all tier-modes are off, got %+v", step)
+					}
+					if !strings.Contains(step.Summary, "disabled") {
+						t.Fatalf("expected disabled summary for all-off tier-modes, got %q", step.Summary)
+					}
 				}
 			}
 		}
@@ -560,7 +565,7 @@ func TestDecomposeEffectiveModeForTierAndStrictTierModesValidation(t *testing.T)
 		}
 	}
 
-	// Tier-modes-only propose_dag (omitted Mode) must report propose_dag rather than slice_plan.
+	// Tier-modes-only propose_dag (omitted Mode) must report propose_dag and scope=high rather than slice_plan / medium, high.
 	tierOnlyPropose, err := ResolveAnyFlowDeclaration([]byte("schema: grain.dev/qa-flow/v4\nkey: tier-only-propose\ndecompose:\n  enabled: true\n  tier-modes:\n    high: propose_dag\n"), 1, nil)
 	if err != nil {
 		t.Fatalf("ResolveAnyFlowDeclaration tier-only-propose: %v", err)
@@ -568,9 +573,41 @@ func TestDecomposeEffectiveModeForTierAndStrictTierModesValidation(t *testing.T)
 	if got := tierOnlyPropose.Resolved.Decompose.EffectiveDisplayMode(); got != "propose_dag" {
 		t.Fatalf("EffectiveDisplayMode() = %q, want propose_dag", got)
 	}
+	if got := strings.Join(tierOnlyPropose.Resolved.Decompose.ActiveTiers(), ","); got != "high" {
+		t.Fatalf("ActiveTiers() = %q, want high", got)
+	}
 	for _, stg := range BuildWorkflowStagesView(tierOnlyPropose) {
-		if stg.ID == "s0-decompose" && stg.Mode != "propose_dag" {
-			t.Fatalf("expected s0-decompose stage mode=propose_dag, got %q", stg.Mode)
+		if stg.ID == "s0-decompose" {
+			if stg.Mode != "propose_dag" {
+				t.Fatalf("expected s0-decompose stage mode=propose_dag, got %q", stg.Mode)
+			}
+			for _, step := range stg.Steps {
+				if step.ID == "s0:decompose" {
+					if !step.Enabled || step.Mode != "propose_dag" || step.Scope != "high" {
+						t.Fatalf("expected s0:decompose enabled mode=propose_dag scope=high, got %+v", step)
+					}
+				}
+			}
+		}
+	}
+
+	// Mixed slice_plan + propose_dag tier-modes projects highest active mode (propose_dag), active scope, and canonical per-tier summary.
+	mixedBundle, err := ResolveAnyFlowDeclaration([]byte("schema: grain.dev/qa-flow/v4\nkey: mixed-tiers\ndecompose:\n  enabled: true\n  tier-modes:\n    high: propose_dag\n    medium: slice_plan\n"), 1, nil)
+	if err != nil {
+		t.Fatalf("ResolveAnyFlowDeclaration mixed-tiers: %v", err)
+	}
+	for _, stg := range BuildWorkflowStagesView(mixedBundle) {
+		if stg.ID == "s0-decompose" {
+			if !stg.Enabled || stg.Mode != "propose_dag" {
+				t.Fatalf("expected mixed tier-modes s0-decompose enabled mode=propose_dag, got %+v", stg)
+			}
+			for _, step := range stg.Steps {
+				if step.ID == "s0:decompose" {
+					if !step.Enabled || step.Mode != "propose_dag" || step.Scope != "medium, high" || !strings.Contains(step.Summary, "medium=slice_plan, high=propose_dag") {
+						t.Fatalf("unexpected mixed tier-modes s0:decompose step: %+v", step)
+					}
+				}
+			}
 		}
 	}
 }

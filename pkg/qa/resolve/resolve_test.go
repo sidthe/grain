@@ -655,4 +655,38 @@ func TestComposeTightenOnlyOverlaysAndFloors(t *testing.T) {
 	if stillDisabled.Decompose.Enabled || stillDisabled.Decompose.IsActive() {
 		t.Fatalf("inactive all-off overlay should not enable Decompose on disabled base: %+v", stillDisabled.Decompose)
 	}
+
+	// Covered-tiers-only all-off overlay ({complexities: [medium, high], tier-modes: {medium: off, high: off}})
+	// must also leave both gates-only and slice_plan base flows completely untouched (including MaxSubtasks / TargetDiffLines).
+	coveredOffOverlay := qa.FlowSpec{
+		ID: "covered-off-overlay",
+		Decompose: qa.DecomposeDecl{
+			Enabled:         true,
+			Mode:            "propose_dag",
+			Complexities:    []string{"medium", "high"},
+			TierModes:       map[string]string{"medium": "off", "high": "off"},
+			MaxSubtasks:     8,
+			TargetDiffLines: 150,
+		},
+	}
+	var gatesBase qa.FlowSpec
+	foundGates := false
+	for _, b := range qa.BuiltInFlowVersions() {
+		if b.Key == "gates-only" {
+			gatesBase = b.Resolved
+			foundGates = true
+			break
+		}
+	}
+	if !foundGates {
+		t.Fatal("missing built-in gates-only flow")
+	}
+	overGates := resolve.ComposeTightenOnly(gatesBase, coveredOffOverlay)
+	if overGates.Decompose.Enabled || overGates.Decompose.IsActive() || overGates.Decompose.Mode != "off" || len(overGates.Decompose.TierModes) != 0 || overGates.Decompose.MaxSubtasks != 0 || overGates.Decompose.TargetDiffLines != 0 {
+		t.Fatalf("inactive covered-off overlay mutated gates-only Decompose: %+v", overGates.Decompose)
+	}
+	overSlice := resolve.ComposeTightenOnly(base, coveredOffOverlay)
+	if overSlice.Decompose.Mode != "slice_plan" || overSlice.Decompose.MaxSubtasks != base.Decompose.MaxSubtasks || overSlice.Decompose.TargetDiffLines != base.Decompose.TargetDiffLines || len(overSlice.Decompose.TierModes) != 0 {
+		t.Fatalf("inactive covered-off overlay mutated slice_plan base Decompose: %+v", overSlice.Decompose)
+	}
 }
