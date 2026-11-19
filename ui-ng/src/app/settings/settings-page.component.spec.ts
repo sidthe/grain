@@ -2039,5 +2039,102 @@ describe("SettingsPageComponent (M13 D-12)", () => {
     expect(access.rawConfig()?.environmentName).toBe("prod · us");
     expect(access.rawConfig()?.headerColor).toBe("ocean");
     expect(access.rawConfig()?.headerPattern).toBe("diagonal");
+
+    // Roving tabindex: only the checked swatch/tile is a Tab stop per radiogroup.
+    const colorRadios = Array.from(
+      el.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="settings-header-color-group"] [role="radio"]',
+      ),
+    );
+    expect(
+      colorRadios.filter((b) => b.getAttribute("tabindex") === "0").length,
+    ).toBe(1);
+    expect(
+      el
+        .querySelector('[data-testid="settings-header-color-ocean"]')
+        ?.getAttribute("tabindex"),
+    ).toBe("0");
+    expect(
+      el
+        .querySelector('[data-testid="settings-header-color-default"]')
+        ?.getAttribute("tabindex"),
+    ).toBe("-1");
+
+    const patternRadios = Array.from(
+      el.querySelectorAll<HTMLButtonElement>(
+        '[data-testid="settings-header-pattern-group"] [role="radio"]',
+      ),
+    );
+    expect(
+      patternRadios.filter((b) => b.getAttribute("tabindex") === "0").length,
+    ).toBe(1);
+    expect(
+      el
+        .querySelector('[data-testid="settings-header-pattern-diagonal"]')
+        ?.getAttribute("tabindex"),
+    ).toBe("0");
+    expect(
+      el
+        .querySelector('[data-testid="settings-header-pattern-solid"]')
+        ?.getAttribute("tabindex"),
+    ).toBe("-1");
+  });
+
+  it("preserves default deploymentId and syncs configRepoOnly into AccessService on Settings save", async () => {
+    const api = new FakeSettingsApi();
+    api.configBody = {
+      ...api.configBody,
+      deploymentId: "dep-default-01",
+      settingsLocked: true,
+      configRepoOnly: true,
+    };
+    api.settingsBody = {
+      ...api.settingsBody,
+      deploymentId: "",
+      deploymentIdDefault: "dep-default-01",
+      settingsLocked: true,
+      configRepoOnly: true,
+    };
+    const basePost = api.post;
+    api.post = (key, params, body, query) => {
+      if (key === "POST /api/settings") {
+        api.calls.push({ method: "POST", key, params, body, query });
+        const patch = (body as Record<string, unknown>) ?? {};
+        const locked = Boolean(patch["settingsLocked"]);
+        api.settingsBody = {
+          ...api.settingsBody,
+          ...patch,
+          deploymentId: "",
+          deploymentIdDefault: "dep-default-01",
+          settingsLocked: locked,
+          configRepoOnly: locked,
+        };
+        return Promise.resolve(structuredClone(api.settingsBody));
+      }
+      return basePost(key, params, body, query);
+    };
+
+    const { el, harness } = await mountSettings("/settings/general", api);
+    const { AccessService } = await import("../services/access.service");
+    const access = TestBed.inject(AccessService);
+    expect(access.rawConfig()?.deploymentId).toBe("dep-default-01");
+    expect(access.rawConfig()?.configRepoOnly).toBe(true);
+
+    // Unlock settings in Settings -> General and save.
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="switch-settings-locked"]',
+    )!.click();
+    harness.fixture.detectChanges();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-save-btn"]',
+    )!.click();
+    await new Promise((r) => setTimeout(r, 100));
+    harness.detectChanges();
+
+    // Default deploymentId must not be wiped by empty deploymentId override,
+    // and configRepoOnly must immediately flip to false in AccessService.
+    expect(access.rawConfig()?.deploymentId).toBe("dep-default-01");
+    expect(access.rawConfig()?.settingsLocked).toBe(false);
+    expect(access.rawConfig()?.configRepoOnly).toBe(false);
   });
 });

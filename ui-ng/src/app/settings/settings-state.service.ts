@@ -578,8 +578,20 @@ export class SettingsStateService {
     if (typeof saved["settingsLocked"] === "boolean") {
       patch.settingsLocked = saved["settingsLocked"];
     }
-    if (typeof saved["deploymentId"] === "string") {
-      patch.deploymentId = saved["deploymentId"];
+    if (typeof saved["configRepoOnly"] === "boolean") {
+      patch.configRepoOnly = saved["configRepoOnly"];
+    }
+    const savedDepId =
+      typeof saved["deploymentId"] === "string"
+        ? saved["deploymentId"].trim()
+        : "";
+    const defaultDepId =
+      typeof saved["deploymentIdDefault"] === "string"
+        ? saved["deploymentIdDefault"].trim()
+        : "";
+    const resolvedDepId = savedDepId || defaultDepId;
+    if (resolvedDepId) {
+      patch.deploymentId = resolvedDepId;
     }
     if (Object.keys(patch).length > 0) {
       this.access.patchConfig(patch);

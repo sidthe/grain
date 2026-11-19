@@ -144,6 +144,7 @@ const CHECK_PATH = "M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z";
                 [attr.data-testid]="'identity-color-' + (c.id || 'default')"
                 [attr.aria-label]="c.label"
                 [attr.aria-checked]="draftColor() === c.id"
+                [attr.tabindex]="draftColor() === c.id ? 0 : -1"
                 [attr.title]="c.label"
                 [disabled]="readOnly()"
                 (click)="selectColor(c.id)"
@@ -184,6 +185,7 @@ const CHECK_PATH = "M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z";
                 role="radio"
                 [attr.data-testid]="'identity-pattern-' + (p.id || 'solid')"
                 [attr.aria-checked]="draftPattern() === p.id"
+                [attr.tabindex]="draftPattern() === p.id ? 0 : -1"
                 [disabled]="readOnly()"
                 (click)="selectPattern(p.id)"
                 (keydown)="onPatternKeydown($event)"
@@ -476,7 +478,7 @@ export class InstanceIdentityPopoverComponent
     if (!root) return;
     const focusables = Array.from(
       root.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), a[href], input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        'button:not([disabled]):not([tabindex="-1"]), a[href]:not([tabindex="-1"]), input:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"]):not([disabled])',
       ),
     );
     if (!focusables.length) return;

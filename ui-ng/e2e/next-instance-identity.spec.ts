@@ -86,12 +86,13 @@ test.describe("instance identity, header theming, and quick-name popover", () =>
       // Axe check with popover open (including color-contrast).
       expect(await axe()).toEqual([]);
 
-      // Escape reverts cleanly.
+      // Escape reverts cleanly and restores focus to the swapped + Name instance cue.
       await page.keyboard.press("Escape");
       await expect(popover).toBeHidden();
       await expect(topBar).not.toHaveAttribute("data-header-color", /.+/);
       await expect(topBar).not.toHaveAttribute("data-header-pattern", /.+/);
       await expect(cue).toBeVisible();
+      await expect(cue).toBeFocused();
       await expect(page).not.toHaveTitle(/^\[preview-only\] /);
 
       // Re-open, set real identity, and save.
@@ -107,6 +108,7 @@ test.describe("instance identity, header theming, and quick-name popover", () =>
       await expect(topBar).toHaveAttribute("data-header-pattern", "waves");
       const badge = page.getByTestId("instance-identity-badge");
       await expect(badge).toBeVisible();
+      await expect(badge).toBeFocused();
       await expect(badge).toContainText("staging · eu");
       await expect(page).toHaveTitle(/^\[staging · eu\] /);
 

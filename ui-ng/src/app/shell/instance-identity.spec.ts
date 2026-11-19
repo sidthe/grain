@@ -456,4 +456,225 @@ describe("Instance identity top-bar, popover, title, and tinted favicon", () => 
       decodeURIComponent(faviconLink.getAttribute("href") ?? ""),
     ).toContain("#f5b041");
   });
+
+  it("restores keyboard focus to the swapped top-bar button after cancelling a preview name change", async () => {
+    const { root, fixture } = await mountShell({
+      environmentName: "",
+      headerColor: "",
+      headerPattern: "",
+    });
+    // Attach fixture element to document.body so .focus() updates document.activeElement.
+    document.body.appendChild(root);
+    try {
+      // Case 1: unnamed -> open via cue -> type preview name (mounts badge, destroys cue) -> Escape.
+      root
+        .querySelector<HTMLButtonElement>('[data-testid="instance-name-cue"]')!
+        .click();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      fixture.detectChanges();
+
+      setInput(
+        root.querySelector<HTMLInputElement>(
+          '[data-testid="identity-popover-name"]',
+        )!,
+        "preview-swap",
+      );
+      fixture.detectChanges();
+      expect(
+        root.querySelector('[data-testid="instance-identity-badge"]'),
+      ).not.toBeNull();
+      expect(
+        root.querySelector('[data-testid="instance-name-cue"]'),
+      ).toBeNull();
+
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+      fixture.detectChanges();
+      await fixture.whenStable();
+      await new Promise((r) => setTimeout(r, 0));
+      fixture.detectChanges();
+
+      const restoredCue = root.querySelector<HTMLButtonElement>(
+        '[data-testid="instance-name-cue"]',
+      );
+      expect(restoredCue).not.toBeNull();
+      expect(document.activeElement).toBe(restoredCue);
+
+      // Case 2: named -> open via badge -> clear name in preview (mounts cue, destroys badge) -> Cancel.
+      const access = TestBed.inject(AccessService);
+      access.patchConfig({ environmentName: "prod-west" });
+      fixture.detectChanges();
+      TestBed.flushEffects();
+
+      root
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="instance-identity-badge"]',
+        )!
+        .click();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      fixture.detectChanges();
+
+      setInput(
+        root.querySelector<HTMLInputElement>(
+          '[data-testid="identity-popover-name"]',
+        )!,
+        "",
+      );
+      fixture.detectChanges();
+      expect(
+        root.querySelector('[data-testid="instance-name-cue"]'),
+      ).not.toBeNull();
+
+      root
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="identity-popover-cancel"]',
+        )!
+        .click();
+      fixture.detectChanges();
+      await fixture.whenStable();
+      await new Promise((r) => setTimeout(r, 0));
+      fixture.detectChanges();
+
+      const restoredBadge = root.querySelector<HTMLButtonElement>(
+        '[data-testid="instance-identity-badge"]',
+      );
+      expect(restoredBadge).not.toBeNull();
+      expect(document.activeElement).toBe(restoredBadge);
+    } finally {
+      root.remove();
+    }
+  });
+
+  it("uses roving tabindex on popover radiogroups and skips non-roving/disabled radios in focus trap", async () => {
+    const api = new FakeIdentityShellApi();
+    TestBed.configureTestingModule({
+      imports: [InstanceIdentityPopoverComponent],
+      providers: [provideRouter([]), { provide: GrainApi, useValue: api }],
+    });
+    const access = TestBed.inject(AccessService);
+    access.setConfig({
+      environmentName: "staging",
+      headerColor: "ocean",
+      headerPattern: "dots",
+      access: {
+        role: "grain/operator",
+        roles: ["grain/operator"],
+        full: true,
+        scopes: [],
+      },
+    });
+    const fixture = TestBed.createComponent(InstanceIdentityPopoverComponent);
+    const root = fixture.nativeElement as HTMLElement;
+    document.body.appendChild(root);
+    try {
+      fixture.detectChanges();
+
+      const colorRadios = Array.from(
+        root.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="identity-color-group"] [role="radio"]',
+        ),
+      );
+      expect(
+        colorRadios.filter((b) => b.getAttribute("tabindex") === "0").length,
+      ).toBe(1);
+      const oceanBtn = root.querySelector<HTMLButtonElement>(
+        '[data-testid="identity-color-ocean"]',
+      )!;
+      expect(oceanBtn.getAttribute("tabindex")).toBe("0");
+      expect(
+        root
+          .querySelector('[data-testid="identity-color-default"]')
+          ?.getAttribute("tabindex"),
+      ).toBe("-1");
+
+      // ArrowRight moves selection, focus, and roving tabindex="0" to teal.
+      oceanBtn.focus();
+      oceanBtn.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+      );
+      fixture.detectChanges();
+      const tealBtn = root.querySelector<HTMLButtonElement>(
+        '[data-testid="identity-color-teal"]',
+      )!;
+      expect(tealBtn.getAttribute("aria-checked")).toBe("true");
+      expect(tealBtn.getAttribute("tabindex")).toBe("0");
+      expect(oceanBtn.getAttribute("tabindex")).toBe("-1");
+      expect(document.activeElement).toBe(tealBtn);
+
+      const patternRadios = Array.from(
+        root.querySelectorAll<HTMLButtonElement>(
+          '[data-testid="identity-pattern-group"] [role="radio"]',
+        ),
+      );
+      expect(
+        patternRadios.filter((b) => b.getAttribute("tabindex") === "0").length,
+      ).toBe(1);
+      expect(
+        root
+          .querySelector('[data-testid="identity-pattern-dots"]')
+          ?.getAttribute("tabindex"),
+      ).toBe("0");
+
+      // Focus trap wraps Save -> Name input (and Shift+Tab Name input -> Save), never onto tabindex="-1".
+      const pop = root.querySelector<HTMLElement>(
+        '[data-testid="instance-identity-popover"]',
+      )!;
+      const nameInput = root.querySelector<HTMLInputElement>(
+        '[data-testid="identity-popover-name"]',
+      )!;
+      const saveBtn = root.querySelector<HTMLButtonElement>(
+        '[data-testid="identity-popover-save"]',
+      )!;
+
+      saveBtn.focus();
+      pop.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Tab", bubbles: true }),
+      );
+      expect(document.activeElement).toBe(nameInput);
+
+      pop.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Tab",
+          shiftKey: true,
+          bubbles: true,
+        }),
+      );
+      expect(document.activeElement).toBe(saveBtn);
+
+      // When locked (readOnly), Shift+Tab from Settings link wraps to Cancel, skipping disabled radios.
+      access.setConfig({
+        environmentName: "staging",
+        headerColor: "ocean",
+        headerPattern: "dots",
+        settingsLocked: true,
+        access: {
+          role: "grain/operator",
+          roles: ["grain/operator"],
+          full: true,
+          scopes: [],
+        },
+      });
+      fixture.detectChanges();
+      const settingsLink = root.querySelector<HTMLAnchorElement>(
+        '[data-testid="identity-popover-settings-link"]',
+      )!;
+      const cancelBtn = root.querySelector<HTMLButtonElement>(
+        '[data-testid="identity-popover-cancel"]',
+      )!;
+      settingsLink.focus();
+      pop.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Tab",
+          shiftKey: true,
+          bubbles: true,
+        }),
+      );
+      expect(document.activeElement).toBe(cancelBtn);
+    } finally {
+      root.remove();
+    }
+  });
 });

@@ -22,6 +22,7 @@ import {
   NgZone,
   OnDestroy,
   OnInit,
+  afterNextRender,
   computed,
   effect,
   inject,
@@ -1708,12 +1709,15 @@ export class AppComponent implements OnInit, OnDestroy {
     this.identityOpen.set(false);
     this.theme.clearHeaderPreview();
     if (restoreFocus) {
-      queueMicrotask(() => {
-        (
-          this.identityBadgeBtn()?.nativeElement ??
-          this.identityCueBtn()?.nativeElement
-        )?.focus();
-      });
+      afterNextRender(
+        () => {
+          (
+            this.identityBadgeBtn()?.nativeElement ??
+            this.identityCueBtn()?.nativeElement
+          )?.focus();
+        },
+        { injector: this.injector },
+      );
     }
   }
 

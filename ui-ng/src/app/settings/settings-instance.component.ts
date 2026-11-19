@@ -283,6 +283,7 @@ function formatBytes(bytes: number): string {
                     'settings-header-color-' + (c.id || 'default')
                   "
                   [attr.aria-checked]="draftHeaderColor() === c.id"
+                  [attr.tabindex]="draftHeaderColor() === c.id ? 0 : -1"
                   [disabled]="!canWriteSettings()"
                   (click)="state.setField('headerColor', c.id)"
                   (keydown)="onHeaderColorKeydown($event)"
@@ -319,6 +320,7 @@ function formatBytes(bytes: number): string {
                     'settings-header-pattern-' + (p.id || 'solid')
                   "
                   [attr.aria-checked]="draftHeaderPattern() === p.id"
+                  [attr.tabindex]="draftHeaderPattern() === p.id ? 0 : -1"
                   [disabled]="!canWriteSettings()"
                   (click)="state.setField('headerPattern', p.id)"
                   (keydown)="onHeaderPatternKeydown($event)"
