@@ -17,6 +17,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/model/sqlite"
 	"github.com/ai-on-gke/grain/pkg/orchestrator"
+	"github.com/ai-on-gke/grain/pkg/secrets"
 )
 
 type stubQAFramework struct {
@@ -114,5 +116,26 @@ func TestQAStageRoutingThroughJudgementModelAndStartupOverhead(t *testing.T) {
 	}
 	if len(tried) != 2 || tried[0].Model != "claude-sonnet-5-5" || tried[1].Framework != model.AgentFrameworkAntigravity {
 		t.Fatalf("unexpected build attempts: %+v", tried)
+	}
+}
+
+func TestQAStageErrorRedactorScrubsKnownSecretsAndShapes(t *testing.T) {
+	dataDir := t.TempDir()
+	secStore := secrets.Open(SecretsConfig(dataDir))
+	const storedVal = "my-super-secret-oauth-99112233"
+	if err := secStore.Set("deploy-bot", "token", []byte(storedVal)); err != nil {
+		t.Fatalf("secrets Set: %v", err)
+	}
+
+	redactFn := qaStageErrorRedactor(SecretsDir(dataDir), secStore)
+	raw := "agy stderr line 1: token=" + storedVal + "\nAuthorization: Bearer abcdef1234567890\n-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEF\n-----END PRIVATE KEY-----"
+	got := redactFn(raw)
+	for _, secret := range []string{storedVal, "abcdef1234567890", "MIIEvQIBADANBgkqhkiG9w0BAQEF"} {
+		if strings.Contains(got, secret) {
+			t.Fatalf("qaStageErrorRedactor leaked %q in: %s", secret, got)
+		}
+	}
+	if !strings.Contains(got, "[redacted: secret deploy-bot/token]") {
+		t.Fatalf("expected named secret redaction marker, got: %s", got)
 	}
 }

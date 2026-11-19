@@ -30,10 +30,12 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/qa"
+	"github.com/ai-on-gke/grain/pkg/redact"
 	"github.com/ai-on-gke/grain/pkg/safepath"
 )
 
@@ -102,9 +104,16 @@ func effectiveQAStageTimeout(
 	configuredSeconds int,
 	defaultInference, maxInference time.Duration,
 ) (total, overhead time.Duration) {
-	inference := time.Duration(configuredSeconds) * time.Second
-	if inference <= 0 {
+	var inference time.Duration
+	switch {
+	case configuredSeconds <= 0:
 		inference = defaultInference
+	case maxInference > 0 && int64(configuredSeconds) > int64(maxInference/time.Second):
+		inference = maxInference
+	case int64(configuredSeconds) > int64(maxQAStageTotalCap/time.Second):
+		inference = maxQAStageTotalCap
+	default:
+		inference = time.Duration(configuredSeconds) * time.Second
 	}
 	if maxInference > 0 && inference > maxInference {
 		inference = maxInference
@@ -117,14 +126,29 @@ func effectiveQAStageTimeout(
 	return total, overhead
 }
 
-func classifyQAStageError(err error, runCtx context.Context) (kind string, exitCode *int, message string) {
-	if err == nil {
-		return "", nil, ""
+func sanitizeQAStageErrorMessage(rt *QARuntime, raw string) string {
+	msg := strings.TrimSpace(raw)
+	if msg == "" {
+		return ""
 	}
-	msg := strings.TrimSpace(err.Error())
+	if rt != nil && rt.RedactText != nil {
+		msg = rt.RedactText(msg)
+	}
+	// Always apply shape-based credential redaction before truncating so a boundary cut
+	// cannot expose a partial secret even when no runtime known-secret redactor is wired.
+	msg, _ = (*redact.Redactor)(nil).Text(msg)
+	msg = strings.TrimSpace(msg)
 	if len(msg) > 1024 {
 		msg = model.TruncateValidUTF8(msg, 1024) + "..."
 	}
+	return msg
+}
+
+func classifyQAStageError(rt *QARuntime, err error, runCtx context.Context) (kind string, exitCode *int, message string) {
+	if err == nil {
+		return "", nil, ""
+	}
+	msg := sanitizeQAStageErrorMessage(rt, err.Error())
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		code := exitErr.ExitCode()
@@ -144,6 +168,7 @@ func classifyQAStageError(err error, runCtx context.Context) (kind string, exitC
 }
 
 func buildQAStageErrorDetail(
+	rt *QARuntime,
 	err error,
 	runCtx context.Context,
 	timeout, startupOverhead time.Duration,
@@ -153,7 +178,7 @@ func buildQAStageErrorDetail(
 	for k, v := range extra {
 		detail[k] = v
 	}
-	kind, exitCode, msg := classifyQAStageError(err, runCtx)
+	kind, exitCode, msg := classifyQAStageError(rt, err, runCtx)
 	if _, hasKind := detail["errorKind"]; !hasKind && kind != "" {
 		detail["errorKind"] = kind
 	}
@@ -292,6 +317,51 @@ func loadTaskSpecAttachments(ctx context.Context, store *model.Store, task model
 	return out
 }
 
+var closingTaskAttachmentsTagRe = regexp.MustCompile(`(?i)</task-attachments>`)
+
+func attachmentSandboxRelPath(f model.TaskAttachmentMeta) string {
+	if f.ID > 0 {
+		return AttachmentPath(f.ID, f.Filename)
+	}
+	if strings.TrimSpace(f.Filename) != "" {
+		return path.Join(AttachmentsDir, attachmentFilename(f.Filename))
+	}
+	return path.Join(AttachmentsDir, attachmentFilename(f.SandboxPath))
+}
+
+// sanitizeManifestContentType reduces an attachment's client-supplied Content-Type
+// to a bounded single-line string without control characters, line/paragraph separators,
+// backticks, or angle brackets so it cannot break out of the prompt's manifest or
+// <task-attachments> block.
+func sanitizeManifestContentType(raw string) string {
+	const maxContentTypeLen = 80
+	var b strings.Builder
+	b.Grow(min(len(raw), maxContentTypeLen))
+	prevSpace := false
+	for _, r := range strings.TrimSpace(raw) {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' || r == '`' || r == '<' || r == '>' {
+			continue
+		}
+		if unicode.IsSpace(r) {
+			if prevSpace || b.Len() == 0 {
+				continue
+			}
+			prevSpace = true
+			if b.Len()+1 > maxContentTypeLen {
+				break
+			}
+			b.WriteByte(' ')
+			continue
+		}
+		prevSpace = false
+		if b.Len()+utf8.RuneLen(r) > maxContentTypeLen {
+			break
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
+}
+
 func formatAttachmentsManifest(specAtt model.TaskSpecAttachments) string {
 	if len(specAtt.Files) == 0 {
 		return ""
@@ -303,15 +373,8 @@ func formatAttachmentsManifest(specAtt model.TaskSpecAttachments) string {
 			fmt.Fprintf(&b, "- ... (%d additional attachment(s) in `./%s/`)\n", len(specAtt.Files)-maxListed, AttachmentsDir)
 			break
 		}
-		relPath := f.SandboxPath
-		if relPath == "" {
-			if f.ID > 0 {
-				relPath = AttachmentPath(f.ID, f.Filename)
-			} else {
-				relPath = path.Join(AttachmentsDir, attachmentFilename(f.Filename))
-			}
-		}
-		if ct := strings.TrimSpace(f.ContentType); ct != "" {
+		relPath := attachmentSandboxRelPath(f)
+		if ct := sanitizeManifestContentType(f.ContentType); ct != "" {
 			fmt.Fprintf(&b, "- `./%s` (%d bytes, %s)\n", relPath, f.Size, ct)
 		} else {
 			fmt.Fprintf(&b, "- `./%s` (%d bytes)\n", relPath, f.Size)
@@ -346,6 +409,7 @@ func buildAttachmentContextBlock(specAtt model.TaskSpecAttachments, maxTokens in
 		b.WriteString("\n")
 	}
 	if trimmed := strings.TrimSpace(specAtt.Text); trimmed != "" {
+		trimmed = closingTaskAttachmentsTagRe.ReplaceAllString(trimmed, "&lt;/task-attachments&gt;")
 		header := "--- Attached Specification Excerpt ---\n"
 		closing := "\n</task-attachments>"
 		remaining := maxChars - b.Len() - len(header) - len(closing)
@@ -521,7 +585,7 @@ func ExecutePreCloneQAPhase(
 		var question string
 		if err != nil {
 			cr.Verdict = "error"
-			cr.DetailJSON = buildQAStageErrorDetail(err, runCtx, timeout, startupOverhead, map[string]any{
+			cr.DetailJSON = buildQAStageErrorDetail(rt, err, runCtx, timeout, startupOverhead, map[string]any{
 				"complexityTier":  string(comp.Tier),
 				"attachmentCount": specAtt.TotalCount,
 				"attachmentBytes": specAtt.TotalBytes,
@@ -634,15 +698,7 @@ func ExecutePostCloneWorkflowPhases(
 			if store != nil && (spec.Context.Enabled || codebaseContext != "" || attachmentContext != "") {
 				attachmentPaths := make([]string, 0, len(specAtt.Files))
 				for _, f := range specAtt.Files {
-					rel := f.SandboxPath
-					if rel == "" {
-						if f.ID > 0 {
-							rel = AttachmentPath(f.ID, f.Filename)
-						} else {
-							rel = path.Join(AttachmentsDir, attachmentFilename(f.Filename))
-						}
-					}
-					attachmentPaths = append(attachmentPaths, "./"+rel)
+					attachmentPaths = append(attachmentPaths, "./"+attachmentSandboxRelPath(f))
 				}
 				detailMap := map[string]any{
 					"discoveredPaths":  existingPaths,
@@ -867,7 +923,7 @@ func ExecutePostCloneWorkflowPhases(
 			}
 			var detailStr string
 			if err != nil {
-				detailStr = buildQAStageErrorDetail(err, runCtx, totalTimeout, startupOverhead, s2Extra)
+				detailStr = buildQAStageErrorDetail(rt, err, runCtx, totalTimeout, startupOverhead, s2Extra)
 			} else {
 				detailBytes, _ := json.Marshal(s2Extra)
 				detailStr = string(detailBytes)

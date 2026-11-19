@@ -22,6 +22,7 @@ import (
 	"github.com/ai-on-gke/grain/pkg/agent"
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/orchestrator"
+	"github.com/ai-on-gke/grain/pkg/secrets"
 )
 
 // resolveQAStageAgentChoices chooses the AgentChoice for lightweight isolated QA stages (S0/S2/S4).
@@ -109,4 +110,21 @@ func qaStageStartupOverhead(ctx context.Context, store *model.Store, cfg Config,
 		fwName = live.DefaultAgentFramework()
 	}
 	return orchestrator.CLIStartupOverheadForFramework(model.NormalizeAgentFramework(fwName))
+}
+
+// qaStageErrorRedactor redacts stored secrets and credential shapes from QA stage
+// failure diagnostics before they are persisted into task_qa_check_run.detail_json.
+// Like dispatchConditionRedactor, it fails closed when the secret store cannot be read.
+func qaStageErrorRedactor(secretsDir string, secretStore *secrets.Store) func(string) string {
+	return func(text string) string {
+		if text == "" {
+			return ""
+		}
+		redactor := grainLogRedactorFor(secretsDir, secretStore)
+		if redactor == nil {
+			return "(withheld: the redaction list could not be read -- the error is in the daemon's journal)"
+		}
+		out, _ := redactor.Text(text)
+		return out
+	}
 }

@@ -534,40 +534,86 @@ func ComposeTightenOnly(spec qa.FlowSpec, overlays ...qa.FlowSpec) qa.FlowSpec {
 		spec.StrictDecoderPaths = unionStrings(spec.StrictDecoderPaths, ov.StrictDecoderPaths)
 
 		// V4 Decompose, Context, PRContract tighten-only
-		if ov.Decompose.Enabled && (ov.Decompose.Mode != "off" || len(ov.Decompose.TierModes) > 0) {
-			spec.Decompose.Enabled = true
-			if spec.Decompose.Mode == "" || spec.Decompose.Mode == "off" || ov.Decompose.Mode == "propose_dag" {
-				if ov.Decompose.Mode != "" && ov.Decompose.Mode != "off" {
+		if ov.Decompose.Enabled {
+			modeRank := func(m string) int {
+				switch strings.ToLower(strings.TrimSpace(m)) {
+				case "propose_dag":
+					return 2
+				case "slice_plan":
+					return 1
+				default:
+					return 0
+				}
+			}
+			tiers := []qa.ComplexityTier{qa.ComplexityLow, qa.ComplexityMedium, qa.ComplexityHigh}
+			ovHasActiveDecompose := modeRank(ov.Decompose.Mode) > 0
+			for _, t := range tiers {
+				if modeRank(ov.Decompose.EffectiveModeForTier(t)) > 0 {
+					ovHasActiveDecompose = true
+					break
+				}
+			}
+			if ovHasActiveDecompose {
+				wantEff := make(map[string]string, len(tiers))
+				for _, t := range tiers {
+					baseEff := spec.Decompose.EffectiveModeForTier(t)
+					ovEff := ov.Decompose.EffectiveModeForTier(t)
+					if modeRank(ovEff) > modeRank(baseEff) {
+						wantEff[string(t)] = ovEff
+					} else {
+						wantEff[string(t)] = baseEff
+					}
+				}
+				hadBaseAllTiers := spec.Decompose.Enabled && modeRank(spec.Decompose.Mode) > 0 && len(spec.Decompose.Complexities) == 0
+				spec.Decompose.Enabled = true
+				if modeRank(ov.Decompose.Mode) > modeRank(spec.Decompose.Mode) {
 					spec.Decompose.Mode = ov.Decompose.Mode
 				}
-			}
-			spec.Decompose.Complexities = unionStrings(spec.Decompose.Complexities, ov.Decompose.Complexities)
-			if len(ov.Decompose.TierModes) > 0 {
-				if spec.Decompose.TierModes == nil {
-					spec.Decompose.TierModes = make(map[string]string, len(ov.Decompose.TierModes))
+				if !hadBaseAllTiers {
+					spec.Decompose.Complexities = unionStrings(spec.Decompose.Complexities, ov.Decompose.Complexities)
 				}
-				modeRank := func(m string) int {
-					switch m {
-					case "propose_dag":
-						return 2
-					case "slice_plan":
-						return 1
-					default:
-						return 0
+				// Reconcile TierModes strictly against each tier's tighten-only effective mode so a
+				// repository overlay can never downgrade a base flow (e.g. setting tier-modes.high=slice_plan
+				// over a base flow whose mode is propose_dag) or drop a tier covered by the base flow.
+				baseOnly := qa.DecomposeDecl{
+					Enabled:      spec.Decompose.Enabled,
+					Mode:         spec.Decompose.Mode,
+					Complexities: spec.Decompose.Complexities,
+				}
+				needTierModes := len(spec.Decompose.TierModes) > 0 || len(ov.Decompose.TierModes) > 0
+				for _, t := range tiers {
+					if baseOnly.EffectiveModeForTier(t) != wantEff[string(t)] {
+						needTierModes = true
+						break
 					}
 				}
-				for tierKey, ovMode := range ov.Decompose.TierModes {
-					cur := spec.Decompose.TierModes[tierKey]
-					if modeRank(ovMode) > modeRank(cur) {
-						spec.Decompose.TierModes[tierKey] = ovMode
+				if needTierModes {
+					merged := make(map[string]string, len(tiers))
+					for _, t := range tiers {
+						k := string(t)
+						want := wantEff[k]
+						_, inSpec := spec.Decompose.TierModes[k]
+						_, inOv := ov.Decompose.TierModes[k]
+						if want != baseOnly.EffectiveModeForTier(t) || (want != "" && (inSpec || inOv)) {
+							if want == "" {
+								merged[k] = "off"
+							} else {
+								merged[k] = want
+							}
+						}
+					}
+					if len(merged) > 0 {
+						spec.Decompose.TierModes = merged
+					} else {
+						spec.Decompose.TierModes = nil
 					}
 				}
-			}
-			if ov.Decompose.MaxSubtasks > spec.Decompose.MaxSubtasks {
-				spec.Decompose.MaxSubtasks = ov.Decompose.MaxSubtasks
-			}
-			if spec.Decompose.TargetDiffLines == 0 || (ov.Decompose.TargetDiffLines > 0 && ov.Decompose.TargetDiffLines < spec.Decompose.TargetDiffLines) {
-				spec.Decompose.TargetDiffLines = ov.Decompose.TargetDiffLines
+				if ov.Decompose.MaxSubtasks > spec.Decompose.MaxSubtasks {
+					spec.Decompose.MaxSubtasks = ov.Decompose.MaxSubtasks
+				}
+				if spec.Decompose.TargetDiffLines == 0 || (ov.Decompose.TargetDiffLines > 0 && ov.Decompose.TargetDiffLines < spec.Decompose.TargetDiffLines) {
+					spec.Decompose.TargetDiffLines = ov.Decompose.TargetDiffLines
+				}
 			}
 		}
 		if ov.Context.Enabled {

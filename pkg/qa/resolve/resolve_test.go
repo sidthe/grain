@@ -559,7 +559,8 @@ func TestComposeTightenOnlyOverlaysAndFloors(t *testing.T) {
 		t.Fatalf("expected both ReadabilityPacks enabled, got %+v", composed.ReadabilityPacks)
 	}
 
-	// Tightening overlay upgrades slice_plan -> propose_dag and merges TierModes tighten-only.
+	// Tightening overlay upgrades slice_plan -> propose_dag and merges TierModes tighten-only
+	// without dropping low-tier coverage from base.
 	tighter := qa.FlowSpec{
 		Decompose: qa.DecomposeDecl{
 			Enabled:      true,
@@ -571,5 +572,71 @@ func TestComposeTightenOnlyOverlaysAndFloors(t *testing.T) {
 	upgraded := resolve.ComposeTightenOnly(base, tighter)
 	if upgraded.Decompose.Mode != "propose_dag" || upgraded.Decompose.TierModes["high"] != "propose_dag" || upgraded.Decompose.TierModes["medium"] != "slice_plan" {
 		t.Fatalf("expected tighten-only overlay to upgrade Decompose to propose_dag and preserve TierModes, got %+v", upgraded.Decompose)
+	}
+	if upgraded.Decompose.EffectiveModeForTier(qa.ComplexityLow) != "slice_plan" ||
+		upgraded.Decompose.EffectiveModeForTier(qa.ComplexityMedium) != "slice_plan" ||
+		upgraded.Decompose.EffectiveModeForTier(qa.ComplexityHigh) != "propose_dag" {
+		t.Fatalf("expected base low=slice_plan preserved and high tightened to propose_dag, got low=%q med=%q high=%q (%+v)",
+			upgraded.Decompose.EffectiveModeForTier(qa.ComplexityLow),
+			upgraded.Decompose.EffectiveModeForTier(qa.ComplexityMedium),
+			upgraded.Decompose.EffectiveModeForTier(qa.ComplexityHigh),
+			upgraded.Decompose)
+	}
+
+	// Weakening overlay using tier-modes (medium/high=slice_plan or off) MUST NOT downgrade a
+	// base flow whose mode is propose_dag for [medium, high] (e.g. standard-workflow@1).
+	proposeBase := qa.FlowSpec{
+		ID: "propose-base",
+		Decompose: qa.DecomposeDecl{
+			Enabled:         true,
+			Mode:            "propose_dag",
+			Complexities:    []string{"medium", "high"},
+			MaxSubtasks:     4,
+			TargetDiffLines: 400,
+		},
+	}
+	weakeningTierModes := qa.FlowSpec{
+		ID: "weakening-tier-modes",
+		Decompose: qa.DecomposeDecl{
+			Enabled:   true,
+			TierModes: map[string]string{"medium": "slice_plan", "high": "slice_plan"},
+		},
+	}
+	defended := resolve.ComposeTightenOnly(proposeBase, weakeningTierModes)
+	if defended.Decompose.EffectiveModeForTier(qa.ComplexityMedium) != "propose_dag" ||
+		defended.Decompose.EffectiveModeForTier(qa.ComplexityHigh) != "propose_dag" {
+		t.Fatalf("ComposeTightenOnly allowed tier-modes overlay to downgrade propose_dag: med=%q high=%q (%+v)",
+			defended.Decompose.EffectiveModeForTier(qa.ComplexityMedium),
+			defended.Decompose.EffectiveModeForTier(qa.ComplexityHigh),
+			defended.Decompose)
+	}
+
+	// Tightening overlay using mode=propose_dag MUST upgrade an existing weaker base tier-mode
+	// without mutating the caller's TierModes map.
+	baseTierMap := map[string]string{"medium": "slice_plan", "high": "propose_dag"}
+	tieredBase := qa.FlowSpec{
+		ID: "tiered-base",
+		Decompose: qa.DecomposeDecl{
+			Enabled:      true,
+			Mode:         "propose_dag",
+			Complexities: []string{"medium", "high"},
+			TierModes:    baseTierMap,
+		},
+	}
+	tightenAllPropose := qa.FlowSpec{
+		ID: "tighten-all-propose",
+		Decompose: qa.DecomposeDecl{
+			Enabled:      true,
+			Mode:         "propose_dag",
+			Complexities: []string{"medium", "high"},
+		},
+	}
+	tightenedTiered := resolve.ComposeTightenOnly(tieredBase, tightenAllPropose)
+	if tightenedTiered.Decompose.EffectiveModeForTier(qa.ComplexityMedium) != "propose_dag" {
+		t.Fatalf("expected mode=propose_dag overlay to upgrade base tier-modes[medium]=slice_plan, got %q (%+v)",
+			tightenedTiered.Decompose.EffectiveModeForTier(qa.ComplexityMedium), tightenedTiered.Decompose)
+	}
+	if baseTierMap["medium"] != "slice_plan" {
+		t.Fatalf("ComposeTightenOnly mutated caller's TierModes map: %+v", baseTierMap)
 	}
 }

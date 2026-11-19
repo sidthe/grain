@@ -64,6 +64,7 @@ type QARuntime struct {
 	VerifyS4             S4VerifyFunc
 	RunIsolatedPrompt    func(ctx context.Context, task model.Task, runPrefix, prompt string, maxTokens int) (output string, tokensIn, tokensOut int64, err error)
 	StageStartupOverhead func(ctx context.Context, task model.Task) time.Duration
+	RedactText           func(string) string
 	ExecInSandbox        func(ctx context.Context, dir string, argv []string, timeout time.Duration) (string, int, error)
 }
 
@@ -1680,7 +1681,7 @@ func runFreshContextS4(
 				TokensIn:     tokIn,
 				TokensOut:    tokOut,
 				AllocBytes:   sample.AllocBytes,
-				DetailJSON:   buildQAStageErrorDetail(vErr, s4Ctx, s4Timeout, startupOverhead, extra),
+				DetailJSON:   buildQAStageErrorDetail(rt, vErr, s4Ctx, s4Timeout, startupOverhead, extra),
 				ExperimentID: expID,
 				ArmID:        armID,
 				FlowHash:     flowHash,
