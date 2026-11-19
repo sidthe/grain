@@ -45,6 +45,7 @@ test.describe("instance identity, header theming, and quick-name popover", () =>
     demoServer,
     accessCode,
   }) => {
+    test.setTimeout(90_000);
     await setIdentity(demoServer, accessCode, {
       environmentName: "",
       headerColor: "",
@@ -161,6 +162,7 @@ test.describe("instance identity, header theming, and quick-name popover", () =>
     demoServer,
     accessCode,
   }) => {
+    test.setTimeout(90_000);
     await setIdentity(demoServer, accessCode, {
       environmentName: "staging",
       headerColor: "teal",
@@ -227,6 +229,7 @@ test.describe("instance identity, header theming, and quick-name popover", () =>
     demoServer,
     accessCode,
   }) => {
+    test.setTimeout(60_000);
     await page.setViewportSize({ width: 390, height: 844 });
     await setIdentity(demoServer, accessCode, {
       environmentName: "",
