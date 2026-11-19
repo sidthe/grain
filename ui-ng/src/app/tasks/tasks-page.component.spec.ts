@@ -1036,6 +1036,54 @@ describe("TasksPageComponent", () => {
       expect(repoHeaders.some((h) => h?.includes("acme/api"))).toBe(true);
     });
 
+    it("groups Proposals by Workstream and approves a workstream plus its upstream prerequisites in dependency order", async () => {
+      const api = new FakeApi();
+      api.live = [
+        task("50", "proposed", 5, {
+          title: "Standalone upstream",
+          repo: "acme/web",
+        }),
+        task("100", "completed", 5, {
+          title: "Payments stream",
+          repo: "acme/web",
+        }),
+        task("101", "proposed", 5, {
+          title: "Wave 1",
+          repo: "acme/web",
+          origin: "task:100",
+          generatedFrom: "100",
+          dependsOn: ["50"],
+        }),
+        task("102", "proposed", 5, {
+          title: "Wave 2",
+          repo: "acme/web",
+          origin: "task:100",
+          generatedFrom: "100",
+          dependsOn: ["101"],
+        }),
+      ];
+      const f = await render(api, "proposed");
+      f.componentRef.setInput("group", "workstream");
+      await settle(f);
+
+      const wsBtn = q<HTMLButtonElement>(
+        f,
+        '[data-testid="tasks-group-approve-task:100"]',
+      )!;
+      expect(wsBtn).not.toBeNull();
+      expect(wsBtn.textContent?.trim()).toBe("Approve all 3 (1 upstream)");
+
+      wsBtn.click();
+      await settle(f);
+      q<HTMLButtonElement>(f, '[data-testid="confirm-accept"]')!.click();
+      await settle(f);
+
+      const approvedIds = api.calls
+        .filter((c) => c.route === "POST /api/tasks/{id}/approve")
+        .map((c) => c.params?.id);
+      expect(approvedIds).toEqual(["50", "101", "102"]);
+    });
+
     it("renders right-pane empty state when tab has no rows, and supports split-controls + batch priority pill", async () => {
       const api = new FakeApi();
       api.live = [];

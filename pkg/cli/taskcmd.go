@@ -477,21 +477,27 @@ const dependsOnFlagUsage = "task this one must wait on before it is dispatched -
 func cmdApprove(ctx context.Context, c *ui.HTTPClient, out *printer, args []string) error {
 	fs := flag.NewFlagSet("grain approve", flag.ContinueOnError)
 	reason := fs.String("reason", "", "why: sent as X-Grain-Acting-Reason, which an external agent credential (gma_) must give to approve")
-	if err := fs.Parse(args); err != nil {
+	upstream := fs.Bool("upstream", false, "also approve every proposed upstream depends-on task blocking this task, in dependency order")
+	workstream := fs.Bool("workstream", false, "approve every proposed task in this task's workstream and its upstream dependencies, in dependency order")
+	rest, err := parseArgs(fs, args)
+	if err != nil {
 		return err
 	}
-	if err := atMostArgs(fs, fs.Args(), 1); err != nil {
+	if err := atMostArgs(fs, rest, 1); err != nil {
 		return err
 	}
-	id, err := taskID(fs.Arg(0))
+	id, err := taskID(first(rest))
 	if err != nil {
 		return err
 	}
 	c.ActingReason = *reason
-	if err := c.Approve(ctx, id); err != nil {
-		return err
+	if !*upstream && !*workstream {
+		if err := c.Approve(ctx, id); err != nil {
+			return err
+		}
+		return respond(ctx, c, out, id)
 	}
-	return respond(ctx, c, out, id)
+	return approveBatch(ctx, c, out, id, *workstream)
 }
 
 // cmdDefer and cmdUndefer put a task aside and pick it back up --

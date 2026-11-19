@@ -397,8 +397,11 @@ Commands:
                                        -field name=value sets one of the fields this deployment
                                        declares, repeatably -- "grain create -h" lists them)
   update <id> [flags]                  edit a task's title or fields, -field name=value included
-  approve [-reason r] <id>             accept a proposed task (proposed -> queued); an external agent
-                                       credential (gma_) must give -reason
+  approve [-reason r] [-upstream] [-workstream] <id>
+                                       accept a proposed task (proposed -> queued); -upstream also approves
+                                       proposed upstream dependencies, -workstream approves the workstream
+                                       and its upstream dependencies; an external agent credential (gma_)
+                                       must give -reason
   withdraw <id>                        withdraw a queued task's approval (queued -> proposed)
   defer [-until <date>] <id>           put a task aside without closing it (proposed/queued -> deferred);
                                        deferred tasks are hidden from task lists until asked for, and

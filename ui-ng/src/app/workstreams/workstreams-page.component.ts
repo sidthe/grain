@@ -33,12 +33,17 @@ import { CreateTaskService } from "../create/create-task.service";
 import { NO_REPO } from "../create/new-task-form";
 import { AccessService } from "../services/access.service";
 import { KeyboardService, isTypingTarget } from "../services/keyboard.service";
+import { SnackbarService } from "../services/snackbar.service";
 import { ViewFilter } from "../services/view-filter.service";
 import {
   type QaWorkflowChip,
   qaWorkflowChip,
   repoShort,
 } from "../shared/chips";
+import {
+  ConfirmDialogComponent,
+  type ConfirmRequest,
+} from "../shared/confirm-dialog.component";
 import {
   PillSelectComponent,
   type PillOption,
@@ -57,11 +62,16 @@ import {
   type Workstream,
   compactProgressText,
   filterWorkstreams,
+  formatApproveAllLabel,
   lastActivityLabel,
   matchesWorkstreamNonScope,
   progressSummaryText,
 } from "./workstream-model";
-import { WorkstreamsStore } from "./workstreams.store";
+import {
+  type StreamApprovePreview,
+  WorkstreamsStore,
+  formatApproveOutcome,
+} from "./workstreams.store";
 
 export const WS_VIEW_STORAGE_KEY = "grain.ws.view";
 type WsView = "list" | "cards";
@@ -148,6 +158,7 @@ function decodeFragmentKey(frag: string | null): string | null {
   selector: "g-workstreams-page",
   imports: [
     TipDirective,
+    ConfirmDialogComponent,
     WorkstreamDetailComponent,
     PillSelectComponent,
     StatusIconComponent,
@@ -203,7 +214,12 @@ function decodeFragmentKey(frag: string | null): string | null {
         </section>
       }
     } @else {
-      <section class="ws-page" aria-labelledby="ws-title" data-testid="ws-page">
+      <section
+        class="ws-page"
+        aria-labelledby="ws-title"
+        [attr.inert]="confirming() ? '' : null"
+        data-testid="ws-page"
+      >
         <div class="ws-vh">
           <h1 id="ws-title">Workstreams</h1>
           <span class="ws-sub">
@@ -564,13 +580,25 @@ function decodeFragmentKey(frag: string | null): string | null {
                 </div>
                 <div class="ws-cfoot">
                   <span class="mono">{{ reposText(s) }}</span>
-                  <span>
-                    @if (s.runningNodes.length) {
-                      {{ s.runningNodes.length }} running
-                    } @else {
-                      {{ s.counts.total }} tasks
-                    }
-                  </span>
+                  @if (approvePreviews().get(s.key); as ap) {
+                    <button
+                      type="button"
+                      class="btn-tonal ws-row-approve"
+                      [attr.data-testid]="'ws-card-approve-' + s.key"
+                      [disabled]="store.busy() !== null"
+                      (click)="confirmApproveStream($event, s)"
+                    >
+                      {{ approveLabel(ap) }}
+                    </button>
+                  } @else {
+                    <span>
+                      @if (s.runningNodes.length) {
+                        {{ s.runningNodes.length }} running
+                      } @else {
+                        {{ s.counts.total }} tasks
+                      }
+                    </span>
+                  }
                 </div>
               </article>
             }
@@ -693,8 +721,19 @@ function decodeFragmentKey(frag: string | null): string | null {
                   </div>
                   <div
                     class="ws-pills"
-                    style="display:flex;gap:6px;flex-wrap:wrap"
+                    style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"
                   >
+                    @if (approvePreviews().get(s.key); as ap) {
+                      <button
+                        type="button"
+                        class="btn-tonal ws-row-approve"
+                        [attr.data-testid]="'ws-row-approve-' + s.key"
+                        [disabled]="store.busy() !== null"
+                        (click)="confirmApproveStream($event, s)"
+                      >
+                        {{ approveLabel(ap) }}
+                      </button>
+                    }
                     @if (s.counts.person) {
                       <span class="ws-chip-warn"
                         ><g-status-icon tone="warn" kind="warn" />{{
@@ -783,6 +822,9 @@ function decodeFragmentKey(frag: string | null): string | null {
           </div>
         }
       </section>
+      @if (confirming(); as c) {
+        <g-confirm-dialog [request]="c" (done)="onConfirm(c, $event)" />
+      }
     }
   `,
 })
@@ -790,6 +832,7 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
   protected readonly store = inject(WorkstreamsStore);
   private readonly access = inject(AccessService);
   private readonly createTask = inject(CreateTaskService);
+  private readonly snackbar = inject(SnackbarService);
   private readonly router = inject(Router);
   private readonly route = inject(ActivatedRoute);
   private readonly fragment = toSignal(this.route.fragment, {
@@ -798,6 +841,7 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
   private readonly keyboard = inject(KeyboardService);
   protected readonly viewFilter = inject(ViewFilter);
   private readonly host = inject(ElementRef) as ElementRef<HTMLElement>;
+  protected readonly confirming = signal<ConfirmRequest | null>(null);
 
   readonly key = input<string>();
   readonly ws = input<string>();
@@ -914,6 +958,17 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
     for (const stream of this.filtered().visible) {
       const chip = qaWorkflowChip(stream.root.task);
       if (chip) map.set(stream.key, chip);
+    }
+    return map;
+  });
+
+  protected readonly approvePreviews = computed<
+    ReadonlyMap<string, StreamApprovePreview>
+  >(() => {
+    const map = new Map<string, StreamApprovePreview>();
+    for (const stream of this.filtered().visible) {
+      const preview = this.store.approvePreview(stream);
+      if (preview.targets.length > 0) map.set(stream.key, preview);
     }
     return map;
   });
@@ -1064,6 +1119,51 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
     });
   }
 
+  protected approveLabel(p: StreamApprovePreview): string {
+    return formatApproveAllLabel(p);
+  }
+
+  protected confirmApproveStream(ev: Event, s: Workstream): void {
+    ev.stopPropagation();
+    const preview =
+      this.approvePreviews().get(s.key) ?? this.store.approvePreview(s);
+    const req = this.store.buildApproveConfirm({
+      subjectTitle: s.title,
+      preview,
+      run: async (snapshot) => {
+        const res = await this.store.approveWaves(snapshot.waves);
+        const msg = formatApproveOutcome(res);
+        const canUndo =
+          res.approvedIds.length > 0 &&
+          this.store.canWithdrawApprovals(res.approvedTasks);
+        this.snackbar.show(
+          msg,
+          canUndo
+            ? {
+                label: "Undo",
+                run: async () => {
+                  const undo = await this.store.withdrawApprovals(
+                    res.approvedIds,
+                  );
+                  this.snackbar.show(
+                    undo.failed
+                      ? `Withdrew ${undo.succeeded} of ${undo.succeeded + undo.failed} approvals`
+                      : `Withdrew approval for ${undo.succeeded} ${undo.succeeded === 1 ? "task" : "tasks"}`,
+                  );
+                },
+              }
+            : undefined,
+        );
+      },
+    });
+    if (req) this.confirming.set(req);
+  }
+
+  protected async onConfirm(c: ConfirmRequest, ok: boolean): Promise<void> {
+    this.confirming.set(null);
+    if (ok) await c.run();
+  }
+
   protected kLabel(sk: SystemKind): string {
     return KLABEL[sk];
   }
@@ -1156,7 +1256,12 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
   }
 
   protected onKey(ev: KeyboardEvent): void {
-    if (this.activeKey() || ev.defaultPrevented || isTypingTarget(ev.target)) {
+    if (
+      this.activeKey() ||
+      this.confirming() ||
+      ev.defaultPrevented ||
+      isTypingTarget(ev.target)
+    ) {
       return;
     }
     if (ev.metaKey || ev.ctrlKey || ev.altKey || ev.repeat) return;

@@ -553,6 +553,67 @@ describe("WorkstreamsPageComponent", () => {
     ).toBeGreaterThan(0);
     expect(el.querySelector(".ws-gnode title")).not.toBeNull();
   });
+
+  it("approves a workstream and its upstream dependencies from List and Cards views without opening the stream", async () => {
+    api.open = [
+      t("88", { title: "Standalone prereq", state: "proposed" }),
+      t("100", { title: "Submitted stream", state: "completed" }),
+      t("101", {
+        title: "Wave 1",
+        state: "proposed",
+        origin: "task:100",
+        generatedFrom: "100",
+        dependsOn: ["88"],
+      }),
+      t("102", {
+        title: "Wave 2",
+        state: "proposed",
+        origin: "task:100",
+        generatedFrom: "100",
+        dependsOn: ["101"],
+      }),
+    ];
+
+    const { fixture, router } = await mount("/workstreams");
+    const el = fixture.nativeElement as HTMLElement;
+    const navSpy = vi.spyOn(router, "navigate");
+
+    const rowBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="ws-row-approve-task:100"]',
+    )!;
+    expect(rowBtn.textContent?.trim()).toBe("Approve all 3 (1 upstream)");
+    rowBtn.click();
+    fixture.detectChanges();
+
+    // Did not navigate into the stream; opened confirmation dialog instead.
+    expect(navSpy).not.toHaveBeenCalled();
+    expect(
+      el.querySelector('[data-testid="ws-page"]')?.hasAttribute("inert"),
+    ).toBe(true);
+    expect(el.querySelector('[data-testid="confirm-dialog"]')).not.toBeNull();
+
+    // Accept approval -> posts upstream-first: 88, 101, 102.
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="confirm-accept"]',
+    )!.click();
+    fixture.detectChanges();
+    await vi.waitFor(() => {
+      const approvedIds = api.calls
+        .filter((c) => c.route === "POST /api/tasks/{id}/approve")
+        .map((c) => (c.params as { id: string }).id);
+      expect(approvedIds).toEqual(["88", "101", "102"]);
+    });
+
+    // Cards view also renders ws-card-approve-<key>.
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="ws-view-cards"]',
+    )!.click();
+    await fixture.whenStable();
+    fixture.detectChanges();
+    expect(
+      el.querySelector('[data-testid="ws-card-approve-task:100"]'),
+    ).not.toBeNull();
+  });
 });
 
 describe("Workstreams detail embedded task pane", () => {

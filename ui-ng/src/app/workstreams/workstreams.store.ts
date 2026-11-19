@@ -30,16 +30,28 @@ import type {
   TaskDetail,
   TaskListPage,
   TaskSummariesResponse,
+  TreeNode,
+  WorkTree,
 } from "../api/models";
 import { InboxStore } from "../inbox/inbox.store";
 import { AccessService } from "../services/access.service";
 import { TaskFeedStore } from "../services/task-feed.service";
+import type {
+  ConfirmItem,
+  ConfirmRequest,
+} from "../shared/confirm-dialog.component";
 import { type Scope, scopeOf } from "../shared/scope";
 import {
+  type ApprovalPlan,
+  type ApprovalTarget,
   DONE_RETENTION_DAYS,
   type Workstream,
   type WorkstreamNode,
+  classifyTaskState,
+  collectTaskUpstreamApprovals,
+  collectWorkstreamApprovals,
   deriveWorkstreams,
+  orderApprovalTargets,
 } from "./workstream-model";
 
 export const STARTED_STORAGE_KEY = "grain.ws.started";
@@ -86,10 +98,62 @@ export interface StreamBatchPreview {
   scope: Scope;
 }
 
+export interface StreamApprovePreview extends StreamBatchPreview {
+  tasks: Task[];
+  targets: ApprovalTarget[];
+  waves: ApprovalTarget[][];
+  directCount: number;
+  upstreamCount: number;
+}
+
 export interface BatchResult {
   succeeded: number;
   failed: number;
 }
+
+export interface ApproveBatchResult extends BatchResult {
+  // Targets never sent because something they depend on failed (or was
+  // itself skipped) earlier in the batch.
+  skipped: number;
+  approvedIds: string[];
+  approvedTasks: Task[];
+}
+
+export function formatApproveOutcome(res: ApproveBatchResult): string {
+  const total = res.succeeded + res.failed + res.skipped;
+  if (res.skipped > 0) {
+    return `Approved ${res.succeeded} of ${total} (${res.failed} failed, ${res.skipped} downstream skipped)`;
+  }
+  if (res.failed > 0) return `Approved ${res.succeeded} of ${total}`;
+  return `Approved ${res.succeeded} ${res.succeeded === 1 ? "task" : "tasks"}`;
+}
+
+function isDoneForApproval(t: Task): boolean {
+  return (
+    t.state === "closed" ||
+    (t.state === "completed" && !t.pullRequest) ||
+    !!t.merged ||
+    !!t.prMergedAt
+  );
+}
+
+export const EMPTY_APPROVE_PREVIEW: StreamApprovePreview = {
+  nodes: [],
+  tasks: [],
+  targets: [],
+  waves: [],
+  directCount: 0,
+  upstreamCount: 0,
+  scope: {
+    total: 0,
+    repos: [],
+    owners: [],
+    multiRepo: false,
+    otherOwner: false,
+  },
+};
+
+const MAX_CONFIRM_ITEMS = 12;
 
 @Injectable({ providedIn: "root" })
 export class WorkstreamsStore implements OnDestroy {
@@ -152,6 +216,14 @@ export class WorkstreamsStore implements OnDestroy {
   readonly streams = computed(() => this.derivation().streams);
   readonly byKey = computed(() => this.derivation().byKey);
   readonly taskToStream = computed(() => this.derivation().taskToStream);
+
+  readonly allTasksById = computed<ReadonlyMap<string, Task>>(() => {
+    const map = new Map<string, Task>();
+    for (const t of this.allTasks()) {
+      if (t?.id && !map.has(t.id)) map.set(t.id, t);
+    }
+    return map;
+  });
 
   readonly allNodesById = computed<ReadonlyMap<string, WorkstreamNode>>(() => {
     const map = new Map<string, WorkstreamNode>();
@@ -498,21 +570,277 @@ export class WorkstreamsStore implements OnDestroy {
     });
   }
 
-  approvePreview(stream: Workstream): StreamBatchPreview {
-    const nodes = [...stream.proposedNodes]
-      .filter((n) =>
-        this.access.canAccessTask(
-          "POST /api/tasks/{id}/approve",
-          n.task.repo ?? null,
-        ),
-      )
-      .sort((a, b) => Number(a.id) - Number(b.id) || a.id.localeCompare(b.id));
+  private canApproveTask(t: Task): boolean {
+    return this.access.canAccessTask(
+      "POST /api/tasks/{id}/approve",
+      t.repo ?? null,
+    );
+  }
+
+  private toApprovePreview(
+    plan: ApprovalPlan,
+    tasksById: ReadonlyMap<string, Task>,
+  ): StreamApprovePreview {
+    const knownNodes = this.allNodesById();
+    const nodes: WorkstreamNode[] = plan.targets.map((entry) => {
+      const existing = knownNodes.get(entry.id);
+      if (existing) return existing;
+      const cls = classifyTaskState(entry.task, tasksById);
+      return {
+        task: entry.task,
+        id: entry.task.id,
+        parentId: entry.task.generatedFrom ?? null,
+        deps: [...(entry.task.dependsOn ?? [])],
+        crossStreamDeps: [],
+        foldedReviews: [],
+        foldedTaskIds: [entry.task.id],
+        category: cls.category,
+        glyph: cls.glyph,
+        waitingOnPerson: cls.waitingOnPerson,
+        prNumber: null,
+        title: entry.task.title || `Task #${entry.task.id}`,
+        stateText:
+          entry.task.state === "proposed" ? "Proposed" : entry.task.state,
+        activityText: entry.task.activity || "",
+        createdMs: entry.task.createdAt
+          ? Date.parse(entry.task.createdAt) || 0
+          : 0,
+        updatedMs: entry.task.updatedAt
+          ? Date.parse(entry.task.updatedAt) || 0
+          : 0,
+        closedMs: null,
+      };
+    });
+    const tasks = plan.targets.map((entry) => entry.task);
     return {
       nodes,
-      scope: scopeOf(
-        nodes.map((n) => n.task),
-        this.access.viewer(),
-      ),
+      tasks,
+      targets: plan.targets,
+      waves: plan.waves,
+      directCount: plan.directCount,
+      upstreamCount: plan.upstreamCount,
+      scope: scopeOf(tasks, this.access.viewer()),
+    };
+  }
+
+  private mergedTasksById(
+    extraTasks?: Iterable<Task>,
+    preferExtra = false,
+  ): ReadonlyMap<string, Task> {
+    const base = this.allTasksById();
+    if (!extraTasks) return base;
+    let merged: Map<string, Task> | null = null;
+    for (const t of extraTasks) {
+      if (!t?.id || (!preferExtra && base.has(t.id))) continue;
+      merged ??= new Map<string, Task>(base);
+      merged.set(t.id, t);
+    }
+    return merged ?? base;
+  }
+
+  approvePreview(
+    stream: Workstream,
+    opts: {
+      extraTasks?: Iterable<Task>;
+      taskToStream?: ReadonlyMap<string, Workstream>;
+    } = {},
+  ): StreamApprovePreview {
+    const tasksById = this.mergedTasksById(opts.extraTasks, false);
+    const plan = collectWorkstreamApprovals(stream, tasksById, {
+      canApprove: (t) => this.canApproveTask(t),
+      taskToStream: opts.taskToStream ?? this.taskToStream(),
+    });
+    return this.toApprovePreview(plan, tasksById);
+  }
+
+  approveUpstreamPreview(
+    taskId: string,
+    opts: {
+      includeSelf?: boolean;
+      extraTasks?: Iterable<Task>;
+      taskToStream?: ReadonlyMap<string, Workstream>;
+    } = {},
+  ): StreamApprovePreview {
+    const tasksById = this.mergedTasksById(opts.extraTasks, true);
+    const plan = collectTaskUpstreamApprovals(taskId, tasksById, {
+      canApprove: (t) => this.canApproveTask(t),
+      includeSelf: opts.includeSelf,
+      taskToStream: opts.taskToStream ?? this.taskToStream(),
+    });
+    return this.toApprovePreview(plan, tasksById);
+  }
+
+  approveTreePreview(tree: WorkTree | null | undefined): StreamApprovePreview {
+    if (!tree?.nodes?.length) {
+      return EMPTY_APPROVE_PREVIEW;
+    }
+    const loaded = this.loaded();
+    const base = this.allTasksById();
+    const lookup = new Map<string, Task>(base);
+    const taskToStream = this.taskToStream();
+    const selected = new Map<string, ApprovalTarget>();
+    const walked = new Set<string>();
+    const depQueue: string[] = [];
+    const inTreeIds = new Set<string>();
+
+    const walk = (nodes: readonly TreeNode[]) => {
+      for (const n of nodes) {
+        inTreeIds.add(n.id);
+        const known = lookup.get(n.id);
+        const isTreeProposed =
+          n.status === "planned" || n.status === "proposed";
+        // Once the feed has loaded, a node it does not know is outside what
+        // this viewer can read: leave it alone. Before then, never assume the
+        // parent's repository for it, so RBAC is not judged as same-repo.
+        if (!known && loaded) {
+          if (n.children?.length) walk(n.children);
+          continue;
+        }
+        const task: Task = known ?? {
+          id: n.id,
+          title: n.title,
+          state: isTreeProposed ? "proposed" : n.status,
+        };
+        if (!known) lookup.set(n.id, task);
+        // The tree is a one-shot read; the live feed's state wins over it.
+        const isProposed = known ? known.state === "proposed" : isTreeProposed;
+        if (isProposed && !task.consoleSession && this.canApproveTask(task)) {
+          const ws = taskToStream.get(task.id);
+          selected.set(task.id, {
+            id: task.id,
+            task,
+            upstream: false,
+            streamKey: ws?.key ?? null,
+            streamTitle: ws?.title ?? null,
+          });
+        }
+        if (!(known ? isDoneForApproval(known) : n.done) || isProposed) {
+          walked.add(task.id);
+          for (const depId of task.dependsOn ?? []) {
+            if (depId && !walked.has(depId)) depQueue.push(depId);
+          }
+        }
+        if (n.children?.length) walk(n.children);
+      }
+    };
+    walk(tree.nodes);
+
+    while (depQueue.length > 0) {
+      const depId = depQueue.shift()!;
+      if (!depId || walked.has(depId)) continue;
+      walked.add(depId);
+      const dep = lookup.get(depId);
+      if (
+        !dep ||
+        dep.consoleSession ||
+        dep.state === "closed" ||
+        (dep.state === "completed" && !dep.pullRequest) ||
+        dep.merged ||
+        dep.prMergedAt
+      ) {
+        continue;
+      }
+      if (
+        dep.state === "proposed" &&
+        !inTreeIds.has(dep.id) &&
+        this.canApproveTask(dep)
+      ) {
+        const ws = taskToStream.get(dep.id);
+        selected.set(dep.id, {
+          id: dep.id,
+          task: dep,
+          upstream: true,
+          streamKey: ws?.key ?? null,
+          streamTitle: ws?.title ?? null,
+        });
+      }
+      for (const next of dep.dependsOn ?? []) {
+        if (next && !walked.has(next)) depQueue.push(next);
+      }
+    }
+
+    const { targets, waves } = orderApprovalTargets(selected, lookup);
+    let directCount = 0;
+    let upstreamCount = 0;
+    for (const x of targets) {
+      if (x.upstream) upstreamCount++;
+      else directCount++;
+    }
+    return this.toApprovePreview(
+      { targets, waves, directCount, upstreamCount },
+      lookup,
+    );
+  }
+
+  buildApproveConfirm(opts: {
+    subjectTitle: string;
+    preview: StreamApprovePreview;
+    forTaskId?: string;
+    run: (snapshot: StreamApprovePreview) => Promise<unknown>;
+  }): ConfirmRequest | null {
+    const { preview, subjectTitle, forTaskId } = opts;
+    const total = preview.targets.length;
+    if (total === 0) return null;
+
+    const snapshot: StreamApprovePreview = {
+      ...preview,
+      nodes: [...preview.nodes],
+      tasks: [...preview.tasks],
+      targets: [...preview.targets],
+      waves: preview.waves.map((w) => [...w]),
+    };
+
+    const { directCount, upstreamCount } = snapshot;
+    let title: string;
+    let message: string;
+    if (forTaskId) {
+      if (directCount > 0 && upstreamCount > 0) {
+        title = `Approve #${forTaskId} and ${upstreamCount} upstream ${upstreamCount === 1 ? "task" : "tasks"}?`;
+        message = `Queue ${upstreamCount} upstream ${upstreamCount === 1 ? "dependency" : "dependencies"} and #${forTaskId} (${subjectTitle}) in dependency order.`;
+      } else {
+        title = `Approve ${upstreamCount} upstream ${upstreamCount === 1 ? "task" : "tasks"}?`;
+        message = `Queue ${upstreamCount} upstream ${upstreamCount === 1 ? "dependency" : "dependencies"} blocking #${forTaskId} (${subjectTitle}) in dependency order.`;
+      }
+    } else if (directCount === 0 && upstreamCount > 0) {
+      title = `Approve ${upstreamCount} upstream ${upstreamCount === 1 ? "task" : "tasks"}?`;
+      message = `Queue ${upstreamCount} upstream ${upstreamCount === 1 ? "dependency" : "dependencies"} blocking "${subjectTitle}" in dependency order.`;
+    } else if (upstreamCount > 0) {
+      title = `Approve all ${total} tasks?`;
+      message = `Queue ${directCount} proposed ${directCount === 1 ? "task" : "tasks"} in "${subjectTitle}" and ${upstreamCount} upstream ${upstreamCount === 1 ? "dependency" : "dependencies"} in dependency order.`;
+    } else {
+      title = `Approve ${total} ${total === 1 ? "proposal" : "proposals"}?`;
+      message = `Queue all proposed tasks in "${subjectTitle}" to run in dependency order.`;
+    }
+
+    const items: ConfirmItem[] = snapshot.targets
+      .slice(0, MAX_CONFIRM_ITEMS)
+      .map((entry) => ({
+        key: entry.id,
+        label: `#${entry.id} ${entry.task.title || `Task #${entry.id}`}`,
+        route: ["/task", entry.id],
+        detail: entry.upstream
+          ? entry.streamTitle
+            ? `Upstream · ${entry.streamTitle}`
+            : "Upstream dependency"
+          : undefined,
+      }));
+    if (snapshot.targets.length > MAX_CONFIRM_ITEMS) {
+      const more = snapshot.targets.length - MAX_CONFIRM_ITEMS;
+      items.push({
+        key: "__more__",
+        label: `+${more} more ${more === 1 ? "task" : "tasks"}`,
+      });
+    }
+
+    return {
+      title,
+      message,
+      accept: `Approve (${total})`,
+      destructive: false,
+      scope: snapshot.scope,
+      items,
+      itemsLabel: "Tasks to approve (upstream first)",
+      run: () => opts.run(snapshot),
     };
   }
 
@@ -559,11 +887,154 @@ export class WorkstreamsStore implements OnDestroy {
     };
   }
 
-  async approveProposals(stream: Workstream): Promise<BatchResult> {
-    const targets = this.approvePreview(stream).nodes;
-    return this.runBatch("approve", targets, (n) =>
-      this.api.post("POST /api/tasks/{id}/approve", { id: n.id }),
+  async approveProposals(
+    stream: Workstream,
+    snapshot?: StreamApprovePreview,
+  ): Promise<BatchResult> {
+    const preview = snapshot ?? this.approvePreview(stream);
+    const { succeeded, failed } = await this.approveWaves(preview.waves);
+    return { succeeded, failed };
+  }
+
+  async approveTaskWithUpstream(
+    taskId: string,
+    snapshot?: StreamApprovePreview,
+  ): Promise<ApproveBatchResult> {
+    const preview = snapshot ?? this.approveUpstreamPreview(taskId);
+    return this.approveWaves(preview.waves);
+  }
+
+  async approveWaves(
+    waves: readonly (readonly ApprovalTarget[])[],
+  ): Promise<ApproveBatchResult> {
+    const flat = waves.flat();
+    if (flat.length === 0) {
+      return {
+        succeeded: 0,
+        failed: 0,
+        skipped: 0,
+        approvedIds: [],
+        approvedTasks: [],
+      };
+    }
+    this.busy.set("approve");
+    this.actionError.set(null);
+    const approvedIds: string[] = [];
+    const approvedTasks: Task[] = [];
+    // A failed approval blocks everything downstream of it: those are
+    // skipped rather than queued ahead of the prerequisite that is still
+    // proposed. Independent siblings in later waves still go ahead.
+    const blocked = new Set<string>();
+    const lookup = new Map<string, Task>(this.allTasksById());
+    for (const e of flat) if (!lookup.has(e.id)) lookup.set(e.id, e.task);
+    const dependsOnBlocked = (entry: ApprovalTarget): boolean => {
+      if (blocked.size === 0) return false;
+      const seen = new Set<string>([entry.id]);
+      const queue = [
+        ...(entry.task.dependsOn ?? []),
+        ...(lookup.get(entry.id)?.dependsOn ?? []),
+      ];
+      while (queue.length > 0) {
+        const id = queue.shift()!;
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        if (blocked.has(id)) return true;
+        const dep = lookup.get(id);
+        if (!dep || dep.consoleSession || isDoneForApproval(dep)) continue;
+        queue.push(...(dep.dependsOn ?? []));
+      }
+      return false;
+    };
+    let failed = 0;
+    let skipped = 0;
+    try {
+      for (const fullWave of waves) {
+        const wave: ApprovalTarget[] = [];
+        for (const entry of fullWave) {
+          if (dependsOnBlocked(entry)) {
+            skipped++;
+            blocked.add(entry.id);
+          } else {
+            wave.push(entry);
+          }
+        }
+        if (wave.length === 0) continue;
+        const results = await Promise.allSettled(
+          wave.map((entry) =>
+            Promise.resolve().then(() =>
+              this.api.post("POST /api/tasks/{id}/approve", { id: entry.id }),
+            ),
+          ),
+        );
+        results.forEach((r, idx) => {
+          if (r.status === "fulfilled") {
+            approvedIds.push(wave[idx].id);
+            approvedTasks.push(wave[idx].task);
+          } else {
+            failed++;
+            blocked.add(wave[idx].id);
+          }
+        });
+      }
+      if (failed > 0) {
+        this.actionError.set(
+          skipped > 0
+            ? `${failed} of ${flat.length} approvals failed; ${skipped} downstream ${skipped === 1 ? "task was" : "tasks were"} skipped.`
+            : `${failed} of ${flat.length} task updates failed.`,
+        );
+      }
+      await this.refresh(true);
+      return {
+        succeeded: approvedIds.length,
+        failed,
+        skipped,
+        approvedIds,
+        approvedTasks,
+      };
+    } finally {
+      this.busy.set(null);
+    }
+  }
+
+  canWithdrawApprovals(tasks: readonly Task[]): boolean {
+    return (
+      tasks.length > 0 &&
+      tasks.every((t) =>
+        this.access.canAccessTask(
+          "POST /api/tasks/{id}/withdraw-approval",
+          t.repo ?? null,
+        ),
+      )
     );
+  }
+
+  async withdrawApprovals(ids: readonly string[]): Promise<BatchResult> {
+    if (ids.length === 0) return { succeeded: 0, failed: 0 };
+    this.busy.set("withdraw");
+    this.actionError.set(null);
+    let succeeded = 0;
+    let failed = 0;
+    try {
+      // Withdraw downstream tasks first, then upstream dependencies.
+      const reversed = [...ids].reverse();
+      for (const id of reversed) {
+        try {
+          await this.api.post("POST /api/tasks/{id}/withdraw-approval", { id });
+          succeeded++;
+        } catch {
+          failed++;
+        }
+      }
+      if (failed > 0) {
+        this.actionError.set(
+          `${failed} of ${reversed.length} approval withdrawals failed.`,
+        );
+      }
+      await this.refresh(true);
+      return { succeeded, failed };
+    } finally {
+      this.busy.set(null);
+    }
   }
 
   async pauseStream(stream: Workstream): Promise<BatchResult> {

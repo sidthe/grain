@@ -19,7 +19,11 @@ import { GrainApi, routeScope } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import type { Task, TaskDetail } from "../api/models";
 import { AccessService } from "../services/access.service";
-import { STARTED_STORAGE_KEY, WorkstreamsStore } from "./workstreams.store";
+import {
+  STARTED_STORAGE_KEY,
+  WorkstreamsStore,
+  formatApproveOutcome,
+} from "./workstreams.store";
 
 function mkTask(id: string, over: Partial<Task> = {}): Task {
   return {
@@ -509,5 +513,197 @@ describe("WorkstreamsStore", () => {
     await store.ensureRootDetail("999");
     expect(store.byKey().get("task:100")?.goal).toBe("Goal for 100");
     expect(store.byKey().get("task:274")?.goal).toBe("Goal for 274");
+  });
+
+  it("approves cross-stream and standalone upstream tasks in wave order and withdraws in reverse order", async () => {
+    api.open = [
+      mkTask("88", {
+        title: "Standalone prereq",
+        state: "proposed",
+        repo: "sidthe/core",
+      }),
+      mkTask("90", { title: "Upstream stream", state: "completed" }),
+      mkTask("91", {
+        title: "Upstream step",
+        state: "proposed",
+        origin: "task:90",
+        generatedFrom: "90",
+        dependsOn: ["88"],
+      }),
+      mkTask("100", { title: "Main stream", state: "completed" }),
+      mkTask("102", {
+        title: "Wave 1",
+        state: "proposed",
+        origin: "task:100",
+        generatedFrom: "100",
+        dependsOn: ["91"],
+      }),
+      mkTask("101", {
+        title: "Wave 2",
+        state: "proposed",
+        origin: "task:100",
+        generatedFrom: "100",
+        dependsOn: ["102"],
+      }),
+    ];
+
+    await store.refresh(true);
+    api.calls = [];
+
+    const ws = store.byKey().get("task:100")!;
+    const preview = store.approvePreview(ws);
+    expect(preview.targets.map((x) => x.id)).toEqual([
+      "88",
+      "91",
+      "102",
+      "101",
+    ]);
+    expect(preview.directCount).toBe(2);
+    expect(preview.upstreamCount).toBe(2);
+    expect(preview.scope.repos.map((r) => r.name).sort()).toEqual([
+      "sidthe/core",
+      "sidthe/grain-scratch-repo",
+    ]);
+
+    const res = await store.approveWaves(preview.waves);
+    expect(res.succeeded).toBe(4);
+    expect(res.failed).toBe(0);
+    expect(res.approvedIds).toEqual(["88", "91", "102", "101"]);
+    const approvedOrder = api.calls
+      .filter((c) => c.route === "POST /api/tasks/{id}/approve")
+      .map((c) => (c.params as { id: string }).id);
+    expect(approvedOrder).toEqual(["88", "91", "102", "101"]);
+
+    // Withdrawals run downstream-first (reverse order).
+    api.calls = [];
+    const undo = await store.withdrawApprovals(res.approvedIds);
+    expect(undo).toEqual({ succeeded: 4, failed: 0 });
+    const withdrawnOrder = api.calls
+      .filter((c) => c.route === "POST /api/tasks/{id}/withdraw-approval")
+      .map((c) => (c.params as { id: string }).id);
+    expect(withdrawnOrder).toEqual(["101", "102", "91", "88"]);
+
+    // approveTreePreview recognizes server's "planned" status and upstream deps.
+    const treePrev = store.approveTreePreview(
+      {
+        origin: "task:100",
+        done: 0,
+        total: 2,
+        nodes: [
+          {
+            id: "100",
+            title: "Main stream",
+            status: "done",
+            done: true,
+            root: true,
+            children: [
+              { id: "102", title: "Wave 1", status: "planned", done: false },
+              { id: "101", title: "Wave 2", status: "planned", done: false },
+            ],
+          },
+        ],
+      },
+      "sidthe/grain-scratch-repo",
+    );
+    expect(treePrev.targets.map((x) => x.id)).toEqual([
+      "88",
+      "91",
+      "102",
+      "101",
+    ]);
+  });
+
+  it("approveTreePreview prefers live state over a stale tree and skips nodes the loaded feed does not know", async () => {
+    api.open = [
+      mkTask("100", { title: "Root", state: "completed" }),
+      mkTask("102", {
+        state: "queued",
+        origin: "task:100",
+        generatedFrom: "100",
+      }),
+      mkTask("103", {
+        state: "proposed",
+        origin: "task:100",
+        generatedFrom: "100",
+      }),
+    ];
+    await store.refresh(true);
+    const prev = store.approveTreePreview({
+      origin: "task:100",
+      done: 0,
+      total: 3,
+      nodes: [
+        {
+          id: "100",
+          title: "Root",
+          status: "done",
+          done: true,
+          root: true,
+          children: [
+            // Stale: the tree was read while 102 was still proposed.
+            { id: "102", title: "Queued now", status: "planned", done: false },
+            {
+              id: "103",
+              title: "Still proposed",
+              status: "planned",
+              done: false,
+            },
+            // Not in the loaded feed (another repo this viewer cannot read).
+            { id: "104", title: "Unknown", status: "planned", done: false },
+          ],
+        },
+      ],
+    });
+    expect(prev.targets.map((x) => x.id)).toEqual(["103"]);
+  });
+
+  it("approveWaves skips downstream dependents of a failed upstream approval but still approves independent siblings", async () => {
+    api.open = [
+      mkTask("100", { title: "Root", state: "completed" }),
+      mkTask("101", {
+        state: "proposed",
+        origin: "task:100",
+        generatedFrom: "100",
+      }),
+      mkTask("102", {
+        state: "proposed",
+        origin: "task:100",
+        generatedFrom: "100",
+      }),
+      mkTask("103", {
+        state: "proposed",
+        origin: "task:100",
+        generatedFrom: "100",
+        dependsOn: ["101"],
+      }),
+      mkTask("104", {
+        state: "proposed",
+        origin: "task:100",
+        generatedFrom: "100",
+        dependsOn: ["103"],
+      }),
+      mkTask("105", {
+        state: "proposed",
+        origin: "task:100",
+        generatedFrom: "100",
+        dependsOn: ["102"],
+      }),
+    ];
+    await store.refresh(true);
+    const preview = store.approvePreview(store.byKey().get("task:100")!);
+    api.failPostIds.add("101");
+    api.calls = [];
+    const res = await store.approveWaves(preview.waves);
+    const posted = api.calls
+      .filter((c) => c.route === "POST /api/tasks/{id}/approve")
+      .map((c) => (c.params as { id: string }).id);
+    expect(posted.sort()).toEqual(["101", "102", "105"]);
+    expect(res.approvedIds.sort()).toEqual(["102", "105"]);
+    expect(res.failed).toBe(1);
+    expect(res.skipped).toBe(2);
+    expect(store.actionError()).toContain("2 downstream tasks were skipped");
+    expect(formatApproveOutcome(res)).toBe(
+      "Approved 2 of 5 (1 failed, 2 downstream skipped)",
+    );
   });
 });
