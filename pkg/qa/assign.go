@@ -68,9 +68,6 @@ func ClassifyTaskComplexityForTask(task model.Task, att model.TaskSpecAttachment
 
 func classifyComplexityInput(in ComplexityInput) string {
 	assessed := AssessTaskComplexity(in, nil)
-	if assessed.ComplexityForced {
-		return string(assessed.Tier)
-	}
 	cleanInline := stripDispatchEnvelope(stripYAMLFrontmatter(in.Body))
 	cleanAtt := stripDispatchEnvelope(stripYAMLFrontmatter(in.AttachmentText))
 	words := len(strings.Fields(in.Title)) + len(strings.Fields(cleanInline)) + len(strings.Fields(cleanAtt))

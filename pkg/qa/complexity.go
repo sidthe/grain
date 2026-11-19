@@ -15,6 +15,7 @@
 package qa
 
 import (
+	"math"
 	"path"
 	"regexp"
 	"sort"
@@ -137,16 +138,28 @@ func normalizeOverrideKey(raw string) string {
 	return strings.ReplaceAll(k, "-", "_")
 }
 
+func complexityTierRank(t ComplexityTier) int {
+	switch t {
+	case ComplexityHigh:
+		return 3
+	case ComplexityMedium:
+		return 2
+	case ComplexityLow:
+		return 1
+	default:
+		return 0
+	}
+}
+
 func normalizeComplexityOverride(raw string) ComplexityTier {
 	v := strings.ToLower(strings.TrimSpace(strings.Trim(raw, `"'`)))
 	switch v {
-	case "low":
-		return ComplexityLow
 	case "medium", "med":
 		return ComplexityMedium
 	case "high", "large":
 		return ComplexityHigh
 	default:
+		// Task-authored overrides are strictly tighten-only: "low" cannot downgrade QA gating.
 		return ""
 	}
 }
@@ -159,9 +172,8 @@ func normalizeDecomposeOverride(raw string) string {
 		return "propose_dag"
 	case "slice_plan", "slice":
 		return "slice_plan"
-	case "off", "none", "false", "no":
-		return "off"
 	default:
+		// Task-authored overrides are strictly tighten-only: "off"/"none"/"false"/"no" cannot disable decomposition.
 		return ""
 	}
 }
@@ -184,11 +196,26 @@ func isDecomposeOverrideKey(normKey string) bool {
 	}
 }
 
-// ParseTaskQAOverrides extracts explicit complexity tier and decomposition mode overrides from
-// task/template custom fields, YAML frontmatter, or line-start directives (outside code fences).
+// ParseTaskQAOverrides extracts tighten-only explicit complexity tier and decomposition mode
+// overrides from task/template custom fields, YAML frontmatter, or line-start directives
+// (outside code fences). Only upward overrides ("medium"/"high" and "slice_plan"/"propose_dag")
+// are accepted so task bodies or agent-proposed tasks cannot downgrade or bypass QA stages.
 func ParseTaskQAOverrides(body string, customFields map[string][]string) (ComplexityTier, string) {
 	var forcedTier ComplexityTier
 	var decompMode string
+
+	consider := func(nk, rawVal string) {
+		if isComplexityOverrideKey(nk) {
+			if t := normalizeComplexityOverride(rawVal); complexityTierRank(t) > complexityTierRank(forcedTier) {
+				forcedTier = t
+			}
+		}
+		if isDecomposeOverrideKey(nk) {
+			if m := normalizeDecomposeOverride(rawVal); DecomposeModeRank(m) > DecomposeModeRank(decompMode) {
+				decompMode = m
+			}
+		}
+	}
 
 	// 1. Structured custom fields (copied from Templates onto Tasks as well).
 	if len(customFields) > 0 {
@@ -200,16 +227,7 @@ func ParseTaskQAOverrides(body string, customFields map[string][]string) (Comple
 		for _, k := range keys {
 			nk := normalizeOverrideKey(k)
 			for _, v := range customFields[k] {
-				if forcedTier == "" && isComplexityOverrideKey(nk) {
-					if t := normalizeComplexityOverride(v); t != "" {
-						forcedTier = t
-					}
-				}
-				if decompMode == "" && isDecomposeOverrideKey(nk) {
-					if m := normalizeDecomposeOverride(v); m != "" {
-						decompMode = m
-					}
-				}
+				consider(nk, v)
 			}
 		}
 	}
@@ -227,48 +245,26 @@ func ParseTaskQAOverrides(body string, customFields map[string][]string) (Comple
 			if !ok {
 				continue
 			}
-			nk := normalizeOverrideKey(k)
-			if forcedTier == "" && isComplexityOverrideKey(nk) {
-				if t := normalizeComplexityOverride(v); t != "" {
-					forcedTier = t
-				}
-			}
-			if decompMode == "" && isDecomposeOverrideKey(nk) {
-				if m := normalizeDecomposeOverride(v); m != "" {
-					decompMode = m
-				}
-			}
+			consider(normalizeOverrideKey(k), v)
 		}
 	}
 
 	// 3. Line-start directives in body outside fenced code blocks (like Design-Item:).
-	if forcedTier == "" || decompMode == "" {
-		inFence := false
-		for _, rawLine := range strings.Split(body, "\n") {
-			line := strings.TrimSpace(rawLine)
-			if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~") {
-				inFence = !inFence
-				continue
-			}
-			if inFence {
-				continue
-			}
-			k, v, ok := strings.Cut(line, ":")
-			if !ok {
-				continue
-			}
-			nk := normalizeOverrideKey(k)
-			if forcedTier == "" && isComplexityOverrideKey(nk) {
-				if t := normalizeComplexityOverride(v); t != "" {
-					forcedTier = t
-				}
-			}
-			if decompMode == "" && isDecomposeOverrideKey(nk) {
-				if m := normalizeDecomposeOverride(v); m != "" {
-					decompMode = m
-				}
-			}
+	inFence := false
+	for _, rawLine := range strings.Split(body, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~") {
+			inFence = !inFence
+			continue
 		}
+		if inFence {
+			continue
+		}
+		k, v, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		consider(normalizeOverrideKey(k), v)
 	}
 
 	return forcedTier, decompMode
@@ -392,9 +388,15 @@ func assessTaskComplexityInternal(in ComplexityInput) ComplexityAssessment {
 		}
 	}
 
-	attCount := in.AttachmentCount
-	if sum := in.MarkdownAttachmentCount + in.HTMLAttachmentCount; sum > attCount {
-		attCount = sum
+	attCount := max(in.AttachmentCount, 0)
+	mdCount := max(in.MarkdownAttachmentCount, 0)
+	htmlCount := max(in.HTMLAttachmentCount, 0)
+	if mdCount <= math.MaxInt-htmlCount {
+		if sum := mdCount + htmlCount; sum > attCount {
+			attCount = sum
+		}
+	} else {
+		attCount = math.MaxInt
 	}
 	specBytes := in.AttachmentSpecBytes
 	if int64(len(cleanAttachment)) > specBytes {
@@ -583,7 +585,7 @@ func assessTaskComplexityInternal(in ComplexityInput) ComplexityAssessment {
 	}
 
 	complexityForced := false
-	if forcedTier != "" {
+	if forcedTier != "" && complexityTierRank(forcedTier) > complexityTierRank(tier) {
 		tier = forcedTier
 		complexityForced = true
 		signals = append(signals, "explicit complexity override ("+string(forcedTier)+")")

@@ -521,4 +521,56 @@ func TestDecomposeEffectiveModeForTierAndStrictTierModesValidation(t *testing.T)
 			}
 		})
 	}
+
+	// EffectiveModeWithOverride is strictly tighten-only.
+	if m, applied := std.Resolved.Decompose.EffectiveModeWithOverride(ComplexityHigh, "off"); m != "propose_dag" || applied {
+		t.Errorf("override off weakened propose_dag: got (%q, %v)", m, applied)
+	}
+	if m, applied := std.Resolved.Decompose.EffectiveModeWithOverride(ComplexityMedium, "slice_plan"); m != "propose_dag" || applied {
+		t.Errorf("override slice_plan weakened propose_dag: got (%q, %v)", m, applied)
+	}
+	if m, applied := std.Resolved.Decompose.EffectiveModeWithOverride(ComplexityLow, "propose_dag"); m != "propose_dag" || !applied {
+		t.Errorf("override propose_dag should raise uncovered low tier: got (%q, %v)", m, applied)
+	}
+	if m, applied := b.Resolved.Decompose.EffectiveModeWithOverride(ComplexityMedium, "propose_dag"); m != "propose_dag" || !applied {
+		t.Errorf("override propose_dag should raise slice_plan tier: got (%q, %v)", m, applied)
+	}
+
+	// All-off tier-modes with omitted Mode must not report decomposition enabled in stage view or declaration diff.
+	allOffBundle, err := ResolveAnyFlowDeclaration([]byte("schema: grain.dev/qa-flow/v4\nkey: all-off-tiers\ndecompose:\n  enabled: true\n  tier-modes:\n    medium: off\n    high: off\n"), 1, nil)
+	if err != nil {
+		t.Fatalf("ResolveAnyFlowDeclaration all-off: %v", err)
+	}
+	if allOffBundle.Resolved.Decompose.IsActive() {
+		t.Fatalf("expected all-off tier-modes IsActive()=false, got true (%+v)", allOffBundle.Resolved.Decompose)
+	}
+	for _, stg := range BuildWorkflowStagesView(allOffBundle) {
+		if stg.ID == "s0-decompose" {
+			for _, step := range stg.Steps {
+				if step.ID == "s0:decompose" && step.Enabled {
+					t.Fatalf("expected s0:decompose step disabled when all tier-modes are off, got %+v", step)
+				}
+			}
+		}
+	}
+	diffAllOff := ComputeDeclarationDiff(nil, &allOffBundle)
+	for _, s := range diffAllOff.AddedStages {
+		if s == "s0-decompose" {
+			t.Fatalf("ComputeDeclarationDiff reported s0-decompose added for all-off tier-modes: %+v", diffAllOff)
+		}
+	}
+
+	// Tier-modes-only propose_dag (omitted Mode) must report propose_dag rather than slice_plan.
+	tierOnlyPropose, err := ResolveAnyFlowDeclaration([]byte("schema: grain.dev/qa-flow/v4\nkey: tier-only-propose\ndecompose:\n  enabled: true\n  tier-modes:\n    high: propose_dag\n"), 1, nil)
+	if err != nil {
+		t.Fatalf("ResolveAnyFlowDeclaration tier-only-propose: %v", err)
+	}
+	if got := tierOnlyPropose.Resolved.Decompose.EffectiveDisplayMode(); got != "propose_dag" {
+		t.Fatalf("EffectiveDisplayMode() = %q, want propose_dag", got)
+	}
+	for _, stg := range BuildWorkflowStagesView(tierOnlyPropose) {
+		if stg.ID == "s0-decompose" && stg.Mode != "propose_dag" {
+			t.Fatalf("expected s0-decompose stage mode=propose_dag, got %q", stg.Mode)
+		}
+	}
 }

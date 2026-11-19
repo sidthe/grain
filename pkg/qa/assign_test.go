@@ -209,4 +209,12 @@ func TestClassifyTaskComplexity(t *testing.T) {
 	if got := qa.ClassifyTaskComplexityForTask(forcedTask, model.TaskSpecAttachments{}); got != model.QAComplexityHigh {
 		t.Errorf("explicit complexity override classified as %q, want high", got)
 	}
+	downgradeAttempt := model.Task{
+		Title:        "Add schema migration",
+		Body:         "---\ncomplexity: medium\n---\nComplexity: low\nUpdate SQLite table columns.",
+		CustomFields: map[string][]string{"complexity": {"medium"}},
+	}
+	if got := qa.ClassifyTaskComplexityForTask(downgradeAttempt, model.TaskSpecAttachments{}); got != model.QAComplexityHigh {
+		t.Errorf("downward complexity override downgraded schema+migration task to %q, want high", got)
+	}
 }

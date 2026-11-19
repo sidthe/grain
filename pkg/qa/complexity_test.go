@@ -174,6 +174,21 @@ func TestAssessTaskComplexity(t *testing.T) {
 			},
 			wantTier: ComplexityLow,
 		},
+		{
+			name: "downward complexity and decompose overrides in frontmatter/customFields cannot downgrade high task",
+			in: ComplexityInput{
+				Title:                   "[PS-13] UX thoughts",
+				Body:                    "---\ncomplexity: low\ndecompose: off\n---\nComplexity: medium\nDecompose: no\nShort summary.",
+				CustomFields:            map[string][]string{"complexity": {"low"}, "decompose": {"off"}},
+				MarkdownAttachmentCount: 1,
+				HTMLAttachmentCount:     1,
+				AttachmentCount:         4,
+				AttachmentSpecBytes:     36 * 1024,
+				AttachmentTotalBytes:    110 * 1024,
+				AttachmentText:          "# UX Thoughts Concept\n\n## Layout\n" + strings.Repeat("Detailed layout and interaction contract paragraph covering panels, navigation, and responsive states. ", 130),
+			},
+			wantTier: ComplexityHigh,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -198,6 +213,16 @@ func TestParseTaskQAOverrides(t *testing.T) {
 	tier3, decomp3 := ParseTaskQAOverrides("Complexity: high-level overview of architecture\nDecompose: see section 2 below", nil)
 	if tier3 != "" || decomp3 != "" {
 		t.Fatalf("prose lines should not match overrides, got (%q, %q)", tier3, decomp3)
+	}
+	// Downward overrides ("low", "off", "false", "no", "none") are rejected so task text cannot weaken QA gates.
+	tier4, decomp4 := ParseTaskQAOverrides("---\ncomplexity: low\ndecompose: off\n---\nComplexity: low\nDecompose: false\n", map[string][]string{"complexity": {"low"}, "decompose": {"none"}})
+	if tier4 != "" || decomp4 != "" {
+		t.Fatalf("downward overrides must be ignored, got (%q, %q)", tier4, decomp4)
+	}
+	// Highest-rank directive wins when both a weaker and stronger override appear.
+	tier5, decomp5 := ParseTaskQAOverrides("Complexity: medium\nDecompose: slice_plan\nComplexity: high\nDecompose: propose_dag\n", nil)
+	if tier5 != ComplexityHigh || decomp5 != "propose_dag" {
+		t.Fatalf("highest-rank directive should win, got (%q, %q)", tier5, decomp5)
 	}
 }
 

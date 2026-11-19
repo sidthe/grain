@@ -109,14 +109,7 @@ func (s *Server) handlePostQAProbe(w http.ResponseWriter, r *http.Request) {
 
 	effectiveDecomposeMode := ""
 	if flow.Decompose.Enabled {
-		effectiveDecomposeMode = flow.Decompose.EffectiveModeForTier(comp.Tier)
-		if comp.DecomposeOverride != "" {
-			if comp.DecomposeOverride == "off" {
-				effectiveDecomposeMode = ""
-			} else {
-				effectiveDecomposeMode = comp.DecomposeOverride
-			}
-		}
+		effectiveDecomposeMode, _ = flow.Decompose.EffectiveModeWithOverride(comp.Tier, comp.DecomposeOverride)
 		if effectiveDecomposeMode != "" && effectiveDecomposeMode != "off" {
 			stagesFired = append(stagesFired, "S0b")
 		}

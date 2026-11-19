@@ -42,6 +42,18 @@ type DecomposeDecl struct {
 	TargetDiffLines int               `json:"targetDiffLines,omitempty" yaml:"target-diff-lines,omitempty"`
 }
 
+// DecomposeModeRank orders decomposition modes by strictness: off/"" (0) < slice_plan (1) < propose_dag (2).
+func DecomposeModeRank(mode string) int {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "propose_dag":
+		return 2
+	case "slice_plan":
+		return 1
+	default:
+		return 0
+	}
+}
+
 // EffectiveModeForTier returns the explicit decomposition mode ("propose_dag", "slice_plan", or "")
 // configured for tier without performing any silent tier downgrade.
 func (d DecomposeDecl) EffectiveModeForTier(tier ComplexityTier) string {
@@ -84,14 +96,38 @@ func (d DecomposeDecl) EffectiveModeForTier(tier ComplexityTier) string {
 	return baseMode
 }
 
-func hasActiveDecomposeTierMode(tierModes map[string]string) bool {
-	for _, m := range tierModes {
-		norm := strings.ToLower(strings.TrimSpace(m))
-		if norm == "slice_plan" || norm == "propose_dag" {
-			return true
+// EffectiveModeWithOverride returns the tighten-only effective decomposition mode for tier
+// after applying an optional task-level override. Task overrides can only raise strictness
+// (e.g. "" -> slice_plan/propose_dag, or slice_plan -> propose_dag) and can never weaken or
+// disable a flow's configured decomposition policy.
+func (d DecomposeDecl) EffectiveModeWithOverride(tier ComplexityTier, override string) (mode string, overrideApplied bool) {
+	if !d.Enabled {
+		return "", false
+	}
+	base := d.EffectiveModeForTier(tier)
+	ov := strings.ToLower(strings.TrimSpace(override))
+	if DecomposeModeRank(ov) > DecomposeModeRank(base) {
+		return ov, true
+	}
+	return base, false
+}
+
+// EffectiveDisplayMode returns the highest active decomposition mode across low/medium/high tiers,
+// or "" when decomposition is inactive for every tier.
+func (d DecomposeDecl) EffectiveDisplayMode() string {
+	best := ""
+	for _, tier := range []ComplexityTier{ComplexityLow, ComplexityMedium, ComplexityHigh} {
+		m := d.EffectiveModeForTier(tier)
+		if DecomposeModeRank(m) > DecomposeModeRank(best) {
+			best = m
 		}
 	}
-	return false
+	return best
+}
+
+// IsActive reports whether d produces a non-empty decomposition mode for at least one complexity tier.
+func (d DecomposeDecl) IsActive() bool {
+	return d.EffectiveDisplayMode() != ""
 }
 
 // ContextDiscoveryDecl configures Stage 2 caller & memory context discovery in FlowDeclarationV4.
@@ -1015,16 +1051,17 @@ func BuildWorkflowStagesView(b FlowVersionBundle) []WorkflowStageView {
 	}
 
 	// Stage 1: s0-decompose
-	decompEnabled := f.Decompose.Enabled && (f.Decompose.Mode != "off" || hasActiveDecomposeTierMode(f.Decompose.TierModes))
+	decompDisplayMode := f.Decompose.EffectiveDisplayMode()
+	decompEnabled := decompDisplayMode != ""
 	s0Enabled := f.S0Intent || decompEnabled || hasEnabledSkillStepForStage(f.SkillSteps, "s0")
 	s0Mode := "off"
 	if decompEnabled {
-		s0Mode = defaultNonEmpty(f.Decompose.Mode, "slice_plan")
+		s0Mode = decompDisplayMode
 	} else if f.S0Intent {
 		s0Mode = defaultNonEmpty(f.S0IntentConfig.OnClarification, "warn")
 	}
 	decompSummary := fmt.Sprintf("Splits complex work into bounded slices (maxSubtasks=%d, targetDiffLines=%d).", f.Decompose.MaxSubtasks, f.Decompose.TargetDiffLines)
-	if f.Decompose.Mode == "propose_dag" {
+	if decompDisplayMode == "propose_dag" {
 		decompSummary = fmt.Sprintf("Decomposes matching workstreams into wave-ordered subtask DAGs (maxSubtasks=%d, targetDiffLines=%d).", f.Decompose.MaxSubtasks, f.Decompose.TargetDiffLines)
 	}
 	if len(f.Decompose.TierModes) > 0 {
@@ -1058,7 +1095,7 @@ func BuildWorkflowStagesView(b FlowVersionBundle) []WorkflowStageView {
 			Kind:    "decomposition",
 			StageID: "s0-decompose",
 			Enabled: decompEnabled,
-			Mode:    boolMode(decompEnabled, defaultNonEmpty(f.Decompose.Mode, "slice_plan")),
+			Mode:    boolMode(decompEnabled, decompDisplayMode),
 			Scope:   joinOrDefault(f.Decompose.Complexities, "medium, high"),
 			Summary: decompSummary,
 		},

@@ -317,7 +317,7 @@ func loadTaskSpecAttachments(ctx context.Context, store *model.Store, task model
 	return out
 }
 
-var closingTaskAttachmentsTagRe = regexp.MustCompile(`(?i)</task-attachments>`)
+var closingTaskAttachmentsTagRe = regexp.MustCompile(`(?i)</task-attachments\s*>`)
 
 func attachmentSandboxRelPath(f model.TaskAttachmentMeta) string {
 	if f.ID > 0 {
@@ -661,14 +661,14 @@ func ExecutePostCloneWorkflowPhases(
 	var attachmentContext string
 	s2Enabled := spec.S2PlanCritic || spec.S2PlanCriticConfig.Enabled
 	hasAttachments := specAtt.TotalCount > 0 || len(specAtt.Files) > 0 || strings.TrimSpace(specAtt.Text) != ""
-	if spec.Context.Enabled || s2Enabled || hasAttachments {
+	if spec.Context.Enabled || s2Enabled {
 		s1Start := time.Now()
 		var existingPaths []string
 		configuredMaxTokens := spec.Context.MaxTokens
 		if configuredMaxTokens <= 0 {
 			configuredMaxTokens = 2000
 		}
-		if (spec.Context.Enabled || s2Enabled) && strings.TrimSpace(worktreeDir) != "" {
+		if strings.TrimSpace(worktreeDir) != "" {
 			repoMaxTokens := min(configuredMaxTokens, 2000)
 			codebaseContext, existingPaths, siblingImporters = discoverPostCloneCodebaseContext(worktreeDir, candidatePaths, repoMaxTokens, 180*time.Millisecond)
 			for _, ep := range existingPaths {
@@ -742,16 +742,7 @@ func ExecutePostCloneWorkflowPhases(
 
 	// 2. S0b (step:goal-subtask-decomposer): complexity-gated slice plan / wave DAG coordinator.
 	if spec.Decompose.Enabled {
-		effectiveMode := spec.Decompose.EffectiveModeForTier(comp.Tier)
-		overrideApplied := false
-		if comp.DecomposeOverride != "" {
-			overrideApplied = true
-			if comp.DecomposeOverride == "off" {
-				effectiveMode = ""
-			} else {
-				effectiveMode = comp.DecomposeOverride
-			}
-		}
+		effectiveMode, overrideApplied := spec.Decompose.EffectiveModeWithOverride(comp.Tier, comp.DecomposeOverride)
 		if effectiveMode != "" && effectiveMode != "off" {
 			maxSub := spec.Decompose.MaxSubtasks
 			if maxSub <= 0 {

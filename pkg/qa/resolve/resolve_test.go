@@ -639,4 +639,20 @@ func TestComposeTightenOnlyOverlaysAndFloors(t *testing.T) {
 	if baseTierMap["medium"] != "slice_plan" {
 		t.Fatalf("ComposeTightenOnly mutated caller's TierModes map: %+v", baseTierMap)
 	}
+
+	// Overlay with enabled=true + mode=propose_dag but all tier-modes explicitly "off" is inactive
+	// and must not flip Enabled=true on a base flow whose Decompose is disabled.
+	disabledBase := qa.FlowSpec{ID: "disabled-base"}
+	allOffOverlay := qa.FlowSpec{
+		ID: "all-off-overlay",
+		Decompose: qa.DecomposeDecl{
+			Enabled:   true,
+			Mode:      "propose_dag",
+			TierModes: map[string]string{"low": "off", "medium": "off", "high": "off"},
+		},
+	}
+	stillDisabled := resolve.ComposeTightenOnly(disabledBase, allOffOverlay)
+	if stillDisabled.Decompose.Enabled || stillDisabled.Decompose.IsActive() {
+		t.Fatalf("inactive all-off overlay should not enable Decompose on disabled base: %+v", stillDisabled.Decompose)
+	}
 }
