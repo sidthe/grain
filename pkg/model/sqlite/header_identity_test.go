@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ai-on-gke/grain/pkg/model"
@@ -111,5 +112,40 @@ func TestSchema153MigratesAndRoundTripsHeaderIdentity(t *testing.T) {
 	if got2.HeaderColor != "plum" || got2.HeaderPattern != "diagonal" {
 		t.Fatalf("imported Config = (%q, %q), want (plum, diagonal)",
 			got2.HeaderColor, got2.HeaderPattern)
+	}
+
+	// Verify staterepo.Check vocabulary warnings: valid presets stay silent,
+	// unrecognized header_color / header_pattern values emit warnings.
+	if err := staterepo.WriteSchemaVersion(dir, model.SchemaVersion); err != nil {
+		t.Fatalf("WriteSchemaVersion: %v", err)
+	}
+	_, checkDB, _ := openStore(t)
+	validReport, err := staterepo.Check(ctx, checkDB, dir, model.SchemaVersion)
+	if err != nil {
+		t.Fatalf("staterepo.Check valid: %v", err)
+	}
+	if joined := strings.Join(validReport.Warnings, "\n"); strings.Contains(joined, "header_color") || strings.Contains(joined, "header_pattern") {
+		t.Errorf("valid header presets produced vocabulary warnings: %q", joined)
+	}
+
+	rows[0]["header_color"] = "magenta"
+	rows[0]["header_pattern"] = "stripes"
+	badJSON, err := json.MarshalIndent(rows, "", "  ")
+	if err != nil {
+		t.Fatalf("marshaling invalid grain_config.json: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, badJSON, 0o600); err != nil {
+		t.Fatalf("writing invalid grain_config.json: %v", err)
+	}
+	_, badCheckDB, _ := openStore(t)
+	badReport, err := staterepo.Check(ctx, badCheckDB, dir, model.SchemaVersion)
+	if err != nil {
+		t.Fatalf("staterepo.Check invalid: %v", err)
+	}
+	joinedBad := strings.Join(badReport.Warnings, "\n")
+	for _, want := range []string{"header_color", `"magenta"`, "header_pattern", `"stripes"`, "grain_config.json"} {
+		if !strings.Contains(joinedBad, want) {
+			t.Errorf("staterepo.Check warnings missing %s: %q", want, joinedBad)
+		}
 	}
 }

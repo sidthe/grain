@@ -15,12 +15,15 @@
 package ui_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/ai-on-gke/grain/pkg/model"
+	"github.com/ai-on-gke/grain/pkg/ui"
 )
 
 func TestHeaderIdentityConfigAndSettingsRoundTrip(t *testing.T) {
@@ -172,5 +175,79 @@ func TestHeaderIdentityEnforcesAuthAndSettingsLocked(t *testing.T) {
 	}
 	if rec := do(t, srv, http.MethodPost, "/api/settings", `{"environmentName":"unlocked","headerColor":"amber","headerPattern":"grid"}`); rec.Code != http.StatusOK {
 		t.Fatalf("POST /api/settings after unlocking: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestConfigRedactsDeploymentIDForUnauthenticatedAndScopedAgentCallers(t *testing.T) {
+	srv, client, store := releaseServer(t, nil)
+	ctx := context.Background()
+
+	cfg := model.DefaultConfig()
+	cfg.EnvironmentName = "Acme Prod"
+	cfg.HeaderColor = model.HeaderColorOcean
+	cfg.HeaderPattern = model.HeaderPatternWaves
+	cfg.DeploymentID = "prod-secret-id"
+	cfg.TargetRepos = []string{"acme/widgets"}
+	cfg.ExternalAgentAPI = true
+	if err := store.PutConfig(ctx, cfg); err != nil {
+		t.Fatal(err)
+	}
+	ui.SetAccessCodeForTest(srv, testAccessCode)
+
+	// 1. Unauthenticated remote GET /api/config is refused (401) and never leaks deploymentId.
+	unauthRec := serveFrom(srv, "203.0.113.10:54321", http.MethodGet, "/api/config", "", nil)
+	if unauthRec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated GET /api/config: %d %s, want 401", unauthRec.Code, unauthRec.Body.String())
+	}
+	if strings.Contains(unauthRec.Body.String(), "prod-secret-id") {
+		t.Errorf("unauthenticated GET /api/config leaked deploymentId: %s", unauthRec.Body.String())
+	}
+
+	// 2. Repo-scoped / unprivileged external agent tokens must not receive deploymentId.
+	humanCtx := ui.WithPrincipal(ctx, model.Principal{Kind: model.PrincipalHuman, ID: "operator@example.com"})
+	scopedTok, err := client.CreateExternalAgentToken(humanCtx, ui.CreateExternalAgentTokenRequest{
+		Name:   "repo-scoped",
+		Scopes: []string{"settings:read@acme/widgets", "deployment:read@acme/widgets"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopedReq := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	scopedReq.Header.Set("Authorization", "Bearer "+scopedTok.Token)
+	scopedRec := httptest.NewRecorder()
+	srv.ServeHTTP(scopedRec, scopedReq)
+	if scopedRec.Code != http.StatusOK {
+		t.Fatalf("scoped agent GET /api/config: %d %s", scopedRec.Code, scopedRec.Body.String())
+	}
+	var scoped map[string]any
+	if err := json.Unmarshal(scopedRec.Body.Bytes(), &scoped); err != nil {
+		t.Fatalf("decode scoped agent /api/config: %v", err)
+	}
+	if got, ok := scoped["deploymentId"]; ok {
+		t.Errorf("repo-scoped agent GET /api/config leaked deploymentId = %v", got)
+	}
+
+	// 3. Unscoped deployment:read agent token may still read deploymentId.
+	unscopedTok, err := client.CreateExternalAgentToken(humanCtx, ui.CreateExternalAgentTokenRequest{
+		Name:   "unscoped-deployment-read",
+		Scopes: []string{"deployment:read"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unscopedReq := httptest.NewRequest(http.MethodGet, "/api/config", nil)
+	unscopedReq.Header.Set("Authorization", "Bearer "+unscopedTok.Token)
+	unscopedRec := httptest.NewRecorder()
+	srv.ServeHTTP(unscopedRec, unscopedReq)
+	if unscopedRec.Code != http.StatusOK {
+		t.Fatalf("unscoped agent GET /api/config: %d %s", unscopedRec.Code, unscopedRec.Body.String())
+	}
+	var unscoped map[string]any
+	if err := json.Unmarshal(unscopedRec.Body.Bytes(), &unscoped); err != nil {
+		t.Fatalf("decode unscoped agent /api/config: %v", err)
+	}
+	if unscoped["deploymentId"] != "prod-secret-id" {
+		t.Errorf("unscoped deployment:read agent GET /api/config deploymentId = %v, want prod-secret-id",
+			unscoped["deploymentId"])
 	}
 }

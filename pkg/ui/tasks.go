@@ -2624,6 +2624,7 @@ func narrowConfigForAgentCall(resp *configResponse, call agentCall) {
 	if resp.StateRepoSyncFailure != nil && (resp.StateRepoSyncFailure.Repo == "" || !repoAllowed(resp.StateRepoSyncFailure.Repo)) {
 		resp.StateRepoSyncFailure = nil
 	}
+	resp.DeploymentID = ""
 	resp.InstallTrackSignals = nil
 	resp.DispatchBlocked = nil
 	resp.InstallNotice = nil
