@@ -17,10 +17,13 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -41,7 +44,134 @@ type PreCloneQAResult struct {
 	Question           string
 }
 
-const maxPromptSpecAttachmentBytes = 16 * 1024
+const (
+	maxPromptSpecAttachmentBytes = 16 * 1024
+
+	defaultS0InferenceTimeout     = 45 * time.Second
+	defaultS2InferenceTimeout     = 45 * time.Second
+	defaultS4InferenceTimeout     = 90 * time.Second
+	maxQAStageInferenceCap        = 180 * time.Second
+	maxQAStageTotalCap            = 300 * time.Second
+	maxQAStageStartupOverheadCap  = 120 * time.Second
+	antigravityCLIStartupOverhead = 60 * time.Second
+	otherCLIStartupOverhead       = 20 * time.Second
+)
+
+// CLIStartupOverheadForFramework returns the extra CLI subprocess cold-start latency
+// allowance added to lightweight QA stage timeouts (S0/S2/S4) so cold-starting a coding
+// CLI (such as ambient Antigravity taking 20-46s before turn 1) does not kill the stage
+// before receiving tokens.
+func CLIStartupOverheadForFramework(framework string) time.Duration {
+	switch model.NormalizeAgentFrameworkName(strings.ToLower(strings.TrimSpace(framework))) {
+	case model.AgentFrameworkAntigravity:
+		return antigravityCLIStartupOverhead
+	case model.AgentFrameworkClaude, model.AgentFrameworkCodex:
+		return otherCLIStartupOverhead
+	default:
+		return 0
+	}
+}
+
+func resolveQAStageStartupOverhead(ctx context.Context, store *model.Store, rt *QARuntime, task model.Task) time.Duration {
+	if rt != nil && rt.StageStartupOverhead != nil {
+		d := rt.StageStartupOverhead(ctx, task)
+		if d < 0 {
+			return 0
+		}
+		if d > maxQAStageStartupOverheadCap {
+			return maxQAStageStartupOverheadCap
+		}
+		return d
+	}
+	if fw := strings.TrimSpace(task.AgentFramework); fw != "" {
+		return CLIStartupOverheadForFramework(fw)
+	}
+	if store != nil {
+		if cfg, err := store.GetConfig(ctx); err == nil && cfg != nil {
+			return CLIStartupOverheadForFramework(model.NormalizeAgentFramework(cfg.AgentFramework))
+		}
+	}
+	return antigravityCLIStartupOverhead
+}
+
+func effectiveQAStageTimeout(
+	ctx context.Context,
+	store *model.Store,
+	rt *QARuntime,
+	task model.Task,
+	configuredSeconds int,
+	defaultInference, maxInference time.Duration,
+) (total, overhead time.Duration) {
+	inference := time.Duration(configuredSeconds) * time.Second
+	if inference <= 0 {
+		inference = defaultInference
+	}
+	if maxInference > 0 && inference > maxInference {
+		inference = maxInference
+	}
+	overhead = resolveQAStageStartupOverhead(ctx, store, rt, task)
+	total = inference + overhead
+	if total > maxQAStageTotalCap {
+		total = maxQAStageTotalCap
+	}
+	return total, overhead
+}
+
+func classifyQAStageError(err error, runCtx context.Context) (kind string, exitCode *int, message string) {
+	if err == nil {
+		return "", nil, ""
+	}
+	msg := strings.TrimSpace(err.Error())
+	if len(msg) > 1024 {
+		msg = model.TruncateValidUTF8(msg, 1024) + "..."
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		code := exitErr.ExitCode()
+		exitCode = &code
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || (runCtx != nil && errors.Is(runCtx.Err(), context.DeadlineExceeded)):
+		kind = "timeout"
+	case errors.Is(err, context.Canceled) || (runCtx != nil && errors.Is(runCtx.Err(), context.Canceled)):
+		kind = "canceled"
+	case exitCode != nil:
+		kind = "exit_error"
+	default:
+		kind = "error"
+	}
+	return kind, exitCode, msg
+}
+
+func buildQAStageErrorDetail(
+	err error,
+	runCtx context.Context,
+	timeout, startupOverhead time.Duration,
+	extra map[string]any,
+) string {
+	detail := make(map[string]any, len(extra)+5)
+	for k, v := range extra {
+		detail[k] = v
+	}
+	kind, exitCode, msg := classifyQAStageError(err, runCtx)
+	if _, hasKind := detail["errorKind"]; !hasKind && kind != "" {
+		detail["errorKind"] = kind
+	}
+	if msg != "" {
+		detail["error"] = msg
+	}
+	if exitCode != nil {
+		detail["exitCode"] = *exitCode
+	}
+	if timeout > 0 {
+		detail["timeoutSeconds"] = int(timeout / time.Second)
+	}
+	if startupOverhead > 0 {
+		detail["startupOverheadSeconds"] = int(startupOverhead / time.Second)
+	}
+	b, _ := json.Marshal(detail)
+	return string(b)
+}
 
 var urlTokenRe = regexp.MustCompile("https?://[^\\s)>\\]\"'`]+")
 var pathTokenRe = regexp.MustCompile(`(?:[a-zA-Z0-9_.-]+/)*[a-zA-Z0-9_.-]+\.(?:tsx|jsx|hpp|cpp|scss|html|yaml|json|go|ts|js|py|cc|md|yml|sql|css|h)`)
@@ -57,6 +187,15 @@ func isPathTokenContByte(b byte) bool {
 func loadTaskSpecAttachments(ctx context.Context, store *model.Store, task model.Task, worktreeDir string) model.TaskSpecAttachments {
 	if store != nil && strings.TrimSpace(task.ID) != "" {
 		if att, err := store.TaskSpecAttachments(ctx, task.ID, model.DefaultTaskSpecAttachmentMaxBytes); err == nil {
+			for i := range att.Files {
+				if att.Files[i].SandboxPath == "" {
+					if att.Files[i].ID > 0 {
+						att.Files[i].SandboxPath = AttachmentPath(att.Files[i].ID, att.Files[i].Filename)
+					} else {
+						att.Files[i].SandboxPath = path.Join(AttachmentsDir, attachmentFilename(att.Files[i].Filename))
+					}
+				}
+			}
 			return att
 		}
 		return model.TaskSpecAttachments{}
@@ -89,43 +228,135 @@ func loadTaskSpecAttachments(ctx context.Context, store *model.Store, task model
 		if ent.IsDir() || ent.Type()&fs.ModeSymlink != 0 {
 			continue
 		}
-		isSpec, isMD := model.IsSpecTextAttachment(ent.Name(), "")
-		if !isSpec {
-			continue
-		}
 		info, iErr := root.Lstat(ent.Name())
 		if iErr != nil || !info.Mode().IsRegular() {
 			continue
 		}
-		f, oErr := root.Open(ent.Name())
-		if oErr != nil {
-			continue
+		sz := info.Size()
+		if sz < 0 {
+			sz = 0
 		}
-		raw, rErr := io.ReadAll(io.LimitReader(f, maxRead))
-		_ = f.Close()
-		if rErr != nil || len(raw) == 0 || slices.Contains(raw, 0) {
-			continue
+		isSpec, isMD := model.IsSpecTextAttachment(ent.Name(), "")
+		isHTML := model.IsHTMLAttachment(ent.Name(), "")
+
+		out.TotalCount++
+		if out.TotalBytes <= math.MaxInt64-sz {
+			out.TotalBytes += sz
+		} else {
+			out.TotalBytes = math.MaxInt64
 		}
-		raw = model.TrimIncompleteTrailingUTF8Bytes(raw, model.DefaultTaskSpecAttachmentMaxBytes)
-		if len(raw) == 0 || !utf8.Valid(raw) {
-			continue
+		if isHTML {
+			out.HTMLCount++
 		}
-		trimmed := strings.TrimSpace(string(raw))
-		if trimmed == "" {
-			continue
-		}
-		if isMD {
-			out.MarkdownCount++
-		}
-		if len(out.Text) < model.DefaultTaskSpecAttachmentMaxBytes {
-			joined := trimmed
-			if out.Text != "" {
-				joined = out.Text + "\n\n" + trimmed
+
+		validSpecText := false
+		if isSpec {
+			f, oErr := root.Open(ent.Name())
+			if oErr == nil {
+				raw, rErr := io.ReadAll(io.LimitReader(f, maxRead))
+				_ = f.Close()
+				if rErr == nil && len(raw) > 0 && !slices.Contains(raw, 0) {
+					raw = model.TrimIncompleteTrailingUTF8Bytes(raw, model.DefaultTaskSpecAttachmentMaxBytes)
+					if len(raw) > 0 && utf8.Valid(raw) {
+						if trimmed := strings.TrimSpace(string(raw)); trimmed != "" {
+							validSpecText = true
+							if isMD {
+								out.MarkdownCount++
+							}
+							if out.SpecBytes <= math.MaxInt64-sz {
+								out.SpecBytes += sz
+							} else {
+								out.SpecBytes = math.MaxInt64
+							}
+							if len(out.Text) < model.DefaultTaskSpecAttachmentMaxBytes {
+								joined := trimmed
+								if out.Text != "" {
+									joined = out.Text + "\n\n" + trimmed
+								}
+								out.Text = model.TruncateValidUTF8(joined, model.DefaultTaskSpecAttachmentMaxBytes)
+							}
+						}
+					}
+				}
 			}
-			out.Text = model.TruncateValidUTF8(joined, model.DefaultTaskSpecAttachmentMaxBytes)
 		}
+		out.Files = append(out.Files, model.TaskAttachmentMeta{
+			Filename:    ent.Name(),
+			Size:        sz,
+			SandboxPath: path.Join(AttachmentsDir, attachmentFilename(ent.Name())),
+			IsSpecText:  validSpecText,
+			IsMarkdown:  validSpecText && isMD,
+			IsHTML:      isHTML,
+		})
 	}
 	return out
+}
+
+func formatAttachmentsManifest(specAtt model.TaskSpecAttachments) string {
+	if len(specAtt.Files) == 0 {
+		return ""
+	}
+	const maxListed = 25
+	var b strings.Builder
+	for i, f := range specAtt.Files {
+		if i >= maxListed {
+			fmt.Fprintf(&b, "- ... (%d additional attachment(s) in `./%s/`)\n", len(specAtt.Files)-maxListed, AttachmentsDir)
+			break
+		}
+		relPath := f.SandboxPath
+		if relPath == "" {
+			if f.ID > 0 {
+				relPath = AttachmentPath(f.ID, f.Filename)
+			} else {
+				relPath = path.Join(AttachmentsDir, attachmentFilename(f.Filename))
+			}
+		}
+		if ct := strings.TrimSpace(f.ContentType); ct != "" {
+			fmt.Fprintf(&b, "- `./%s` (%d bytes, %s)\n", relPath, f.Size, ct)
+		} else {
+			fmt.Fprintf(&b, "- `./%s` (%d bytes)\n", relPath, f.Size)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func buildAttachmentContextBlock(specAtt model.TaskSpecAttachments, maxTokens int) string {
+	if specAtt.TotalCount == 0 && len(specAtt.Files) == 0 && strings.TrimSpace(specAtt.Text) == "" {
+		return ""
+	}
+	if maxTokens <= 0 {
+		maxTokens = 1000
+	}
+	if maxTokens > 4000 {
+		maxTokens = 4000
+	}
+	maxChars := maxTokens * 4
+	if maxChars < 512 {
+		maxChars = 512
+	}
+
+	var b strings.Builder
+	b.WriteString("<task-attachments>\n")
+	b.WriteString("IMPORTANT: Inspect EVERY file in `./attachments/` before designing, implementing, or decomposing this task.\n")
+	if specAtt.TotalCount > 0 {
+		fmt.Fprintf(&b, "Attached files (%d total, %d bytes):\n", specAtt.TotalCount, specAtt.TotalBytes)
+	}
+	if manifest := formatAttachmentsManifest(specAtt); manifest != "" {
+		b.WriteString(manifest)
+		b.WriteString("\n")
+	}
+	if trimmed := strings.TrimSpace(specAtt.Text); trimmed != "" {
+		header := "--- Attached Specification Excerpt ---\n"
+		closing := "\n</task-attachments>"
+		remaining := maxChars - b.Len() - len(header) - len(closing)
+		if remaining > 96 {
+			b.WriteString(header)
+			b.WriteString(model.TruncateValidUTF8(trimmed, remaining))
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("</task-attachments>")
+	return b.String()
 }
 
 func isSubtaskOfWorkstream(ctx context.Context, store *model.Store, task model.Task) bool {
@@ -224,15 +455,10 @@ func ExecutePreCloneQAPhase(
 	}
 
 	specAtt := loadTaskSpecAttachments(ctx, store, task, "")
-	comp := qa.AssessTaskComplexity(qa.ComplexityInput{
-		Title:                   task.Title,
-		Body:                    task.Body,
-		AttachmentText:          specAtt.Text,
-		MarkdownAttachmentCount: specAtt.MarkdownCount,
-		ReadsCount:              len(task.Reads),
-		WritesCount:             len(task.Writes),
-		PathHints:               extractCandidatePathsWithSpec(task, spec, "", specAtt.Text),
-	}, rt.Profiler)
+	comp := qa.AssessTaskComplexity(
+		qa.ComplexityInputFromTask(task, specAtt, extractCandidatePathsWithSpec(task, spec, "", specAtt.Text)),
+		rt.Profiler,
+	)
 
 	finalPrompt := currentPrompt
 	s0Enabled := spec.S0Intent || spec.S0IntentConfig.Enabled
@@ -248,23 +474,31 @@ func ExecutePreCloneQAPhase(
 				}
 			}
 		}
-		timeout := time.Duration(spec.S0IntentConfig.MaxSeconds) * time.Second
-		if timeout <= 0 || timeout > 45*time.Second {
-			timeout = 45 * time.Second
-		}
+		timeout, startupOverhead := effectiveQAStageTimeout(
+			ctx, store, rt, task,
+			spec.S0IntentConfig.MaxSeconds,
+			defaultS0InferenceTimeout,
+			maxQAStageInferenceCap,
+		)
 		intentGuidance := strings.TrimSpace(spec.IntentSkillText)
 		if intentGuidance == "" {
 			intentGuidance = "Extract 2 to 6 testable WHEN ... SHALL acceptance criteria and explicit non-goals strictly from the task title and body."
 		}
 		prompt := intentGuidance + "\n\nTask title: " + task.Title + "\n\nTask body:\n" + task.Body
+		if manifest := formatAttachmentsManifest(specAtt); manifest != "" {
+			prompt += "\n\nTask attachments (in `./attachments/`):\n" + manifest
+		}
 		if specAtt.Text != "" {
-			prompt += "\n\nAttached specification:\n" + model.TruncateValidUTF8(specAtt.Text, maxPromptSpecAttachmentBytes)
+			specMaxBytes := maxPromptSpecAttachmentBytes
+			if spec.Context.MaxTokens > 0 && spec.Context.MaxTokens*4 < specMaxBytes {
+				specMaxBytes = max(spec.Context.MaxTokens*4, 512)
+			}
+			prompt += "\n\nAttached specification:\n" + model.TruncateValidUTF8(specAtt.Text, specMaxBytes)
 		}
 		runCtx, cancel := context.WithTimeout(ctx, timeout)
 		start := time.Now()
 		out, inTok, outTok, err := rt.RunIsolatedPrompt(runCtx, task, task.ID+"-qa-s0", prompt, spec.S0IntentConfig.MaxTokens)
 		duration := time.Since(start).Milliseconds()
-		cancel()
 
 		cr := model.QACheckRun{
 			TaskID:         task.ID,
@@ -287,6 +521,11 @@ func ExecutePreCloneQAPhase(
 		var question string
 		if err != nil {
 			cr.Verdict = "error"
+			cr.DetailJSON = buildQAStageErrorDetail(err, runCtx, timeout, startupOverhead, map[string]any{
+				"complexityTier":  string(comp.Tier),
+				"attachmentCount": specAtt.TotalCount,
+				"attachmentBytes": specAtt.TotalBytes,
+			})
 		} else {
 			checklist := strings.TrimSpace(out)
 			if strings.Contains(strings.ToLower(checklist), "status: needs_clarification") {
@@ -311,6 +550,7 @@ func ExecutePreCloneQAPhase(
 				finalPrompt += "\n\n## EARS Intent Checklist\n" + checklist
 			}
 		}
+		cancel()
 		if store != nil {
 			_, _ = store.RecordQACheckRun(ctx, cr, nil)
 		}
@@ -351,40 +591,71 @@ func ExecutePostCloneWorkflowPhases(
 	specAtt := loadTaskSpecAttachments(ctx, store, task, worktreeDir)
 	candidatePaths := extractCandidatePathsWithSpec(task, spec, worktreeDir, specAtt.Text)
 
-	// 1. S1 (step:context-repo-discovery): deterministic repo & sibling importer context discovery.
+	// 1. S1 (step:context-repo-discovery): deterministic repo, sibling importer, and task attachment context discovery.
 	var codebaseContext string
 	var siblingImporters []string
+	var attachmentContext string
 	s2Enabled := spec.S2PlanCritic || spec.S2PlanCriticConfig.Enabled
-	if spec.Context.Enabled || s2Enabled {
+	hasAttachments := specAtt.TotalCount > 0 || len(specAtt.Files) > 0 || strings.TrimSpace(specAtt.Text) != ""
+	if spec.Context.Enabled || s2Enabled || hasAttachments {
 		s1Start := time.Now()
 		var existingPaths []string
-		if strings.TrimSpace(worktreeDir) != "" {
-			maxTokens := spec.Context.MaxTokens
-			if maxTokens <= 0 || maxTokens > 2000 {
-				maxTokens = 2000
-			}
-			codebaseContext, existingPaths, siblingImporters = discoverPostCloneCodebaseContext(worktreeDir, candidatePaths, maxTokens, 180*time.Millisecond)
+		configuredMaxTokens := spec.Context.MaxTokens
+		if configuredMaxTokens <= 0 {
+			configuredMaxTokens = 2000
+		}
+		if (spec.Context.Enabled || s2Enabled) && strings.TrimSpace(worktreeDir) != "" {
+			repoMaxTokens := min(configuredMaxTokens, 2000)
+			codebaseContext, existingPaths, siblingImporters = discoverPostCloneCodebaseContext(worktreeDir, candidatePaths, repoMaxTokens, 180*time.Millisecond)
 			for _, ep := range existingPaths {
 				if !slices.Contains(candidatePaths, ep) {
 					candidatePaths = append(candidatePaths, ep)
 				}
 			}
 		}
+		if hasAttachments {
+			remainingTokens := configuredMaxTokens - len(codebaseContext)/4
+			if remainingTokens < 256 {
+				remainingTokens = min(configuredMaxTokens, 512)
+			}
+			attachmentContext = buildAttachmentContextBlock(specAtt, remainingTokens)
+		}
 		s1Duration := time.Since(s1Start).Milliseconds()
-		if spec.Context.Enabled || codebaseContext != "" {
+		if spec.Context.Enabled || codebaseContext != "" || attachmentContext != "" {
 			if codebaseContext != "" {
 				finalPrompt += "\n\n## Codebase & Caller Context\n" + codebaseContext
 			} else if spec.Context.Enabled && len(candidatePaths) > 0 {
 				codebaseContext = "<codebase-context>\nCandidate paths: " + strings.Join(candidatePaths, ", ") + "\n</codebase-context>"
 				finalPrompt += "\n\n## Codebase & Caller Context\n" + codebaseContext
 			}
-			if store != nil && (spec.Context.Enabled || codebaseContext != "") {
-				detailBytes, _ := json.Marshal(map[string]any{
+			if attachmentContext != "" {
+				finalPrompt += "\n\n## Task Attachments Context\n" + attachmentContext
+			}
+			if store != nil && (spec.Context.Enabled || codebaseContext != "" || attachmentContext != "") {
+				attachmentPaths := make([]string, 0, len(specAtt.Files))
+				for _, f := range specAtt.Files {
+					rel := f.SandboxPath
+					if rel == "" {
+						if f.ID > 0 {
+							rel = AttachmentPath(f.ID, f.Filename)
+						} else {
+							rel = path.Join(AttachmentsDir, attachmentFilename(f.Filename))
+						}
+					}
+					attachmentPaths = append(attachmentPaths, "./"+rel)
+				}
+				detailMap := map[string]any{
 					"discoveredPaths":  existingPaths,
 					"candidatePaths":   candidatePaths,
 					"siblingImporters": siblingImporters,
-					"contextBytes":     len(codebaseContext),
-				})
+					"contextBytes":     len(codebaseContext) + len(attachmentContext),
+				}
+				if len(attachmentPaths) > 0 || specAtt.TotalCount > 0 {
+					detailMap["attachments"] = attachmentPaths
+					detailMap["attachmentCount"] = specAtt.TotalCount
+					detailMap["attachmentBytes"] = specAtt.TotalBytes
+				}
+				detailBytes, _ := json.Marshal(detailMap)
 				_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
 					TaskID:       task.ID,
 					RunID:        task.ID + "-qa-s1",
@@ -404,15 +675,7 @@ func ExecutePostCloneWorkflowPhases(
 		}
 	}
 
-	comp := qa.AssessTaskComplexity(qa.ComplexityInput{
-		Title:                   task.Title,
-		Body:                    task.Body,
-		AttachmentText:          specAtt.Text,
-		MarkdownAttachmentCount: specAtt.MarkdownCount,
-		ReadsCount:              len(task.Reads),
-		WritesCount:             len(task.Writes),
-		PathHints:               candidatePaths,
-	}, prof)
+	comp := qa.AssessTaskComplexity(qa.ComplexityInputFromTask(task, specAtt, candidatePaths), prof)
 	if store != nil && strings.TrimSpace(task.ID) != "" && !isSubtaskOfWorkstream(ctx, store, task) {
 		epoch := 1
 		if qaCfg, cErr := store.ConfigQA(ctx); cErr == nil {
@@ -422,8 +685,18 @@ func ExecutePostCloneWorkflowPhases(
 	}
 
 	// 2. S0b (step:goal-subtask-decomposer): complexity-gated slice plan / wave DAG coordinator.
-	if spec.Decompose.Enabled && spec.Decompose.Mode != "" && spec.Decompose.Mode != "off" {
-		if matchesComplexityTier(spec.Decompose.Complexities, comp.Tier) {
+	if spec.Decompose.Enabled {
+		effectiveMode := spec.Decompose.EffectiveModeForTier(comp.Tier)
+		overrideApplied := false
+		if comp.DecomposeOverride != "" {
+			overrideApplied = true
+			if comp.DecomposeOverride == "off" {
+				effectiveMode = ""
+			} else {
+				effectiveMode = comp.DecomposeOverride
+			}
+		}
+		if effectiveMode != "" && effectiveMode != "off" {
 			maxSub := spec.Decompose.MaxSubtasks
 			if maxSub <= 0 {
 				maxSub = 4
@@ -432,31 +705,62 @@ func ExecutePostCloneWorkflowPhases(
 			if targetLines <= 0 {
 				targetLines = 400
 			}
-			effectiveMode := strings.ToLower(strings.TrimSpace(spec.Decompose.Mode))
 			isChildSubtask := isSubtaskOfWorkstream(ctx, store, task)
-			// Step down to single-PR slice_plan on medium-complexity tasks or already-decomposed child subtasks
-			// so only high-complexity root tasks spawn a multi-PR Workstream DAG and children never split recursively.
-			if effectiveMode == "propose_dag" && (comp.Tier != qa.ComplexityHigh || isChildSubtask) {
+			// Only step down to single-PR slice_plan on already-decomposed child subtasks so
+			// children never fan out recursively; root tasks honor the configured mode truthfully.
+			if effectiveMode == "propose_dag" && isChildSubtask {
 				effectiveMode = "slice_plan"
 			}
+			attManifest := formatAttachmentsManifest(specAtt)
 			switch effectiveMode {
 			case "propose_dag":
+				var attClause string
+				if attManifest != "" {
+					attClause = "\n\n**Required pre-planning step:** Read **every** file in `./attachments/` before designing, implementing, or decomposing work:\n" + attManifest
+				} else {
+					attClause = " If `./attachments/` contains any files, read every file in `./attachments/` first before designing, implementing, or decomposing work."
+				}
 				finalPrompt += fmt.Sprintf(
 					"\n\n## Workstream Subtask Decomposition (S0b — propose_dag)\n"+
-						"You are running on a high-complexity root Workstream task. Inspect the repository layout first and choose ONE of two paths:\n"+
+						"You are running on a root Workstream task (`%s` complexity). Inspect the repository layout first.%s\n\n"+
+						"Choose ONE of two paths:\n"+
 						"1. **Single-PR execution:** If the entire change fits cleanly inside one focused pull request (<= ~%d diff lines within one subsystem), implement and verify it directly in this run without calling `propose_task`.\n"+
-						"2. **Wave-ordered Workstream DAG:** If the work spans multiple subsystems or waves (> ~%d diff lines), decompose it into 2 to %d wave-ordered child tasks via `propose_task` (each with a clear `title`, self-contained `body` naming target files and acceptance tests, non-overlapping file scopes so parallel tasks never conflict, and explicit `depends_on` task IDs between waves). When filing a child DAG, make **zero** code edits or git commits on this root task and finish by calling `nothing_needed` with a concise summary of the proposed subtask DAG so this root closes cleanly as the Workstream header.",
-					targetLines, targetLines, maxSub,
+						"2. **Wave-ordered Workstream DAG:** If the work spans multiple subsystems or waves (> ~%d diff lines), decompose it into 2 to %d wave-ordered child tasks via `propose_task`:\n"+
+						"   - Assign each subtask a unique symbolic `id` (e.g. `wave1-backend`, `wave2-ui`) and wire wave ordering explicitly with `depends_on` referencing earlier subtasks' `id` values.\n"+
+						"   - Make every child `propose_task` `body` completely **self-contained**: read all `./attachments/` and distill all required specification, API/schema contracts, UI mock details, target file paths, and acceptance tests directly into each child's `body` (or committed design docs), because **child tasks do not inherit parent `./attachments/`**.\n"+
+						"   - Keep file scopes non-overlapping across parallel tasks in the same wave so pull requests never conflict.\n"+
+						"   - When filing a child DAG, make **zero** code edits or git commits on this root task and finish by calling `nothing_needed` with a concise summary of the proposed subtask DAG so this root closes cleanly as the Workstream header.",
+					comp.Tier, attClause, targetLines, targetLines, maxSub,
 				)
 			default:
+				var attNote string
+				if attManifest != "" {
+					attNote = " Read every file in `./attachments/` before starting slice 1."
+				}
 				finalPrompt += fmt.Sprintf(
 					"\n\n## Goal Subtask Decomposition (S0b — slice_plan)\n"+
 						"Execute this change as at most %d ordered single-PR slice steps targeting ~%d diff lines per slice, "+
-						"verifying compilation and targeted tests after each slice.",
-					maxSub, targetLines,
+						"verifying compilation and targeted tests after each slice.%s",
+					maxSub, targetLines, attNote,
 				)
 			}
-			detailJSON := fmt.Sprintf(`{"effectiveMode":%q,"isChildSubtask":%v}`, effectiveMode, isChildSubtask)
+			s0bDetail := map[string]any{
+				"configuredMode":  spec.Decompose.Mode,
+				"effectiveMode":   effectiveMode,
+				"isChildSubtask":  isChildSubtask,
+				"overrideApplied": overrideApplied,
+			}
+			if comp.DecomposeOverride != "" {
+				s0bDetail["decomposeOverride"] = comp.DecomposeOverride
+			}
+			if comp.ComplexityForced {
+				s0bDetail["complexityForced"] = true
+			}
+			if specAtt.TotalCount > 0 {
+				s0bDetail["attachmentCount"] = specAtt.TotalCount
+				s0bDetail["attachmentBytes"] = specAtt.TotalBytes
+			}
+			detailBytes, _ := json.Marshal(s0bDetail)
 			if store != nil {
 				_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
 					TaskID:         task.ID,
@@ -465,7 +769,7 @@ func ExecutePostCloneWorkflowPhases(
 					CheckID:        "step:goal-subtask-decomposer",
 					Arm:            model.QAArmTreatment,
 					Verdict:        "pass",
-					DetailJSON:     detailJSON,
+					DetailJSON:     string(detailBytes),
 					ComplexityTier: string(comp.Tier),
 					ExperimentID:   expID,
 					ArmID:          armID,
@@ -502,15 +806,30 @@ func ExecutePostCloneWorkflowPhases(
 		}
 
 		if shouldRunS2 {
-			timeout := time.Duration(spec.S2PlanCriticConfig.MaxSeconds) * time.Second
-			if timeout <= 0 || timeout > 45*time.Second {
-				timeout = 45 * time.Second
+			maxBounces := spec.S2PlanCriticConfig.MaxBounces
+			if maxBounces < 0 {
+				maxBounces = 0
+			} else if maxBounces > 2 {
+				maxBounces = 2
+			}
+			callTimeout, startupOverhead := effectiveQAStageTimeout(
+				ctx, store, rt, task,
+				spec.S2PlanCriticConfig.MaxSeconds,
+				defaultS2InferenceTimeout,
+				maxQAStageInferenceCap,
+			)
+			totalTimeout := callTimeout * time.Duration(1+maxBounces)
+			if totalTimeout > maxQAStageTotalCap {
+				totalTimeout = maxQAStageTotalCap
 			}
 			criticGuidance := strings.TrimSpace(spec.PlanCriticSkillText)
 			if criticGuidance == "" {
 				criticGuidance = "Inspect the proposed file plan and sibling importers. Flag missing caller updates, missing schema/route registrations, or scope creep beyond the task specification."
 			}
 			s2Prompt := criticGuidance + "\n\nTask title: " + task.Title + "\n\nTask body:\n" + task.Body
+			if manifest := formatAttachmentsManifest(specAtt); manifest != "" {
+				s2Prompt += "\n\nTask attachments (in `./attachments/`):\n" + manifest
+			}
 			if specAtt.Text != "" {
 				s2Prompt += "\n\nAttached specification:\n" + model.TruncateValidUTF8(specAtt.Text, maxPromptSpecAttachmentBytes)
 			}
@@ -518,14 +837,7 @@ func ExecutePostCloneWorkflowPhases(
 				s2Prompt += "\n\n## Codebase & Caller Context\n" + codebaseContext
 			}
 
-			maxBounces := spec.S2PlanCriticConfig.MaxBounces
-			if maxBounces < 0 {
-				maxBounces = 0
-			} else if maxBounces > 2 {
-				maxBounces = 2
-			}
-
-			runCtx, cancel := context.WithTimeout(ctx, timeout)
+			runCtx, cancel := context.WithTimeout(ctx, totalTimeout)
 			start := time.Now()
 			out, inTok, outTok, err := rt.RunIsolatedPrompt(runCtx, task, task.ID+"-qa-s2", s2Prompt, spec.S2PlanCriticConfig.MaxTokens)
 			totalInTok := inTok
@@ -546,14 +858,22 @@ func ExecutePostCloneWorkflowPhases(
 				}
 			}
 			duration := time.Since(start).Milliseconds()
-			cancel()
 
-			detailBytes, _ := json.Marshal(map[string]any{
+			s2Extra := map[string]any{
 				"bounces":          bounces,
 				"maxBounces":       maxBounces,
 				"prelimBlastTier":  prelimRisk.Tier,
 				"siblingImporters": siblingImporters,
-			})
+			}
+			var detailStr string
+			if err != nil {
+				detailStr = buildQAStageErrorDetail(err, runCtx, totalTimeout, startupOverhead, s2Extra)
+			} else {
+				detailBytes, _ := json.Marshal(s2Extra)
+				detailStr = string(detailBytes)
+			}
+			cancel()
+
 			cr := model.QACheckRun{
 				TaskID:         task.ID,
 				RunID:          task.ID + "-qa-s2",
@@ -564,7 +884,7 @@ func ExecutePostCloneWorkflowPhases(
 				DurationMS:     duration,
 				TokensIn:       totalInTok,
 				TokensOut:      totalOutTok,
-				DetailJSON:     string(detailBytes),
+				DetailJSON:     detailStr,
 				BlastTier:      string(prelimRisk.Tier),
 				BlastScore:     prelimRisk.Score,
 				ComplexityTier: string(comp.Tier),

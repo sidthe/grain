@@ -22,13 +22,13 @@ import (
 )
 
 func TestBuiltInEngineeringWorkflowV4AndPreservedV1ToV3Hashes(t *testing.T) {
-	// Verify existing built-in hashes remain resolvable with engine rev 7.
+	// Verify existing built-in hashes remain resolvable with engine rev 8.
 	wantBuiltInHashes := map[string]string{
-		"golden-v1-minimal@1":     "builtin:golden-v1-minimal@1#7",
-		"golden-v2@1":             "builtin:golden-v2@1#7",
-		"golden-v2-skill-only@1":  "builtin:golden-v2-skill-only@1#7",
-		"golden-v2-checks-only@1": "builtin:golden-v2-checks-only@1#7",
-		"golden-v3@1":             "builtin:golden-v3@1#7",
+		"golden-v1-minimal@1":     "builtin:golden-v1-minimal@1#8",
+		"golden-v2@1":             "builtin:golden-v2@1#8",
+		"golden-v2-skill-only@1":  "builtin:golden-v2-skill-only@1#8",
+		"golden-v2-checks-only@1": "builtin:golden-v2-checks-only@1#8",
+		"golden-v3@1":             "builtin:golden-v3@1#8",
 	}
 	for ref, wantHash := range wantBuiltInHashes {
 		b, ok := LookupBuiltInOrRegisteredVersion(ref)
@@ -429,5 +429,96 @@ func TestCanonicalBuiltInWorkflowsSafeForGenericRepos(t *testing.T) {
 		if ref == "standard-workflow@1" && len(b.Resolved.RiskOverrides) != 0 {
 			t.Errorf("standard-workflow@1 should not hardcode Grain-specific RiskOverrides, got %+v", b.Resolved.RiskOverrides)
 		}
+	}
+}
+
+func TestDecomposeEffectiveModeForTierAndStrictTierModesValidation(t *testing.T) {
+	std, ok := LookupBuiltInOrRegisteredVersion("standard-workflow@1")
+	if !ok {
+		t.Fatal("standard-workflow@1 not found")
+	}
+	// standard-workflow configures mode: propose_dag, complexities: [medium, high].
+	// Both listed complexities must resolve truthfully to propose_dag (no silent downgrade).
+	if got := std.Resolved.Decompose.EffectiveModeForTier(ComplexityMedium); got != "propose_dag" {
+		t.Errorf("standard-workflow EffectiveModeForTier(medium) = %q, want propose_dag", got)
+	}
+	if got := std.Resolved.Decompose.EffectiveModeForTier(ComplexityHigh); got != "propose_dag" {
+		t.Errorf("standard-workflow EffectiveModeForTier(high) = %q, want propose_dag", got)
+	}
+	if got := std.Resolved.Decompose.EffectiveModeForTier(ComplexityLow); got != "" {
+		t.Errorf("standard-workflow EffectiveModeForTier(low) = %q, want empty", got)
+	}
+
+	// Explicit per-tier modes via JSON camelCase (tierModes) and YAML kebab-case (tier-modes).
+	rawJSON, err := json.Marshal(map[string]any{
+		"schema":  FlowSchemaV4,
+		"key":     "explicit-tier-modes",
+		"extends": "standard-workflow@1",
+		"decompose": map[string]any{
+			"enabled":         true,
+			"mode":            "propose_dag",
+			"complexities":    []string{"medium", "high"},
+			"tierModes":       map[string]string{"medium": "slice_plan", "high": "propose_dag"},
+			"maxSubtasks":     4,
+			"targetDiffLines": 400,
+		},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	b, err := ResolveAnyFlowDeclaration(rawJSON, 1, nil)
+	if err != nil {
+		t.Fatalf("ResolveAnyFlowDeclaration: %v", err)
+	}
+	if got := b.Resolved.Decompose.EffectiveModeForTier(ComplexityMedium); got != "slice_plan" {
+		t.Errorf("explicit tierModes medium = %q, want slice_plan", got)
+	}
+	if got := b.Resolved.Decompose.EffectiveModeForTier(ComplexityHigh); got != "propose_dag" {
+		t.Errorf("explicit tierModes high = %q, want propose_dag", got)
+	}
+	if got := b.Resolved.Decompose.EffectiveModeForTier(ComplexityLow); got != "" {
+		t.Errorf("explicit tierModes low = %q, want empty", got)
+	}
+	// Round-trip through DeclarationV4 JSON preserves tierModes.
+	rtJSON, err := json.Marshal(b.DeclarationV4)
+	if err != nil {
+		t.Fatalf("round-trip marshal: %v", err)
+	}
+	rtBundle, err := ResolveAnyFlowDeclaration(rtJSON, 1, nil)
+	if err != nil {
+		t.Fatalf("round-trip resolve: %v", err)
+	}
+	if rtBundle.Resolved.Decompose.TierModes["medium"] != "slice_plan" || rtBundle.Resolved.Decompose.TierModes["high"] != "propose_dag" {
+		t.Fatalf("round-trip lost tierModes: %+v", rtBundle.Resolved.Decompose.TierModes)
+	}
+
+	// Invalid tier key or mode value is strictly rejected.
+	for _, bad := range []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "unknown tier key",
+			yaml: "schema: grain.dev/qa-flow/v4\nkey: bad-tier\ndecompose:\n  enabled: true\n  tier-modes:\n    extreme: propose_dag\n",
+			want: "tier-modes key",
+		},
+		{
+			name: "wrong case tier key",
+			yaml: "schema: grain.dev/qa-flow/v4\nkey: bad-case\ndecompose:\n  enabled: true\n  tier-modes:\n    Medium: slice_plan\n",
+			want: "tier-modes key",
+		},
+		{
+			name: "invalid tier mode value",
+			yaml: "schema: grain.dev/qa-flow/v4\nkey: bad-val\ndecompose:\n  enabled: true\n  tier-modes:\n    medium: unknown_mode\n",
+			want: "tier-modes",
+		},
+	} {
+		t.Run(bad.name, func(t *testing.T) {
+			_, err := ResolveAnyFlowDeclaration([]byte(bad.yaml), 1, nil)
+			if err == nil || !strings.Contains(err.Error(), bad.want) {
+				t.Errorf("got err=%v, want substring %q", err, bad.want)
+			}
+		})
 	}
 }

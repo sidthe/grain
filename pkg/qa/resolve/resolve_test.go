@@ -558,4 +558,18 @@ func TestComposeTightenOnlyOverlaysAndFloors(t *testing.T) {
 	if len(composed.ReadabilityPacks) != 2 || !composed.ReadabilityPacks[0].Enabled || !composed.ReadabilityPacks[1].Enabled {
 		t.Fatalf("expected both ReadabilityPacks enabled, got %+v", composed.ReadabilityPacks)
 	}
+
+	// Tightening overlay upgrades slice_plan -> propose_dag and merges TierModes tighten-only.
+	tighter := qa.FlowSpec{
+		Decompose: qa.DecomposeDecl{
+			Enabled:      true,
+			Mode:         "propose_dag",
+			Complexities: []string{"medium", "high"},
+			TierModes:    map[string]string{"medium": "slice_plan", "high": "propose_dag"},
+		},
+	}
+	upgraded := resolve.ComposeTightenOnly(base, tighter)
+	if upgraded.Decompose.Mode != "propose_dag" || upgraded.Decompose.TierModes["high"] != "propose_dag" || upgraded.Decompose.TierModes["medium"] != "slice_plan" {
+		t.Fatalf("expected tighten-only overlay to upgrade Decompose to propose_dag and preserve TierModes, got %+v", upgraded.Decompose)
+	}
 }

@@ -52,9 +52,29 @@ func ClassifyTaskComplexity(title, body string) string {
 // ClassifyTaskComplexityWithAttachments computes a pre-dispatch complexity tier ("low", "medium", "high")
 // from pre-filtrated task title, inline body, and specification attachments symmetrically across arms.
 func ClassifyTaskComplexityWithAttachments(title, body, attachmentText string, markdownAttachmentCount int) string {
-	cleanInline := stripDispatchEnvelope(stripYAMLFrontmatter(body))
-	words := len(strings.Fields(title)) + len(strings.Fields(cleanInline))
-	lower := strings.ToLower(title + "\n" + cleanInline)
+	return classifyComplexityInput(ComplexityInput{
+		Title:                   title,
+		Body:                    body,
+		AttachmentText:          attachmentText,
+		MarkdownAttachmentCount: markdownAttachmentCount,
+	})
+}
+
+// ClassifyTaskComplexityForTask computes a pre-dispatch complexity tier ("low", "medium", "high")
+// from a task's title, body, custom fields, explicit overrides, and hydrated attachment metadata/text.
+func ClassifyTaskComplexityForTask(task model.Task, att model.TaskSpecAttachments) string {
+	return classifyComplexityInput(ComplexityInputFromTask(task, att, nil))
+}
+
+func classifyComplexityInput(in ComplexityInput) string {
+	assessed := AssessTaskComplexity(in, nil)
+	if assessed.ComplexityForced {
+		return string(assessed.Tier)
+	}
+	cleanInline := stripDispatchEnvelope(stripYAMLFrontmatter(in.Body))
+	cleanAtt := stripDispatchEnvelope(stripYAMLFrontmatter(in.AttachmentText))
+	words := len(strings.Fields(in.Title)) + len(strings.Fields(cleanInline)) + len(strings.Fields(cleanAtt))
+	lower := strings.ToLower(in.Title + "\n" + cleanInline + "\n" + cleanAtt)
 	archSignals := 0
 	for _, kw := range []string{
 		"migration", "schema", "concurrency", "scheduler", "syscall",
@@ -72,14 +92,8 @@ func ClassifyTaskComplexityWithAttachments(title, body, attachmentText string, m
 	case words >= 45 || archSignals >= 1:
 		wordTier = model.QAComplexityMedium
 	}
-	assessed := string(AssessTaskComplexity(ComplexityInput{
-		Title:                   title,
-		Body:                    body,
-		AttachmentText:          attachmentText,
-		MarkdownAttachmentCount: markdownAttachmentCount,
-	}, nil).Tier)
-	if complexityTierOrder(assessed) > complexityTierOrder(wordTier) {
-		return assessed
+	if complexityTierOrder(string(assessed.Tier)) > complexityTierOrder(wordTier) {
+		return string(assessed.Tier)
 	}
 	return wordTier
 }

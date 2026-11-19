@@ -25,15 +25,21 @@ import (
 )
 
 type postQAProbeReq struct {
-	FlowHash       string   `json:"flowHash"`
-	FlowYAML       string   `json:"flowYaml"`
-	Title          string   `json:"title"`
-	Body           string   `json:"body"`
-	Files          []string `json:"files"`
-	NonTestAdded   int      `json:"nonTestAdded"`
-	NonTestDeleted int      `json:"nonTestDeleted"`
-	SiblingCallers int      `json:"siblingCallers"`
-	TestTampered   bool     `json:"testTampered"`
+	FlowHash                string              `json:"flowHash"`
+	FlowYAML                string              `json:"flowYaml"`
+	Title                   string              `json:"title"`
+	Body                    string              `json:"body"`
+	AttachmentText          string              `json:"attachmentText,omitempty"`
+	MarkdownAttachmentCount int                 `json:"markdownAttachmentCount,omitempty"`
+	HTMLAttachmentCount     int                 `json:"htmlAttachmentCount,omitempty"`
+	AttachmentCount         int                 `json:"attachmentCount,omitempty"`
+	AttachmentTotalBytes    int64               `json:"attachmentTotalBytes,omitempty"`
+	CustomFields            map[string][]string `json:"customFields,omitempty"`
+	Files                   []string            `json:"files"`
+	NonTestAdded            int                 `json:"nonTestAdded"`
+	NonTestDeleted          int                 `json:"nonTestDeleted"`
+	SiblingCallers          int                 `json:"siblingCallers"`
+	TestTampered            bool                `json:"testTampered"`
 }
 
 func (s *Server) handlePostQAProbe(w http.ResponseWriter, r *http.Request) {
@@ -72,11 +78,17 @@ func (s *Server) handlePostQAProbe(w http.ResponseWriter, r *http.Request) {
 	flow := flowBundle.Resolved
 
 	comp := qa.AssessTaskComplexity(qa.ComplexityInput{
-		Title:       req.Title,
-		Body:        req.Body,
-		ReadsCount:  0,
-		WritesCount: len(req.Files),
-		PathHints:   req.Files,
+		Title:                   req.Title,
+		Body:                    req.Body,
+		AttachmentText:          req.AttachmentText,
+		MarkdownAttachmentCount: req.MarkdownAttachmentCount,
+		HTMLAttachmentCount:     req.HTMLAttachmentCount,
+		AttachmentCount:         req.AttachmentCount,
+		AttachmentTotalBytes:    req.AttachmentTotalBytes,
+		CustomFields:            req.CustomFields,
+		ReadsCount:              0,
+		WritesCount:             len(req.Files),
+		PathHints:               req.Files,
 	}, nil)
 
 	risk := qa.AssessDiffBlast(qa.DiffStats{
@@ -94,6 +106,21 @@ func (s *Server) handlePostQAProbe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	stagesFired = append(stagesFired, "S1")
+
+	effectiveDecomposeMode := ""
+	if flow.Decompose.Enabled {
+		effectiveDecomposeMode = flow.Decompose.EffectiveModeForTier(comp.Tier)
+		if comp.DecomposeOverride != "" {
+			if comp.DecomposeOverride == "off" {
+				effectiveDecomposeMode = ""
+			} else {
+				effectiveDecomposeMode = comp.DecomposeOverride
+			}
+		}
+		if effectiveDecomposeMode != "" && effectiveDecomposeMode != "off" {
+			stagesFired = append(stagesFired, "S0b")
+		}
+	}
 
 	if flow.S2PlanCritic {
 		if comp.Tier == qa.ComplexityHigh || slices.Contains(flow.S2PlanCriticConfig.Complexities, string(comp.Tier)) {
@@ -142,11 +169,14 @@ func (s *Server) handlePostQAProbe(w http.ResponseWriter, r *http.Request) {
 
 	res := map[string]any{
 		"complexity": map[string]any{
-			"tier":          comp.Tier,
-			"score":         comp.Score,
-			"signals":       comp.Signals,
-			"hasDesignItem": comp.HasDesignItem,
+			"tier":              comp.Tier,
+			"score":             comp.Score,
+			"signals":           comp.Signals,
+			"hasDesignItem":     comp.HasDesignItem,
+			"complexityForced":  comp.ComplexityForced,
+			"decomposeOverride": comp.DecomposeOverride,
 		},
+		"decomposeMode": effectiveDecomposeMode,
 		"risk": map[string]any{
 			"tier":          risk.Tier,
 			"score":         risk.Score,

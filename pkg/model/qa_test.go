@@ -683,8 +683,16 @@ func TestTaskSpecAttachmentsAndSummariesHydration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TaskSpecAttachments: %v", err)
 	}
-	if gotAtt.MarkdownCount != 1 || !strings.Contains(gotAtt.Text, "## 4. Phased Implementation") || strings.Contains(gotAtt.Text, "<!doctype html>") {
-		t.Fatalf("unexpected TaskSpecAttachments: count=%d text=%q", gotAtt.MarkdownCount, gotAtt.Text)
+	if gotAtt.MarkdownCount != 1 || gotAtt.HTMLCount != 1 || gotAtt.TotalCount != 3 || !strings.Contains(gotAtt.Text, "## 4. Phased Implementation") || strings.Contains(gotAtt.Text, "<!doctype html>") {
+		t.Fatalf("unexpected TaskSpecAttachments: %+v", gotAtt)
+	}
+	wantTotalBytes := int64(len(mdContent) + len(htmlMock) + len(pngBytes))
+	if gotAtt.TotalBytes != wantTotalBytes || gotAtt.SpecBytes != int64(len(mdContent)) || len(gotAtt.Files) != 3 {
+		t.Fatalf("unexpected TaskSpecAttachments metadata: totalBytes=%d want=%d specBytes=%d wantSpec=%d files=%+v",
+			gotAtt.TotalBytes, wantTotalBytes, gotAtt.SpecBytes, len(mdContent), gotAtt.Files)
+	}
+	if !gotAtt.Files[0].IsMarkdown || !gotAtt.Files[0].IsSpecText || !gotAtt.Files[1].IsHTML || gotAtt.Files[1].IsSpecText || gotAtt.Files[2].IsSpecText {
+		t.Fatalf("unexpected TaskSpecAttachments file flags: %+v", gotAtt.Files)
 	}
 
 	// Verify SQLite BLOB SUBSTR mid-rune boundary slicing preserves valid UTF-8 attachments.

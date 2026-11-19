@@ -273,7 +273,7 @@ func EnsureQAResolutionAtDispatchWithConfig(
 			return &Resolution{Source: "none", ArmID: "baseline"}, qaCfg, nil
 		}
 		att, _ := store.TaskSpecAttachments(ctx, task.ID, model.DefaultTaskSpecAttachmentMaxBytes)
-		tier := qa.ClassifyTaskComplexityWithAttachments(task.Title, task.Body, att.Text, att.MarkdownCount)
+		tier := qa.ClassifyTaskComplexityForTask(task, att)
 		created, err := qa.AssignOrLoadArm(ctx, store, root, tier, qaCfg, now)
 		if err != nil {
 			return nil, qaCfg, err
@@ -534,12 +534,35 @@ func ComposeTightenOnly(spec qa.FlowSpec, overlays ...qa.FlowSpec) qa.FlowSpec {
 		spec.StrictDecoderPaths = unionStrings(spec.StrictDecoderPaths, ov.StrictDecoderPaths)
 
 		// V4 Decompose, Context, PRContract tighten-only
-		if ov.Decompose.Enabled && ov.Decompose.Mode != "off" {
+		if ov.Decompose.Enabled && (ov.Decompose.Mode != "off" || len(ov.Decompose.TierModes) > 0) {
 			spec.Decompose.Enabled = true
-			if spec.Decompose.Mode == "" || spec.Decompose.Mode == "off" || ov.Decompose.Mode == "propose_tasks" {
-				spec.Decompose.Mode = ov.Decompose.Mode
+			if spec.Decompose.Mode == "" || spec.Decompose.Mode == "off" || ov.Decompose.Mode == "propose_dag" {
+				if ov.Decompose.Mode != "" && ov.Decompose.Mode != "off" {
+					spec.Decompose.Mode = ov.Decompose.Mode
+				}
 			}
 			spec.Decompose.Complexities = unionStrings(spec.Decompose.Complexities, ov.Decompose.Complexities)
+			if len(ov.Decompose.TierModes) > 0 {
+				if spec.Decompose.TierModes == nil {
+					spec.Decompose.TierModes = make(map[string]string, len(ov.Decompose.TierModes))
+				}
+				modeRank := func(m string) int {
+					switch m {
+					case "propose_dag":
+						return 2
+					case "slice_plan":
+						return 1
+					default:
+						return 0
+					}
+				}
+				for tierKey, ovMode := range ov.Decompose.TierModes {
+					cur := spec.Decompose.TierModes[tierKey]
+					if modeRank(ovMode) > modeRank(cur) {
+						spec.Decompose.TierModes[tierKey] = ovMode
+					}
+				}
+			}
 			if ov.Decompose.MaxSubtasks > spec.Decompose.MaxSubtasks {
 				spec.Decompose.MaxSubtasks = ov.Decompose.MaxSubtasks
 			}
