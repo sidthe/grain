@@ -177,3 +177,98 @@ func TestOrderProposedIDsUpstreamFirstHandlesCycles(t *testing.T) {
 		t.Fatalf("orderProposedIDsUpstreamFirst = %v, want %v", got, want)
 	}
 }
+
+// A failed read of an upstream task must abort the batch before anything
+// downstream is approved; only a 404 (deleted task) is skipped.
+func TestApproveUpstreamFetchErrorsAbortNon404AndSkip404(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		status  int
+		wantErr bool
+	}{
+		{name: "403 aborts", status: http.StatusForbidden, wantErr: true},
+		{name: "500 aborts", status: http.StatusInternalServerError, wantErr: true},
+		{name: "404 is skipped", status: http.StatusNotFound, wantErr: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := testStore(t)
+			ctx := context.Background()
+			client := ui.NewClient(ui.Config{Actor: ui.DefaultActor("tester"), Capabilities: ui.OfferedCapabilities()}, store)
+			upstream, err := client.CreateTask(ctx, ui.CreateTaskRequest{Title: "Upstream dep", NoRepo: true})
+			if err != nil {
+				t.Fatalf("create upstream: %v", err)
+			}
+			downstream, err := client.CreateTask(ctx, ui.CreateTaskRequest{
+				Title: "Downstream task", NoRepo: true, DependsOn: []string{upstream.ID},
+			})
+			if err != nil {
+				t.Fatalf("create downstream: %v", err)
+			}
+
+			var approved []string
+			inner := accessCodeServer(client)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// Hide upstream from the list so approveBatch must read it on its own.
+				if r.Method == http.MethodGet && r.URL.Path == "/api/tasks" {
+					req := r.Clone(r.Context())
+					req.Header = r.Header.Clone()
+					req.Header.Del("Accept-Encoding")
+					rec := httptest.NewRecorder()
+					inner.ServeHTTP(rec, req)
+					var tasks []ui.Task
+					if err := json.Unmarshal(rec.Body.Bytes(), &tasks); err != nil {
+						http.Error(w, "decode tasks: "+err.Error(), http.StatusInternalServerError)
+						return
+					}
+					filtered := make([]ui.Task, 0, len(tasks))
+					for _, task := range tasks {
+						if task.ID != upstream.ID {
+							filtered = append(filtered, task)
+						}
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(filtered)
+					return
+				}
+				if r.Method == http.MethodGet && r.URL.Path == "/api/tasks/"+upstream.ID {
+					http.Error(w, "simulated upstream read failure", tc.status)
+					return
+				}
+				if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/approve") {
+					approved = append(approved, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/tasks/"), "/approve"))
+				}
+				inner.ServeHTTP(w, r)
+			}))
+			defer srv.Close()
+
+			var runErr error
+			_ = captureStdout(t, func() {
+				runErr = runCLIWithAccessCode([]string{"-server", srv.URL, "-json", "approve", "-upstream", downstream.ID})
+			})
+			wantState := model.StateQueued
+			if tc.wantErr {
+				wantState = model.StateProposed
+				if runErr == nil || !strings.Contains(runErr.Error(), "#"+upstream.ID) {
+					t.Fatalf("err = %v, want an error naming #%s", runErr, upstream.ID)
+				}
+				if len(approved) != 0 {
+					t.Fatalf("approved = %v, want none", approved)
+				}
+			} else {
+				if runErr != nil {
+					t.Fatalf("unexpected error: %v", runErr)
+				}
+				if want := []string{downstream.ID}; !slices.Equal(approved, want) {
+					t.Fatalf("approved = %v, want %v", approved, want)
+				}
+			}
+			got, err := client.Task(ctx, downstream.ID)
+			if err != nil {
+				t.Fatalf("read downstream: %v", err)
+			}
+			if got.State != wantState {
+				t.Fatalf("downstream state = %s, want %s", got.State, wantState)
+			}
+		})
+	}
+}
