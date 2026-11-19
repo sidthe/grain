@@ -1,59 +1,82 @@
-name: UI walkthrough - boards and visualizations
-title: Walk through saved boards and task visualizations
+name: UI walkthrough - boards, workstreams, agents and visualizations
+title: Walk through saved boards, Workstreams, Agents and task visualizations
 base: main
 auto-merge: true
 body: |
-  Thoroughly exercise saved views and every board presentation, using
-  the seeded demo data and the UI's own creation flows, in a real
-  browser against a real server.
+  Thoroughly exercise saved views and every presentation of work --
+  `/next/tasks`' Boards menu and Timeline, Workstreams, Agents, and the
+  classic Boards index and board kinds -- using the seeded demo data and
+  the UI's own creation flows, in a real browser against a real server.
 
   ## Coverage
 
-  - Open the Boards index (`/boards`) and the seeded boards
-    from the rail and from direct URLs; verify folders (confirming
-    same-named boards in different folders carry distinct accessible
-    names), ordering (including dragging a board in a section below the
-    first), counts, narrowing, search and sort where offered,
-    Back/Forward/reload behaviour, and that a failed `/api/boards` fetch
-    explains why the boards could not be loaded rather than saying "No
-    boards yet".
-  - Request a new board from the rail's create menu (New board) and from
-    the Boards index header, then inspect the resulting task or proposal,
-    so the product's asynchronous creation contract is verified rather
-    than bypassed; confirm a viewer role lacking `tasks:write` is not
-    offered New board, Edit board, kanban/list drag reorder, or dashboard
-    Add panel / Keep.
-  - List and kanban: open task detail from rows and cards, edit column
-    definitions, move cards and columns through mouse and keyboard/tap
-    affordances (confirming move slots identify tasks by id rather than
-    title alone), and verify that state and order persist. Confirm the
-    merge-queue column reads "Merging", blocked cards show the blocked
-    state oval, `keep_running` tasks carry their marker, a held proposal's
-    card carries its "held for approval" chip, an imported issue's card
-    carries its `imported` chip, and a board with custom columns
-    distinguishes "Asked to submit" from "Asked for a reply" in its "in
-    no column" summary when a column collects only one of the two.
-  - Timeline and gantt: change range and lanes (confirming the Asked lane
-    is ordered after Running), inspect bars/dependencies/today marker,
-    open a task from a bar, and verify that settings and URL survive a
-    reload.
-  - Tree: open a `tree` board and verify tasks nest under the task that
-    filed them, that the board's narrowing applies and survives a
-    reload, and that a row opens task detail.
-  - Dashboard: exercise whole-board narrowing (confirming Keep is not
-    offered on a throughput panel whose report the typed narrowing would
-    not change); configure, add/request, reorder and open panels; verify
-    panel-specific query scoping, links to the underlying task lists (and
-    that browser Back from a panel's Open or state count restores focus
-    to that link), and loading/empty/error rendering.
-  - Report: change the time window (`?window=` in the URL) and press
-    Refresh, inspect and reorder the report's measurement sections
-    (throughput, latency, backlog, merges, prompts, tools, agents,
-    sandboxes and checks, confirming silent sections are omitted),
-    verify repo and query scoping, and follow task references and
-    backlog counts as real links into the underlying task lists
-    (confirming backlog chip counts match those lists and browser Back
-    restores focus to the originating link).
+  - Saved boards on `/next/tasks`: open the Boards menu (focus lands on
+    the first board; Tab moves through it; `Escape` closes it with focus
+    back on its button), confirm same-named boards are announced apart
+    (`Triage, in WT Ops`, `(board-17)`), Save current view… on a narrowed
+    tab (`?tab=asked&q=retry`) and on the Timeline, reopen each (the
+    Timeline board reopens on the Timeline; a board with no view puts the
+    list back), and delete a throwaway board through its confirmation
+    (`Escape` deletes nothing). Apply a board saved on the classic UI and
+    note whether its narrowing carries over (the two filter grammars are
+    a known gap). Confirm a role without `boards:write` sees no Save or
+    delete.
+  - Timeline on `/next/tasks` (Task view → Timeline, `?view=timeline`):
+    still-open tasks draw to the right-hand `now` edge, finished ones stop
+    where their work ended and a failed one at its last run; open a task
+    from a row's title (`&task=<id>` survives reload, Back returns to the
+    Timeline), switch tabs and confirm the view is kept.
+  - Workstreams (`/next/workstreams`, and Start a workstream from the
+    Create menu): People vs System, the status chips (Needs a person,
+    Planning, Running, Blocked, Parked, Done (last 14d)) and the sort
+    (Attention first, Last activity, Least done, Most tasks, Newest),
+    each kept in the URL through a reload (they replace the history entry
+    rather than adding one, and Reset filters clears them). Open a workstream
+    (`/next/workstreams/<key>`, including a multi-segment key): its tree
+    of tasks nested under who filed what, its done count, the goal in the
+    detail inspector (not the header), and a task link into
+    `/next/task/<id>` and back. Confirm the root summaries come from one
+    `/api/tasks/summaries` read rather than one request per task, and
+    that a summary that fails for one entry leaves the rest drawn.
+  - Agents (`/next/agents`): every running agent as a card with what it
+    is doing now and its CPU reading, quiet runs first; the filter chips
+    (All, Working, Setting up, Quiet) and grouping (No grouping,
+    Repository, Model, Host work). Select a card (click, Enter on the card
+    or on its CPU reading, `j`/`k` in on-screen order) to open the
+    inspector, then close it by Close inspector, the pane's ×, `Escape`
+    and a second click, confirming the cards go back to full width and
+    focus returns to the card; Open full screen opens the task page. At
+    phone width the last card stays reachable in the list's one scroller.
+  - Classic Boards index (`/boards`, no `/next/` page yet): open it and
+    the seeded boards from the rail and direct URLs; folders (same-named
+    boards in different folders carry distinct accessible names),
+    ordering (including dragging a board below the first section),
+    counts, search and sort, Back/Forward/reload, and a failed
+    `/api/boards` fetch explaining why rather than saying "No boards
+    yet".
+  - Request a new board from the Create menu (New board, on `/next/` and
+    classic) and from the Boards index header, and inspect the resulting
+    task or proposal, so the asynchronous creation contract is verified
+    rather than bypassed; confirm a viewer role lacking `tasks:write` is
+    not offered New board, Edit board, kanban/list drag reorder, or
+    dashboard Add panel / Keep.
+  - List and kanban (classic): open task detail from rows and cards,
+    edit column definitions, move cards and columns by mouse and
+    keyboard/tap (move slots identify tasks by id), and verify state and
+    order persist. Confirm "Merging", the blocked oval, `keep_running`
+    markers, the held-for-approval, `imported` and `Rolled over to #M`
+    chips, and that custom columns tell "Asked to submit" from "Asked for
+    a reply" in the "in no column" summary.
+  - Timeline/gantt and Tree (classic): change range and lanes (the Asked
+    lane after Running), inspect bars, dependencies and the today marker,
+    open a task from a bar; on a `tree` board confirm tasks nest under the
+    task that filed them and the board's narrowing survives a reload.
+  - Dashboard and Report (classic): whole-board narrowing (no Keep on a
+    throughput panel the narrowing would not change); configure, add,
+    reorder and open panels, follow their links into task lists and
+    confirm Back restores focus to the link; on Report change `?window=`,
+    Refresh, reorder its sections (silent ones omitted) and follow task
+    references and backlog counts (chip counts match the lists).
   - Exercise delete and confirmation only where the UI actually exposes
     it, and only against throwaway objects created in this run.
 

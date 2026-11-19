@@ -23,14 +23,14 @@ a template in `.grain/templates/`:
 
 | File | What it walks |
 | --- | --- |
-| `ui-walkthrough-tasks.yml` | Inbox (including notifications and release approvals), the New task form, task lists, closed-task paging and narrowing, task detail and its controls (admission, hosting, pause, `request_access`, force merge, Run now), bulk edit and manual mode |
-| `ui-walkthrough-boards.yml` | The Boards index and every visualization: list, kanban, timeline, tree, dashboard, report |
-| `ui-walkthrough-repos.yml` | Repos, the repo page's tabs and Settings → Repositories, the merge queue and base-gate warnings, comparing branches, releases, qualification plans and release trains |
-| `ui-walkthrough-automation.yml` | Processes: schedules (including `git_ref` triggers), templates, suites, suite runs and triggers -- including declared rows |
-| `ui-walkthrough-settings.yml` | Settings' layout, filter, save, role and config-repo lock model; Preferences, Access, CLI, Audit, General, Config repo (and its browser), Models, Agents, Memory and Tasks |
-| `ui-walkthrough-infrastructure.yml` | Settings' connections and infrastructure sections: Git, Hosts, Capabilities (servers, policy, API scope sets, deployment credentials), Hub, Engine, CI, Sandboxes, Caches |
-| `ui-walkthrough-operations.yml` | System and its tabs (Health, Logs, Sandboxes, Caches, Top, Pipeline, Metrics, Power), Settings → Upgrade (image sources, retracted/discarded banners, offline DB panel), the CI page, the alerts bell and the standing banners |
-| `ui-walkthrough-shell.yml` | The shared shell -- page header rail, phone bar and drawer, collapsible nav rail and user tile, banners -- at desktop/tablet/phone widths, role-gated rendering, and the live session and task-chat surfaces |
+| `ui-walkthrough-tasks.yml` | `/next/inbox` (its filter tabs, inspector decisions and group bulk actions), the New task sheet, `/next/tasks` (tabs, order, grouping, backlog reordering, the selection bar), the task page `/next/task/<id>` and its tabs, edits, goal, dependencies, holds, access cards, Pause, Force merge and Defer until, plus the intake and detail controls still classic-only (`/new?field.` links, Bulk edit, Run selected now, the image viewer) |
+| `ui-walkthrough-boards.yml` | `/next/tasks`' Boards menu and Timeline, Workstreams (`/next/workstreams`), Agents (`/next/agents`), and the classic Boards index and every board kind: list, kanban, timeline, tree, dashboard, report |
+| `ui-walkthrough-repos.yml` | Repos (`/next/repos`), the repo page's tabs (Overview, CI & Workflows, Merge Queue, Agents & Grants, Branches, Releases, Advanced) and Settings → Repositories, plus the classic-only compare page, per-release URLs, qualification plans, release trains, work ownership and base-gate warnings |
+| `ui-walkthrough-automation.yml` | `/next/processes`: its tabs, sort and custom order, the New menu, schedules (including `git_ref` triggers and held schedules), templates, suites, suite runs, declared rows and triggers -- and the schedule/template controls still classic-only |
+| `ui-walkthrough-settings.yml` | Settings' layout, filter, save, role and config-repo lock model; Preferences, Access, CLI, Audit, General, Config repo (and its file viewer), Models, Agents, Tasks (quality control rollout included) and Memory; and the Context page (`/next/context`) |
+| `ui-walkthrough-infrastructure.yml` | Settings' connections and infrastructure sections: Git, Hosts (Invite hosts, host updates), Capabilities (servers, policy, API scope sets, secrets and deployment credentials), Registry & Hub, Engine, CI, Sandboxes, Caches |
+| `ui-walkthrough-operations.yml` | Fleet (`/next/fleet`: Sandboxes, Hosts, Pauses & Controls, Daemon Logs, publishing-held warnings), Telemetry, the CI page, Settings → Upgrade and the dispatch banner, plus classic System → Health, Power, the alerts bell and the standing banners |
+| `ui-walkthrough-shell.yml` | The `/next/` shell -- rail, Create menu, Account popover, Customize navigation, Help and shortcuts, Next up, bottom bar, phone compact nav and More sheet -- at desktop/tablet/phone widths, the Director drawer, Sessions and task chat, role-gated rendering, and the classic-only shell surfaces (collapsible rail, pins, Staging list, UserTile, alerts bell, disconnected banner) |
 
 Every one of them carries the same walkthrough protocol in its body:
 build and run this repository's real `grain demo` server over a
@@ -56,10 +56,14 @@ the classic specs keep passing and are not deleted, but nothing new is
 added to them. A classic page gets a fix only where it is broken for
 users today, and the same page in `ui-ng/` gets it too.
 
-The chunks' Coverage bullets were written against the classic UI, and
-some name screens `/next/` has reorganised or not built (System is
-Fleet there; Boards has no `/next/` page yet). The weekly
-review below rewrites them against `/next/` as pages move over.
+Since the 2026-11-16 review the chunks' Coverage bullets are written
+against `/next/` pages first (System is Fleet there, Metrics is
+Telemetry, Memory is Context), and each chunk names, in a bullet or a
+closing sentence of its own, the classic-only surfaces it still walks
+on `/` because `/next/` has not built them (Boards' index and board kinds, the compare page,
+System → Health, the alerts bell and others). The weekly review below
+moves a step out of that bullet once its page or control lands in
+`/next/`.
 
 Outside the walkthrough, every UI change follows the standing "UI
 changes" rule in `.grain/settings.yml`: screenshots at desktop and phone
@@ -165,8 +169,8 @@ and 11 October about fifty components landed that no chunk named.
 So a weekly schedule revisits them: `.grain/schedules/ui-walkthrough-review.yml`
 runs `.grain/templates/ui-walkthrough-review.yml` every Monday at 05:00
 UTC on `main`, where these templates are maintained. It inventories the
-UI in `ui/src`, reads the week's `docs/test-plans/` and `docs/test-runs/`,
-and compares both against the chunks. It then either opens one pull
+UI in `ui-ng/src` (the `/next/` UI) and `ui/src`, reads the week's
+`docs/test-plans/` and `docs/test-runs/`, and compares both against the chunks. It then either opens one pull
 request that adds, moves, drops or splits steps, with a dated coverage
 review entry in its description, or closes with nothing needed. The
 nightly suite runs on `main` and walks staging, which runs the current
