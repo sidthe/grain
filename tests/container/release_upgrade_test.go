@@ -37,8 +37,12 @@ package container
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,8 +51,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ai-on-gke/grain/pkg/installtrack"
+	"github.com/ai-on-gke/grain/pkg/upgrade"
 )
 
 func TestUpgradeFromReleasedVersions(t *testing.T) {
@@ -62,9 +68,19 @@ func TestUpgradeFromReleasedVersions(t *testing.T) {
 
 	conf := readReleaseConf(t)
 	target := strings.TrimSpace(os.Getenv("GRAIN_UPGRADE_TARGET"))
-	latest, floor, err := releaseBaselines(gitTags(t), target, promotedRelease(t), conf)
+	latest, floor, fromRegistry, err := resolveReleaseBaselines(
+		gitTags(t), target, promotedRelease(t), conf,
+		func() ([]string, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			return registryReleaseTags(ctx, releaseImage, target, conf)
+		},
+	)
 	if err != nil {
 		t.Fatalf("choosing the releases to upgrade from: %v", err)
+	}
+	if fromRegistry {
+		t.Logf("checkout has no promoted release git tags; chose baselines from %s", releaseImage)
 	}
 	t.Logf("upgrading %s (target %q) from latest %s and floor %s", image, target, latest, floor)
 
@@ -243,7 +259,7 @@ func releaseBaselines(tags []string, target, promoted string, conf releaseConf) 
 	var releases []release
 	for _, tag := range tags {
 		m := releaseTag.FindStringSubmatch(tag)
-		if m == nil || slices.Contains(conf.neverPromote, tag) {
+		if m == nil || slices.Contains(conf.neverPromote, tag) || slices.Contains(tags, tag+"-retracted") {
 			continue
 		}
 		v := parseSemver(m)
@@ -274,6 +290,49 @@ func releaseBaselines(tags []string, target, promoted string, conf releaseConf) 
 	return newest.tag, newest.tag, nil
 }
 
+// resolveReleaseBaselines selects latest and floor from local git tags when
+// the checkout has at least one promoted release tag, and falls back to
+// listing published tags from the release image repository when it does not
+// (for example on a fork that carries main without mirroring upstream's
+// release git tags).
+func resolveReleaseBaselines(tags []string, target, promoted string, conf releaseConf, listRegistry func() ([]string, error)) (latest, floor string, fromRegistry bool, err error) {
+	latest, floor, err = releaseBaselines(tags, target, promoted, conf)
+	if err == nil || listRegistry == nil {
+		return latest, floor, false, err
+	}
+	regTags, regErr := listRegistry()
+	if regErr != nil {
+		return "", "", false, fmt.Errorf("%w (registry tag fallback failed: %v)", err, regErr)
+	}
+	// Only promoted releases carry :vX.Y.Z in the image registry, so there is
+	// no unpromoted-git-tag ceiling to apply when selecting from registry tags.
+	latest, floor, regBaseErr := releaseBaselines(regTags, target, "", conf)
+	if regBaseErr != nil {
+		return "", "", false, fmt.Errorf("%w (registry fallback: %v)", err, regBaseErr)
+	}
+	return latest, floor, true, nil
+}
+
+// registryReleaseTags lists published tags from releaseImage, falling back to
+// its legacy repository when releaseImage cannot be listed or carries no
+// promoted release tags below target yet.
+func registryReleaseTags(ctx context.Context, releaseImage, target string, conf releaseConf) ([]string, error) {
+	tags, err := upgrade.ListRegistryTags(ctx, releaseImage)
+	if err == nil {
+		if _, _, baseErr := releaseBaselines(tags, target, "", conf); baseErr == nil {
+			return tags, nil
+		}
+	}
+	if leg, ok := installtrack.LegacyRepositoryFor(releaseImage); ok {
+		if legTags, legErr := upgrade.ListRegistryTags(ctx, leg); legErr == nil {
+			if _, _, baseErr := releaseBaselines(legTags, target, "", conf); baseErr == nil {
+				return legTags, nil
+			}
+		}
+	}
+	return tags, err
+}
+
 func TestReleaseBaselines(t *testing.T) {
 	conf := releaseConf{major: 3, floorMinor: 0, neverPromote: []string{"v2.5.0", "v3.2.0"}}
 	tags := []string{
@@ -284,6 +343,7 @@ func TestReleaseBaselines(t *testing.T) {
 		name, target, latest, floor string
 		promoted                    string
 		conf                        *releaseConf
+		tags                        []string
 	}{
 		{name: "an RC upgrades from the release before it", target: "v3.3.0-rc.2", latest: "v3.1.0", floor: "v3.0.0"},
 		{name: "a hotfix RC from its own minor", target: "v3.1.1-rc.1", latest: "v3.1.0", floor: "v3.0.0"},
@@ -296,6 +356,8 @@ func TestReleaseBaselines(t *testing.T) {
 		{name: "a release tagged above latest is not yet published", target: "", promoted: "v3.0.1",
 			latest: "v3.0.1", floor: "v3.0.0"},
 		{name: "no latest tag is no ceiling", target: "main", promoted: "", latest: "v3.1.0", floor: "v3.0.0"},
+		{name: "retracted releases are excluded", target: "", promoted: "",
+			tags: []string{"v3.0.0", "v3.1.0", "v3.1.0-retracted"}, latest: "v3.0.0", floor: "v3.0.0"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -303,7 +365,11 @@ func TestReleaseBaselines(t *testing.T) {
 			if tc.conf != nil {
 				c = *tc.conf
 			}
-			latest, floor, err := releaseBaselines(tags, tc.target, tc.promoted, c)
+			in := tags
+			if tc.tags != nil {
+				in = tc.tags
+			}
+			latest, floor, err := releaseBaselines(in, tc.target, tc.promoted, c)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -315,4 +381,72 @@ func TestReleaseBaselines(t *testing.T) {
 	if _, _, err := releaseBaselines([]string{"v3.0.0-rc.1"}, "", "", conf); err == nil {
 		t.Errorf("releaseBaselines with no promoted release chose one")
 	}
+}
+
+func TestResolveReleaseBaselines(t *testing.T) {
+	conf := releaseConf{major: 3, floorMinor: 0, neverPromote: []string{"v2.5.0"}}
+
+	t.Run("prefers git tags without calling registry", func(t *testing.T) {
+		called := false
+		latest, floor, fromReg, err := resolveReleaseBaselines(
+			[]string{"v3.0.0", "v3.1.0"}, "", "v3.1.0", conf,
+			func() ([]string, error) {
+				called = true
+				return nil, errors.New("unexpected registry call")
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if called || fromReg || latest != "v3.1.0" || floor != "v3.0.0" {
+			t.Fatalf("got (%s, %s, fromReg=%v, called=%v), want (v3.1.0, v3.0.0, false, false)", latest, floor, fromReg, called)
+		}
+	})
+
+	t.Run("falls back to registry tags when checkout has no git tags", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v2/grainai/grain/tags/list" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"grainai/grain","tags":["latest","main","sha-deadbeef","v3.4.0","v3.12.0","v3.13.0","v3.14.0","v3.14.0-retracted","v3.15.0-rc.1"]}`))
+		}))
+		defer srv.Close()
+
+		repo := strings.TrimPrefix(srv.URL, "http://") + "/grainai/grain"
+		latest, floor, fromReg, err := resolveReleaseBaselines(nil, "", "", conf, func() ([]string, error) {
+			return registryReleaseTags(context.Background(), repo, "", conf)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fromReg || latest != "v3.13.0" || floor != "v3.4.0" {
+			t.Fatalf("got (%s, %s, fromReg=%v), want (v3.13.0, v3.4.0, true)", latest, floor, fromReg)
+		}
+	})
+
+	t.Run("respects target bound on registry fallback", func(t *testing.T) {
+		latest, floor, fromReg, err := resolveReleaseBaselines(
+			[]string{"v3.14.0-rc.1"}, "v3.14.0-rc.1", "", conf,
+			func() ([]string, error) {
+				return []string{"v3.4.0", "v3.13.0", "v3.14.0"}, nil
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fromReg || latest != "v3.13.0" || floor != "v3.4.0" {
+			t.Fatalf("got (%s, %s, fromReg=%v), want (v3.13.0, v3.4.0, true)", latest, floor, fromReg)
+		}
+	})
+
+	t.Run("reports registry failure when git tags are absent", func(t *testing.T) {
+		_, _, _, err := resolveReleaseBaselines(nil, "", "", conf, func() ([]string, error) {
+			return nil, errors.New("registry unreachable")
+		})
+		if err == nil || !strings.Contains(err.Error(), "registry unreachable") {
+			t.Fatalf("err = %v, want registry unreachable", err)
+		}
+	})
 }

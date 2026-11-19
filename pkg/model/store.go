@@ -52,6 +52,16 @@ import (
 // at all.
 type Store struct {
 	db *sql.DB
+	// writeSem serializes write transactions through this Store when the
+	// underlying engine admits only one writer at a time (SQLite, where
+	// _txlock=immediate takes a database-wide write lock at BEGIN). Without
+	// an in-process FIFO queue, concurrent goroutines open separate pool
+	// connections and hit SQLite's non-FIFO polling busy_timeout sleep loop
+	// (up to 100ms per wake), which wastes latency and can starve a writer
+	// past busy_timeout * maxWriteAttempts under load. Cross-process
+	// contention still goes through busy_timeout and write's retry loop.
+	// Nil on PostgreSQL, which executes concurrent writers in parallel.
+	writeSem chan struct{}
 	// id is a monotonically increasing process-local identifier assigned in
 	// New, so callers keying process-memory state by a Store (such as
 	// orchestrator's pathTriggerPolled) never collide when the garbage
@@ -133,7 +143,13 @@ var nextStoreID atomic.Uint64
 
 // New wraps an already-open database. It runs nothing against it: Init
 // is what creates and migrates the schema.
-func New(db *sql.DB) *Store { return &Store{db: db, id: nextStoreID.Add(1)} }
+func New(db *sql.DB) *Store {
+	s := &Store{db: db, id: nextStoreID.Add(1)}
+	if db != nil && !IsPostgresDB(db) {
+		s.writeSem = make(chan struct{}, 1)
+	}
+	return s
+}
 
 // ID returns this Store's process-local identifier, unique across every
 // Store opened with New in this process even if a closed Store's heap
@@ -429,7 +445,27 @@ const maxWriteAttempts = 5
 // than relying on anything read before write was called -- that is what
 // makes a retry see the previous attempt's own result rather than
 // rewriting over it.
+func (s *Store) lockWrite(ctx context.Context) (func(), error) {
+	if s.writeSem == nil {
+		return func() {}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case s.writeSem <- struct{}{}:
+		return func() { <-s.writeSem }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func (s *Store) write(ctx context.Context, what string, fn func(*sql.Tx) error) error {
+	unlock, err := s.lockWrite(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	var lastErr error
 	for attempt := 0; attempt < maxWriteAttempts; attempt++ {
 		err := s.writeOnce(ctx, fn)
@@ -7202,6 +7238,87 @@ func hydrateSchedule(ctx context.Context, q querier, t *Schedule) error {
 	return nil
 }
 
+// hydrateSchedules fills Reads, Writes, Grants and CustomFields for every
+// schedule in four bulk queries rather than 4*len(schedules) round trips --
+// hydrateTasks' own batching applied to schedule lists.
+func hydrateSchedules(ctx context.Context, q querier, schedules []Schedule) error {
+	if len(schedules) == 0 {
+		return nil
+	}
+	if len(schedules) == 1 {
+		return hydrateSchedule(ctx, q, &schedules[0])
+	}
+	byID := make(map[string]*Schedule, len(schedules))
+	for i := range schedules {
+		byID[schedules[i].ID] = &schedules[i]
+	}
+	if err := each(ctx, q,
+		"SELECT `schedule_id`,`owner`,`name` FROM `schedule_read` ORDER BY `owner`,`name`",
+		nil, func(rows *sql.Rows) error {
+			var id, owner, name string
+			if err := rows.Scan(&id, &owner, &name); err != nil {
+				return err
+			}
+			if s := byID[id]; s != nil {
+				s.Reads = append(s.Reads, RepoFromStored(owner, name))
+			}
+			return nil
+		}); err != nil {
+		return fmt.Errorf("reading schedule reads: %w", err)
+	}
+	if err := each(ctx, q,
+		"SELECT `schedule_id`,`owner`,`name`,`base` FROM `schedule_write` ORDER BY `owner`,`name`,`base`",
+		nil, func(rows *sql.Rows) error {
+			var w WriteTarget
+			var id, owner, name string
+			if err := rows.Scan(&id, &owner, &name, &w.Base); err != nil {
+				return err
+			}
+			if s := byID[id]; s != nil {
+				w.Repo = RepoFromStored(owner, name)
+				s.Writes = append(s.Writes, w)
+			}
+			return nil
+		}); err != nil {
+		return fmt.Errorf("reading schedule write targets: %w", err)
+	}
+	if err := each(ctx, q,
+		"SELECT `schedule_id`,`capability`,`via`,`folder` FROM `schedule_grant` ORDER BY `capability`",
+		nil, func(rows *sql.Rows) error {
+			var g Grant
+			var id, via string
+			var folder sql.NullString
+			if err := rows.Scan(&id, &g.Capability, &via, &folder); err != nil {
+				return err
+			}
+			if s := byID[id]; s != nil {
+				g.Via, g.Folder = GrantSource(via), ParseFolder(folder.String)
+				s.Grants = append(s.Grants, g)
+			}
+			return nil
+		}); err != nil {
+		return fmt.Errorf("reading schedule grants: %w", err)
+	}
+	if err := each(ctx, q,
+		"SELECT `schedule_id`,`name`,`value` FROM `schedule_custom_field` ORDER BY `name`,`value`",
+		nil, func(rows *sql.Rows) error {
+			var id, name, value string
+			if err := rows.Scan(&id, &name, &value); err != nil {
+				return err
+			}
+			if s := byID[id]; s != nil {
+				if s.CustomFields == nil {
+					s.CustomFields = map[string][]string{}
+				}
+				s.CustomFields[name] = append(s.CustomFields[name], value)
+			}
+			return nil
+		}); err != nil {
+		return fmt.Errorf("reading schedule custom field values: %w", err)
+	}
+	return nil
+}
+
 func getSchedule(ctx context.Context, q querier, id string) (*Schedule, error) {
 	t, err := scanSchedule(q.QueryRowContext(ctx,
 		"SELECT "+scheduleColumns+" FROM `schedule` WHERE `id` = ?", id).Scan)
@@ -7245,10 +7362,8 @@ func (s *Store) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	}
 	rows.Close()
 
-	for i := range out {
-		if err := hydrateSchedule(ctx, s.db, &out[i]); err != nil {
-			return nil, err
-		}
+	if err := hydrateSchedules(ctx, s.db, out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -7307,10 +7422,8 @@ func (s *Store) DueSchedules(ctx context.Context, now time.Time) ([]Schedule, er
 	}
 	rows.Close()
 
-	for i := range out {
-		if err := hydrateSchedule(ctx, s.db, &out[i]); err != nil {
-			return nil, err
-		}
+	if err := hydrateSchedules(ctx, s.db, out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -8153,10 +8266,8 @@ func (s *Store) schedulesUsing(ctx context.Context, column, what, id string) ([]
 	}
 	rows.Close()
 
-	for i := range out {
-		if err := hydrateSchedule(ctx, s.db, &out[i]); err != nil {
-			return nil, err
-		}
+	if err := hydrateSchedules(ctx, s.db, out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

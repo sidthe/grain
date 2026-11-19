@@ -2851,6 +2851,52 @@ func TestARetryRecoversFromABusyDatabase(t *testing.T) {
 	}
 }
 
+// A writer waiting on Store's in-process SQLite write queue returns as soon as
+// its context expires rather than sitting through busy_timeout, and leaves the
+// queue healthy for subsequent writes.
+func TestQueuedSQLiteWriteHonorsContextCancellation(t *testing.T) {
+	t.Parallel()
+	store, _, ctx := openStore(t)
+	if err := store.PutTask(ctx, task("a1b2", true)); err != nil {
+		t.Fatal(err)
+	}
+
+	inTx := make(chan struct{})
+	release := make(chan struct{})
+	holderErr := make(chan error, 1)
+	go func() {
+		holderErr <- store.UpdateTask(ctx, "a1b2", func(tk *model.Task) error {
+			close(inTx)
+			<-release
+			tk.Title = "holder"
+			return nil
+		})
+	}()
+	<-inTx
+
+	waitCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := store.PutTask(waitCtx, task("c3d4", true))
+	elapsed := time.Since(started)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		close(release)
+		t.Fatalf("queued PutTask error = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed > 2*time.Second {
+		close(release)
+		t.Fatalf("queued PutTask waited %v for cancellation, want prompt exit", elapsed)
+	}
+
+	close(release)
+	if err := <-holderErr; err != nil {
+		t.Fatalf("holder UpdateTask failed: %v", err)
+	}
+	if err := store.PutTask(ctx, task("c3d4", true)); err != nil {
+		t.Fatalf("subsequent PutTask failed: %v", err)
+	}
+}
+
 // The answer to "what if it crashes mid-write": an operation that does
 // not reach commit leaves nothing behind. There is no lock left held and
 // no merge to reconcile, so the failure needs no cleanup at all.
