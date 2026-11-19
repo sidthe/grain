@@ -539,6 +539,11 @@ type Settings struct {
 	// to arrive as present-and-empty rather than as an absent key leaving
 	// the old one on screen.
 	EnvironmentName string `json:"environmentName"`
+	// HeaderColor and HeaderPattern are model.Config's curated top-bar theme
+	// presets. Deliberately not omitempty (like EnvironmentName above) so
+	// resetting back to default arrives as present-and-empty.
+	HeaderColor   string `json:"headerColor"`
+	HeaderPattern string `json:"headerPattern"`
 	// PromptExtension is model.Config's own field of the same name
 	// (grain/task-114): the standing instructions every run dispatched
 	// here is given on top of the prompt grain builds for it. Empty adds
@@ -1218,6 +1223,8 @@ func (c *Client) settingsFrom(ctx context.Context, cfg model.Config, repoConfigs
 		SettingsLocked:                     cfg.SettingsLocked,
 		ConfigRepoOnly:                     c.rowConfigRepoOnly(ctx, cfg),
 		EnvironmentName:                    cfg.EnvironmentName,
+		HeaderColor:                        model.NormalizeHeaderColor(cfg.HeaderColor),
+		HeaderPattern:                      model.NormalizeHeaderPattern(cfg.HeaderPattern),
 		PromptExtension:                    cfg.PromptExtension,
 		Skills:                             cfg.Skills.Clone(),
 		RepairTemplateID:                   cfg.RepairTemplateID,
@@ -1645,6 +1652,8 @@ type UpdateSettingsRequest struct {
 	DefaultHosting      *string `json:"defaultHosting"`
 	ShowClosedByDefault *bool   `json:"showClosedByDefault"`
 	EnvironmentName     *string `json:"environmentName"`
+	HeaderColor         *string `json:"headerColor"`
+	HeaderPattern       *string `json:"headerPattern"`
 	// TimeZone is model.Config.TimeZone: the IANA zone every timestamp the
 	// frontend prints is formatted in (ui/src/time.js). Empty means
 	// model.DefaultTimeZone, which is how a deployment goes back to UTC.
@@ -2381,6 +2390,20 @@ func (c *Client) plannedConfig(ctx context.Context, req UpdateSettingsRequest) (
 			return model.Config{}, validationErrorf("environmentName cannot contain line breaks or tabs")
 		}
 		cfg.EnvironmentName = name
+	}
+	if req.HeaderColor != nil {
+		color, err := model.ParseHeaderColor(*req.HeaderColor)
+		if err != nil {
+			return model.Config{}, validationErrorf("headerColor: %v", err)
+		}
+		cfg.HeaderColor = color
+	}
+	if req.HeaderPattern != nil {
+		pattern, err := model.ParseHeaderPattern(*req.HeaderPattern)
+		if err != nil {
+			return model.Config{}, validationErrorf("headerPattern: %v", err)
+		}
+		cfg.HeaderPattern = pattern
 	}
 	if req.TimeZone != nil {
 		zone := strings.TrimSpace(*req.TimeZone)

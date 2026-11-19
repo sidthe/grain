@@ -1711,6 +1711,14 @@ type configResponse struct {
 	// unlike ui.Settings there is nothing here to merge a cleared value
 	// over -- App.jsx replaces this response wholesale on every poll.
 	EnvironmentName string `json:"environmentName,omitempty"`
+	// HeaderColor and HeaderPattern mirror model.Config's curated top-bar
+	// styling presets so the shell can theme the header and favicon on first
+	// paint. Empty means the default neutral header and solid background.
+	HeaderColor   string `json:"headerColor,omitempty"`
+	HeaderPattern string `json:"headerPattern,omitempty"`
+	// DeploymentID is the deployment's identifier (configured or default)
+	// shown in tooltips for authenticated callers.
+	DeploymentID string `json:"deploymentId,omitempty"`
 	// TimeZone mirrors model.Config.TimeZone -- the IANA zone this
 	// deployment keeps its wall clock in -- read from the store the same
 	// way EnvironmentName above is. Empty when the deployment never set
@@ -2341,6 +2349,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		resp.NewTaskForm = cfg.NewTaskForm
 		resp.DefaultFilters = cfg.DefaultFilters
 		resp.EnvironmentName = cfg.EnvironmentName
+		resp.HeaderColor = model.NormalizeHeaderColor(cfg.HeaderColor)
+		resp.HeaderPattern = model.NormalizeHeaderPattern(cfg.HeaderPattern)
+		resp.DeploymentID = cfg.DeploymentID
 		// The stored zone, which before this never reached the frontend:
 		// the line above the cfg block assigned a literal "UTC" and
 		// nothing here overrode it, so every timestamp was formatted in
@@ -2375,8 +2386,11 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	// install walkthrough).
 	if !authenticated && !singleTenantTrusted(r) {
 		resp.Deployment = nil
+		resp.DeploymentID = ""
 		resp.TargetRepos = []string{}
 		resp.ManagementURL = ""
+	} else if resp.DeploymentID == "" {
+		resp.DeploymentID = s.tasks.deploymentIDDefault(r.Context())
 	}
 	// Outside the cfg != nil branch above: a repo can carry defaults of
 	// its own on a deployment that has never saved a settings row, the

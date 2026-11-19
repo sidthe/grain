@@ -19,9 +19,13 @@ import {
 } from "@angular/common/http";
 import {
   type ApplicationConfig,
+  Injectable,
+  inject,
   provideZoneChangeDetection,
 } from "@angular/core";
 import {
+  type RouterStateSnapshot,
+  TitleStrategy,
   provideRouter,
   withComponentInputBinding,
   withNavigationErrorHandler,
@@ -29,10 +33,21 @@ import {
 } from "@angular/router";
 import { routes } from "./app.routes";
 import { connectionInterceptor } from "./services/connection.service";
+import { ThemeService } from "./services/theme.service";
 import {
   IdleRoutePreload,
   staleChunkErrorHandler,
 } from "./shell/route-preload";
+
+@Injectable({ providedIn: "root" })
+export class GrainTitleStrategy extends TitleStrategy {
+  private readonly theme = inject(ThemeService);
+
+  override updateTitle(snapshot: RouterStateSnapshot): void {
+    const title = this.buildTitle(snapshot) || "Grain";
+    this.theme.setBaseTitle(title);
+  }
+}
 
 export const appConfig: ApplicationConfig = {
   providers: [
@@ -43,6 +58,7 @@ export const appConfig: ApplicationConfig = {
       withPreloading(IdleRoutePreload),
       withNavigationErrorHandler(staleChunkErrorHandler),
     ),
+    { provide: TitleStrategy, useClass: GrainTitleStrategy },
     provideHttpClient(withFetch(), withInterceptors([connectionInterceptor])),
   ],
 };

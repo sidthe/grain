@@ -279,6 +279,8 @@ type settingsDiffRow struct {
 // something has to say what.
 var settingsDiffRows = []settingsDiffRow{
 	{"environmentName", "environment name", func(s ui.Settings) any { return s.EnvironmentName }},
+	{"headerColor", "header color theme", func(s ui.Settings) any { return s.HeaderColor }},
+	{"headerPattern", "header pattern", func(s ui.Settings) any { return s.HeaderPattern }},
 	{"pollInterval", "poll interval", func(s ui.Settings) any { return s.PollInterval }},
 	{"maxWorkers", "max workers", func(s ui.Settings) any { return s.MaxWorkers }},
 	{"maxMergesPerRepo", "max merges per repo", func(s ui.Settings) any { return s.MaxMergesPerRepo }},

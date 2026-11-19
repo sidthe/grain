@@ -48,6 +48,16 @@ import {
   PillSelectComponent,
 } from "../shared/pill-select.component";
 import { formatStamp } from "../shared/dispatch-status";
+import { CHLADNI_ROSETTE_PATH } from "../shared/brand-mark";
+import {
+  HEADER_COLOR_OPTIONS,
+  HEADER_PATTERN_OPTIONS,
+  type HeaderColorPreset,
+  type HeaderPatternPreset,
+  MAX_ENVIRONMENT_NAME_LEN,
+  normalizeHeaderColor,
+  normalizeHeaderPattern,
+} from "../shared/instance-identity";
 import { TipDirective } from "../shared/tip.directive";
 import { errorText } from "../sessions/session-helpers";
 import {
@@ -132,19 +142,88 @@ function formatBytes(bytes: number): string {
     SandboxCommitmentNoteComponent,
   ],
   encapsulation: ViewEncapsulation.None,
+  styleUrls: ["./settings-identity.css"],
   changeDetection: ChangeDetectionStrategy.OnPush,
   template: `
     @switch (section()) {
       @case ("general") {
         <div class="s-card" data-testid="card-general">
-          <h3 class="s-card-title">Deployment identity &amp; UI lock</h3>
+          <div>
+            <h3 class="s-card-title">
+              Instance identity &amp; header appearance
+            </h3>
+            <p class="s-card-desc">
+              Distinguish this Grain deployment across open browser tabs and
+              windows with a name, accent theme, and subtle header pattern.
+            </p>
+          </div>
+
+          <div
+            class="identity-preview-frame"
+            data-testid="identity-settings-preview"
+            aria-label="Live preview of browser tab and top header"
+            [attr.data-header-color]="draftHeaderColor()"
+          >
+            <div class="identity-preview-tabbar">
+              <div
+                class="identity-preview-tab"
+                data-testid="identity-preview-tab"
+              >
+                <svg
+                  class="identity-preview-favicon"
+                  width="14"
+                  height="14"
+                  viewBox="0 0 128 128"
+                  aria-hidden="true"
+                >
+                  <path
+                    style="clip-path: circle(44% at 50% 50%)"
+                    fill="currentColor"
+                    fill-rule="evenodd"
+                    [attr.d]="rosettePath"
+                  />
+                </svg>
+                <span class="identity-preview-tab-title">{{
+                  previewTabTitle()
+                }}</span>
+              </div>
+            </div>
+            <div
+              class="identity-preview-topbar"
+              data-testid="identity-preview-topbar"
+              [attr.data-header-color]="draftHeaderColor()"
+              [attr.data-header-pattern]="draftHeaderPattern() || null"
+            >
+              <div class="identity-preview-brand">
+                <span class="identity-preview-wordmark">Grain</span>
+                @if (draftEnvironmentName(); as envName) {
+                  <span class="top-brand-sep" aria-hidden="true">/</span>
+                  <span class="identity-preview-badge">
+                    <span
+                      class="instance-identity-dot"
+                      aria-hidden="true"
+                    ></span>
+                    <span class="instance-identity-name">{{ envName }}</span>
+                  </span>
+                } @else {
+                  <span class="identity-preview-cue">+ Name instance</span>
+                }
+              </div>
+              <div class="identity-preview-actions" aria-hidden="true">
+                <span class="identity-preview-chip">Next up</span>
+                <span class="identity-preview-chip">0 agents running</span>
+              </div>
+            </div>
+          </div>
+
           <div class="s-grid">
             <div class="s-field">
-              <label class="s-label" for="g-env">Environment name</label>
+              <label class="s-label" for="g-env">Instance name</label>
               <input
                 id="g-env"
                 class="s-input"
                 type="text"
+                [attr.maxlength]="maxEnvironmentNameLen"
                 data-testid="input-environment-name"
                 placeholder="Production"
                 [value]="state.val('environmentName', '')"
@@ -153,6 +232,10 @@ function formatBytes(bytes: number): string {
                   state.setField('environmentName', $any($event.target).value)
                 "
               />
+              <span class="s-hint"
+                >Shown in the top bar, browser tab title, and favicon; leave
+                blank to show the '+ Name instance' cue</span
+              >
             </div>
             <div class="s-field">
               <label class="s-label" for="g-dep-id">Deployment ID</label>
@@ -177,6 +260,78 @@ function formatBytes(bytes: number): string {
                 [value]="timeZone()"
                 (valueChange)="setTimeZone($event)"
               />
+            </div>
+          </div>
+
+          <div class="s-field">
+            <span class="s-label" id="g-header-color-label"
+              >Header color theme</span
+            >
+            <div
+              class="s-swatch-grid"
+              role="radiogroup"
+              aria-labelledby="g-header-color-label"
+              data-testid="settings-header-color-group"
+            >
+              @for (c of headerColorOptions; track c.id) {
+                <button
+                  type="button"
+                  class="s-swatch-btn"
+                  role="radio"
+                  [attr.data-header-color]="c.id"
+                  [attr.data-testid]="
+                    'settings-header-color-' + (c.id || 'default')
+                  "
+                  [attr.aria-checked]="draftHeaderColor() === c.id"
+                  [disabled]="!canWriteSettings()"
+                  (click)="state.setField('headerColor', c.id)"
+                  (keydown)="onHeaderColorKeydown($event)"
+                >
+                  <span class="s-swatch-dot" aria-hidden="true">
+                    @if (draftHeaderColor() === c.id) {
+                      <svg width="13" height="13" viewBox="0 0 24 24">
+                        <path [attr.d]="checkPath" fill="currentColor" />
+                      </svg>
+                    }
+                  </span>
+                  <span>{{ c.label }}</span>
+                </button>
+              }
+            </div>
+          </div>
+
+          <div class="s-field">
+            <span class="s-label" id="g-header-pattern-label"
+              >Header pattern</span
+            >
+            <div
+              class="s-pattern-grid"
+              role="radiogroup"
+              aria-labelledby="g-header-pattern-label"
+              data-testid="settings-header-pattern-group"
+            >
+              @for (p of headerPatternOptions; track p.id) {
+                <button
+                  type="button"
+                  class="s-pattern-tile"
+                  role="radio"
+                  [attr.data-testid]="
+                    'settings-header-pattern-' + (p.id || 'solid')
+                  "
+                  [attr.aria-checked]="draftHeaderPattern() === p.id"
+                  [disabled]="!canWriteSettings()"
+                  (click)="state.setField('headerPattern', p.id)"
+                  (keydown)="onHeaderPatternKeydown($event)"
+                >
+                  <span
+                    class="s-pattern-preview"
+                    [attr.data-header-color]="draftHeaderColor()"
+                    [attr.data-header-pattern]="p.id || null"
+                    aria-hidden="true"
+                  ></span>
+                  <span>{{ p.label }}</span>
+                </button>
+              }
             </div>
           </div>
 
@@ -1614,6 +1769,79 @@ export class SettingsInstanceComponent implements OnInit, OnChanges {
     if (changes["section"] && !changes["section"].firstChange) {
       this.loadForSection();
     }
+  }
+
+  protected readonly rosettePath = CHLADNI_ROSETTE_PATH;
+  protected readonly checkPath =
+    "M9 16.17 4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z";
+  protected readonly maxEnvironmentNameLen = MAX_ENVIRONMENT_NAME_LEN;
+  protected readonly headerColorOptions = HEADER_COLOR_OPTIONS;
+  protected readonly headerPatternOptions = HEADER_PATTERN_OPTIONS;
+
+  protected readonly draftEnvironmentName = computed(() =>
+    String(this.state.val("environmentName", "") ?? "").trim(),
+  );
+  protected readonly draftHeaderColor = computed<HeaderColorPreset>(() =>
+    normalizeHeaderColor(this.state.val("headerColor", "")),
+  );
+  protected readonly draftHeaderPattern = computed<HeaderPatternPreset>(() =>
+    normalizeHeaderPattern(this.state.val("headerPattern", "")),
+  );
+  protected readonly previewTabTitle = computed(() => {
+    const env = this.draftEnvironmentName();
+    return env ? `[${env}] Inbox — Grain` : "Inbox — Grain";
+  });
+
+  protected onHeaderColorKeydown(ev: KeyboardEvent): void {
+    if (!this.canWriteSettings()) return;
+    const step =
+      ev.key === "ArrowRight" || ev.key === "ArrowDown"
+        ? 1
+        : ev.key === "ArrowLeft" || ev.key === "ArrowUp"
+          ? -1
+          : 0;
+    if (step === 0) return;
+    ev.preventDefault();
+    const cur = this.headerColorOptions.findIndex(
+      (o) => o.id === this.draftHeaderColor(),
+    );
+    const next =
+      this.headerColorOptions[
+        (Math.max(0, cur) + step + this.headerColorOptions.length) %
+          this.headerColorOptions.length
+      ];
+    this.state.setField("headerColor", next.id);
+    this.doc
+      .querySelector<HTMLButtonElement>(
+        `[data-testid="settings-header-color-${next.id || "default"}"]`,
+      )
+      ?.focus();
+  }
+
+  protected onHeaderPatternKeydown(ev: KeyboardEvent): void {
+    if (!this.canWriteSettings()) return;
+    const step =
+      ev.key === "ArrowRight" || ev.key === "ArrowDown"
+        ? 1
+        : ev.key === "ArrowLeft" || ev.key === "ArrowUp"
+          ? -1
+          : 0;
+    if (step === 0) return;
+    ev.preventDefault();
+    const cur = this.headerPatternOptions.findIndex(
+      (o) => o.id === this.draftHeaderPattern(),
+    );
+    const next =
+      this.headerPatternOptions[
+        (Math.max(0, cur) + step + this.headerPatternOptions.length) %
+          this.headerPatternOptions.length
+      ];
+    this.state.setField("headerPattern", next.id);
+    this.doc
+      .querySelector<HTMLButtonElement>(
+        `[data-testid="settings-header-pattern-${next.id || "solid"}"]`,
+      )
+      ?.focus();
   }
 
   protected canWriteSettings(): boolean {

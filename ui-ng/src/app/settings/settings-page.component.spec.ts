@@ -1939,4 +1939,105 @@ describe("SettingsPageComponent (M13 D-12)", () => {
       "The repository holds schema 152 and this build knows 151. Upgrade grain before applying changes from this repository.",
     );
   });
+
+  it("updates General identity live preview, draft state, plan preview, discard, and save for name, color, and pattern", async () => {
+    const api = new FakeSettingsApi();
+    api.settingsBody["environmentName"] = "Staging";
+    api.settingsBody["headerColor"] = "";
+    api.settingsBody["headerPattern"] = "";
+    const { el, harness } = await mountSettings("/settings/general", api);
+
+    expect(
+      el.querySelector('[data-testid="card-general"] .s-card-title')
+        ?.textContent,
+    ).toContain("Instance identity & header appearance");
+    expect(
+      el.querySelector('[data-testid="identity-preview-tab"]')?.textContent,
+    ).toContain("[Staging] Inbox — Grain");
+
+    // Edit Instance name, Header color theme, and Header pattern.
+    setInput(
+      el.querySelector<HTMLInputElement>(
+        '[data-testid="input-environment-name"]',
+      )!,
+      "prod · us",
+    );
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-header-color-teal"]',
+    )!.click();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-header-pattern-waves"]',
+    )!.click();
+    harness.detectChanges();
+
+    expect(
+      el.querySelector('[data-testid="identity-preview-tab"]')?.textContent,
+    ).toContain("[prod · us] Inbox — Grain");
+    const previewBar = el.querySelector(
+      '[data-testid="identity-preview-topbar"]',
+    )!;
+    expect(previewBar.getAttribute("data-header-color")).toBe("teal");
+    expect(previewBar.getAttribute("data-header-pattern")).toBe("waves");
+
+    const saveBar = el.querySelector('[data-testid="settings-save-bar"]');
+    expect(saveBar?.textContent).toContain("3 unsaved changes");
+
+    // Plan preview shows human-readable labels.
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-plan-btn"]',
+    )!.click();
+    await new Promise((r) => setTimeout(r, 100));
+    harness.detectChanges();
+    const planText =
+      el.querySelector('[data-testid="settings-plan-preview"]')?.textContent ??
+      "";
+    expect(planText).toContain("Instance name");
+    expect(planText).toContain("Header color theme");
+    expect(planText).toContain("Header pattern");
+
+    // Discard restores stored state and preview.
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-discard-btn"]',
+    )!.click();
+    harness.detectChanges();
+    expect(el.querySelector('[data-testid="settings-save-bar"]')).toBeNull();
+    expect(
+      el.querySelector('[data-testid="identity-preview-tab"]')?.textContent,
+    ).toContain("[Staging] Inbox — Grain");
+    expect(previewBar.getAttribute("data-header-color")).toBe("");
+    expect(previewBar.getAttribute("data-header-pattern")).toBeNull();
+
+    // Re-apply and Save -> persists via POST /api/settings and updates AccessService immediately.
+    setInput(
+      el.querySelector<HTMLInputElement>(
+        '[data-testid="input-environment-name"]',
+      )!,
+      "prod · us",
+    );
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-header-color-ocean"]',
+    )!.click();
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-header-pattern-diagonal"]',
+    )!.click();
+    harness.detectChanges();
+
+    el.querySelector<HTMLButtonElement>(
+      '[data-testid="settings-save-btn"]',
+    )!.click();
+    await new Promise((r) => setTimeout(r, 100));
+    harness.detectChanges();
+
+    const saveCall = api.calls.find((c) => c.key === "POST /api/settings");
+    expect(saveCall?.body).toEqual({
+      environmentName: "prod · us",
+      headerColor: "ocean",
+      headerPattern: "diagonal",
+    });
+    const { AccessService } = await import("../services/access.service");
+    const access = TestBed.inject(AccessService);
+    expect(access.rawConfig()?.environmentName).toBe("prod · us");
+    expect(access.rawConfig()?.headerColor).toBe("ocean");
+    expect(access.rawConfig()?.headerPattern).toBe("diagonal");
+  });
 });

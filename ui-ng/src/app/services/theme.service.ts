@@ -12,9 +12,26 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { Injectable, computed, effect, signal } from "@angular/core";
+import { Injectable, computed, effect, inject, signal } from "@angular/core";
+import { AccessService } from "./access.service";
+import {
+  type HeaderColorPreset,
+  type HeaderPatternPreset,
+  buildTintedFaviconDataUrl,
+  formatDocumentTitle,
+  headerColorOption,
+  normalizeHeaderColor,
+  normalizeHeaderPattern,
+  stripEnvironmentPrefix,
+} from "../shared/instance-identity";
 
 export type ThemeMode = "light" | "dark" | "auto";
+
+export interface HeaderIdentityPreview {
+  environmentName: string;
+  headerColor: HeaderColorPreset;
+  headerPattern: HeaderPatternPreset;
+}
 
 // The same localStorage key ui/src/ThemeModeContext.jsx (via
 // ui-shared/themeMode.js) reads, so one setting themes both UIs.
@@ -56,18 +73,50 @@ function systemPrefersDark(): boolean {
 
 @Injectable({ providedIn: "root" })
 export class ThemeService {
+  private readonly access = inject(AccessService);
   private readonly _mode = signal<ThemeMode>(storedMode());
   private readonly _systemDark = signal(systemPrefersDark());
   private readonly _preferNext = signal(
     readStorage(PREFER_NEXT_STORAGE_KEY) === "1",
   );
+  private readonly _baseTitle = signal<string>(
+    typeof document !== "undefined"
+      ? stripEnvironmentPrefix(document.title)
+      : "Grain",
+  );
+  private readonly _headerPreview = signal<HeaderIdentityPreview | null>(null);
 
   readonly mode = this._mode.asReadonly();
   readonly preferNext = this._preferNext.asReadonly();
+  readonly baseTitle = this._baseTitle.asReadonly();
+  readonly headerPreview = this._headerPreview.asReadonly();
   readonly resolved = computed<"light" | "dark">(() => {
     const m = this._mode();
     if (m !== "auto") return m;
     return this._systemDark() ? "dark" : "light";
+  });
+
+  readonly savedEnvironmentName = computed(() =>
+    (this.access.rawConfig()?.environmentName ?? "").trim(),
+  );
+  readonly savedHeaderColor = computed<HeaderColorPreset>(() =>
+    normalizeHeaderColor(this.access.rawConfig()?.headerColor),
+  );
+  readonly savedHeaderPattern = computed<HeaderPatternPreset>(() =>
+    normalizeHeaderPattern(this.access.rawConfig()?.headerPattern),
+  );
+
+  readonly effectiveEnvironmentName = computed(() => {
+    const p = this._headerPreview();
+    return p !== null ? p.environmentName.trim() : this.savedEnvironmentName();
+  });
+  readonly effectiveHeaderColor = computed<HeaderColorPreset>(() => {
+    const p = this._headerPreview();
+    return p !== null ? p.headerColor : this.savedHeaderColor();
+  });
+  readonly effectiveHeaderPattern = computed<HeaderPatternPreset>(() => {
+    const p = this._headerPreview();
+    return p !== null ? p.headerPattern : this.savedHeaderPattern();
   });
 
   constructor() {
@@ -78,18 +127,74 @@ export class ThemeService {
     }
     effect(() => {
       const polarity = this.resolved();
+      const color = this.effectiveHeaderColor();
       if (typeof document !== "undefined") {
         document.documentElement.dataset["theme"] = polarity;
+        if (color) {
+          document.documentElement.dataset["headerColor"] = color;
+        } else {
+          delete document.documentElement.dataset["headerColor"];
+        }
         const svg = document.getElementById(
           "grain-favicon-svg",
         ) as HTMLLinkElement | null;
-        svg?.setAttribute("href", `grain-favicon-${polarity}.svg`);
+        if (svg) {
+          if (!color) {
+            svg.setAttribute("href", `grain-favicon-${polarity}.svg`);
+          } else {
+            const fill = this.resolveFaviconColor(color, polarity);
+            svg.setAttribute("href", buildTintedFaviconDataUrl(fill));
+          }
+        }
         const png = document.getElementById(
           "grain-favicon-png",
         ) as HTMLLinkElement | null;
         png?.setAttribute("href", `grain-mark-${polarity}.png`);
       }
     });
+    effect(() => {
+      const base = this._baseTitle();
+      const env = this.effectiveEnvironmentName();
+      if (typeof document !== "undefined") {
+        document.title = formatDocumentTitle(base, env);
+      }
+    });
+  }
+
+  private resolveFaviconColor(
+    color: HeaderColorPreset,
+    polarity: "light" | "dark",
+  ): string {
+    if (
+      typeof document !== "undefined" &&
+      typeof getComputedStyle === "function"
+    ) {
+      const cssVal = getComputedStyle(document.documentElement)
+        .getPropertyValue("--grain-header-favicon")
+        .trim();
+      if (cssVal) return cssVal;
+    }
+    const opt = headerColorOption(color);
+    return polarity === "dark" ? opt.darkFavicon : opt.lightFavicon;
+  }
+
+  setBaseTitle(title: string): void {
+    const clean = stripEnvironmentPrefix(title);
+    this._baseTitle.set(clean);
+    if (typeof document !== "undefined") {
+      document.title = formatDocumentTitle(
+        clean,
+        this.effectiveEnvironmentName(),
+      );
+    }
+  }
+
+  setHeaderPreview(preview: HeaderIdentityPreview | null): void {
+    this._headerPreview.set(preview);
+  }
+
+  clearHeaderPreview(): void {
+    this._headerPreview.set(null);
   }
 
   toggle(): void {

@@ -50,6 +50,7 @@ export class AccessService {
   private readonly config = signal<GrainConfig | null>(null);
   readonly rawConfig = this.config.asReadonly();
   readonly configLoaded = signal(false);
+  readonly configPatchEpoch = signal(0);
   readonly whoami = signal<WhoamiResponse | null>(null);
   private readonly usageState = signal<UsagePauseInput | null>(null);
   readonly usage = this.usageState.asReadonly();
@@ -116,6 +117,7 @@ export class AccessService {
       this.config.set({ ...patch });
       this.configLoaded.set(true);
     }
+    this.configPatchEpoch.update((n) => n + 1);
   }
 
   setWhoami(who: WhoamiResponse | null): void {

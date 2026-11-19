@@ -48,7 +48,12 @@ than a sticker:
 - Top of the rail: a 44×44 button linking to the Inbox, above the New task
   button.
 - Favicons: `public/grain-favicon-light.svg` (`#0b57d0`) and
-  `public/grain-favicon-dark.svg` (`#a8c7fa`), swapped with the theme.
+  `public/grain-favicon-dark.svg` (`#a8c7fa`), swapped with the theme. When a
+  deployment sets a curated `headerColor` preset (`ocean`, `teal`, `forest`,
+  `amber`, `coral`, `plum`, `slate`), `ThemeService` dynamically tints
+  `#grain-favicon-svg` from `CHLADNI_ROSETTE_PATH` using the preset's
+  `--grain-header-favicon` token, and prefixes `document.title` with
+  `[<environmentName>] ` whenever `environmentName` is non-empty.
 - When agents are running and the person has not asked for reduced motion,
   the mark may animate; otherwise it is still.
 
@@ -99,6 +104,20 @@ Rules that came from real defects:
   `inverse-surface` flips with the theme (`#282c35` in light, `#e4e6eb` in
   dark); hard-coding `color-scheme: dark` leaves a date input's picker glyph
   light on dark mode's light grey bar.
+- **Instance header identity tokens.** All eight curated header colour presets
+  (`""` Default, `ocean`, `teal`, `forest`, `amber`, `coral`, `plum`, `slate`)
+  are defined in `ui-ng/src/styles.css` for both light and dark themes via
+  `[data-header-color="…"]` tokens (`--grain-header-bg`, `--grain-header-edge`,
+  `--grain-header-pill-bg`, `--grain-header-pill-fg`,
+  `--grain-header-pill-border`, `--grain-header-pattern-color`,
+  `--grain-header-favicon`, plus `--grain-header-swatch-bg` and
+  `--grain-header-swatch-check`). Every preset keeps
+  at least 4.5:1 WCAG AA contrast for all `.top-bar` text, icons, and pill
+  labels in both themes. The four optional background patterns (`dots`,
+  `diagonal`, `grid`, `waves`) apply via `[data-header-pattern="…"]` CSS SVG
+  masks tinted by `--grain-header-pattern-color` at 10–12% opacity behind the
+  crisp 3px top accent edge (`::after`), keeping header controls calm and
+  readable. Component stylesheets never write raw hex values for presets.
 
 ### Type
 
@@ -162,6 +181,30 @@ do not pull in an icon font.
 - **Top bar:** "Next up" is always present, even when the queue is empty, in
   which case it says so. "N agents running" is always present and links to
   Agents; it pulses only when the number is above zero.
+- **Instance identity badge, unnamed cue & Quick Identity Popover:**
+  - When `environmentName` is non-empty, `.top-brand-cluster` renders `/` and
+    a tonal pill badge (`data-testid="instance-identity-badge"`) showing an
+    accent dot and the instance name, ellipsizing long names gracefully on
+    medium and phone viewports (`max-width`) so `.top-actions` never clip or
+    wrap. Operators holding `POST /api/settings` on an unlocked deployment see
+    a subtle edit pencil on hover/focus and can click the pill to open the
+    Quick Identity Popover; read-only viewers and locked deployments see a
+    non-interactive pill whose tooltip carries the full name and deployment ID.
+  - When `environmentName` is empty, only operators holding
+    `POST /api/settings` on an unlocked deployment see a dashed-border ghost
+    pill `+ Name instance` (`data-testid="instance-name-cue"`) beside `Grain`.
+    It is never shown to read-only viewers or when settings are locked, and is
+    hidden below 600px on phones to preserve mobile header space.
+  - The Quick Identity Popover (`shell/instance-identity-popover.component.ts`,
+    `@defer`-loaded) anchors below `.top-brand-cluster`, traps keyboard focus,
+    supports arrow keys across colour/pattern radiogroups, previews unsaved
+    changes live on `.top-bar` (plus title and favicon), reverts cleanly on
+    Cancel, Escape or outside click, saves through `POST /api/settings` and
+    refreshes `/api/config`, links to `/settings/general`, and disables edits
+    with a `grain/config` PR notice whenever settings are locked. Settings →
+    Instance → General mirrors these controls in the "Instance identity &
+    header appearance" card with a live mini browser tab and `.top-bar`
+    preview wired through `SettingsStateService`.
 - **Phone (< 600px):** the rail becomes a bottom bar with Inbox, Tasks,
   Sessions and More, plus a floating New task button.
 - **Build stamp:** the "grain v…" stamp at the left of the bottom bar is a

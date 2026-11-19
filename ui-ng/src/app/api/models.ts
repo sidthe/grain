@@ -130,6 +130,13 @@ export interface GrainConfig {
   dispatchBlocked?: DispatchCondition[] | null;
   reconcilerDown?: boolean;
   timeZone?: string;
+  environmentName?: string;
+  headerColor?: string;
+  headerPattern?: string;
+  deploymentId?: string;
+  settingsLocked?: boolean;
+  configRepoOnly?: boolean;
+  externalConfigRepo?: string;
   deployment?: Record<string, unknown>;
   [key: string]: unknown;
 }

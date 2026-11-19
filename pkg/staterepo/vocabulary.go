@@ -149,6 +149,14 @@ func grainConfigWarnings(path string, i int, row map[string]any, say func(column
 		say("default_hosting", word, "%s row %d has default_hosting %q, which is not \"unattended\" or \"console\"",
 			path, i, word)
 	}
+	if word, ok := wordIn(row, "header_color"); ok && word != "" && !model.ValidHeaderColor(word) {
+		say("header_color", word, "%s row %d has header_color %q, which is not one of \"ocean\", \"teal\", \"forest\", \"amber\", \"coral\", \"plum\", \"slate\"",
+			path, i, word)
+	}
+	if word, ok := wordIn(row, "header_pattern"); ok && word != "" && !model.ValidHeaderPattern(word) {
+		say("header_pattern", word, "%s row %d has header_pattern %q, which is not one of \"dots\", \"diagonal\", \"grid\", \"waves\"",
+			path, i, word)
+	}
 }
 
 // panelWarnings is the dashboard row: three closed vocabularies on one
