@@ -107,6 +107,7 @@ import {
 import {
   type StreamApprovePreview,
   WorkstreamsStore,
+  formatApproveOutcome,
 } from "../workstreams/workstreams.store";
 
 export type TasksGroupBy = "none" | "workstream" | "repo";
@@ -2918,10 +2919,7 @@ export class TasksPageComponent implements OnInit, OnDestroy {
       run: async (snapshot) => {
         const res = await this.wsStore.approveWaves(snapshot.waves);
         await this.store.refresh();
-        const noun = res.succeeded === 1 ? "task" : "tasks";
-        const msg = res.failed
-          ? `Approved ${res.succeeded} of ${res.succeeded + res.failed}`
-          : `Approved ${res.succeeded} ${noun}`;
+        const msg = formatApproveOutcome(res);
         const canUndo =
           res.approvedIds.length > 0 &&
           this.wsStore.canWithdrawApprovals(res.approvedTasks);

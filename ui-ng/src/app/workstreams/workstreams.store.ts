@@ -112,8 +112,29 @@ export interface BatchResult {
 }
 
 export interface ApproveBatchResult extends BatchResult {
+  // Targets never sent because something they depend on failed (or was
+  // itself skipped) earlier in the batch.
+  skipped: number;
   approvedIds: string[];
   approvedTasks: Task[];
+}
+
+export function formatApproveOutcome(res: ApproveBatchResult): string {
+  const total = res.succeeded + res.failed + res.skipped;
+  if (res.skipped > 0) {
+    return `Approved ${res.succeeded} of ${total} (${res.failed} failed, ${res.skipped} downstream skipped)`;
+  }
+  if (res.failed > 0) return `Approved ${res.succeeded} of ${total}`;
+  return `Approved ${res.succeeded} ${res.succeeded === 1 ? "task" : "tasks"}`;
+}
+
+function isDoneForApproval(t: Task): boolean {
+  return (
+    t.state === "closed" ||
+    (t.state === "completed" && !t.pullRequest) ||
+    !!t.merged ||
+    !!t.prMergedAt
+  );
 }
 
 export const EMPTY_APPROVE_PREVIEW: StreamApprovePreview = {
@@ -649,13 +670,11 @@ export class WorkstreamsStore implements OnDestroy {
     return this.toApprovePreview(plan, tasksById);
   }
 
-  approveTreePreview(
-    tree: WorkTree | null | undefined,
-    fallbackRepo?: string,
-  ): StreamApprovePreview {
+  approveTreePreview(tree: WorkTree | null | undefined): StreamApprovePreview {
     if (!tree?.nodes?.length) {
       return EMPTY_APPROVE_PREVIEW;
     }
+    const loaded = this.loaded();
     const base = this.allTasksById();
     const lookup = new Map<string, Task>(base);
     const taskToStream = this.taskToStream();
@@ -670,14 +689,21 @@ export class WorkstreamsStore implements OnDestroy {
         const known = lookup.get(n.id);
         const isTreeProposed =
           n.status === "planned" || n.status === "proposed";
+        // Once the feed has loaded, a node it does not know is outside what
+        // this viewer can read: leave it alone. Before then, never assume the
+        // parent's repository for it, so RBAC is not judged as same-repo.
+        if (!known && loaded) {
+          if (n.children?.length) walk(n.children);
+          continue;
+        }
         const task: Task = known ?? {
           id: n.id,
           title: n.title,
           state: isTreeProposed ? "proposed" : n.status,
-          repo: fallbackRepo,
         };
         if (!known) lookup.set(n.id, task);
-        const isProposed = task.state === "proposed" || isTreeProposed;
+        // The tree is a one-shot read; the live feed's state wins over it.
+        const isProposed = known ? known.state === "proposed" : isTreeProposed;
         if (isProposed && !task.consoleSession && this.canApproveTask(task)) {
           const ws = taskToStream.get(task.id);
           selected.set(task.id, {
@@ -688,7 +714,7 @@ export class WorkstreamsStore implements OnDestroy {
             streamTitle: ws?.title ?? null,
           });
         }
-        if (!n.done || isProposed) {
+        if (!(known ? isDoneForApproval(known) : n.done) || isProposed) {
           walked.add(task.id);
           for (const depId of task.dependsOn ?? []) {
             if (depId && !walked.has(depId)) depQueue.push(depId);
@@ -883,15 +909,55 @@ export class WorkstreamsStore implements OnDestroy {
   ): Promise<ApproveBatchResult> {
     const flat = waves.flat();
     if (flat.length === 0) {
-      return { succeeded: 0, failed: 0, approvedIds: [], approvedTasks: [] };
+      return {
+        succeeded: 0,
+        failed: 0,
+        skipped: 0,
+        approvedIds: [],
+        approvedTasks: [],
+      };
     }
     this.busy.set("approve");
     this.actionError.set(null);
     const approvedIds: string[] = [];
     const approvedTasks: Task[] = [];
+    // A failed approval blocks everything downstream of it: those are
+    // skipped rather than queued ahead of the prerequisite that is still
+    // proposed. Independent siblings in later waves still go ahead.
+    const blocked = new Set<string>();
+    const lookup = new Map<string, Task>(this.allTasksById());
+    for (const e of flat) if (!lookup.has(e.id)) lookup.set(e.id, e.task);
+    const dependsOnBlocked = (entry: ApprovalTarget): boolean => {
+      if (blocked.size === 0) return false;
+      const seen = new Set<string>([entry.id]);
+      const queue = [
+        ...(entry.task.dependsOn ?? []),
+        ...(lookup.get(entry.id)?.dependsOn ?? []),
+      ];
+      while (queue.length > 0) {
+        const id = queue.shift()!;
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        if (blocked.has(id)) return true;
+        const dep = lookup.get(id);
+        if (!dep || dep.consoleSession || isDoneForApproval(dep)) continue;
+        queue.push(...(dep.dependsOn ?? []));
+      }
+      return false;
+    };
     let failed = 0;
+    let skipped = 0;
     try {
-      for (const wave of waves) {
+      for (const fullWave of waves) {
+        const wave: ApprovalTarget[] = [];
+        for (const entry of fullWave) {
+          if (dependsOnBlocked(entry)) {
+            skipped++;
+            blocked.add(entry.id);
+          } else {
+            wave.push(entry);
+          }
+        }
         if (wave.length === 0) continue;
         const results = await Promise.allSettled(
           wave.map((entry) =>
@@ -906,18 +972,22 @@ export class WorkstreamsStore implements OnDestroy {
             approvedTasks.push(wave[idx].task);
           } else {
             failed++;
+            blocked.add(wave[idx].id);
           }
         });
       }
       if (failed > 0) {
         this.actionError.set(
-          `${failed} of ${flat.length} task updates failed.`,
+          skipped > 0
+            ? `${failed} of ${flat.length} approvals failed; ${skipped} downstream ${skipped === 1 ? "task was" : "tasks were"} skipped.`
+            : `${failed} of ${flat.length} task updates failed.`,
         );
       }
       await this.refresh(true);
       return {
         succeeded: approvedIds.length,
         failed,
+        skipped,
         approvedIds,
         approvedTasks,
       };

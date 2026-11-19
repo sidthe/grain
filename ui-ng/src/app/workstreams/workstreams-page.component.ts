@@ -70,6 +70,7 @@ import {
 import {
   type StreamApprovePreview,
   WorkstreamsStore,
+  formatApproveOutcome,
 } from "./workstreams.store";
 
 export const WS_VIEW_STORAGE_KEY = "grain.ws.view";
@@ -1131,10 +1132,7 @@ export class WorkstreamsPageComponent implements OnInit, OnDestroy {
       preview,
       run: async (snapshot) => {
         const res = await this.store.approveWaves(snapshot.waves);
-        const noun = res.succeeded === 1 ? "task" : "tasks";
-        const msg = res.failed
-          ? `Approved ${res.succeeded} of ${res.succeeded + res.failed}`
-          : `Approved ${res.succeeded} ${noun}`;
+        const msg = formatApproveOutcome(res);
         const canUndo =
           res.approvedIds.length > 0 &&
           this.store.canWithdrawApprovals(res.approvedTasks);

@@ -737,6 +737,35 @@ describe("workstream-layout", () => {
     expect(cPlan.targets.map((x) => x.id)).toEqual(["301", "302", "303"]);
   });
 
+  it("collectTaskUpstreamApprovals offers nothing for a task that is already done", () => {
+    const dep = task("20", { state: "proposed" });
+    const byId = (start: Task) =>
+      new Map([dep, start].map((t) => [t.id, t] as const));
+    for (const done of [
+      task("21", { state: "closed", dependsOn: ["20"] }),
+      task("21", { state: "completed", dependsOn: ["20"] }),
+      task("21", {
+        state: "completed",
+        pullRequest: "acme/web#1",
+        prMergedAt: "2026-11-19T00:00:00Z",
+        dependsOn: ["20"],
+      }),
+    ]) {
+      expect(collectTaskUpstreamApprovals("21", byId(done)).targets).toEqual(
+        [],
+      );
+    }
+    // Still open with a PR: the upstream proposal still blocks it.
+    const open = task("21", {
+      state: "completed",
+      pullRequest: "acme/web#1",
+      dependsOn: ["20"],
+    });
+    expect(
+      collectTaskUpstreamApprovals("21", byId(open)).targets.map((x) => x.id),
+    ).toEqual(["20"]);
+  });
+
   it("collectTaskUpstreamApprovals handles proposed and already-queued tasks and formatApproveAllLabel formats cleanly", () => {
     const a = task("10", { state: "proposed" });
     const b = task("11", { state: "queued", dependsOn: ["10"] });

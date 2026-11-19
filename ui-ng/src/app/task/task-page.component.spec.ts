@@ -1996,6 +1996,68 @@ describe("duration", () => {
         .map((c) => c.params?.id);
       expect(approvedIds).toEqual(["1", "7", "8"]);
     });
+
+    it("offers Approve all on a closed workstream root that the open feed omits", async () => {
+      const api = new FakeApi();
+      // #7 is closed (as after propose_dag), so GET /api/tasks leaves it out.
+      const openTasks: Task[] = [
+        {
+          id: "1",
+          title: "Upstream prereq",
+          state: "proposed",
+          repo: "acme/widgets",
+        },
+        {
+          id: "8",
+          title: "Step one",
+          state: "proposed",
+          repo: "acme/widgets",
+          origin: "task:7",
+          generatedFrom: "7",
+          dependsOn: ["1"],
+        },
+        {
+          id: "9",
+          title: "Step two",
+          state: "proposed",
+          repo: "acme/widgets",
+          origin: "task:7",
+          generatedFrom: "7",
+          dependsOn: ["8"],
+        },
+      ];
+      api.detail = { ...api.detail, id: "7", state: "closed", dependsOn: [] };
+      api.getIfChanged = ((route?: string) =>
+        Promise.resolve({
+          body: structuredClone(
+            route === "GET /api/tasks" ? openTasks : api.detail,
+          ),
+          changed: true,
+        })) as typeof api.getIfChanged;
+
+      const f = await render(api);
+      await settle(f);
+
+      // Closed: nothing upstream of #7 itself needs approving.
+      expect(q(f, '[data-testid="act-approve-upstream"]')).toBeNull();
+      const wsBtn = q<HTMLButtonElement>(
+        f,
+        '[data-testid="act-approve-workstream"]',
+      )!;
+      expect(wsBtn).not.toBeNull();
+      expect(wsBtn.textContent?.trim()).toBe("Approve all 3 (1 upstream)");
+      wsBtn.click();
+      await settle(f);
+      q<HTMLButtonElement>(f, '[data-testid="confirm-accept"]')!.click();
+      await settle(f);
+      await vi.waitFor(() =>
+        expect(
+          api.calls
+            .filter((c) => c.route === "POST /api/tasks/{id}/approve")
+            .map((c) => c.params?.id),
+        ).toEqual(["1", "8", "9"]),
+      );
+    });
   });
 
   it("offers Accept findings only on an acceptable findings gate, and posts its gate, review and reason", async () => {

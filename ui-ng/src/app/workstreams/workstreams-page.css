@@ -259,6 +259,7 @@ g-workstreams-page {
 
 .ws-cfoot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
@@ -269,13 +270,24 @@ g-workstreams-page {
   color: var(--md-sys-color-on-surface-variant);
 }
 
+.ws-cfoot .mono {
+  flex: 1 1 80px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ws-row-approve {
   position: relative;
   z-index: 2;
   min-height: 28px;
+  max-width: 100%;
   padding: 3px 10px;
   font-size: 12px;
-  white-space: nowrap;
+  line-height: 1.25;
+  text-align: center;
+  white-space: normal;
 }
 
 .ws-empty {
@@ -288,7 +300,7 @@ g-workstreams-page {
 
 @media (max-width: 1079.95px) {
   .ws-row {
-    grid-template-columns: 28px minmax(0, 1fr) 170px 140px;
+    grid-template-columns: 28px minmax(0, 1fr) 170px minmax(140px, auto);
   }
   .ws-row .ws-agents,
   .ws-row .ws-last {

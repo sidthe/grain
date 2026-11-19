@@ -69,6 +69,7 @@ import {
   EMPTY_APPROVE_PREVIEW,
   type StreamApprovePreview,
   WorkstreamsStore,
+  formatApproveOutcome,
 } from "./workstreams.store";
 
 export const NODE_GLYPHS: Record<NodeGlyphKind, string> = {
@@ -1617,10 +1618,7 @@ export class WorkstreamDetailComponent implements OnDestroy {
   }
 
   private announceApproval(res: ApproveBatchResult): void {
-    const noun = res.succeeded === 1 ? "task" : "tasks";
-    const msg = res.failed
-      ? `Approved ${res.succeeded} of ${res.succeeded + res.failed}`
-      : `Approved ${res.succeeded} ${noun}`;
+    const msg = formatApproveOutcome(res);
     const canUndo =
       res.approvedIds.length > 0 &&
       this.wsStore.canWithdrawApprovals(res.approvedTasks);

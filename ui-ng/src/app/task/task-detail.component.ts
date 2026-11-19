@@ -101,6 +101,7 @@ import {
   EMPTY_APPROVE_PREVIEW,
   type StreamApprovePreview,
   WorkstreamsStore,
+  formatApproveOutcome,
 } from "../workstreams/workstreams.store";
 import { TaskChangesTabComponent } from "./task-changes-tab.component";
 import { TaskDocsTabComponent } from "./task-docs-tab.component";
@@ -2055,7 +2056,14 @@ export class TaskDetailComponent implements OnDestroy {
   });
   protected readonly partOfStream = computed(() => {
     const id = this.t()?.id;
-    return id ? (this.wsStore.taskToStream().get(id) ?? null) : null;
+    if (!id) return null;
+    // A closed root is not in the open feed, so taskToStream omits it; its
+    // stream is still keyed task:<id> with a virtual root.
+    return (
+      this.wsStore.taskToStream().get(id) ??
+      this.wsStore.byKey().get(`task:${id}`) ??
+      null
+    );
   });
   protected readonly upstreamApproval = computed<StreamApprovePreview>(() => {
     const t = this.t();
@@ -2071,7 +2079,7 @@ export class TaskDetailComponent implements OnDestroy {
   protected readonly treeApproval = computed<StreamApprovePreview>(() => {
     const ps = this.partOfStream();
     if (ps) return this.wsStore.approvePreview(ps);
-    return this.wsStore.approveTreePreview(this.store.tree(), this.t()?.repo);
+    return this.wsStore.approveTreePreview(this.store.tree());
   });
   protected readonly treeApproveLabel = computed(() =>
     formatApproveAllLabel(this.treeApproval()),
@@ -2080,7 +2088,9 @@ export class TaskDetailComponent implements OnDestroy {
     if (this.from()?.startsWith("workstreams:")) return false;
     const t = this.t();
     const ps = this.partOfStream();
-    if (!t || !ps || ps.rootId !== t.id) return false;
+    if (!t || !ps || (ps.rootId !== t.id && ps.key !== `task:${t.id}`)) {
+      return false;
+    }
     const ap = this.treeApproval();
     if (ap.targets.length === 0) return false;
     return t.state !== "proposed" || ap.targets.length > 1;
@@ -2499,15 +2509,9 @@ export class TaskDetailComponent implements OnDestroy {
       });
     });
     effect(() => {
-      const t = this.t();
-      const tree = this.store.tree();
-      if (
-        t &&
-        (t.origin ||
-          t.generatedFrom ||
-          (t.dependsOn?.length ?? 0) > 0 ||
-          (tree?.total ?? 0) > 0)
-      ) {
+      // Any task may root a workstream (a closed root carries no origin or
+      // dependsOn of its own), so read the open feed for every task.
+      if (this.t()) {
         untracked(() => this.wsStore.ensureLoaded(false));
       }
     });
@@ -2710,10 +2714,7 @@ export class TaskDetailComponent implements OnDestroy {
       await this.store.loadTree();
     }
     this.acted.emit();
-    const noun = res.succeeded === 1 ? "task" : "tasks";
-    const msg = res.failed
-      ? `Approved ${res.succeeded} of ${res.succeeded + res.failed}`
-      : `Approved ${res.succeeded} ${noun}`;
+    const msg = formatApproveOutcome(res);
     const canUndo =
       res.approvedIds.length > 0 &&
       this.wsStore.canWithdrawApprovals(res.approvedTasks);

@@ -1472,7 +1472,8 @@ export function collectTaskUpstreamApprovals(
   opts: ApprovalPlanOptions = {},
 ): ApprovalPlan {
   const start = tasksById.get(taskId);
-  if (!start || isConsoleTask(start)) {
+  // A finished task blocks nothing, so it has no upstream set to approve.
+  if (!start || isConsoleTask(start) || isTaskDone(start)) {
     return { targets: [], waves: [], directCount: 0, upstreamCount: 0 };
   }
 
