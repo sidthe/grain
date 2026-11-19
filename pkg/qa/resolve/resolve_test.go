@@ -558,4 +558,135 @@ func TestComposeTightenOnlyOverlaysAndFloors(t *testing.T) {
 	if len(composed.ReadabilityPacks) != 2 || !composed.ReadabilityPacks[0].Enabled || !composed.ReadabilityPacks[1].Enabled {
 		t.Fatalf("expected both ReadabilityPacks enabled, got %+v", composed.ReadabilityPacks)
 	}
+
+	// Tightening overlay upgrades slice_plan -> propose_dag and merges TierModes tighten-only
+	// without dropping low-tier coverage from base.
+	tighter := qa.FlowSpec{
+		Decompose: qa.DecomposeDecl{
+			Enabled:      true,
+			Mode:         "propose_dag",
+			Complexities: []string{"medium", "high"},
+			TierModes:    map[string]string{"medium": "slice_plan", "high": "propose_dag"},
+		},
+	}
+	upgraded := resolve.ComposeTightenOnly(base, tighter)
+	if upgraded.Decompose.Mode != "propose_dag" || upgraded.Decompose.TierModes["high"] != "propose_dag" || upgraded.Decompose.TierModes["medium"] != "slice_plan" {
+		t.Fatalf("expected tighten-only overlay to upgrade Decompose to propose_dag and preserve TierModes, got %+v", upgraded.Decompose)
+	}
+	if upgraded.Decompose.EffectiveModeForTier(qa.ComplexityLow) != "slice_plan" ||
+		upgraded.Decompose.EffectiveModeForTier(qa.ComplexityMedium) != "slice_plan" ||
+		upgraded.Decompose.EffectiveModeForTier(qa.ComplexityHigh) != "propose_dag" {
+		t.Fatalf("expected base low=slice_plan preserved and high tightened to propose_dag, got low=%q med=%q high=%q (%+v)",
+			upgraded.Decompose.EffectiveModeForTier(qa.ComplexityLow),
+			upgraded.Decompose.EffectiveModeForTier(qa.ComplexityMedium),
+			upgraded.Decompose.EffectiveModeForTier(qa.ComplexityHigh),
+			upgraded.Decompose)
+	}
+
+	// Weakening overlay using tier-modes (medium/high=slice_plan or off) MUST NOT downgrade a
+	// base flow whose mode is propose_dag for [medium, high] (e.g. standard-workflow@1).
+	proposeBase := qa.FlowSpec{
+		ID: "propose-base",
+		Decompose: qa.DecomposeDecl{
+			Enabled:         true,
+			Mode:            "propose_dag",
+			Complexities:    []string{"medium", "high"},
+			MaxSubtasks:     4,
+			TargetDiffLines: 400,
+		},
+	}
+	weakeningTierModes := qa.FlowSpec{
+		ID: "weakening-tier-modes",
+		Decompose: qa.DecomposeDecl{
+			Enabled:   true,
+			TierModes: map[string]string{"medium": "slice_plan", "high": "slice_plan"},
+		},
+	}
+	defended := resolve.ComposeTightenOnly(proposeBase, weakeningTierModes)
+	if defended.Decompose.EffectiveModeForTier(qa.ComplexityMedium) != "propose_dag" ||
+		defended.Decompose.EffectiveModeForTier(qa.ComplexityHigh) != "propose_dag" {
+		t.Fatalf("ComposeTightenOnly allowed tier-modes overlay to downgrade propose_dag: med=%q high=%q (%+v)",
+			defended.Decompose.EffectiveModeForTier(qa.ComplexityMedium),
+			defended.Decompose.EffectiveModeForTier(qa.ComplexityHigh),
+			defended.Decompose)
+	}
+
+	// Tightening overlay using mode=propose_dag MUST upgrade an existing weaker base tier-mode
+	// without mutating the caller's TierModes map.
+	baseTierMap := map[string]string{"medium": "slice_plan", "high": "propose_dag"}
+	tieredBase := qa.FlowSpec{
+		ID: "tiered-base",
+		Decompose: qa.DecomposeDecl{
+			Enabled:      true,
+			Mode:         "propose_dag",
+			Complexities: []string{"medium", "high"},
+			TierModes:    baseTierMap,
+		},
+	}
+	tightenAllPropose := qa.FlowSpec{
+		ID: "tighten-all-propose",
+		Decompose: qa.DecomposeDecl{
+			Enabled:      true,
+			Mode:         "propose_dag",
+			Complexities: []string{"medium", "high"},
+		},
+	}
+	tightenedTiered := resolve.ComposeTightenOnly(tieredBase, tightenAllPropose)
+	if tightenedTiered.Decompose.EffectiveModeForTier(qa.ComplexityMedium) != "propose_dag" {
+		t.Fatalf("expected mode=propose_dag overlay to upgrade base tier-modes[medium]=slice_plan, got %q (%+v)",
+			tightenedTiered.Decompose.EffectiveModeForTier(qa.ComplexityMedium), tightenedTiered.Decompose)
+	}
+	if baseTierMap["medium"] != "slice_plan" {
+		t.Fatalf("ComposeTightenOnly mutated caller's TierModes map: %+v", baseTierMap)
+	}
+
+	// Overlay with enabled=true + mode=propose_dag but all tier-modes explicitly "off" is inactive
+	// and must not flip Enabled=true on a base flow whose Decompose is disabled.
+	disabledBase := qa.FlowSpec{ID: "disabled-base"}
+	allOffOverlay := qa.FlowSpec{
+		ID: "all-off-overlay",
+		Decompose: qa.DecomposeDecl{
+			Enabled:   true,
+			Mode:      "propose_dag",
+			TierModes: map[string]string{"low": "off", "medium": "off", "high": "off"},
+		},
+	}
+	stillDisabled := resolve.ComposeTightenOnly(disabledBase, allOffOverlay)
+	if stillDisabled.Decompose.Enabled || stillDisabled.Decompose.IsActive() {
+		t.Fatalf("inactive all-off overlay should not enable Decompose on disabled base: %+v", stillDisabled.Decompose)
+	}
+
+	// Covered-tiers-only all-off overlay ({complexities: [medium, high], tier-modes: {medium: off, high: off}})
+	// must also leave both gates-only and slice_plan base flows completely untouched (including MaxSubtasks / TargetDiffLines).
+	coveredOffOverlay := qa.FlowSpec{
+		ID: "covered-off-overlay",
+		Decompose: qa.DecomposeDecl{
+			Enabled:         true,
+			Mode:            "propose_dag",
+			Complexities:    []string{"medium", "high"},
+			TierModes:       map[string]string{"medium": "off", "high": "off"},
+			MaxSubtasks:     8,
+			TargetDiffLines: 150,
+		},
+	}
+	var gatesBase qa.FlowSpec
+	foundGates := false
+	for _, b := range qa.BuiltInFlowVersions() {
+		if b.Key == "gates-only" {
+			gatesBase = b.Resolved
+			foundGates = true
+			break
+		}
+	}
+	if !foundGates {
+		t.Fatal("missing built-in gates-only flow")
+	}
+	overGates := resolve.ComposeTightenOnly(gatesBase, coveredOffOverlay)
+	if overGates.Decompose.Enabled || overGates.Decompose.IsActive() || overGates.Decompose.Mode != "off" || len(overGates.Decompose.TierModes) != 0 || overGates.Decompose.MaxSubtasks != 0 || overGates.Decompose.TargetDiffLines != 0 {
+		t.Fatalf("inactive covered-off overlay mutated gates-only Decompose: %+v", overGates.Decompose)
+	}
+	overSlice := resolve.ComposeTightenOnly(base, coveredOffOverlay)
+	if overSlice.Decompose.Mode != "slice_plan" || overSlice.Decompose.MaxSubtasks != base.Decompose.MaxSubtasks || overSlice.Decompose.TargetDiffLines != base.Decompose.TargetDiffLines || len(overSlice.Decompose.TierModes) != 0 {
+		t.Fatalf("inactive covered-off overlay mutated slice_plan base Decompose: %+v", overSlice.Decompose)
+	}
 }

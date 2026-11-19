@@ -273,7 +273,7 @@ func EnsureQAResolutionAtDispatchWithConfig(
 			return &Resolution{Source: "none", ArmID: "baseline"}, qaCfg, nil
 		}
 		att, _ := store.TaskSpecAttachments(ctx, task.ID, model.DefaultTaskSpecAttachmentMaxBytes)
-		tier := qa.ClassifyTaskComplexityWithAttachments(task.Title, task.Body, att.Text, att.MarkdownCount)
+		tier := qa.ClassifyTaskComplexityForTask(task, att)
 		created, err := qa.AssignOrLoadArm(ctx, store, root, tier, qaCfg, now)
 		if err != nil {
 			return nil, qaCfg, err
@@ -534,12 +534,62 @@ func ComposeTightenOnly(spec qa.FlowSpec, overlays ...qa.FlowSpec) qa.FlowSpec {
 		spec.StrictDecoderPaths = unionStrings(spec.StrictDecoderPaths, ov.StrictDecoderPaths)
 
 		// V4 Decompose, Context, PRContract tighten-only
-		if ov.Decompose.Enabled && ov.Decompose.Mode != "off" {
+		if ov.Decompose.IsActive() {
+			tiers := []qa.ComplexityTier{qa.ComplexityLow, qa.ComplexityMedium, qa.ComplexityHigh}
+			wantEff := make(map[string]string, len(tiers))
+			for _, t := range tiers {
+				baseEff := spec.Decompose.EffectiveModeForTier(t)
+				ovEff := ov.Decompose.EffectiveModeForTier(t)
+				if qa.DecomposeModeRank(ovEff) > qa.DecomposeModeRank(baseEff) {
+					wantEff[string(t)] = ovEff
+				} else {
+					wantEff[string(t)] = baseEff
+				}
+			}
+			hadBaseAllTiers := spec.Decompose.Enabled && qa.DecomposeModeRank(spec.Decompose.Mode) > 0 && len(spec.Decompose.Complexities) == 0
 			spec.Decompose.Enabled = true
-			if spec.Decompose.Mode == "" || spec.Decompose.Mode == "off" || ov.Decompose.Mode == "propose_tasks" {
+			if qa.DecomposeModeRank(ov.Decompose.Mode) > qa.DecomposeModeRank(spec.Decompose.Mode) {
 				spec.Decompose.Mode = ov.Decompose.Mode
 			}
-			spec.Decompose.Complexities = unionStrings(spec.Decompose.Complexities, ov.Decompose.Complexities)
+			if !hadBaseAllTiers {
+				spec.Decompose.Complexities = unionStrings(spec.Decompose.Complexities, ov.Decompose.Complexities)
+			}
+			// Reconcile TierModes strictly against each tier's tighten-only effective mode so a
+			// repository overlay can never downgrade a base flow (e.g. setting tier-modes.high=slice_plan
+			// over a base flow whose mode is propose_dag) or drop a tier covered by the base flow.
+			baseOnly := qa.DecomposeDecl{
+				Enabled:      spec.Decompose.Enabled,
+				Mode:         spec.Decompose.Mode,
+				Complexities: spec.Decompose.Complexities,
+			}
+			needTierModes := len(spec.Decompose.TierModes) > 0 || len(ov.Decompose.TierModes) > 0
+			for _, t := range tiers {
+				if baseOnly.EffectiveModeForTier(t) != wantEff[string(t)] {
+					needTierModes = true
+					break
+				}
+			}
+			if needTierModes {
+				merged := make(map[string]string, len(tiers))
+				for _, t := range tiers {
+					k := string(t)
+					want := wantEff[k]
+					_, inSpec := spec.Decompose.TierModes[k]
+					_, inOv := ov.Decompose.TierModes[k]
+					if want != baseOnly.EffectiveModeForTier(t) || (want != "" && (inSpec || inOv)) {
+						if want == "" {
+							merged[k] = "off"
+						} else {
+							merged[k] = want
+						}
+					}
+				}
+				if len(merged) > 0 {
+					spec.Decompose.TierModes = merged
+				} else {
+					spec.Decompose.TierModes = nil
+				}
+			}
 			if ov.Decompose.MaxSubtasks > spec.Decompose.MaxSubtasks {
 				spec.Decompose.MaxSubtasks = ov.Decompose.MaxSubtasks
 			}

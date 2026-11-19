@@ -91,14 +91,7 @@ func (s *Server) handleGetQAFlows(w http.ResponseWriter, _ *http.Request) {
 }
 
 func assessTaskComplexityTier(t model.Task, specAtt model.TaskSpecAttachments) string {
-	comp := qa.AssessTaskComplexity(qa.ComplexityInput{
-		Title:                   t.Title,
-		Body:                    t.Body,
-		AttachmentText:          specAtt.Text,
-		MarkdownAttachmentCount: specAtt.MarkdownCount,
-		ReadsCount:              len(t.Reads),
-		WritesCount:             len(t.Writes),
-	}, nil)
+	comp := qa.AssessTaskComplexity(qa.ComplexityInputFromTask(t, specAtt, nil), nil)
 	return string(comp.Tier)
 }
 

@@ -650,7 +650,8 @@ function readInputChecked(ev: Event): boolean {
                             testid="qa-decompose-mode"
                             ariaLabel="Decomposition strategy"
                             [options]="decomposeModeOptions"
-                            [value]="decomposeMode()"
+                            [value]="decomposeModeSelectValue()"
+                            [placeholder]="decomposeModePlaceholder()"
                             (valueChange)="decomposeModeChange.emit($event)"
                           />
                         </div>
@@ -2168,6 +2169,9 @@ export class QaStepDrawerComponent {
   readonly s0Intent = input<boolean>(false);
   readonly decomposeEnabled = input<boolean>(false);
   readonly decomposeMode = input<string>("slice_plan");
+  readonly decomposeTierModes = input<
+    Readonly<Record<string, string>> | undefined
+  >(undefined);
   readonly decomposeMaxSubtasks = input<number>(4);
   readonly decomposeTargetDiffLines = input<number>(400);
   readonly contextEnabled = input<boolean>(false);
@@ -2301,6 +2305,28 @@ export class QaStepDrawerComponent {
     { value: "slice_plan", label: "Slice plan" },
     { value: "propose_dag", label: "Subtask DAG" },
   ];
+
+  protected readonly hasDecomposeTierModes = computed(() => {
+    const tm = this.decomposeTierModes();
+    return Boolean(tm && Object.keys(tm).length > 0);
+  });
+
+  protected readonly decomposeModeSelectValue = computed(() => {
+    const m = this.decomposeMode();
+    if (
+      this.hasDecomposeTierModes() ||
+      (m !== "slice_plan" && m !== "propose_dag")
+    ) {
+      return "";
+    }
+    return m;
+  });
+
+  protected readonly decomposeModePlaceholder = computed(() => {
+    if (this.hasDecomposeTierModes()) return "Per-tier";
+    if (this.decomposeMode() === "off") return "Off";
+    return "Slice plan";
+  });
 
   protected readonly skillModeOptions: readonly PillOption[] = [
     { value: "replace", label: "Replace" },

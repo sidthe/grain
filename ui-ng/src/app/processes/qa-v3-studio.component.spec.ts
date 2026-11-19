@@ -19,7 +19,11 @@ import { GrainApi } from "../api/grain-api.service";
 import { SnackbarService } from "../services/snackbar.service";
 import {
   buildClientWorkflowStagesView,
+  decomposeDisplayMode,
   evaluateFixturesClientSide,
+  formatStageModeLabel,
+  formatStepModeLabel,
+  isDecomposeActive,
   matchesGlobPattern,
   synthesizeDiffBudgetFixtures,
   validateSafeRe2Pattern,
@@ -1391,5 +1395,344 @@ describe("QaV3StudioComponent", () => {
     fixture.detectChanges();
     expect(comp.customChecks().length).toBe(1);
     expect(comp.customChecks()[0].id).toBe("custom:renamed-rule");
+  });
+
+  it("preserves decompose tier-modes losslessly through hydration, exportDeclarationV4, buildYaml, and stage projection", () => {
+    const comp = fixture.componentInstance;
+
+    // 1. Flow with kebab-case tier-modes and omitted mode/complexities
+    const tieredDecl: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      key: "tiered-flow",
+      extends: "standard-workflow@1",
+      label: "Tiered flow",
+      decompose: {
+        enabled: true,
+        "tier-modes": { high: "propose_dag", medium: "slice_plan" },
+        "max-subtasks": 5,
+        "target-diff-lines": 350,
+      },
+      stages: {
+        "s0-intent": { enabled: false },
+      },
+    };
+    fixture.componentRef.setInput("declV4", tieredDecl);
+    fixture.componentRef.setInput("editing", true);
+    fixture.detectChanges();
+
+    // Editing an unrelated field must not drop tier-modes or coerce omitted mode/complexities.
+    comp.stopNudge.set(false);
+    fixture.detectChanges();
+
+    const exportedTiered = comp.exportDeclarationV4();
+    expect(exportedTiered.decompose?.enabled).toBe(true);
+    expect(exportedTiered.decompose?.mode).toBeUndefined();
+    expect(exportedTiered.decompose?.complexities).toBeUndefined();
+    expect(exportedTiered.decompose?.tierModes).toEqual({
+      medium: "slice_plan",
+      high: "propose_dag",
+    });
+    expect(exportedTiered.decompose?.maxSubtasks).toBe(5);
+    expect(exportedTiered.decompose?.targetDiffLines).toBe(350);
+
+    const tieredYaml = comp.buildYaml();
+    expect(tieredYaml).toContain(
+      'decompose:\n  enabled: true\n  tier-modes:\n    medium: "slice_plan"\n    high: "propose_dag"\n  max-subtasks: 5\n  target-diff-lines: 350\n',
+    );
+    expect(tieredYaml).not.toContain('  mode: "slice_plan"');
+
+    const tieredS0 = comp.workflowStages().find((s) => s.id === "s0-decompose");
+    const tieredStep = tieredS0?.steps.find((st) => st.id === "s0:decompose");
+    expect(tieredS0?.enabled).toBe(true);
+    expect(tieredS0?.mode).toBe("propose_dag");
+    expect(formatStageModeLabel(tieredS0!)).toBe("Subtask DAG");
+    expect(tieredStep?.enabled).toBe(true);
+    expect(tieredStep?.mode).toBe("propose_dag");
+    expect(formatStepModeLabel(tieredStep!)).toBe("Subtask DAG");
+    expect(tieredStep?.scope).toBe("medium, high");
+    expect(tieredStep?.summary).toContain(
+      "medium=slice_plan, high=propose_dag",
+    );
+
+    // 2. Flow with mode: "off" + active tierModes.high: "propose_dag"
+    const highOnlyDecl: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      key: "high-only-dag",
+      extends: "standard-workflow@1",
+      label: "High-only DAG",
+      decompose: {
+        enabled: true,
+        mode: "off",
+        tierModes: { high: "propose_dag" },
+        maxSubtasks: 4,
+        targetDiffLines: 400,
+      },
+      stages: {
+        "s0-intent": { enabled: false },
+      },
+    };
+    fixture.componentRef.setInput("declV4", highOnlyDecl);
+    fixture.detectChanges();
+
+    const exportedHighOnly = comp.exportDeclarationV4();
+    expect(exportedHighOnly.decompose?.mode).toBe("off");
+    expect(exportedHighOnly.decompose?.tierModes).toEqual({
+      high: "propose_dag",
+    });
+    const highOnlyYaml = comp.buildYaml();
+    expect(highOnlyYaml).toContain('  mode: "off"\n');
+    expect(highOnlyYaml).toContain('  tier-modes:\n    high: "propose_dag"\n');
+    const highOnlyS0 = comp
+      .workflowStages()
+      .find((s) => s.id === "s0-decompose");
+    const highOnlyStep = highOnlyS0?.steps.find(
+      (st) => st.id === "s0:decompose",
+    );
+    expect(highOnlyS0?.enabled).toBe(true);
+    expect(highOnlyS0?.mode).toBe("propose_dag");
+    expect(highOnlyStep?.enabled).toBe(true);
+    expect(highOnlyStep?.mode).toBe("propose_dag");
+    expect(highOnlyStep?.scope).toBe("high");
+
+    // 3. Flow where tier-modes turns every covered tier "off" over mode: "propose_dag"
+    const allOffDecl: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      key: "all-off-tier-modes",
+      extends: "standard-workflow@1",
+      label: "All-off tier-modes",
+      decompose: {
+        enabled: true,
+        mode: "propose_dag",
+        complexities: ["medium", "high"],
+        tierModes: { medium: "off", high: "off" },
+      },
+      stages: {
+        "s0-intent": { enabled: false },
+      },
+    };
+    expect(isDecomposeActive(allOffDecl.decompose)).toBe(false);
+    expect(decomposeDisplayMode(allOffDecl.decompose)).toBe("off");
+    fixture.componentRef.setInput("declV4", allOffDecl);
+    fixture.detectChanges();
+
+    const exportedAllOff = comp.exportDeclarationV4();
+    expect(exportedAllOff.decompose?.mode).toBe("propose_dag");
+    expect(exportedAllOff.decompose?.complexities).toEqual(["medium", "high"]);
+    expect(exportedAllOff.decompose?.tierModes).toEqual({
+      medium: "off",
+      high: "off",
+    });
+    const allOffS0 = comp.workflowStages().find((s) => s.id === "s0-decompose");
+    const allOffStep = allOffS0?.steps.find((st) => st.id === "s0:decompose");
+    expect(allOffS0?.enabled).toBe(false);
+    expect(allOffS0?.mode).toBe("off");
+    expect(allOffStep?.enabled).toBe(false);
+    expect(allOffStep?.mode).toBe("off");
+    expect(allOffStep?.scope).toBe("none");
+
+    // 4. Switching to a flow without tier-modes resets decomposeTierModes cleanly
+    const plainDecl: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      key: "plain-propose-dag",
+      extends: "standard-workflow@1",
+      label: "Plain DAG",
+      decompose: {
+        enabled: true,
+        mode: "propose_dag",
+        complexities: ["medium", "high"],
+      },
+    };
+    fixture.componentRef.setInput("declV4", plainDecl);
+    fixture.detectChanges();
+
+    expect(comp.exportDeclarationV4().decompose?.tierModes).toBeUndefined();
+    expect(comp.buildYaml()).not.toContain("tier-modes:");
+  });
+
+  it("treats Go-omitted decompose.enabled as disabled without re-enabling tier-modes on unrelated edits", () => {
+    const comp = fixture.componentInstance;
+
+    // Go serializes DecomposeDecl.Enabled with json:"enabled,omitempty", omitting "enabled" when false.
+    const disabledApiDecl: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      key: "disabled-with-tier-modes",
+      extends: "standard-workflow@1",
+      label: "Disabled tiered flow",
+      decompose: {
+        tierModes: { high: "propose_dag" },
+        maxSubtasks: 4,
+        targetDiffLines: 400,
+      },
+      stages: {
+        "s0-intent": { enabled: false },
+      },
+    };
+    fixture.componentRef.setInput("declV4", disabledApiDecl);
+    fixture.componentRef.setInput("editing", true);
+    fixture.detectChanges();
+
+    expect(comp.decomposeEnabled()).toBe(false);
+    const s0Stage = comp.workflowStages().find((s) => s.id === "s0-decompose");
+    const s0Step = s0Stage?.steps.find((st) => st.id === "s0:decompose");
+    expect(s0Stage?.enabled).toBe(false);
+    expect(s0Stage?.mode).toBe("off");
+    expect(s0Step?.enabled).toBe(false);
+    expect(s0Step?.mode).toBe("off");
+    expect(s0Step?.scope).toBe("none");
+
+    // Saving an unrelated edit must keep decompose disabled while preserving tierModes.
+    comp.stopNudge.set(false);
+    fixture.detectChanges();
+
+    const exported = comp.exportDeclarationV4();
+    expect(exported.decompose?.enabled).toBe(false);
+    expect(exported.decompose?.mode).toBeUndefined();
+    expect(exported.decompose?.tierModes).toEqual({ high: "propose_dag" });
+    const yaml = comp.buildYaml();
+    expect(yaml).toContain(
+      'decompose:\n  enabled: false\n  tier-modes:\n    high: "propose_dag"\n',
+    );
+  });
+
+  it("shows honest Per-tier/Off strategy label in s0:decompose drawer and clears tier-modes when picking a uniform strategy", () => {
+    const comp = fixture.componentInstance;
+    const root = fixture.nativeElement as HTMLElement;
+
+    // 1. Flow with tier-modes and omitted mode/complexities displays "Per-tier" (not "Slice plan").
+    const tieredDecl: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      key: "tiered-switch-test",
+      extends: "standard-workflow@1",
+      label: "Tiered switch test",
+      decompose: {
+        enabled: true,
+        "tier-modes": { medium: "slice_plan", high: "propose_dag" },
+      },
+      stages: {
+        "s0-intent": { enabled: false },
+      },
+    };
+    fixture.componentRef.setInput("declV4", tieredDecl);
+    fixture.componentRef.setInput("editing", true);
+    fixture.detectChanges();
+    comp.selectStep("s0-decompose", "s0:decompose");
+    fixture.detectChanges();
+
+    const pillBtn = mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-decompose-mode"]',
+    );
+    expect(pillBtn.textContent?.trim()).toBe("Per-tier");
+
+    // Opening the menu shows neither uniform option as selected; choosing "Slice plan"
+    // clears tier-modes and restores default complexities ["medium", "high"] so low is not activated.
+    pillBtn.click();
+    fixture.detectChanges();
+    const sliceOpt = mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-decompose-mode-opt-slice_plan"]',
+    );
+    const dagOpt = mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-decompose-mode-opt-propose_dag"]',
+    );
+    expect(sliceOpt.getAttribute("aria-selected")).toBe("false");
+    expect(dagOpt.getAttribute("aria-selected")).toBe("false");
+
+    sliceOpt.click();
+    fixture.detectChanges();
+
+    expect(comp.decomposeMode()).toBe("slice_plan");
+    expect(comp.decomposeTierModes()).toBeUndefined();
+    expect(comp.decomposeComplexities()).toEqual(["medium", "high"]);
+    const exportedSlice = comp.exportDeclarationV4();
+    expect(exportedSlice.decompose?.mode).toBe("slice_plan");
+    expect(exportedSlice.decompose?.complexities).toEqual(["medium", "high"]);
+    expect(exportedSlice.decompose?.tierModes).toBeUndefined();
+    const sliceYaml = comp.buildYaml();
+    expect(sliceYaml).toContain('  mode: "slice_plan"\n');
+    expect(sliceYaml).toContain('  complexities: ["medium","high"]\n');
+    expect(sliceYaml).not.toContain("tier-modes:");
+    const sliceStep = comp
+      .workflowStages()
+      .find((s) => s.id === "s0-decompose")
+      ?.steps.find((st) => st.id === "s0:decompose");
+    expect(sliceStep?.enabled).toBe(true);
+    expect(sliceStep?.mode).toBe("slice_plan");
+    expect(sliceStep?.scope).toBe("medium, high");
+    expect(
+      mustEl<HTMLButtonElement>(
+        root,
+        '[data-testid="qa-decompose-mode"]',
+      ).textContent?.trim(),
+    ).toBe("Slice plan");
+
+    // 2. All-off tier-modes flow switching to "Subtask DAG" clears tier-modes and restores
+    // medium/high complexities rather than activating low-only.
+    const allOffDecl: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      key: "all-off-switch-test",
+      extends: "standard-workflow@1",
+      label: "All-off switch test",
+      decompose: {
+        enabled: true,
+        "tier-modes": { medium: "off", high: "off" },
+      },
+      stages: {
+        "s0-intent": { enabled: false },
+      },
+    };
+    fixture.componentRef.setInput("declV4", allOffDecl);
+    fixture.detectChanges();
+    comp.selectStep("s0-decompose", "s0:decompose");
+    fixture.detectChanges();
+
+    const allOffBtn = mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-decompose-mode"]',
+    );
+    expect(allOffBtn.textContent?.trim()).toBe("Per-tier");
+    allOffBtn.click();
+    fixture.detectChanges();
+    mustEl<HTMLButtonElement>(
+      root,
+      '[data-testid="qa-decompose-mode-opt-propose_dag"]',
+    ).click();
+    fixture.detectChanges();
+
+    expect(comp.decomposeMode()).toBe("propose_dag");
+    expect(comp.decomposeTierModes()).toBeUndefined();
+    expect(comp.decomposeComplexities()).toEqual(["medium", "high"]);
+    const dagStep = comp
+      .workflowStages()
+      .find((s) => s.id === "s0-decompose")
+      ?.steps.find((st) => st.id === "s0:decompose");
+    expect(dagStep?.enabled).toBe(true);
+    expect(dagStep?.mode).toBe("propose_dag");
+    expect(dagStep?.scope).toBe("medium, high");
+
+    // 3. Explicit mode: "off" without tier-modes displays "Off" (not "Slice plan").
+    const modeOffDecl: FlowDeclarationV4 = {
+      schema: "grain.dev/qa-flow/v4",
+      key: "mode-off-test",
+      extends: "standard-workflow@1",
+      label: "Mode off test",
+      decompose: {
+        enabled: true,
+        mode: "off",
+        complexities: ["medium", "high"],
+      },
+    };
+    fixture.componentRef.setInput("declV4", modeOffDecl);
+    fixture.detectChanges();
+    comp.selectStep("s0-decompose", "s0:decompose");
+    fixture.detectChanges();
+
+    expect(
+      mustEl<HTMLButtonElement>(
+        root,
+        '[data-testid="qa-decompose-mode"]',
+      ).textContent?.trim(),
+    ).toBe("Off");
   });
 });

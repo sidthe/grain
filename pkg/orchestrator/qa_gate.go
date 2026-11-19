@@ -57,13 +57,15 @@ type MirrorSessionResolver func(ctx context.Context, repo model.RepoRef) (remote
 // QARuntime holds controller-level dependencies used by pre-PR quality checks during
 // `OpenPullRequestForTaskWithQA`, `salvagePushedBranch`, and async Control shadow runs.
 type QARuntime struct {
-	DataDir             string
-	Profiler            *qa.Profiler
-	ResolveRemote       MirrorRemoteResolver
-	ResolveMirrorRemote MirrorSessionResolver
-	VerifyS4            S4VerifyFunc
-	RunIsolatedPrompt   func(ctx context.Context, task model.Task, runPrefix, prompt string, maxTokens int) (output string, tokensIn, tokensOut int64, err error)
-	ExecInSandbox       func(ctx context.Context, dir string, argv []string, timeout time.Duration) (string, int, error)
+	DataDir              string
+	Profiler             *qa.Profiler
+	ResolveRemote        MirrorRemoteResolver
+	ResolveMirrorRemote  MirrorSessionResolver
+	VerifyS4             S4VerifyFunc
+	RunIsolatedPrompt    func(ctx context.Context, task model.Task, runPrefix, prompt string, maxTokens int) (output string, tokensIn, tokensOut int64, err error)
+	StageStartupOverhead func(ctx context.Context, task model.Task) time.Duration
+	RedactText           func(string) string
+	ExecInSandbox        func(ctx context.Context, dir string, argv []string, timeout time.Duration) (string, int, error)
 }
 
 func (rt *QARuntime) hasMirrorResolver() bool {
@@ -703,15 +705,10 @@ func persistS3ReportToStore(
 		return
 	}
 	specAtt := loadTaskSpecAttachments(ctx, store, task, "")
-	comp := qa.AssessTaskComplexity(qa.ComplexityInput{
-		Title:                   task.Title,
-		Body:                    task.Body,
-		AttachmentText:          specAtt.Text,
-		MarkdownAttachmentCount: specAtt.MarkdownCount,
-		ReadsCount:              len(task.Reads),
-		WritesCount:             len(task.Writes),
-		PathHints:               extractCandidatePathsWithSpec(task, nil, "", specAtt.Text),
-	}, nil)
+	comp := qa.AssessTaskComplexity(
+		qa.ComplexityInputFromTask(task, specAtt, extractCandidatePathsWithSpec(task, nil, "", specAtt.Text)),
+		nil,
+	)
 
 	detailMap := map[string]any{
 		"blastTier":    rep.BlastTier,
@@ -846,15 +843,10 @@ func executeCustomStages(
 	rt := LiveQARuntime()
 
 	specAtt := loadTaskSpecAttachments(ctx, store, task, "")
-	comp := qa.AssessTaskComplexity(qa.ComplexityInput{
-		Title:                   task.Title,
-		Body:                    task.Body,
-		AttachmentText:          specAtt.Text,
-		MarkdownAttachmentCount: specAtt.MarkdownCount,
-		ReadsCount:              len(task.Reads),
-		WritesCount:             len(task.Writes),
-		PathHints:               extractCandidatePathsWithSpec(task, &flow, "", specAtt.Text),
-	}, nil)
+	comp := qa.AssessTaskComplexity(
+		qa.ComplexityInputFromTask(task, specAtt, extractCandidatePathsWithSpec(task, &flow, "", specAtt.Text)),
+		nil,
+	)
 
 	armCol := model.QAArmTreatment
 	if shadow || assign.ArmID == model.QAArmControl {
@@ -1591,17 +1583,21 @@ func runFreshContextS4(
 	}
 
 	var spec qa.FlowSpec
-	s4Timeout := 90 * time.Second
+	configuredS4Sec := 0
 	maxS4Tokens := 50000
 	if assign != nil && assign.Spec != nil {
 		spec = *assign.Spec
-		if spec.MaxS4Seconds > 0 {
-			s4Timeout = time.Duration(spec.MaxS4Seconds) * time.Second
-		}
+		configuredS4Sec = spec.MaxS4Seconds
 		if spec.MaxS4Tokens > 0 {
 			maxS4Tokens = spec.MaxS4Tokens
 		}
 	}
+	s4Timeout, startupOverhead := effectiveQAStageTimeout(
+		ctx, store, rt, task,
+		configuredS4Sec,
+		defaultS4InferenceTimeout,
+		time.Duration(qa.MaxVerifierSecondsCap)*time.Second,
+	)
 
 	prompt := buildS4VerifierPrompt(task, rawDiff, hazardSites, spec)
 	s4Ctx, cancel := context.WithTimeout(ctx, s4Timeout)
@@ -1611,6 +1607,7 @@ func runFreshContextS4(
 	var tokIn, tokOut int64
 	var kept []qa.ValidatedS4Finding
 	var filteredCnt int
+	var parseFailed bool
 
 	sample, vErr := rt.Profiler.Measure(qa.PerfSample{
 		TaskID:  task.ID,
@@ -1622,9 +1619,9 @@ func runFreshContextS4(
 		var err error
 		if rt.RunIsolatedPrompt != nil {
 			out, inTok, outTok, err = rt.RunIsolatedPrompt(s4Ctx, task, task.ID+"-qa-s4", prompt, maxS4Tokens)
-			if (err != nil || strings.TrimSpace(out) == "") && rt.VerifyS4 != nil {
+			if s4Ctx.Err() == nil && (err != nil || strings.TrimSpace(out) == "") && rt.VerifyS4 != nil {
 				out, inTok, outTok, err = rt.VerifyS4(s4Ctx, task, prompt)
-			} else if rt.VerifyS4 != nil {
+			} else if s4Ctx.Err() == nil && rt.VerifyS4 != nil {
 				if _, pErr := qa.ExtractS4JSONFindings(out); pErr != nil {
 					out, inTok, outTok, err = rt.VerifyS4(s4Ctx, task, prompt)
 				}
@@ -1640,6 +1637,7 @@ func runFreshContextS4(
 		}
 		parsed, pErr := qa.ExtractS4JSONFindings(rawOut)
 		if pErr != nil {
+			parseFailed = true
 			return "error", pErr
 		}
 		kept, filteredCnt = qa.FilterS4Findings(parsed, qa.InquisitorContext{
@@ -1654,7 +1652,44 @@ func runFreshContextS4(
 		}
 		return "pass", nil
 	})
+	var expID, armID, flowHash string
+	var engineRev int
+	if assign != nil {
+		expID = assign.ExperimentID
+		armID = assign.ArmID
+		flowHash = assign.FlowHash
+		engineRev = assign.QAEngineRev
+	}
 	if vErr != nil {
+		if store != nil {
+			extra := map[string]any{
+				"filteredTheaterCount": filteredCnt,
+			}
+			if parseFailed {
+				extra["errorKind"] = "parse_error"
+			}
+			_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
+				TaskID:       task.ID,
+				RunID:        task.ID + "-qa-s4",
+				CommitSHA:    headSHA,
+				Stage:        "S4",
+				CheckID:      qa.RuleS4OrthogonalVerifier,
+				Arm:          model.QAArmTreatment,
+				Shadow:       false,
+				Verdict:      "error",
+				DurationMS:   sample.DurationMS,
+				TokensIn:     tokIn,
+				TokensOut:    tokOut,
+				AllocBytes:   sample.AllocBytes,
+				DetailJSON:   buildQAStageErrorDetail(rt, vErr, s4Ctx, s4Timeout, startupOverhead, extra),
+				ExperimentID: expID,
+				ArmID:        armID,
+				FlowHash:     flowHash,
+				QAEngineRev:  engineRev,
+				Model:        task.Model,
+				BaseSHA:      ws.BaseSHA,
+			}, nil)
+		}
 		return nil, vErr
 	}
 
@@ -1673,14 +1708,6 @@ func runFreshContextS4(
 			Summary:  f.Summary,
 			Evidence: f.Evidence,
 		})
-	}
-	var expID, armID, flowHash string
-	var engineRev int
-	if assign != nil {
-		expID = assign.ExperimentID
-		armID = assign.ArmID
-		flowHash = assign.FlowHash
-		engineRev = assign.QAEngineRev
 	}
 	_, _ = store.RecordQACheckRun(ctx, model.QACheckRun{
 		TaskID:       task.ID,
@@ -2431,15 +2458,9 @@ func EvaluateAndApplyQATriage(
 	}
 
 	specAtt := loadTaskSpecAttachments(ctx, store, task, "")
-	comp := qa.AssessTaskComplexity(qa.ComplexityInput{
-		Title:                   task.Title,
-		Body:                    task.Body,
-		AttachmentText:          specAtt.Text,
-		MarkdownAttachmentCount: specAtt.MarkdownCount,
-		ReadsCount:              len(task.Reads),
-		WritesCount:             max(len(task.Writes), len(prFiles)),
-		PathHints:               extractCandidatePathsWithSpec(task, assign.Spec, "", specAtt.Text),
-	}, nil)
+	s5CompInput := qa.ComplexityInputFromTask(task, specAtt, extractCandidatePathsWithSpec(task, assign.Spec, "", specAtt.Text))
+	s5CompInput.WritesCount = max(len(task.Writes), len(prFiles))
+	comp := qa.AssessTaskComplexity(s5CompInput, nil)
 
 	var autoTiers, humTiers []qa.BlastTier
 	for _, s := range assign.Spec.S5MergeTriage.AutoMergeTiers {
