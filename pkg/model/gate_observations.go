@@ -322,7 +322,19 @@ func (s *Store) observeTaskGates(ctx context.Context, id string, now time.Time, 
 		if err != nil {
 			return nil, nil, err
 		}
-		err = func() error {
+		err = func() (retErr error) {
+			defer func() {
+				_ = tx.Rollback()
+				release()
+			}()
+			defer func() {
+				if r := recover(); r != nil {
+					panic(r)
+				}
+				if retErr == nil {
+					retErr = tx.Commit()
+				}
+			}()
 			if err := authorizeObservationTask(ctx, tx, id); err != nil {
 				return err
 			}
@@ -613,13 +625,6 @@ func (s *Store) observeTaskGates(ctx context.Context, id string, now time.Time, 
 			}
 			return nil
 		}()
-		if err == nil {
-			err = tx.Commit()
-		} else {
-			_ = tx.Rollback()
-		}
-		_ = tx.Rollback()
-		release()
 		if err == nil {
 			if transient || !history {
 				return &view, nil, nil
