@@ -482,6 +482,7 @@ function defaultFixturesForEngine(engine: CustomCheckEngine): {
           [s0Intent]="s0Intent()"
           [decomposeEnabled]="decomposeEnabled()"
           [decomposeMode]="decomposeMode()"
+          [decomposeTierModes]="decomposeTierModes()"
           [decomposeMaxSubtasks]="decomposeMaxSubtasks()"
           [decomposeTargetDiffLines]="decomposeTargetDiffLines()"
           [contextEnabled]="contextEnabled()"
@@ -1296,7 +1297,7 @@ export class QaV3StudioComponent {
 
     if (effectiveV4?.decompose) {
       const rawTierModes = normalizeDecomposeTierModes(effectiveV4.decompose);
-      this.decomposeEnabled.set(effectiveV4.decompose.enabled ?? true);
+      this.decomposeEnabled.set(Boolean(effectiveV4.decompose.enabled));
       const dm = (effectiveV4.decompose.mode ?? "").trim();
       if (dm === "off" || dm === "slice_plan" || dm === "propose_dag") {
         this.decomposeMode.set(dm);
@@ -1859,6 +1860,12 @@ export class QaV3StudioComponent {
     this.decomposeMode.set(
       val === "off" || val === "propose_dag" ? val : "slice_plan",
     );
+    if (this.decomposeTierModes()) {
+      this.decomposeTierModes.set(undefined);
+      if (this.decomposeComplexities().length === 0) {
+        this.decomposeComplexities.set(["medium", "high"]);
+      }
+    }
   }
 
   protected updateCodingSkillMode(val: string): void {
