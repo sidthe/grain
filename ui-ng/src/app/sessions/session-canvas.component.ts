@@ -484,7 +484,9 @@ export class SessionCanvasComponent implements OnInit {
     const out: TreeNode[] = [];
     const walk = (nodes: TreeNode[]) => {
       for (const n of nodes) {
-        if (!n.root && n.status === "proposed") out.push(n);
+        if (!n.root && (n.status === "planned" || n.status === "proposed")) {
+          out.push(n);
+        }
         if (n.children?.length) walk(n.children);
       }
     };

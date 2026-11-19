@@ -259,6 +259,7 @@ g-workstreams-page {
 
 .ws-cfoot {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
   padding-top: 8px;
@@ -266,6 +267,15 @@ g-workstreams-page {
   border-top: 1px solid var(--md-sys-color-outline-variant);
   font-size: 12px;
   color: var(--md-sys-color-on-surface-variant);
+}
+
+.ws-row-approve {
+  position: relative;
+  z-index: 2;
+  min-height: 28px;
+  padding: 3px 10px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .ws-empty {

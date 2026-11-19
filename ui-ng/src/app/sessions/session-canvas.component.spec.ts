@@ -18,6 +18,7 @@ import { NEVER } from "rxjs";
 import { GrainApi } from "../api/grain-api.service";
 import { GrainEvents } from "../api/grain-events.service";
 import type { Comment } from "../api/models";
+import { AccessService } from "../services/access.service";
 import { SessionCanvasComponent } from "./session-canvas.component";
 
 class FakeApi {
@@ -160,6 +161,77 @@ describe("SessionCanvasComponent", () => {
       dependsOn: ["102"],
       approved: true,
     });
+    f.destroy();
+  });
+
+  it("detects planned tree nodes returned by GET /api/tasks/{id}/tree and approves all of them", async () => {
+    const api = new FakeApi();
+    api.get = async (route: string) => {
+      if (route === "GET /api/tasks/{id}/tree") {
+        return {
+          origin: "task:1",
+          done: 0,
+          total: 2,
+          nodes: [
+            {
+              id: "1",
+              title: "Session root",
+              status: "running",
+              done: false,
+              root: true,
+              children: [
+                { id: "10", title: "Step A", status: "planned", done: false },
+                { id: "11", title: "Step B", status: "planned", done: false },
+              ],
+            },
+          ],
+        };
+      }
+      return { documents: [] };
+    };
+
+    TestBed.configureTestingModule({
+      imports: [SessionCanvasComponent],
+      providers: [
+        provideRouter([]),
+        { provide: GrainApi, useValue: api },
+        { provide: GrainEvents, useValue: { events: () => EMPTY } },
+      ],
+    });
+    TestBed.inject(AccessService).setConfig({ access: null });
+
+    const f = TestBed.createComponent(SessionCanvasComponent);
+    f.componentRef.setInput("sessionTaskId", "1");
+    f.componentRef.setInput("repo", "acme/web");
+    f.componentRef.setInput("comments", []);
+    f.autoDetectChanges();
+    await f.whenStable();
+    f.detectChanges();
+
+    const el = f.nativeElement as HTMLElement;
+    (
+      el.querySelector('[data-testid="canvas-tab-plan"]') as HTMLButtonElement
+    ).click();
+    await f.whenStable();
+    f.detectChanges();
+
+    const approveBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="canvas-approve-proposals"]',
+    )!;
+    expect(approveBtn).not.toBeNull();
+    expect(approveBtn.textContent?.trim()).toBe("Approve 2");
+    approveBtn.click();
+    await vi.waitFor(() =>
+      expect(
+        api.calls.filter((c) => c.route === "POST /api/tasks/{id}/approve")
+          .length,
+      ).toBe(2),
+    );
+    expect(
+      api.calls
+        .filter((c) => c.route === "POST /api/tasks/{id}/approve")
+        .map((c) => (c.params as { id: string }).id),
+    ).toEqual(["10", "11"]);
     f.destroy();
   });
 });

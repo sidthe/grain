@@ -1891,6 +1891,111 @@ describe("duration", () => {
       );
       expect(openWs?.getAttribute("href")).toContain("/workstreams/task:7");
     });
+
+    it("approves planned workstream tasks from the Workstream tab and upstream dependencies from task actions", async () => {
+      const api = new FakeApi();
+      const openTasks: Task[] = [
+        {
+          id: "1",
+          title: "Upstream base",
+          state: "proposed",
+          repo: "acme/widgets",
+        },
+        {
+          id: "2",
+          title: "Upstream middle",
+          state: "queued",
+          repo: "acme/widgets",
+          dependsOn: ["1"],
+        },
+        {
+          id: "7",
+          title: "Fix the parser",
+          state: "proposed",
+          repo: "acme/widgets",
+          dependsOn: ["2"],
+        },
+        {
+          id: "8",
+          title: "Child step",
+          state: "proposed",
+          repo: "acme/widgets",
+          origin: "task:7",
+          generatedFrom: "7",
+          dependsOn: ["7"],
+        },
+      ];
+      api.detail = {
+        ...api.detail,
+        id: "7",
+        state: "proposed",
+        dependsOn: ["2"],
+      };
+      api.tree = {
+        origin: "task:7",
+        done: 0,
+        total: 1,
+        nodes: [
+          {
+            id: "7",
+            title: "Fix the parser",
+            status: "planned",
+            done: false,
+            root: true,
+            children: [
+              { id: "8", title: "Child step", status: "planned", done: false },
+            ],
+          },
+        ],
+      };
+      api.getIfChanged = ((route?: string) => {
+        if (route === "GET /api/tasks") {
+          return Promise.resolve({
+            body: structuredClone(openTasks),
+            changed: true,
+          });
+        }
+        return Promise.resolve({
+          body: structuredClone(api.detail),
+          changed: true,
+        });
+      }) as typeof api.getIfChanged;
+
+      const f = await render(api, "tree");
+      await settle(f);
+
+      // Action bar offers both Approve with 1 upstream (for #7 + #1) and Approve all for root workstream.
+      const upBtn = q<HTMLButtonElement>(
+        f,
+        '[data-testid="act-approve-upstream"]',
+      )!;
+      expect(upBtn).not.toBeNull();
+      expect(upBtn.textContent?.trim()).toBe("Approve with 1 upstream");
+
+      const rootWsBtn = q<HTMLButtonElement>(
+        f,
+        '[data-testid="act-approve-workstream"]',
+      )!;
+      expect(rootWsBtn).not.toBeNull();
+      expect(rootWsBtn.textContent?.trim()).toBe("Approve all 3 (1 upstream)");
+
+      // Workstream tab also renders tree-approve-all and approves #1 -> #7 -> #8 in dependency order.
+      const treeBtn = q<HTMLButtonElement>(
+        f,
+        '[data-testid="tree-approve-all"]',
+      )!;
+      expect(treeBtn).not.toBeNull();
+      treeBtn.click();
+      await settle(f);
+
+      q<HTMLButtonElement>(f, '[data-testid="confirm-accept"]')!.click();
+      await settle(f);
+
+      const approvedIds = api.calls
+        .filter((c) => c.route === "POST /api/tasks/{id}/approve")
+        .map((c) => c.params?.id);
+      expect(approvedIds).toEqual(["1", "7", "8"]);
+    });
   });
 
   it("offers Accept findings only on an acceptable findings gate, and posts its gate, review and reason", async () => {

@@ -60,10 +60,16 @@ import {
   type SystemKind,
   type Workstream,
   type WorkstreamNode,
+  formatApproveAllLabel,
   lastActivityLabel,
   progressSummaryText,
 } from "./workstream-model";
-import { WorkstreamsStore } from "./workstreams.store";
+import {
+  type ApproveBatchResult,
+  EMPTY_APPROVE_PREVIEW,
+  type StreamApprovePreview,
+  WorkstreamsStore,
+} from "./workstreams.store";
 
 export const NODE_GLYPHS: Record<NodeGlyphKind, string> = {
   running: "M6 1.6a4.4 4.4 0 1 1-4.2 3.1M1 2.2l.9 2.6 2.6-.9",
@@ -182,16 +188,16 @@ const MODES: { id: LayoutMode; label: string }[] = [
                 + Add a task
               </button>
             }
-            @if (approveCount(); as apCnt) {
+            @if (approvePreview().targets.length > 0) {
               <button
                 type="button"
                 class="btn-tonal"
                 data-testid="ws-approve-proposals"
+                [gTip]="approveTip()"
                 [disabled]="wsStore.busy() !== null"
                 (click)="confirmApprove(s)"
               >
-                Approve {{ apCnt }}
-                {{ apCnt === 1 ? "proposal" : "proposals" }}
+                {{ approveLabel() }}
               </button>
             }
             @if (s.counts.person > 0) {
@@ -824,6 +830,30 @@ const MODES: { id: LayoutMode; label: string }[] = [
                     }}
                   </button>
                 }
+                @if (selectedUpstreamPreview().upstreamCount > 0) {
+                  <button
+                    type="button"
+                    class="btn-tonal ws-rel-more"
+                    data-testid="ws-approve-upstream"
+                    [disabled]="wsStore.busy() !== null"
+                    (click)="confirmApproveUpstream()"
+                  >
+                    {{ selectedUpstreamLabel() }}
+                  </button>
+                }
+              </div>
+            } @else if (selectedUpstreamPreview().upstreamCount > 0) {
+              <div class="ws-rel-group">
+                <span class="ws-rel-lbl">Upstream approvals</span>
+                <button
+                  type="button"
+                  class="btn-tonal ws-rel-more"
+                  data-testid="ws-approve-upstream"
+                  [disabled]="wsStore.busy() !== null"
+                  (click)="confirmApproveUpstream()"
+                >
+                  {{ selectedUpstreamLabel() }}
+                </button>
               </div>
             }
             @if (rel.waitsOn.length) {
@@ -924,7 +954,8 @@ const MODES: { id: LayoutMode; label: string }[] = [
               !rel.blockingChain.length &&
               !rel.waitsOn.length &&
               !rel.waitedOnBy.length &&
-              !rel.nextUp.length
+              !rel.nextUp.length &&
+              selectedUpstreamPreview().upstreamCount === 0
             ) {
               <p class="muted" style="margin:0;font-size:12px">
                 Stream root — select a task to see blockers and dependents.
@@ -1221,8 +1252,50 @@ export class WorkstreamDetailComponent implements OnDestroy {
       ? repos.some((r) => this.access.can("POST /api/tasks", r))
       : this.access.canAccessTask("POST /api/tasks", null);
   });
+  private readonly extraKnownTasks = computed(() => {
+    const out = new Map<string, WorkstreamNode["task"]>();
+    for (const n of this.allNodesById().values()) {
+      if (!n.virtual) out.set(n.id, n.task);
+    }
+    for (const n of this.stream().nodes) {
+      if (!n.virtual && !out.has(n.id)) out.set(n.id, n.task);
+    }
+    return [...out.values()];
+  });
+
+  protected readonly approvePreview = computed<StreamApprovePreview>(() =>
+    this.wsStore.approvePreview(this.stream(), {
+      extraTasks: this.extraKnownTasks(),
+      taskToStream: this.taskToStream(),
+    }),
+  );
   protected readonly approveCount = computed(
-    () => this.wsStore.approvePreview(this.stream()).nodes.length,
+    () => this.approvePreview().targets.length,
+  );
+  protected readonly approveLabel = computed(() =>
+    formatApproveAllLabel(this.approvePreview()),
+  );
+  protected readonly approveTip = computed(() => {
+    const p = this.approvePreview();
+    if (p.upstreamCount > 0) {
+      return `Approve ${p.directCount} in this stream and ${p.upstreamCount} upstream ${p.upstreamCount === 1 ? "dependency" : "dependencies"} in dependency order`;
+    }
+    return p.targets.length > 1
+      ? `Approve all ${p.targets.length} proposed tasks in dependency order`
+      : "Approve this proposed task";
+  });
+  protected readonly selectedUpstreamPreview = computed<StreamApprovePreview>(
+    () => {
+      const id = this.selectedRealTaskId();
+      if (!id) return EMPTY_APPROVE_PREVIEW;
+      return this.wsStore.approveUpstreamPreview(id, {
+        extraTasks: this.extraKnownTasks(),
+        taskToStream: this.taskToStream(),
+      });
+    },
+  );
+  protected readonly selectedUpstreamLabel = computed(() =>
+    formatApproveAllLabel(this.selectedUpstreamPreview(), { forTask: true }),
   );
   protected readonly pauseCount = computed(
     () => this.wsStore.pausePreview(this.stream()).nodes.length,
@@ -1543,24 +1616,60 @@ export class WorkstreamDetailComponent implements OnDestroy {
     }
   }
 
+  private announceApproval(res: ApproveBatchResult): void {
+    const noun = res.succeeded === 1 ? "task" : "tasks";
+    const msg = res.failed
+      ? `Approved ${res.succeeded} of ${res.succeeded + res.failed}`
+      : `Approved ${res.succeeded} ${noun}`;
+    const canUndo =
+      res.approvedIds.length > 0 &&
+      this.wsStore.canWithdrawApprovals(res.approvedTasks);
+    this.snackbar.show(
+      msg,
+      canUndo
+        ? {
+            label: "Undo",
+            run: async () => {
+              const undo = await this.wsStore.withdrawApprovals(
+                res.approvedIds,
+              );
+              this.snackbar.show(
+                undo.failed
+                  ? `Withdrew ${undo.succeeded} of ${undo.succeeded + undo.failed} approvals`
+                  : `Withdrew approval for ${undo.succeeded} ${undo.succeeded === 1 ? "task" : "tasks"}`,
+              );
+            },
+          }
+        : undefined,
+    );
+  }
+
   protected confirmApprove(s: Workstream): void {
-    const preview = this.wsStore.approvePreview(s);
-    if (!preview.nodes.length) return;
-    this.confirming.set({
-      title: `Approve ${preview.nodes.length} ${preview.nodes.length === 1 ? "proposal" : "proposals"}?`,
-      message: `Queue all proposed tasks in "${s.title}" to run.`,
-      accept: `Approve (${preview.nodes.length})`,
-      destructive: false,
-      scope: preview.scope,
-      run: async () => {
-        const res = await this.wsStore.approveProposals(s);
-        this.snackbar.show(
-          res.failed
-            ? `Approved ${res.succeeded} of ${res.succeeded + res.failed}`
-            : `Approved ${res.succeeded} ${res.succeeded === 1 ? "proposal" : "proposals"}`,
-        );
+    const req = this.wsStore.buildApproveConfirm({
+      subjectTitle: s.title,
+      preview: this.approvePreview(),
+      run: async (snapshot) => {
+        const res = await this.wsStore.approveWaves(snapshot.waves);
+        this.announceApproval(res);
       },
     });
+    if (req) this.confirming.set(req);
+  }
+
+  protected confirmApproveUpstream(): void {
+    const id = this.selectedRealTaskId();
+    if (!id) return;
+    const node = this.stream().byId.get(id);
+    const req = this.wsStore.buildApproveConfirm({
+      subjectTitle: node?.title || `Task #${id}`,
+      preview: this.selectedUpstreamPreview(),
+      forTaskId: id,
+      run: async (snapshot) => {
+        const res = await this.wsStore.approveTaskWithUpstream(id, snapshot);
+        this.announceApproval(res);
+      },
+    });
+    if (req) this.confirming.set(req);
   }
 
   protected confirmPause(s: Workstream): void {

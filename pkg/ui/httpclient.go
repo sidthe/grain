@@ -951,6 +951,14 @@ func (c *HTTPClient) GetTask(ctx context.Context, id string) (TaskDetail, error)
 	return detail, nil
 }
 
+func (c *HTTPClient) WorkTree(ctx context.Context, id string) (WorkTree, error) {
+	var tree WorkTree
+	if err := c.do(ctx, http.MethodGet, "/api/tasks/"+url.PathEscape(id)+"/tree", nil, &tree); err != nil {
+		return WorkTree{}, err
+	}
+	return tree, nil
+}
+
 func (c *HTTPClient) CreateTask(ctx context.Context, req CreateTaskRequest) (Task, error) {
 	var task Task
 	if err := c.do(ctx, http.MethodPost, "/api/tasks", req, &task); err != nil {

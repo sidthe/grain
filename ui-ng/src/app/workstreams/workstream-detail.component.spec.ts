@@ -321,4 +321,87 @@ describe("WorkstreamDetailComponent", () => {
       "https://example.com/",
     );
   });
+
+  it("approves cross-stream upstream dependencies from header and blocking chain in upstream-first order", async () => {
+    const { fixture } = setup(
+      [
+        t("90", {
+          title: "Upstream root",
+          state: "completed",
+          repo: "acme/core",
+        }),
+        t("91", {
+          title: "Upstream prerequisite",
+          state: "proposed",
+          repo: "acme/core",
+          origin: "task:90",
+          generatedFrom: "90",
+        }),
+        t("100", {
+          title: "Feature stream",
+          state: "completed",
+          repo: "acme/app",
+        }),
+        t("101", {
+          title: "Wave 1",
+          state: "proposed",
+          repo: "acme/app",
+          origin: "task:100",
+          generatedFrom: "100",
+          dependsOn: ["91"],
+        }),
+        t("102", {
+          title: "Wave 2",
+          state: "proposed",
+          repo: "acme/app",
+          origin: "task:100",
+          generatedFrom: "100",
+          dependsOn: ["101"],
+        }),
+      ],
+      "102",
+    );
+    const el = fixture.nativeElement as HTMLElement;
+
+    const headerBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="ws-approve-proposals"]',
+    )!;
+    expect(headerBtn.textContent?.trim()).toBe("Approve all 3 (1 upstream)");
+
+    // Blocking chain offers approving the selected task + its 2 upstream tasks.
+    const upBtn = el.querySelector<HTMLButtonElement>(
+      '[data-testid="ws-approve-upstream"]',
+    )!;
+    expect(upBtn.textContent?.trim()).toBe("Approve with 2 upstream");
+
+    upBtn.click();
+    fixture.detectChanges();
+    const items = [
+      ...el.querySelectorAll('[data-testid="confirm-items"] li'),
+    ].map((li) => li.textContent?.trim());
+    expect(items).toHaveLength(3);
+    expect(items[0]).toContain("#91");
+    expect(items[1]).toContain("#101");
+    expect(items[2]).toContain("#102");
+
+    // Multi-repo scope requires explicit tick before accepting.
+    const accept = el.querySelector<HTMLButtonElement>(
+      '[data-testid="confirm-accept"]',
+    )!;
+    expect(accept.disabled).toBe(true);
+    el.querySelector<HTMLInputElement>(
+      '[data-testid="confirm-multi-repo"]',
+    )!.click();
+    fixture.detectChanges();
+    expect(accept.disabled).toBe(false);
+
+    accept.click();
+    fixture.detectChanges();
+    await vi.waitFor(() => {
+      const approvedIds = api.calls
+        .filter((c) => c.route === "POST /api/tasks/{id}/approve")
+        .map((c) => (c.params as { id: string }).id);
+      expect(approvedIds).toEqual(["91", "101", "102"]);
+    });
+  });
 });

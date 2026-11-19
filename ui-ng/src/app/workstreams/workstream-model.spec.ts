@@ -22,8 +22,11 @@ import {
   thumbLayout,
 } from "./workstream-layout";
 import {
+  collectTaskUpstreamApprovals,
+  collectWorkstreamApprovals,
   deriveWorkstreams,
   filterWorkstreams,
+  formatApproveAllLabel,
   progressSummaryText,
 } from "./workstream-model";
 
@@ -632,5 +635,154 @@ describe("workstream-layout", () => {
     const s = d.byKey.get("task:1600")!;
     const chain = blockingChain(s, "1650");
     expect(chain.some((r) => r.taskId === "1699")).toBe(true);
+  });
+
+  it("collectWorkstreamApprovals gathers in-stream and transitive upstream proposed tasks in wave order, skipping done subtrees and cycles", () => {
+    const standaloneDoneDep = task("80", { state: "proposed" });
+    const doneIntermediate = task("85", {
+      state: "closed",
+      dependsOn: ["80"],
+    });
+    const standaloneUpstream = task("90", { state: "proposed" });
+    const extRoot = task("100", {
+      title: "Upstream stream",
+      state: "completed",
+    });
+    const extMid = task("101", {
+      state: "queued",
+      origin: "task:100",
+      generatedFrom: "100",
+      dependsOn: ["90"],
+    });
+    const extProposed = task("102", {
+      state: "proposed",
+      origin: "task:100",
+      generatedFrom: "100",
+      dependsOn: ["101"],
+    });
+    const wsRoot = task("200", { title: "Main stream", state: "completed" });
+    const wsWave1 = task("202", {
+      state: "proposed",
+      origin: "task:200",
+      generatedFrom: "200",
+      dependsOn: ["102", "85"],
+    });
+    const wsWave2 = task("201", {
+      state: "proposed",
+      origin: "task:200",
+      generatedFrom: "200",
+      dependsOn: ["202"],
+    });
+    const all = [
+      standaloneDoneDep,
+      doneIntermediate,
+      standaloneUpstream,
+      extRoot,
+      extMid,
+      extProposed,
+      wsRoot,
+      wsWave1,
+      wsWave2,
+    ];
+    const byId = new Map(all.map((t) => [t.id, t]));
+    const d = deriveWorkstreams(all, { now: NOW });
+    const main = d.byKey.get("task:200")!;
+
+    const plan = collectWorkstreamApprovals(main, byId, {
+      taskToStream: d.taskToStream,
+    });
+    // Upstream standalone (#90) -> extProposed (#102, across queued #101) -> wsWave1 (#202) -> wsWave2 (#201).
+    // Never walks past closed #85 to #80.
+    expect(plan.targets.map((x) => x.id)).toEqual(["90", "102", "202", "201"]);
+    expect(plan.waves.map((w) => w.map((x) => x.id))).toEqual([
+      ["90"],
+      ["102"],
+      ["202"],
+      ["201"],
+    ]);
+    expect(plan.directCount).toBe(2);
+    expect(plan.upstreamCount).toBe(2);
+    expect(plan.targets[0].upstream).toBe(true);
+    expect(plan.targets[0].streamTitle).toBeNull();
+    expect(plan.targets[1].upstream).toBe(true);
+    expect(plan.targets[1].streamTitle).toBe("Upstream stream");
+    expect(plan.targets[2].upstream).toBe(false);
+
+    // Cycle safety: 301 <-> 302 with downstream 303 completes deterministically.
+    const cRoot = task("300", { state: "completed" });
+    const c1 = task("301", {
+      state: "proposed",
+      origin: "task:300",
+      generatedFrom: "300",
+      dependsOn: ["302"],
+    });
+    const c2 = task("302", {
+      state: "proposed",
+      origin: "task:300",
+      generatedFrom: "300",
+      dependsOn: ["301"],
+    });
+    const c3 = task("303", {
+      state: "proposed",
+      origin: "task:300",
+      generatedFrom: "300",
+      dependsOn: ["302"],
+    });
+    const cycleAll = [cRoot, c1, c2, c3];
+    const cd = deriveWorkstreams(cycleAll, { now: NOW });
+    const cPlan = collectWorkstreamApprovals(
+      cd.byKey.get("task:300")!,
+      new Map(cycleAll.map((t) => [t.id, t])),
+    );
+    expect(cPlan.targets.map((x) => x.id)).toEqual(["301", "302", "303"]);
+  });
+
+  it("collectTaskUpstreamApprovals handles proposed and already-queued tasks and formatApproveAllLabel formats cleanly", () => {
+    const a = task("10", { state: "proposed" });
+    const b = task("11", { state: "queued", dependsOn: ["10"] });
+    const c = task("12", { state: "proposed", dependsOn: ["11"] });
+    const d = task("13", { state: "queued", dependsOn: ["12"] });
+    const byId = new Map([a, b, c, d].map((t) => [t.id, t]));
+
+    const forProposed = collectTaskUpstreamApprovals("12", byId);
+    expect(forProposed.targets.map((x) => x.id)).toEqual(["10", "12"]);
+    expect(forProposed.directCount).toBe(1);
+    expect(forProposed.upstreamCount).toBe(1);
+    expect(formatApproveAllLabel(forProposed, { forTask: true })).toBe(
+      "Approve with 1 upstream",
+    );
+
+    const forQueued = collectTaskUpstreamApprovals("13", byId);
+    expect(forQueued.targets.map((x) => x.id)).toEqual(["10", "12"]);
+    expect(forQueued.directCount).toBe(0);
+    expect(forQueued.upstreamCount).toBe(2);
+    expect(formatApproveAllLabel(forQueued, { forTask: true })).toBe(
+      "Approve 2 upstream",
+    );
+
+    expect(
+      formatApproveAllLabel({ targets: [a], directCount: 1, upstreamCount: 0 }),
+    ).toBe("Approve 1 proposal");
+    expect(
+      formatApproveAllLabel({
+        targets: [a, c],
+        directCount: 2,
+        upstreamCount: 0,
+      }),
+    ).toBe("Approve all 2");
+    expect(
+      formatApproveAllLabel({
+        targets: [a, c],
+        directCount: 1,
+        upstreamCount: 1,
+      }),
+    ).toBe("Approve all 2 (1 upstream)");
+    expect(
+      formatApproveAllLabel({
+        targets: [a, c],
+        directCount: 0,
+        upstreamCount: 2,
+      }),
+    ).toBe("Approve 2 upstream");
   });
 });

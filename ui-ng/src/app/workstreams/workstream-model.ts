@@ -192,6 +192,32 @@ export interface FilteredWorkstreams {
   promotedCount: number;
 }
 
+export interface ApprovalTarget {
+  id: string;
+  task: Task;
+  /** True when pulled in as an upstream `dependsOn` prerequisite. */
+  upstream: boolean;
+  streamKey: string | null;
+  streamTitle: string | null;
+}
+
+export interface ApprovalPlan {
+  /** All approvable tasks in topological upstream-first order. */
+  targets: ApprovalTarget[];
+  /** Targets grouped into upstream-first waves (parallel within a wave). */
+  waves: ApprovalTarget[][];
+  /** Count belonging directly to the stream (or the selected task itself). */
+  directCount: number;
+  /** Count pulled in as upstream `dependsOn` prerequisites. */
+  upstreamCount: number;
+}
+
+export interface ApprovalPlanOptions {
+  canApprove?: (task: Task) => boolean;
+  taskToStream?: ReadonlyMap<string, Workstream>;
+  includeSelf?: boolean;
+}
+
 const STREAM_RANK: Record<StreamState, number> = {
   person: 0,
   planning: 1,
@@ -1272,4 +1298,238 @@ export function compactProgressText(s: Workstream): string {
 export function lastActivityLabel(s: Workstream, now = Date.now()): string {
   if (!s.lastActivityMs) return "";
   return ago(new Date(s.lastActivityMs).toISOString(), now);
+}
+
+function makeApprovalTarget(
+  task: Task,
+  upstream: boolean,
+  taskToStream?: ReadonlyMap<string, Workstream>,
+): ApprovalTarget {
+  const ws = taskToStream?.get(task.id);
+  return {
+    id: task.id,
+    task,
+    upstream,
+    streamKey: ws?.key ?? null,
+    streamTitle: ws?.title ?? null,
+  };
+}
+
+// orderApprovalTargets arranges targets into upstream-first waves using Kahn's
+// algorithm over transitive `dependsOn` paths (including through non-proposed
+// intermediate tasks). Ties and cycles are broken deterministically by numeric
+// task ID so every target is placed once without hanging.
+export function orderApprovalTargets(
+  selected: ReadonlyMap<string, ApprovalTarget>,
+  tasksById: ReadonlyMap<string, Task>,
+): { targets: ApprovalTarget[]; waves: ApprovalTarget[][] } {
+  if (selected.size === 0) return { targets: [], waves: [] };
+
+  const inDegree = new Map<string, number>();
+  const outgoing = new Map<string, Set<string>>();
+  for (const id of selected.keys()) {
+    inDegree.set(id, 0);
+    outgoing.set(id, new Set());
+  }
+
+  for (const [id, entry] of selected.entries()) {
+    const visited = new Set<string>([id]);
+    const queue: string[] = [...(entry.task.dependsOn ?? [])];
+    while (queue.length > 0) {
+      const depId = queue.shift()!;
+      if (!depId || visited.has(depId)) continue;
+      visited.add(depId);
+      if (selected.has(depId)) {
+        const outs = outgoing.get(depId)!;
+        if (!outs.has(id)) {
+          outs.add(id);
+          inDegree.set(id, (inDegree.get(id) ?? 0) + 1);
+        }
+        continue;
+      }
+      const dep = tasksById.get(depId);
+      if (!dep || isConsoleTask(dep) || isTaskDone(dep)) continue;
+      for (const next of dep.dependsOn ?? []) {
+        if (next && !visited.has(next)) queue.push(next);
+      }
+    }
+  }
+
+  const remaining = new Set<string>(selected.keys());
+  const waves: ApprovalTarget[][] = [];
+  const ordered: ApprovalTarget[] = [];
+
+  while (remaining.size > 0) {
+    let ready = [...remaining]
+      .filter((id) => (inDegree.get(id) ?? 0) === 0)
+      .sort(compareTaskIds);
+    if (ready.length === 0) {
+      // Break dependency cycles deterministically by lowest task ID.
+      const fallback = [...remaining].sort(compareTaskIds)[0];
+      ready = [fallback];
+    }
+    const wave: ApprovalTarget[] = [];
+    for (const id of ready) {
+      remaining.delete(id);
+      const target = selected.get(id)!;
+      wave.push(target);
+      ordered.push(target);
+    }
+    waves.push(wave);
+    for (const id of ready) {
+      for (const next of outgoing.get(id) ?? []) {
+        if (remaining.has(next)) {
+          inDegree.set(next, Math.max(0, (inDegree.get(next) ?? 0) - 1));
+        }
+      }
+    }
+  }
+
+  return { targets: ordered, waves };
+}
+
+function finalizeApprovalPlan(
+  selected: ReadonlyMap<string, ApprovalTarget>,
+  tasksById: ReadonlyMap<string, Task>,
+): ApprovalPlan {
+  const { targets, waves } = orderApprovalTargets(selected, tasksById);
+  let directCount = 0;
+  let upstreamCount = 0;
+  for (const t of targets) {
+    if (t.upstream) upstreamCount++;
+    else directCount++;
+  }
+  return { targets, waves, directCount, upstreamCount };
+}
+
+// collectWorkstreamApprovals gathers every proposed task in `stream` plus any
+// transitive upstream `dependsOn` proposed tasks blocking non-done work in the
+// stream (including cross-stream and standalone prerequisites), ordered
+// topologically upstream-first.
+export function collectWorkstreamApprovals(
+  stream: Workstream,
+  tasksById: ReadonlyMap<string, Task>,
+  opts: ApprovalPlanOptions = {},
+): ApprovalPlan {
+  const lookup = new Map<string, Task>(tasksById);
+  const inStreamIds = new Set<string>();
+  for (const n of stream.nodes) {
+    if (n.virtual) continue;
+    inStreamIds.add(n.id);
+    if (!lookup.has(n.id)) lookup.set(n.id, n.task);
+  }
+
+  const canApprove = opts.canApprove;
+  const selected = new Map<string, ApprovalTarget>();
+  const walked = new Set<string>();
+  const depQueue: string[] = [];
+
+  for (const n of stream.nodes) {
+    if (n.virtual) continue;
+    const task = lookup.get(n.id) ?? n.task;
+    if (isConsoleTask(task)) continue;
+    if (task.state === "proposed") {
+      if (!canApprove || canApprove(task)) {
+        selected.set(
+          task.id,
+          makeApprovalTarget(task, false, opts.taskToStream),
+        );
+      }
+    }
+    if (!isTaskDone(task) || task.state === "proposed") {
+      walked.add(task.id);
+      for (const depId of task.dependsOn ?? []) {
+        if (depId && !walked.has(depId)) depQueue.push(depId);
+      }
+    }
+  }
+
+  while (depQueue.length > 0) {
+    const depId = depQueue.shift()!;
+    if (!depId || walked.has(depId)) continue;
+    walked.add(depId);
+    const dep = lookup.get(depId);
+    if (!dep || isConsoleTask(dep) || isTaskDone(dep)) continue;
+    if (dep.state === "proposed" && !inStreamIds.has(dep.id)) {
+      if (!canApprove || canApprove(dep)) {
+        selected.set(dep.id, makeApprovalTarget(dep, true, opts.taskToStream));
+      }
+    }
+    for (const nextDep of dep.dependsOn ?? []) {
+      if (nextDep && !walked.has(nextDep)) depQueue.push(nextDep);
+    }
+  }
+
+  return finalizeApprovalPlan(selected, lookup);
+}
+
+// collectTaskUpstreamApprovals gathers the transitive upstream `dependsOn`
+// proposed tasks for `taskId` (plus `taskId` itself when proposed and
+// `includeSelf !== false`), ordered topologically upstream-first.
+export function collectTaskUpstreamApprovals(
+  taskId: string,
+  tasksById: ReadonlyMap<string, Task>,
+  opts: ApprovalPlanOptions = {},
+): ApprovalPlan {
+  const start = tasksById.get(taskId);
+  if (!start || isConsoleTask(start)) {
+    return { targets: [], waves: [], directCount: 0, upstreamCount: 0 };
+  }
+
+  const canApprove = opts.canApprove;
+  const includeSelf = opts.includeSelf !== false;
+  const selected = new Map<string, ApprovalTarget>();
+
+  if (includeSelf && start.state === "proposed") {
+    if (!canApprove || canApprove(start)) {
+      selected.set(
+        start.id,
+        makeApprovalTarget(start, false, opts.taskToStream),
+      );
+    }
+  }
+
+  const walked = new Set<string>([start.id]);
+  const depQueue: string[] = [...(start.dependsOn ?? [])];
+  while (depQueue.length > 0) {
+    const depId = depQueue.shift()!;
+    if (!depId || walked.has(depId)) continue;
+    walked.add(depId);
+    const dep = tasksById.get(depId);
+    if (!dep || isConsoleTask(dep) || isTaskDone(dep)) continue;
+    if (dep.state === "proposed") {
+      if (!canApprove || canApprove(dep)) {
+        selected.set(dep.id, makeApprovalTarget(dep, true, opts.taskToStream));
+      }
+    }
+    for (const nextDep of dep.dependsOn ?? []) {
+      if (nextDep && !walked.has(nextDep)) depQueue.push(nextDep);
+    }
+  }
+
+  return finalizeApprovalPlan(selected, tasksById);
+}
+
+export function formatApproveAllLabel(
+  plan: Pick<ApprovalPlan, "targets" | "directCount" | "upstreamCount">,
+  opts: { forTask?: boolean } = {},
+): string {
+  const total = plan.targets.length;
+  if (total === 0) return "";
+  if (opts.forTask) {
+    if (plan.directCount > 0 && plan.upstreamCount > 0) {
+      return `Approve with ${plan.upstreamCount} upstream`;
+    }
+    if (plan.upstreamCount > 0) {
+      return `Approve ${plan.upstreamCount} upstream`;
+    }
+    return "Approve";
+  }
+  if (plan.directCount === 0 && plan.upstreamCount > 0) {
+    return `Approve ${plan.upstreamCount} upstream`;
+  }
+  if (plan.upstreamCount > 0) {
+    return `Approve all ${total} (${plan.upstreamCount} upstream)`;
+  }
+  return total === 1 ? "Approve 1 proposal" : `Approve all ${total}`;
 }

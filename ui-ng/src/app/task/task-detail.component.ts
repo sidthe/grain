@@ -95,7 +95,13 @@ import {
   stateLabel,
   taskStateLabel,
 } from "../tasks/task-view";
-import { WorkstreamsStore } from "../workstreams/workstreams.store";
+import { formatApproveAllLabel } from "../workstreams/workstream-model";
+import {
+  type ApproveBatchResult,
+  EMPTY_APPROVE_PREVIEW,
+  type StreamApprovePreview,
+  WorkstreamsStore,
+} from "../workstreams/workstreams.store";
 import { TaskChangesTabComponent } from "./task-changes-tab.component";
 import { TaskDocsTabComponent } from "./task-docs-tab.component";
 import {
@@ -356,6 +362,35 @@ export function duration(from?: string, to?: string): string {
                 (click)="approve()"
               >
                 Approve
+              </button>
+            }
+            @if (
+              !from()?.startsWith("workstreams:") &&
+              upstreamApproval().upstreamCount > 0
+            ) {
+              <button
+                type="button"
+                class="btn-tonal"
+                data-testid="act-approve-upstream"
+                [disabled]="
+                  wsStore.busy() !== null || store.isBusy('approve', t.id)
+                "
+                (click)="confirmApproveUpstream()"
+              >
+                {{ upstreamApproveLabel() }}
+              </button>
+            }
+            @if (showRootWorkstreamApprove()) {
+              <button
+                type="button"
+                class="btn-tonal"
+                data-testid="act-approve-workstream"
+                [disabled]="
+                  wsStore.busy() !== null || store.isBusy('approve', t.id)
+                "
+                (click)="confirmApproveWorkstream()"
+              >
+                {{ treeApproveLabel() }}
               </button>
             }
             @if (
@@ -1259,27 +1294,51 @@ export function duration(from?: string, to?: string): string {
                   @if (store.treeError(); as err) {
                     <p class="banner banner-error" role="alert">{{ err }}</p>
                   } @else if (tree) {
-                    <p class="muted" data-testid="tree-summary">
-                      @if (tree.total) {
-                        {{ tree.done }} of {{ tree.total }} done
-                      } @else {
-                        Nothing has been filed from this task.
-                      }
-                      @if (partOfStream() || tree.origin) {
-                        ·
-                        <a
-                          [routerLink]="[
-                            '/workstreams',
-                            partOfStream()?.key ||
-                              tree.origin ||
-                              'task:' + t.id,
-                          ]"
-                          [queryParams]="{ node: t.id }"
-                          data-testid="open-in-workstreams"
-                          >Open in Workstreams</a
+                    <div
+                      style="
+                        display: flex;
+                        align-items: center;
+                        flex-wrap: wrap;
+                        gap: 8px 12px;
+                      "
+                    >
+                      <p
+                        class="muted"
+                        style="margin: 0"
+                        data-testid="tree-summary"
+                      >
+                        @if (tree.total) {
+                          {{ tree.done }} of {{ tree.total }} done
+                        } @else {
+                          Nothing has been filed from this task.
+                        }
+                        @if (partOfStream() || tree.origin) {
+                          ·
+                          <a
+                            [routerLink]="[
+                              '/workstreams',
+                              partOfStream()?.key ||
+                                tree.origin ||
+                                'task:' + t.id,
+                            ]"
+                            [queryParams]="{ node: t.id }"
+                            data-testid="open-in-workstreams"
+                            >Open in Workstreams</a
+                          >
+                        }
+                      </p>
+                      @if (treeApproval().targets.length > 0) {
+                        <button
+                          type="button"
+                          class="btn-tonal"
+                          data-testid="tree-approve-all"
+                          [disabled]="wsStore.busy() !== null"
+                          (click)="confirmApproveWorkstream()"
                         >
+                          {{ treeApproveLabel() }}
+                        </button>
                       }
-                    </p>
+                    </div>
                     <ul class="tree" aria-label="Work tree">
                       @for (n of tree.nodes; track n.id) {
                         <ng-container
@@ -1763,7 +1822,7 @@ export function duration(from?: string, to?: string): string {
 })
 export class TaskDetailComponent implements OnDestroy {
   protected readonly store = inject(TaskStore);
-  private readonly wsStore = inject(WorkstreamsStore);
+  protected readonly wsStore = inject(WorkstreamsStore);
   private readonly api = inject(GrainApi);
   private readonly feed = inject(TaskFeedStore);
   private readonly access = inject(AccessService);
@@ -1997,6 +2056,34 @@ export class TaskDetailComponent implements OnDestroy {
   protected readonly partOfStream = computed(() => {
     const id = this.t()?.id;
     return id ? (this.wsStore.taskToStream().get(id) ?? null) : null;
+  });
+  protected readonly upstreamApproval = computed<StreamApprovePreview>(() => {
+    const t = this.t();
+    if (!t || t.id !== this.id()) return EMPTY_APPROVE_PREVIEW;
+    return this.wsStore.approveUpstreamPreview(t.id, {
+      includeSelf: t.state === "proposed",
+      extraTasks: [t],
+    });
+  });
+  protected readonly upstreamApproveLabel = computed(() =>
+    formatApproveAllLabel(this.upstreamApproval(), { forTask: true }),
+  );
+  protected readonly treeApproval = computed<StreamApprovePreview>(() => {
+    const ps = this.partOfStream();
+    if (ps) return this.wsStore.approvePreview(ps);
+    return this.wsStore.approveTreePreview(this.store.tree(), this.t()?.repo);
+  });
+  protected readonly treeApproveLabel = computed(() =>
+    formatApproveAllLabel(this.treeApproval()),
+  );
+  protected readonly showRootWorkstreamApprove = computed(() => {
+    if (this.from()?.startsWith("workstreams:")) return false;
+    const t = this.t();
+    const ps = this.partOfStream();
+    if (!t || !ps || ps.rootId !== t.id) return false;
+    const ap = this.treeApproval();
+    if (ap.targets.length === 0) return false;
+    return t.state !== "proposed" || ap.targets.length > 1;
   });
   protected readonly current = computed<TaskTab>(() => {
     if (this.forceConversationTab()) return "conversation";
@@ -2414,7 +2501,13 @@ export class TaskDetailComponent implements OnDestroy {
     effect(() => {
       const t = this.t();
       const tree = this.store.tree();
-      if (t && (t.origin || t.generatedFrom || (tree?.total ?? 0) > 0)) {
+      if (
+        t &&
+        (t.origin ||
+          t.generatedFrom ||
+          (t.dependsOn?.length ?? 0) > 0 ||
+          (tree?.total ?? 0) > 0)
+      ) {
         untracked(() => this.wsStore.ensureLoaded(false));
       }
     });
@@ -2609,6 +2702,74 @@ export class TaskDetailComponent implements OnDestroy {
     ) {
       this.done(`Approved #${id}; it is in the Backlog`);
     }
+  }
+
+  private async finishBatchApproval(res: ApproveBatchResult): Promise<void> {
+    await this.store.refresh();
+    if (this.current() === "tree" || this.store.tree()) {
+      await this.store.loadTree();
+    }
+    this.acted.emit();
+    const noun = res.succeeded === 1 ? "task" : "tasks";
+    const msg = res.failed
+      ? `Approved ${res.succeeded} of ${res.succeeded + res.failed}`
+      : `Approved ${res.succeeded} ${noun}`;
+    const canUndo =
+      res.approvedIds.length > 0 &&
+      this.wsStore.canWithdrawApprovals(res.approvedTasks);
+    this.snackbar.show(
+      msg,
+      canUndo
+        ? {
+            label: "Undo",
+            run: async () => {
+              const undo = await this.wsStore.withdrawApprovals(
+                res.approvedIds,
+              );
+              await this.store.refresh();
+              if (this.current() === "tree" || this.store.tree()) {
+                await this.store.loadTree();
+              }
+              this.acted.emit();
+              this.snackbar.show(
+                undo.failed
+                  ? `Withdrew ${undo.succeeded} of ${undo.succeeded + undo.failed} approvals`
+                  : `Withdrew approval for ${undo.succeeded} ${undo.succeeded === 1 ? "task" : "tasks"}`,
+              );
+            },
+          }
+        : undefined,
+    );
+  }
+
+  protected confirmApproveUpstream(): void {
+    const t = this.t();
+    if (!t || t.id !== this.id()) return;
+    const req = this.wsStore.buildApproveConfirm({
+      subjectTitle: t.title || `Task #${t.id}`,
+      preview: this.upstreamApproval(),
+      forTaskId: t.id,
+      run: async (snapshot) => {
+        const res = await this.wsStore.approveWaves(snapshot.waves);
+        await this.finishBatchApproval(res);
+      },
+    });
+    if (req) this.confirming.set(req);
+  }
+
+  protected confirmApproveWorkstream(): void {
+    const t = this.t();
+    if (!t) return;
+    const ps = this.partOfStream();
+    const req = this.wsStore.buildApproveConfirm({
+      subjectTitle: ps?.title || t.title || `Task #${t.id}`,
+      preview: this.treeApproval(),
+      run: async (snapshot) => {
+        const res = await this.wsStore.approveWaves(snapshot.waves);
+        await this.finishBatchApproval(res);
+      },
+    });
+    if (req) this.confirming.set(req);
   }
 
   protected reply(): void {

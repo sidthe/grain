@@ -100,7 +100,14 @@ import {
   timelineEndMs,
 } from "./task-view";
 import { type BatchResult, type Undo, TasksStore } from "./tasks.store";
-import { WorkstreamsStore } from "../workstreams/workstreams.store";
+import {
+  type Workstream,
+  formatApproveAllLabel,
+} from "../workstreams/workstream-model";
+import {
+  type StreamApprovePreview,
+  WorkstreamsStore,
+} from "../workstreams/workstreams.store";
 
 export type TasksGroupBy = "none" | "workstream" | "repo";
 
@@ -640,12 +647,36 @@ function needsApproval(t: Task): boolean {
                         class="band"
                         [attr.aria-labelledby]="'tgrp-' + $index"
                       >
-                        <h2 class="band-header" [id]="'tgrp-' + $index">
-                          {{ g.label }}
-                          <span class="tabular muted">{{
-                            g.tasks.length
-                          }}</span>
-                        </h2>
+                        <div class="band-head-row">
+                          <h2 class="band-header" [id]="'tgrp-' + $index">
+                            {{ g.label }}
+                            <span class="tabular muted">{{
+                              g.tasks.length
+                            }}</span>
+                          </h2>
+                          @if (
+                            g.stream &&
+                            g.approvePreview &&
+                            g.approvePreview.targets.length > 0
+                          ) {
+                            <button
+                              type="button"
+                              class="btn-tonal band-approve-btn"
+                              [attr.data-testid]="
+                                'tasks-group-approve-' + g.key
+                              "
+                              [disabled]="wsStore.busy() !== null"
+                              (click)="
+                                confirmApproveWorkstream(
+                                  g.stream,
+                                  g.approvePreview
+                                )
+                              "
+                            >
+                              {{ approveWorkstreamLabel(g.approvePreview) }}
+                            </button>
+                          }
+                        </div>
                         <ul class="task-rows">
                           @for (t of g.tasks; track t.id) {
                             <ng-container
@@ -747,82 +778,62 @@ function needsApproval(t: Task): boolean {
                       No proposals are waiting for approval.
                     </p>
                   }
-                  <ul class="task-rows">
-                    @for (t of rows(); track t.id) {
-                      @let place = placementOf(t);
-                      <li
-                        class="task-row approval-row"
-                        [class.is-selected]="effectiveSelectedId() === t.id"
-                        [attr.data-testid]="'row-' + t.id"
-                        [attr.data-task-id]="t.id"
+                  @if (groupBy() !== "none") {
+                    @for (g of groupedRows(); track g.key) {
+                      <section
+                        class="band"
+                        [attr.aria-labelledby]="'tpropgrp-' + $index"
                       >
-                        <input
-                          type="checkbox"
-                          [attr.aria-label]="'Select #' + t.id"
-                          [checked]="checked().has(t.id)"
-                          (change)="toggle(t.id)"
-                        />
-                        <span class="status-pill proposal"
-                          ><g-status-icon tone="proposal" kind="proposed" />{{
-                            label(t)
-                          }}</span
-                        >
-                        <div class="row-main">
-                          <ng-container
-                            [ngTemplateOutlet]="titleLink"
-                            [ngTemplateOutletContext]="{ $implicit: t }"
-                          />
-                          <span class="row-sub muted">
-                            <ng-container
-                              [ngTemplateOutlet]="scopeLine"
-                              [ngTemplateOutletContext]="{ $implicit: t }"
-                            />
-                            @if (filer(t); as who) {
-                              <span
-                                >· filed by
-                                <g-actor-chip
-                                  [label]="who"
-                                  [kind]="t.authorKind"
-                              /></span>
-                            }
-                            <span>
-                              · If approved: position {{ place.position }} of
-                              {{ place.of }}, {{ place.band }}
-                            </span>
-                          </span>
-                        </div>
-                        <ng-container
-                          [ngTemplateOutlet]="priorityChip"
-                          [ngTemplateOutletContext]="{
-                            $implicit: t,
-                            editable: true,
-                          }"
-                        />
-                        <span class="row-actions">
-                          @if (canApproveTask(t)) {
+                        <div class="band-head-row">
+                          <h2 class="band-header" [id]="'tpropgrp-' + $index">
+                            {{ g.label }}
+                            <span class="tabular muted">{{
+                              g.tasks.length
+                            }}</span>
+                          </h2>
+                          @if (
+                            g.stream &&
+                            g.approvePreview &&
+                            g.approvePreview.targets.length > 0
+                          ) {
                             <button
                               type="button"
-                              class="btn-tonal"
-                              [attr.data-testid]="'approve-' + t.id"
-                              [disabled]="store.isBusy('approve')"
-                              (click)="approve([t.id])"
+                              class="btn-tonal band-approve-btn"
+                              [attr.data-testid]="
+                                'tasks-group-approve-' + g.key
+                              "
+                              [disabled]="wsStore.busy() !== null"
+                              (click)="
+                                confirmApproveWorkstream(
+                                  g.stream,
+                                  g.approvePreview
+                                )
+                              "
                             >
-                              Approve
+                              {{ approveWorkstreamLabel(g.approvePreview) }}
                             </button>
                           }
-                          <button
-                            type="button"
-                            class="btn-text"
-                            [disabled]="!canDeferTask(t)"
-                            [attr.data-testid]="'defer-' + t.id"
-                            (click)="defer([t.id])"
-                          >
-                            Defer
-                          </button>
-                        </span>
-                      </li>
+                        </div>
+                        <ul class="task-rows">
+                          @for (t of g.tasks; track t.id) {
+                            <ng-container
+                              [ngTemplateOutlet]="proposalRow"
+                              [ngTemplateOutletContext]="{ $implicit: t }"
+                            />
+                          }
+                        </ul>
+                      </section>
                     }
-                  </ul>
+                  } @else {
+                    <ul class="task-rows">
+                      @for (t of rows(); track t.id) {
+                        <ng-container
+                          [ngTemplateOutlet]="proposalRow"
+                          [ngTemplateOutletContext]="{ $implicit: t }"
+                        />
+                      }
+                    </ul>
+                  }
                 }
 
                 @default {
@@ -866,12 +877,36 @@ function needsApproval(t: Task): boolean {
                         class="band"
                         [attr.aria-labelledby]="'tdefgrp-' + $index"
                       >
-                        <h2 class="band-header" [id]="'tdefgrp-' + $index">
-                          {{ g.label }}
-                          <span class="tabular muted">{{
-                            g.tasks.length
-                          }}</span>
-                        </h2>
+                        <div class="band-head-row">
+                          <h2 class="band-header" [id]="'tdefgrp-' + $index">
+                            {{ g.label }}
+                            <span class="tabular muted">{{
+                              g.tasks.length
+                            }}</span>
+                          </h2>
+                          @if (
+                            g.stream &&
+                            g.approvePreview &&
+                            g.approvePreview.targets.length > 0
+                          ) {
+                            <button
+                              type="button"
+                              class="btn-tonal band-approve-btn"
+                              [attr.data-testid]="
+                                'tasks-group-approve-' + g.key
+                              "
+                              [disabled]="wsStore.busy() !== null"
+                              (click)="
+                                confirmApproveWorkstream(
+                                  g.stream,
+                                  g.approvePreview
+                                )
+                              "
+                            >
+                              {{ approveWorkstreamLabel(g.approvePreview) }}
+                            </button>
+                          }
+                        </div>
                         <ul class="task-rows">
                           @for (t of g.tasks; track t.id) {
                             <ng-container
@@ -1423,6 +1458,76 @@ function needsApproval(t: Task): boolean {
       }
     </ng-template>
 
+    <ng-template #proposalRow let-t>
+      @let place = placementOf(t);
+      <li
+        class="task-row approval-row"
+        [class.is-selected]="effectiveSelectedId() === t.id"
+        [attr.data-testid]="'row-' + t.id"
+        [attr.data-task-id]="t.id"
+      >
+        <input
+          type="checkbox"
+          [attr.aria-label]="'Select #' + t.id"
+          [checked]="checked().has(t.id)"
+          (change)="toggle(t.id)"
+        />
+        <span class="status-pill proposal"
+          ><g-status-icon tone="proposal" kind="proposed" />{{ label(t) }}</span
+        >
+        <div class="row-main">
+          <ng-container
+            [ngTemplateOutlet]="titleLink"
+            [ngTemplateOutletContext]="{ $implicit: t }"
+          />
+          <span class="row-sub muted">
+            <ng-container
+              [ngTemplateOutlet]="scopeLine"
+              [ngTemplateOutletContext]="{ $implicit: t }"
+            />
+            @if (filer(t); as who) {
+              <span
+                >· filed by <g-actor-chip [label]="who" [kind]="t.authorKind"
+              /></span>
+            }
+            <span>
+              · If approved: position {{ place.position }} of {{ place.of }},
+              {{ place.band }}
+            </span>
+          </span>
+        </div>
+        <ng-container
+          [ngTemplateOutlet]="priorityChip"
+          [ngTemplateOutletContext]="{
+            $implicit: t,
+            editable: true,
+          }"
+        />
+        <span class="row-actions">
+          @if (canApproveTask(t)) {
+            <button
+              type="button"
+              class="btn-tonal"
+              [attr.data-testid]="'approve-' + t.id"
+              [disabled]="store.isBusy('approve')"
+              (click)="approve([t.id])"
+            >
+              Approve
+            </button>
+          }
+          <button
+            type="button"
+            class="btn-text"
+            [disabled]="!canDeferTask(t)"
+            [attr.data-testid]="'defer-' + t.id"
+            (click)="defer([t.id])"
+          >
+            Defer
+          </button>
+        </span>
+      </li>
+    </ng-template>
+
     <ng-template #selectAll>
       <div class="list-toolbar select-toolbar">
         <label class="check-row">
@@ -1601,7 +1706,7 @@ function needsApproval(t: Task): boolean {
 })
 export class TasksPageComponent implements OnInit, OnDestroy {
   protected readonly store = inject(TasksStore);
-  private readonly wsStore = inject(WorkstreamsStore);
+  protected readonly wsStore = inject(WorkstreamsStore);
   private readonly access = inject(AccessService);
   private readonly directorCtx = inject(DirectorContextService);
   private readonly snackbar = inject(SnackbarService);
@@ -1766,7 +1871,13 @@ export class TasksPageComponent implements OnInit, OnDestroy {
     if (mode === "none") return [];
     const groups = new Map<
       string,
-      { key: string; label: string; tasks: Task[] }
+      {
+        key: string;
+        label: string;
+        tasks: Task[];
+        stream: Workstream | null;
+        approvePreview: StreamApprovePreview | null;
+      }
     >();
     for (const t of list) {
       const ps = mode === "workstream" ? this.partOf(t.id) : null;
@@ -1780,7 +1891,13 @@ export class TasksPageComponent implements OnInit, OnDestroy {
           : t.repo || "No repository";
       let g = groups.get(key);
       if (!g) {
-        g = { key, label, tasks: [] };
+        g = {
+          key,
+          label,
+          tasks: [],
+          stream: ps,
+          approvePreview: ps ? this.wsStore.approvePreview(ps) : null,
+        };
         groups.set(key, g);
       }
       g.tasks.push(t);
@@ -2787,6 +2904,51 @@ export class TasksPageComponent implements OnInit, OnDestroy {
   // confirmApprove asks before approving several tasks. The rows are
   // fixed when the button is pressed; the dialog counts them per
   // repository and owner and the batch approves exactly these.
+  protected approveWorkstreamLabel(p: StreamApprovePreview): string {
+    return formatApproveAllLabel(p);
+  }
+
+  protected confirmApproveWorkstream(
+    s: Workstream,
+    preview: StreamApprovePreview,
+  ): void {
+    const req = this.wsStore.buildApproveConfirm({
+      subjectTitle: s.title,
+      preview,
+      run: async (snapshot) => {
+        const res = await this.wsStore.approveWaves(snapshot.waves);
+        await this.store.refresh();
+        const noun = res.succeeded === 1 ? "task" : "tasks";
+        const msg = res.failed
+          ? `Approved ${res.succeeded} of ${res.succeeded + res.failed}`
+          : `Approved ${res.succeeded} ${noun}`;
+        const canUndo =
+          res.approvedIds.length > 0 &&
+          this.wsStore.canWithdrawApprovals(res.approvedTasks);
+        this.snackbar.show(
+          msg,
+          canUndo
+            ? {
+                label: "Undo",
+                run: async () => {
+                  const undo = await this.wsStore.withdrawApprovals(
+                    res.approvedIds,
+                  );
+                  await this.store.refresh();
+                  this.snackbar.show(
+                    undo.failed
+                      ? `Withdrew ${undo.succeeded} of ${undo.succeeded + undo.failed} approvals`
+                      : `Withdrew approval for ${undo.succeeded} ${undo.succeeded === 1 ? "task" : "tasks"}`,
+                  );
+                },
+              }
+            : undefined,
+        );
+      },
+    });
+    if (req) this.confirming.set(req);
+  }
+
   protected confirmApprove(rows: readonly Task[]): void {
     const ids = rows.map((t) => t.id);
     if (!ids.length) return;

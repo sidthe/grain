@@ -510,4 +510,102 @@ describe("WorkstreamsStore", () => {
     expect(store.byKey().get("task:100")?.goal).toBe("Goal for 100");
     expect(store.byKey().get("task:274")?.goal).toBe("Goal for 274");
   });
+
+  it("approves cross-stream and standalone upstream tasks in wave order and withdraws in reverse order", async () => {
+    api.open = [
+      mkTask("88", {
+        title: "Standalone prereq",
+        state: "proposed",
+        repo: "sidthe/core",
+      }),
+      mkTask("90", { title: "Upstream stream", state: "completed" }),
+      mkTask("91", {
+        title: "Upstream step",
+        state: "proposed",
+        origin: "task:90",
+        generatedFrom: "90",
+        dependsOn: ["88"],
+      }),
+      mkTask("100", { title: "Main stream", state: "completed" }),
+      mkTask("102", {
+        title: "Wave 1",
+        state: "proposed",
+        origin: "task:100",
+        generatedFrom: "100",
+        dependsOn: ["91"],
+      }),
+      mkTask("101", {
+        title: "Wave 2",
+        state: "proposed",
+        origin: "task:100",
+        generatedFrom: "100",
+        dependsOn: ["102"],
+      }),
+    ];
+
+    await store.refresh(true);
+    api.calls = [];
+
+    const ws = store.byKey().get("task:100")!;
+    const preview = store.approvePreview(ws);
+    expect(preview.targets.map((x) => x.id)).toEqual([
+      "88",
+      "91",
+      "102",
+      "101",
+    ]);
+    expect(preview.directCount).toBe(2);
+    expect(preview.upstreamCount).toBe(2);
+    expect(preview.scope.repos.map((r) => r.name).sort()).toEqual([
+      "sidthe/core",
+      "sidthe/grain-scratch-repo",
+    ]);
+
+    const res = await store.approveWaves(preview.waves);
+    expect(res.succeeded).toBe(4);
+    expect(res.failed).toBe(0);
+    expect(res.approvedIds).toEqual(["88", "91", "102", "101"]);
+    const approvedOrder = api.calls
+      .filter((c) => c.route === "POST /api/tasks/{id}/approve")
+      .map((c) => (c.params as { id: string }).id);
+    expect(approvedOrder).toEqual(["88", "91", "102", "101"]);
+
+    // Withdrawals run downstream-first (reverse order).
+    api.calls = [];
+    const undo = await store.withdrawApprovals(res.approvedIds);
+    expect(undo).toEqual({ succeeded: 4, failed: 0 });
+    const withdrawnOrder = api.calls
+      .filter((c) => c.route === "POST /api/tasks/{id}/withdraw-approval")
+      .map((c) => (c.params as { id: string }).id);
+    expect(withdrawnOrder).toEqual(["101", "102", "91", "88"]);
+
+    // approveTreePreview recognizes server's "planned" status and upstream deps.
+    const treePrev = store.approveTreePreview(
+      {
+        origin: "task:100",
+        done: 0,
+        total: 2,
+        nodes: [
+          {
+            id: "100",
+            title: "Main stream",
+            status: "done",
+            done: true,
+            root: true,
+            children: [
+              { id: "102", title: "Wave 1", status: "planned", done: false },
+              { id: "101", title: "Wave 2", status: "planned", done: false },
+            ],
+          },
+        ],
+      },
+      "sidthe/grain-scratch-repo",
+    );
+    expect(treePrev.targets.map((x) => x.id)).toEqual([
+      "88",
+      "91",
+      "102",
+      "101",
+    ]);
+  });
 });
