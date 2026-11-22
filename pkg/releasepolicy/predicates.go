@@ -24,8 +24,6 @@ import (
 	"strings"
 )
 
-var releaseTagPattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
-var retractedTagPattern = regexp.MustCompile(`^(v[0-9]+\.[0-9]+\.[0-9]+)-retracted$`)
 var releaseMajorConfPattern = regexp.MustCompile(`^RELEASE_MAJOR="?([0-9]+)"?[ \t]*(?:#.*)?$`)
 var releaseNeverPromoteQuotedPattern = regexp.MustCompile(`^RELEASE_NEVER_PROMOTE="([^"]*)"[ \t]*(?:#.*)?$`)
 var releaseNeverPromoteBarePattern = regexp.MustCompile(`^RELEASE_NEVER_PROMOTE=([^"#\r\n]*?)[ \t]*(?:#.*)?$`)

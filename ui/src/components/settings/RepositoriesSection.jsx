@@ -299,7 +299,7 @@ function declarationsText(defaults) {
 const DEFAULT_SKILL_FOLDERS_KEY =
   ".claude/skills,.agents/skills,.codex/skills,.gemini/skills,skills";
 
-export function skillsText(defaults) {
+function skillsText(defaults) {
   if (defaults === undefined) return "…";
   if (!defaults) return "Unknown";
   if (Array.isArray(defaults.effectiveSkillFolders)) {

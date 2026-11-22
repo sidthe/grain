@@ -20,12 +20,12 @@
 // via comments_before= / attempts_before=, and mergeFreshDetail keeps any
 // earlier pages the reader has already opened when a poll refreshes the head.
 
-export const TASK_COMMENTS_LIMIT = 50;
-export const TASK_ATTEMPTS_LIMIT = 20;
+const TASK_COMMENTS_LIMIT = 50;
+const TASK_ATTEMPTS_LIMIT = 20;
 // TASK_DETAIL_MAX_PAGE is the largest page GET /api/tasks/<id> serves
 // (pkg/ui's maxTaskDetailPage); a deep link to an old comment pages back
 // this many at a time.
-export const TASK_DETAIL_MAX_PAGE = 500;
+const TASK_DETAIL_MAX_PAGE = 500;
 
 export function taskDetailPath(id) {
   return `/api/tasks/${encodeURIComponent(id)}?comments_limit=${TASK_COMMENTS_LIMIT}&attempts_limit=${TASK_ATTEMPTS_LIMIT}`;

@@ -54,21 +54,16 @@ func (c *Client) baseBranchPublishing(ctx context.Context) []BaseBranchPublishin
 	return out
 }
 
-// baseBranchPublishingFor is the same reading for one repository, for its
+// baseBranchPublishingForBranch is the same reading for one repository, for its
 // own release pane to put beside the switch that decides whether it
 // publishes at all. nil when that repository is shipping, which is one
 // alert fewer rather than a reassurance.
 //
-// Where a repository has several base branches the one that has been
-// failing longest is reported: the pane is a paragraph beside a switch
-// rather than a table.
-func (c *Client) baseBranchPublishingFor(ctx context.Context, repo model.RepoRef) *BaseBranchPublishing {
-	return c.baseBranchPublishingForBranch(ctx, repo, "")
-}
-
-// baseBranchPublishingForBranch scopes baseBranchPublishingFor to branch when
-// branch is non-empty (matching findings with empty branch or the named
-// branch), so a caller asking about main is not masked by another branch.
+// When branch is non-empty, findings are scoped to empty branch or the named
+// branch so a caller asking about main is not masked by another branch.
+// Where several matching base branches exist, the one that has been failing
+// longest is reported: the pane is a paragraph beside a switch rather than a
+// table.
 func (c *Client) baseBranchPublishingForBranch(ctx context.Context, repo model.RepoRef, branch string) *BaseBranchPublishing {
 	branch = strings.TrimSpace(branch)
 	var worst *BaseBranchPublishing

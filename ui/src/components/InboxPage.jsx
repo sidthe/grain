@@ -1285,7 +1285,7 @@ const classicAsked =
   typeof window !== "undefined" &&
   new URLSearchParams(window.location?.search || "").has("classic");
 
-export function preferNextInbox() {
+function preferNextInbox() {
   if (classicAsked) return false;
   try {
     return localStorage.getItem(PREFER_NEXT_KEY) === "1";
