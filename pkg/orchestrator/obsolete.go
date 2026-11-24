@@ -342,14 +342,22 @@ func stopOnExpiredHostCredentials(ctx context.Context, store *model.Store, task 
 
 	log.Printf("orchestrator: task %s could not start a host tool, its host credentials have expired; parking it rather than retrying",
 		task.ID)
+	return parkOnHostCredentials(ctx, store, task, fmt.Sprintf("This task's run could not start: %s.", strings.TrimRight(why, ".")), now)
+}
+
+// parkOnHostCredentials parks task on a comment that opens with what
+// happened -- a run that could not start (stopOnExpiredHostCredentials),
+// or one whose finish could not reach the forge (stopOnLapsedLoginAtFinish)
+// -- and goes on to say that renewing the host's login is what the task
+// waits on.
+func parkOnHostCredentials(ctx context.Context, store *model.Store, task model.Task, opening string, now time.Time) error {
 	commentID, err := store.AddComment(ctx, model.Comment{
 		TaskID: task.ID,
 		Author: model.Attribution{Actor: model.Principal{Kind: model.PrincipalAutomation, ID: "grain"}},
-		Body: fmt.Sprintf(
-			"This task's run could not start: %s.\n\n"+
-				"Every run on this host fails the same way until that is done, whatever the task, so grain has "+
-				"parked this one rather than retrying it, and has not counted the attempt against it. "+
-				"Reply here once that has been done to have it dispatched again.", strings.TrimRight(why, ".")),
+		Body: opening + "\n\n" +
+			"Every run on this host fails the same way until that is done, whatever the task, so grain has " +
+			"parked this one rather than retrying it, and has not counted the attempt against it. " +
+			"Reply here once that has been done to have it dispatched again.",
 		CreatedAt: now,
 	})
 	if err != nil {
@@ -380,9 +388,9 @@ func stopOnExpiredHostCredentials(ctx context.Context, store *model.Store, task 
 // dependency is dropped with it. A running older review is left to finish,
 // and one whose stacked pull request is merging is left to merge.
 func releaseStaleReviewDependencies(ctx context.Context, store *model.Store, now time.Time) error {
-	ids, err := store.OpenTasksWithLink(ctx, model.LinkDependsOn)
+	ids, err := store.OpenPathTriggerReviewsWithDependencies(ctx)
 	if err != nil {
-		return fmt.Errorf("orchestrator: reading tasks with dependencies: %w", err)
+		return fmt.Errorf("orchestrator: reading review tasks with dependencies: %w", err)
 	}
 	var errs []error
 	for _, id := range ids {

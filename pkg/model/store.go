@@ -62,6 +62,9 @@ type Store struct {
 	// contention still goes through busy_timeout and write's retry loop.
 	// Nil on PostgreSQL, which executes concurrent writers in parallel.
 	writeSem chan struct{}
+	// prepared is the querier the hottest single-row reads go through
+	// (preparedReads, Store.reads).
+	prepared *preparedReads
 	// id is a monotonically increasing process-local identifier assigned in
 	// New, so callers keying process-memory state by a Store (such as
 	// orchestrator's pathTriggerPolled) never collide when the garbage
@@ -144,7 +147,7 @@ var nextStoreID atomic.Uint64
 // New wraps an already-open database. It runs nothing against it: Init
 // is what creates and migrates the schema.
 func New(db *sql.DB) *Store {
-	s := &Store{db: db, id: nextStoreID.Add(1)}
+	s := &Store{db: db, prepared: newPreparedReads(db), id: nextStoreID.Add(1)}
 	if db != nil && !IsPostgresDB(db) {
 		s.writeSem = make(chan struct{}, 1)
 	}
@@ -538,6 +541,12 @@ func (s *Store) signalChanged() {
 //
 // A miss here costs a pointless surfaced error rather than a wrong
 // answer, and the pinning test is there to catch a reword.
+//
+// Postgres codes are matched as pgconn prints them, "(SQLSTATE 40001)",
+// never as bare digits: an error can carry arbitrary text -- a config
+// refusal quotes its whole patch, timestamps included -- and a
+// nanosecond stamp like "46.400011603" holds "40001", which read a
+// refusal as a lost race and retried it into ErrConflict.
 func isSerializationFailure(err error) bool {
 	if err == nil {
 		return false
@@ -546,9 +555,9 @@ func isSerializationFailure(err error) bool {
 	for _, marker := range []string{
 		"database is locked",
 		"SQLITE_BUSY",
-		"40001",
-		"40P01",
-		"55P03",
+		"SQLSTATE 40001",
+		"SQLSTATE 40P01",
+		"SQLSTATE 55P03",
 		"could not serialize access",
 		"deadlock detected",
 		"lock timeout",
@@ -1419,7 +1428,7 @@ func (s *Store) GetAttachment(ctx context.Context, taskID string, id int64) (*At
 
 // GetTask returns a task, or nil if there is none with that ID.
 func (s *Store) GetTask(ctx context.Context, id string) (*Task, error) {
-	return getTask(ctx, s.db, id)
+	return getTask(ctx, s.reads(), id)
 }
 
 func getTask(ctx context.Context, q querier, id string) (*Task, error) {
@@ -2685,7 +2694,7 @@ func observe(ctx context.Context, tx *sql.Tx, o Observation) error {
 // GetObservation reads grain's observation row for taskID, nil with no
 // error for a task grain has not observed anything about yet.
 func (s *Store) GetObservation(ctx context.Context, taskID string) (*Observation, error) {
-	return getObservation(ctx, s.db, taskID)
+	return getObservation(ctx, s.reads(), taskID)
 }
 
 func getObservation(ctx context.Context, q querier, taskID string) (*Observation, error) {
@@ -3975,7 +3984,7 @@ func (s *Store) RunLeases(ctx context.Context, runID string) ([]Lease, error) {
 // aggregated.
 func (s *Store) Attempts(ctx context.Context, taskID string) (int, error) {
 	var n int
-	err := s.db.QueryRowContext(ctx,
+	err := s.reads().QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM `task_run` WHERE `task_id` = ?", taskID).Scan(&n)
 	return n, err
 }
@@ -4193,7 +4202,7 @@ const streakBatchSize = 32
 // happened last", not "how badly is this task going".
 func (s *Store) FailureStreak(ctx context.Context, taskID string) (*FailureStreak, error) {
 	var since time.Time
-	if obs, err := getObservation(ctx, s.db, taskID); err != nil {
+	if obs, err := getObservation(ctx, s.reads(), taskID); err != nil {
 		return nil, err
 	} else if obs != nil && obs.RetryRequestedAt != nil {
 		since = *obs.RetryRequestedAt
@@ -4210,7 +4219,7 @@ func (s *Store) FailureStreak(ctx context.Context, taskID string) (*FailureStrea
 			query += " OFFSET ?"
 			args = append(args, offset)
 		}
-		rows, err := s.db.QueryContext(ctx, query, args...)
+		rows, err := s.reads().QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -4685,7 +4694,7 @@ func (s *Store) ReadyTargets(ctx context.Context) ([]ReadyTarget, error) {
 // one row rather than the whole view re-read per dispatch.
 func (s *Store) IsReady(ctx context.Context, taskID string) (bool, error) {
 	var one int
-	err := s.db.QueryRowContext(ctx,
+	err := s.reads().QueryRowContext(ctx,
 		"SELECT 1 FROM `task_ready` WHERE `task_id` = ?", taskID).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -6410,15 +6419,49 @@ func (s *Store) PruneOffTargetPullRequestLinks(ctx context.Context) ([]TaskPullR
 
 // openPullRequestLinks is OpenPullRequestLinks' query, split into the
 // links it returns and those it leaves out for being off target.
+//
+// It drives off task_observation's partial indexes on open completed and
+// open merge-queue-repair rows instead of joining the task_state view over
+// every task in history: for a task that carries a LinkFixes row,
+// task_state reads 'completed' or 'awaiting_submit' iff closed_at IS NULL
+// AND completed_at IS NOT NULL, and the repair arm is strictly disjoint
+// (completed_at IS NULL AND merge_queue_repair_at IS NOT NULL).
 func (s *Store) openPullRequestLinks(ctx context.Context) (kept, off []TaskPullRequestLink, err error) {
-	return s.pullRequestLinksWhere(ctx,
-		"JOIN `task_state` AS `st` ON `st`.`task_id` = `l`.`task_id` "+
-			"LEFT JOIN `task` AS `t` ON `t`.`id` = `l`.`task_id` "+
-			"LEFT JOIN `task_observation` AS `o` ON `o`.`task_id` = `l`.`task_id` "+
-			"WHERE `l`.`kind` = ? AND (`st`.`state` IN (?, ?) OR ("+
-			"`o`.`merge_queue_repair_at` IS NOT NULL AND `o`.`completed_at` IS NULL "+
-			"AND `o`.`closed_at` IS NULL))",
-		string(LinkFixes), string(StateCompleted), string(StateAwaitingSubmit))
+	return s.selectPullRequestLinksQuery(ctx,
+		"SELECT `l`.`task_id`, `l`.`target`, `t`.`target_owner`, `t`.`target_name` "+
+			"FROM ("+
+			"SELECT `task_id` FROM `task_observation` WHERE `closed_at` IS NULL AND `completed_at` IS NOT NULL "+
+			"UNION ALL "+
+			"SELECT `task_id` FROM `task_observation` WHERE `closed_at` IS NULL AND `completed_at` IS NULL AND `merge_queue_repair_at` IS NOT NULL"+
+			") AS `cand` "+
+			"JOIN `task` AS `t` ON `t`.`id` = `cand`.`task_id` "+
+			"JOIN `task_link` AS `l` ON `l`.`task_id` = `cand`.`task_id` AND `l`.`kind` = ? "+
+			"ORDER BY `l`.`task_id`",
+		string(LinkFixes))
+}
+
+// OpenPullRequestLinksNeedingReview returns the subset of OpenPullRequestLinks
+// whose task declares a review template (Task.ReviewTemplateID), names a
+// target repository, and has not yet linked a review task (LinkReviewTask).
+// It keeps review reconciliation from loading tasks that declare no review or
+// already have one filed.
+func (s *Store) OpenPullRequestLinksNeedingReview(ctx context.Context) ([]TaskPullRequestLink, error) {
+	kept, _, err := s.selectPullRequestLinksQuery(ctx,
+		"SELECT `l`.`task_id`, `l`.`target`, `t`.`target_owner`, `t`.`target_name` "+
+			"FROM ("+
+			"SELECT `task_id` FROM `task_observation` WHERE `closed_at` IS NULL AND `completed_at` IS NOT NULL "+
+			"UNION ALL "+
+			"SELECT `task_id` FROM `task_observation` WHERE `closed_at` IS NULL AND `completed_at` IS NULL AND `merge_queue_repair_at` IS NOT NULL"+
+			") AS `cand` "+
+			"JOIN `task` AS `t` ON `t`.`id` = `cand`.`task_id` "+
+			"JOIN `task_link` AS `l` ON `l`.`task_id` = `cand`.`task_id` AND `l`.`kind` = ? "+
+			"WHERE `t`.`review_template_id` != '' "+
+			"AND `t`.`target_owner` IS NOT NULL AND `t`.`target_owner` != '' "+
+			"AND `t`.`target_name` IS NOT NULL AND `t`.`target_name` != '' "+
+			"AND NOT EXISTS (SELECT 1 FROM `task_link` AS `rl` WHERE `rl`.`task_id` = `t`.`id` AND `rl`.`kind` = ?) "+
+			"ORDER BY `l`.`task_id`",
+		string(LinkFixes), string(LinkReviewTask))
+	return kept, err
 }
 
 // ResumeLaterPullRequestLinks returns the fixes-links of every task
@@ -6478,14 +6521,20 @@ func (s *Store) ClosedUnsettledPullRequestLinks(ctx context.Context, since time.
 // split into the links it returns and those it leaves out for being off
 // target.
 func (s *Store) pullRequestLinksWhere(ctx context.Context, from string, args ...any) (kept, off []TaskPullRequestLink, err error) {
+	return s.selectPullRequestLinksQuery(ctx,
+		"SELECT `l`.`task_id`, `l`.`target`, `t`.`target_owner`, `t`.`target_name` FROM `task_link` AS `l` "+
+			from+" ORDER BY `l`.`task_id`",
+		args...)
+}
+
+func (s *Store) selectPullRequestLinksQuery(ctx context.Context, query string, args ...any) (kept, off []TaskPullRequestLink, err error) {
 	type row struct {
 		link   TaskPullRequestLink
 		target *RepoRef
 	}
 	var rows []row
 	err = each(ctx, s.db,
-		"SELECT `l`.`task_id`, `l`.`target`, `t`.`target_owner`, `t`.`target_name` FROM `task_link` AS `l` "+
-			from+" ORDER BY `l`.`task_id`",
+		query,
 		args,
 		func(r *sql.Rows) error {
 			var l TaskPullRequestLink
@@ -7504,8 +7553,9 @@ func (s *Store) HasOpenTaskWithTag(ctx context.Context, tag string) (bool, error
 	var n int
 	err := s.db.QueryRowContext(ctx,
 		"SELECT COUNT(*) FROM `task_tag` AS `tg` "+
-			"JOIN `task_state` AS `st` ON `st`.`task_id` = `tg`.`task_id` "+
-			"WHERE `tg`.`tag` = ? AND `st`.`state` != ?", tag, string(StateClosed)).Scan(&n)
+			"JOIN `task` AS `t` ON `t`.`id` = `tg`.`task_id` "+
+			"LEFT JOIN `task_observation` AS `o` ON `o`.`task_id` = `tg`.`task_id` "+
+			"WHERE `tg`.`tag` = ? AND `o`.`closed_at` IS NULL", tag).Scan(&n)
 	if err != nil {
 		return false, fmt.Errorf("checking for an open task tagged %s: %w", tag, err)
 	}
@@ -7530,11 +7580,11 @@ func (s *Store) OpenTaskWithTag(ctx context.Context, tag string) (*Task, error) 
 	var id string
 	err := s.db.QueryRowContext(ctx,
 		"SELECT `tg`.`task_id` FROM `task_tag` AS `tg` "+
-			"JOIN `task_state` AS `st` ON `st`.`task_id` = `tg`.`task_id` "+
 			"JOIN `task` AS `t` ON `t`.`id` = `tg`.`task_id` "+
-			"WHERE `tg`.`tag` = ? AND `st`.`state` != ? "+
+			"LEFT JOIN `task_observation` AS `o` ON `o`.`task_id` = `tg`.`task_id` "+
+			"WHERE `tg`.`tag` = ? AND `o`.`closed_at` IS NULL "+
 			"ORDER BY `t`.`created_at` DESC, `tg`.`task_id` DESC LIMIT 1",
-		tag, string(StateClosed)).Scan(&id)
+		tag).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -7572,11 +7622,11 @@ func (s *Store) OpenTasksWithTag(ctx context.Context, tag string) ([]string, err
 	var out []string
 	err := each(ctx, s.db,
 		"SELECT `tg`.`task_id` FROM `task_tag` AS `tg` "+
-			"JOIN `task_state` AS `st` ON `st`.`task_id` = `tg`.`task_id` "+
 			"JOIN `task` AS `t` ON `t`.`id` = `tg`.`task_id` "+
-			"WHERE `tg`.`tag` = ? AND `st`.`state` != ? "+
+			"LEFT JOIN `task_observation` AS `o` ON `o`.`task_id` = `tg`.`task_id` "+
+			"WHERE `tg`.`tag` = ? AND `o`.`closed_at` IS NULL "+
 			"ORDER BY `t`.`created_at`, `tg`.`task_id`",
-		[]any{tag, string(StateClosed)},
+		[]any{tag},
 		func(rows *sql.Rows) error {
 			var id string
 			if err := rows.Scan(&id); err != nil {
@@ -7597,11 +7647,11 @@ func (s *Store) OpenTasksWithLink(ctx context.Context, kind LinkKind) ([]string,
 	var out []string
 	err := each(ctx, s.db,
 		"SELECT DISTINCT `l`.`task_id`, `t`.`created_at` FROM `task_link` AS `l` "+
-			"JOIN `task_state` AS `st` ON `st`.`task_id` = `l`.`task_id` "+
 			"JOIN `task` AS `t` ON `t`.`id` = `l`.`task_id` "+
-			"WHERE `l`.`kind` = ? AND `st`.`state` != ? "+
+			"LEFT JOIN `task_observation` AS `o` ON `o`.`task_id` = `l`.`task_id` "+
+			"WHERE `l`.`kind` = ? AND `o`.`closed_at` IS NULL "+
 			"ORDER BY `t`.`created_at`, `l`.`task_id`",
-		[]any{string(kind), string(StateClosed)},
+		[]any{string(kind)},
 		func(rows *sql.Rows) error {
 			var id string
 			var created any
@@ -7652,11 +7702,11 @@ func (s *Store) OpenTasksWithLinkTarget(ctx context.Context, kind LinkKind, targ
 	var out []string
 	err := each(ctx, s.db,
 		"SELECT DISTINCT `l`.`task_id`, `t`.`created_at` FROM `task_link` AS `l` "+
-			"JOIN `task_state` AS `st` ON `st`.`task_id` = `l`.`task_id` "+
 			"JOIN `task` AS `t` ON `t`.`id` = `l`.`task_id` "+
-			"WHERE `l`.`kind` = ? AND `l`.`target` = ? AND `st`.`state` != ? "+
+			"LEFT JOIN `task_observation` AS `o` ON `o`.`task_id` = `l`.`task_id` "+
+			"WHERE `l`.`kind` = ? AND `l`.`target` = ? AND `o`.`closed_at` IS NULL "+
 			"ORDER BY `t`.`created_at`, `l`.`task_id`",
-		[]any{string(kind), target, string(StateClosed)},
+		[]any{string(kind), target},
 		func(rows *sql.Rows) error {
 			var id string
 			var created any

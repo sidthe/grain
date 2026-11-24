@@ -28,6 +28,7 @@ import (
 
 	"github.com/ai-on-gke/grain/pkg/model"
 	"github.com/ai-on-gke/grain/pkg/orchestrator"
+	"github.com/ai-on-gke/grain/pkg/upgrade"
 )
 
 // upgrades records what a cycle asked to be upgraded onto, standing in
@@ -447,5 +448,83 @@ func TestAScheduledUpgradeProceedsAfterDrainWindowElapses(t *testing.T) {
 	}
 	if len(up.started) != 1 || up.started[0] != "main" {
 		t.Fatalf("started %v, want upgrade to proceed after drain window elapsed", up.started)
+	}
+}
+
+func TestScheduledUpgradeDropsRefusedSchemaDowngradeAndReopensQueue(t *testing.T) {
+	t.Parallel()
+	store, ctx := openStore(t)
+	now := time.Now().UTC()
+
+	schedule(t, store, "latest", now)
+	deps := orchestrator.Deps{
+		Store: store,
+		Config: orchestrator.Config{
+			StartUpgrade: func(branch string) error {
+				return upgrade.ErrSchemaDowngrade
+			},
+		},
+	}
+	if err := orchestrator.RunCycle(ctx, deps, now.Add(time.Second)); err != nil {
+		t.Fatalf("cycle: %v", err)
+	}
+	if got := scheduledUpgrade(t, store); got != nil {
+		t.Errorf("refused schema-downgrade schedule remained queued: %+v", got)
+	}
+	if pause := pauseNow(t, store); pause != nil {
+		t.Errorf("queue stayed paused after refusing schema downgrade: %+v", pause)
+	}
+}
+
+// TestImmediateUpgradeCompletingAcrossRestartDoesNotTriggerSecondScheduledUpgrade
+// reproduces the live symptom where afterTasksFinish: true wrote scheduled_upgrade,
+// an immediate upgrade took over pipeline_pause via UpgradeHold and restarted,
+// and post-upgrade idle cycles must not see a leftover scheduled_upgrade row or
+// trigger a second unrequested upgrade.
+func TestImmediateUpgradeCompletingAcrossRestartDoesNotTriggerSecondScheduledUpgrade(t *testing.T) {
+	t.Parallel()
+	store, ctx := openStore(t)
+	now := time.Now().UTC()
+
+	liveRun(t, store, "t1", false, now)
+	schedule(t, store, "latest", now)
+
+	up := &upgrades{}
+	runWithScheduledUpgrade(t, store, up, now.Add(time.Second))
+	if len(up.started) != 0 {
+		t.Fatalf("started %v while busy run t1 was active", up.started)
+	}
+	if pause := pauseNow(t, store); pause == nil || pause.By != model.ScheduledUpgradePrincipal {
+		t.Fatalf("pause = %+v, want ScheduledUpgradePrincipal", pause)
+	}
+
+	// An immediate upgrade starts while the schedule is still pending, taking
+	// over the queue hold and restarting onto the new build.
+	release, err := orchestrator.UpgradeHold(store)("latest")
+	if err != nil || release == nil {
+		t.Fatalf("UpgradeHold = (%v, %v), want non-nil release", release != nil, err)
+	}
+	if err := store.FinishRun(ctx, "t1-1", now.Add(30*time.Second), "interrupted", ""); err != nil {
+		t.Fatalf("FinishRun: %v", err)
+	}
+	if err := orchestrator.ReleaseUpgradeHold(ctx, store); err != nil {
+		t.Fatalf("ReleaseUpgradeHold: %v", err)
+	}
+
+	if scheduled := scheduledUpgrade(t, store); scheduled != nil {
+		t.Fatalf("scheduled_upgrade still pending after immediate upgrade restart: %+v", scheduled)
+	}
+	if pause := pauseNow(t, store); pause != nil {
+		t.Fatalf("pipeline_pause still held after ReleaseUpgradeHold: %+v", pause)
+	}
+
+	// Post-restart cycles on an idle deployment must neither re-close the queue
+	// nor trigger a second upgrade.
+	runWithScheduledUpgrade(t, store, up, now.Add(time.Minute))
+	if len(up.started) != 0 {
+		t.Fatalf("reconcileScheduledUpgrade triggered unrequested post-restart upgrade: %v", up.started)
+	}
+	if pause := pauseNow(t, store); pause != nil {
+		t.Fatalf("post-restart cycle re-held the queue: %+v", pause)
 	}
 }

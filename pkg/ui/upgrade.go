@@ -423,6 +423,10 @@ type cancellableUpgrader interface {
 	GraceWindow() time.Duration
 }
 
+type targetSchemaChecker interface {
+	CheckTargetSchema(ctx context.Context, branch, imageRef string) error
+}
+
 // inFlightRuns is how many runs this deployment has going, for the
 // warning the pane shows above the Upgrade button.
 //
@@ -958,11 +962,13 @@ func (s *Server) handleStartUpgrade(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
+		s.clearSupersededScheduledUpgrade(r.Context(), "upgrade to "+req.Branch)
 	default:
 		if err := s.tasks.Config.Upgrader.Start(req.Branch); err != nil {
 			writeError(w, http.StatusBadRequest, err)
 			return
 		}
+		s.clearSupersededScheduledUpgrade(r.Context(), "upgrade to "+req.Branch)
 	}
 	status, err := s.tasks.Config.Upgrader.Status()
 	if err != nil {
@@ -994,12 +1000,44 @@ func (s *Server) startRollback(w http.ResponseWriter, r *http.Request, req start
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	s.clearSupersededScheduledUpgrade(r.Context(), "rollback")
 	status, err := s.tasks.Config.Upgrader.Status()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, s.upgradeStatusResponse(r, status))
+}
+
+// clearSupersededScheduledUpgrade drops any pending scheduled_upgrade row once
+// an immediate upgrade or rollback has been accepted by the upgrader. Starting
+// an immediate cut-over supersedes waiting for the deployment to drain: leaving
+// the row in place would keep reporting a pending schedule alongside the
+// running upgrade, leave upgradeUnderway true if the upgrade finishes unchanged
+// without restarting or runs under an operator's pause, and trigger a second
+// unrequested upgrade once post-upgrade work drains. Requests rejected before
+// Start/StartImageWith/StartRollback succeeds never reach this call, preserving
+// any pending schedule on validation or in-progress errors.
+func (s *Server) clearSupersededScheduledUpgrade(ctx context.Context, action string) {
+	if s.tasks == nil || s.tasks.Store == nil {
+		return
+	}
+	scheduled, err := s.tasks.Store.GetScheduledUpgrade(ctx)
+	if err != nil {
+		log.Printf("ui: reading scheduled upgrade after starting immediate %s: %v", action, err)
+		return
+	}
+	if scheduled == nil {
+		return
+	}
+	cleared, err := s.tasks.Store.ClearScheduledUpgrade(ctx)
+	if err != nil {
+		log.Printf("ui: clearing scheduled upgrade to %s superseded by immediate %s: %v", scheduled.Branch, action, err)
+		return
+	}
+	if cleared {
+		log.Printf("ui: immediate %s supersedes scheduled upgrade to %s", action, scheduled.Branch)
+	}
 }
 
 // scheduleUpgrade writes the schedule down, having first made the branch
@@ -1026,6 +1064,11 @@ func (s *Server) scheduleUpgrade(r *http.Request, req startUpgradeRequest) error
 	branch, err := s.tasks.Config.Upgrader.ValidateBranch(req.Branch)
 	if err != nil {
 		return validationErrorf("%v", err)
+	}
+	if sc, ok := s.tasks.Config.Upgrader.(targetSchemaChecker); ok {
+		if err := sc.CheckTargetSchema(r.Context(), branch, ""); err != nil {
+			return validationErrorf("%v", err)
+		}
 	}
 	ctx, err := withAgentRequester(
 		r.Context(), "a scheduled upgrade's requester", req.RequestedBy, req.RequestedByKind)

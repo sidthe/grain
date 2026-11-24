@@ -57,8 +57,17 @@ selects at most 32 task IDs. There is no automatic cohort expansion or lifecycle
 hook. Choose a small representative set of finite implementation, review,
 report-only child and coordinator tasks. Standing/interactive/console policies
 remain controller behavior and produce explained unknown completion predictions.
-The original report/receipt pair remains visible. Implementation/review/child and
-validated no-work shapes also expose selected product and compatibility monitors.
+The original report/receipt pair remains visible. Finite, non-interactive
+`implement` tasks whose latest settled run produced no change link
+(`AwaitsAck` true, not a review and not a `nothing_needed` run) and ended on a
+durable closing note are projected as report products for
+`delivery(report/current_v1)` and `acknowledgment(explicit_receipt)` alongside
+`analyze` tasks (such as upgrade checks). Settled tasks with a change link
+(`LinkFixes` or `LinkChangelist`), review tasks (`IntentReview` or
+`ReasonReview`), and `nothing_needed` runs are never projected as report
+products or explicit report receipts even when they carry a closing comment.
+Implementation/review/child and validated no-work shapes also expose selected
+product and compatibility monitors.
 Existing goal declarations propose monitor-only mappings: `pr-merged` to exact
 PR integration, `cl-submitted` to every scoped CL (or its explicit target), and
 `tasks-closed` to the original `closed`/`merged` predicate. Stored goal `MetAt`
@@ -171,18 +180,35 @@ graphs without touching dispatch links or waits.
 
 Reads collect current local evidence and evaluate only a changed source fence or
 an expired diagnostic lease (at most 60 seconds, shortened by source, threshold
-and window expiry). Selected task reads bypass the ordinary
-body cache so expiry/errors cannot be hidden by 304 responses. Bursts of events
+and window expiry). Selected task reads reuse the cached gate-free legacy detail
+body when the domain token is stable, then splice fresh gate fields per read and
+compute the ETag over the spliced response so expiry, errors and scope
+differences cannot be hidden by 304 responses. Bursts of events
 between reads coalesce into one current collection; many concurrent readers reuse
 the accepted generation. This is display/poll-driven level collection, not a
 subscription that wakes agents. No history is promised for tasks never read.
 
-SQLite's immediate transaction and Postgres's existing writer serialization keep
+A read-only snapshot pre-check (SQLite deferred WAL `BEGIN`; Postgres
+`REPEATABLE READ READ ONLY`) serves steady-state unchanged reads inside the
+lease, active persisted error backoff, and access-limited transient health
+projections without acquiring SQLite's write lock or Postgres's advisory writer
+lock. Only cache misses, changed source fences, expired leases and due retries
+fall through to the serialized diagnostic writer transaction, where SQLite's
+immediate transaction and Postgres's existing writer serialization keep
 local evidence capture and diagnostic acceptance consistent. An event racing a
 read is included in that transaction or invalidates the next read; no accepted
 old read overwrites a newer committed source. State/config/build/message/evidence
 versions form the source/context fence. Unrelated legacy observation heartbeats
 are excluded. There is no universal snapshot paging or new callback broker.
+
+**Read cost.** Because steady-state reads stay in a read-only snapshot
+transaction and reuse cached legacy detail bodies on both `GET /api/tasks/{id}`
+and `GET /api/tasks/summaries`, polling all 32 allowlisted tasks from 1 or 6
+concurrent tabs does not contend with ordinary writers on SQLite or Postgres
+(ordinary write latency matches the collection-off baseline, with zero
+`unknown_error` budget overruns). Re-evaluating on a changed fence or after the
+60-second lease expires still takes the bounded diagnostic writer transaction
+once per task and coalesces concurrent readers onto the new generation.
 
 Controller generations, accepted observations, rejected errors and retry deadlines
 persist in separate local diagnostic tables. Restart reuses accepted versions and
@@ -227,10 +253,17 @@ current results/evaluation totals without flooding history. Outcome source versi
 include collector refreshes. Each serialized observation has a 256 KiB evidence
 budget, at most 64 combined monitors, 64 resources and 64 distinct children; overflow is a
 safe diagnostic failure. History reads return at most 20 newest complete samples within
-64 KiB of stored view JSON, always retaining the newest complete sample (up to the
-256 KiB per-view limit). Older samples remain persisted and included in counts.
-This bounds history decoding within the local diagnostic budget as gate families
-compose; no individual observation is truncated. Source receipts are at most 4096 rows globally, 4 KiB per
+512 KiB of stored view JSON (`MaxGateObservationHistoryBytes`, sized to two full
+64-binding / 256 KiB views), always inspecting the newest row even if an oversized
+corrupt/restored record exceeds that budget. Older samples remain persisted and included
+in counts. We sized the read budget to the 64-binding maximum rather than compacting or
+truncating stored `observation_view` samples so historical entries remain valid canonical
+views with full evidence, dependency, and provenance fields for child/resource scope
+re-authorization (`redactGateHistoryScopes`, `observationVisible`) and old-build
+inspection, while realistic ~18-binding PR projections (~44–74 KiB per sample) return
+several complete samples (including samples predating a repository move for unrestricted
+readers) and even 64-binding maximum projections retain before/after history inside the
+250 ms local diagnostic read budget; no individual observation is truncated. Source receipts are at most 4096 rows globally, 4 KiB per
 row, retained for at most 72 hours and pruned on source writes. Retention is at most
 72 hours and 1024 samples per task, 32 current caches and 32768 samples globally.
 Pruning runs during diagnostic writes, including failure writes. Indexed time/key

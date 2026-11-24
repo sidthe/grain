@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+import { nextStep } from "../shared/task-actions";
 import { DOCUMENT, LocationStrategy, NgTemplateOutlet } from "@angular/common";
 import {
   ChangeDetectionStrategy,
@@ -36,6 +37,10 @@ import { AccessService } from "../services/access.service";
 import { DirectorContextService } from "../director/director-context.service";
 import { KeyboardService, isTypingTarget } from "../services/keyboard.service";
 import { SnackbarService } from "../services/snackbar.service";
+import {
+  HiddenPausesService,
+  hidePausesWithUndo,
+} from "../services/hidden-pauses.service";
 import { ViewFilter } from "../services/view-filter.service";
 import { ActorChipComponent } from "../shared/actor-chip.component";
 import {
@@ -58,6 +63,7 @@ import {
   priorityTone,
 } from "../shared/priority-chip.component";
 import {
+  type DispatchStatusBanner,
   effectiveDisplayTimeZone,
   summarizeDispatchStatus,
 } from "../shared/dispatch-status";
@@ -509,6 +515,17 @@ function needsApproval(t: Task): boolean {
                               >Repair</span
                             >
                           }
+                          @if (t.rolledOverTo) {
+                            <span
+                              class="status-pill neutral"
+                              [attr.data-testid]="'rolled-over-' + t.id"
+                              [gTip]="
+                                'Closed by rollover past its record limit; its work carries on in #' +
+                                t.rolledOverTo
+                              "
+                              >Rolled over to #{{ t.rolledOverTo }}</span
+                            >
+                          }
                           @if (qaChipsByTaskId().get(t.id); as qc) {
                             <span
                               [class]="'ci-chip ' + qc.tone"
@@ -555,7 +572,11 @@ function needsApproval(t: Task): boolean {
                         >· {{ n }} waiting on a dependency</span
                       >
                     }
-                    <div class="segmented" role="group" aria-label="Order">
+                    <div
+                      class="segmented order-segments"
+                      role="group"
+                      aria-label="Order"
+                    >
                       @for (s of sorts; track s.id) {
                         <button
                           type="button"
@@ -567,6 +588,20 @@ function needsApproval(t: Task): boolean {
                         </button>
                       }
                     </div>
+                    <!-- A list pane too narrow for all four segments (the
+                         30% pane on a tablet) offers the order as a menu
+                         instead, so Oldest and Newest are not clipped off
+                         its end. Only one of the two is ever displayed. -->
+                    <g-pill-select
+                      class="order-select"
+                      prefix="Order"
+                      ariaLabel="Order"
+                      testid="sort-select"
+                      align="left"
+                      [options]="sortOptions"
+                      [value]="sort()"
+                      (valueChange)="setSort($any($event))"
+                    />
                     <span class="toolbar-spacer"></span>
                     @if (store.counts().deferred) {
                       <a
@@ -595,21 +630,53 @@ function needsApproval(t: Task): boolean {
                     }
                   </div>
                   @if (dispatchPause(); as dp) {
-                    <div
-                      class="banner"
-                      [class.banner-error]="dp.tone === 'error'"
-                      [class.banner-warn]="dp.tone === 'warn'"
-                      role="status"
-                      data-testid="backlog-dispatch-notice"
-                    >
-                      <strong>{{ dp.headline }}</strong>
-                      @if (dp.resetText) {
-                        <span class="tabular"> · {{ dp.resetText }}</span>
-                      }
-                      @if (dp.subline) {
-                        <span> — {{ dp.subline }}</span>
-                      }
-                    </div>
+                    @if (pausesHidden()) {
+                      <p
+                        class="muted list-hint"
+                        data-testid="backlog-dispatch-hidden"
+                      >
+                        {{
+                          dp.pauses.length === 1
+                            ? "1 model pause warning hidden"
+                            : dp.pauses.length + " model pause warnings hidden"
+                        }}
+                        until reset.
+                        <button
+                          type="button"
+                          class="btn-text"
+                          data-testid="backlog-dispatch-show"
+                          (click)="hiddenPauses.show(dp)"
+                        >
+                          Show
+                        </button>
+                      </p>
+                    } @else {
+                      <div
+                        class="banner"
+                        [class.banner-error]="dp.tone === 'error'"
+                        [class.banner-warn]="dp.tone === 'warn'"
+                        role="status"
+                        data-testid="backlog-dispatch-notice"
+                      >
+                        <strong>{{ dp.headline }}</strong>
+                        @if (dp.resetText) {
+                          <span class="tabular"> · {{ dp.resetText }}</span>
+                        }
+                        @if (dp.subline) {
+                          <span> — {{ dp.subline }}</span>
+                        }
+                        @if (dp.hideable) {
+                          <button
+                            type="button"
+                            class="btn-text"
+                            data-testid="backlog-dispatch-hide"
+                            (click)="hidePauses(dp)"
+                          >
+                            Hide until reset
+                          </button>
+                        }
+                      </div>
+                    }
                   }
                   @if (sort() !== "run") {
                     <p class="muted list-hint">
@@ -1367,6 +1434,13 @@ function needsApproval(t: Task): boolean {
           @if (t.state === "running" && t.activity) {
             <span class="row-sub activity">{{ t.activity }}</span>
           }
+          @if (next(t); as n) {
+            <span
+              class="row-sub row-next-step"
+              [attr.data-testid]="'next-step-' + t.id"
+              >{{ n }}</span
+            >
+          }
         </div>
         <ng-container
           [ngTemplateOutlet]="priorityChip"
@@ -1627,6 +1701,10 @@ export class TasksPageComponent implements OnInit, OnDestroy {
   readonly newBoard = input<string>();
 
   protected readonly groupOptions = GROUP_OPTIONS;
+  protected readonly sortOptions: readonly PillOption[] = SORTS.map((s) => ({
+    value: s.id,
+    label: s.label,
+  }));
   protected readonly batchPriorityOptions = BATCH_PRIORITY_OPTIONS;
   protected readonly boardSaveOpen = signal(false);
   protected readonly boardName = signal("");
@@ -1710,6 +1788,14 @@ export class TasksPageComponent implements OnInit, OnDestroy {
   protected readonly sorts = SORTS;
   protected readonly ago = ago;
   protected readonly label = taskStateLabel;
+  // The concrete next step a person has to take, under the state's name
+  // (shared/task-actions.ts nextStep); list rows carry no CI detail yet.
+  protected next(t: Task): string {
+    return nextStep(t, true, {
+      can: (route, repo) => this.access.canAccessTask(route, repo ?? null),
+      fullAccess: this.access.isFullAccess(),
+    });
+  }
   protected readonly prio = priorityOf;
   protected readonly jumps = jumpsQueue;
 
@@ -2070,7 +2156,7 @@ export class TasksPageComponent implements OnInit, OnDestroy {
   }
 
   protected readonly canReadBoards = computed(() =>
-    this.access.can("GET /api/boards"),
+    this.access.canGlobal("GET /api/boards"),
   );
   protected readonly canWriteBoards = computed(() =>
     this.access.can("POST /api/boards"),
@@ -2087,6 +2173,13 @@ export class TasksPageComponent implements OnInit, OnDestroy {
       this.access.clockNow(),
     ),
   );
+  protected readonly hiddenPauses = inject(HiddenPausesService);
+  protected readonly pausesHidden = computed(() =>
+    this.hiddenPauses.isHidden(this.dispatchPause()),
+  );
+  protected hidePauses(dp: DispatchStatusBanner): void {
+    hidePausesWithUndo(this.hiddenPauses, this.snackbar, dp);
+  }
   protected readonly timelineSpan = computed(() => {
     const list = this.rows();
     const now = Date.now();

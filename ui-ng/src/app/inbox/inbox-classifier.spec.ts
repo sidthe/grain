@@ -336,7 +336,7 @@ describe("inbox classifier", () => {
     ).toHaveLength(3);
     expect(entries.filter((e) => matchesQuery(e, "bump"))).toHaveLength(1);
     const hs = entries.find((e) => e.kind === "host-script");
-    expect(hs?.summary).toBe("deploy.sh --prod");
+    expect(hs?.summary).toBe('deploy.sh "--prod"');
     expect(hs?.taskLink).toBe("/task/2");
     expect(hs?.externalLink).toBeNull();
   });
@@ -399,6 +399,28 @@ describe("inbox classifier", () => {
         }),
       ),
     ).toBe(false);
+  });
+
+  it("drops 'or accept' from a submit row's summary for a limited role", () => {
+    const t = task({
+      state: "awaiting_submit",
+      mergeGates: [
+        {
+          id: "review",
+          label: "Code review",
+          state: "findings",
+          reviewTask: "5882",
+          acceptable: true,
+        },
+        { id: "approval", label: "Approval", state: "needed" },
+      ],
+    });
+    expect(
+      classifyTask(t, false, { can: () => true, fullAccess: true })?.summary,
+    ).toBe("Fix or accept 1 review finding.");
+    expect(
+      classifyTask(t, false, { can: () => true, fullAccess: false })?.summary,
+    ).toBe("Fix 1 review finding.");
   });
 
   it("enforces Inbox silence for mid-flight autonomous goal questions and auto-approved child proposals while surfacing terminal and safety states", () => {

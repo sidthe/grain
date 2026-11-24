@@ -88,3 +88,13 @@ func TestShadowQualificationCacheSafety(t *testing.T) {
 	s, db, _ := openStore(t)
 	gateobservationtest.RunShadowCacheSafety(t, s, db)
 }
+
+func TestGateObservationReadOnlyPrecheck(t *testing.T) {
+	s, db, _ := openStore(t)
+	gateobservationtest.RunReadOnlyPrecheck(t, s, db)
+}
+
+func TestPRGateObservationHistoryBudget(t *testing.T) {
+	s, db, _ := openStore(t)
+	gateobservationtest.RunPRHistoryBudget(t, s, db)
+}

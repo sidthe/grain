@@ -238,6 +238,9 @@ test("Hub registration token is write-only and stays editable under a config-rep
     if (route.request().method() !== "GET") return route.fallback();
     const res = await route.fetch();
     const body = await res.json();
+    // The UI keys its lock on configRepoOnly (what the server derives
+    // from settingsLocked plus a config repo), as classic Settings does.
+    body.configRepoOnly = true;
     body.settingsLocked = true;
     body.hubTokenSet = tokenSet;
     await route.fulfill({ response: res, json: body });
@@ -447,8 +450,9 @@ test("Sandboxes Kubernetes card shows defaults, validates the node selector and 
       .fill("relative/dir");
     const bad = await saveBar(page);
     expect(bad.status()).toBe(400);
+    // ...under the field's label rather than its JSON key.
     await expect(page.getByTestId("settings-error-banner")).toContainText(
-      "k8sWorkspace",
+      "Kubernetes workspace directory:",
     );
   } finally {
     await restore(request, {

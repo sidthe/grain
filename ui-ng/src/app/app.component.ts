@@ -54,6 +54,7 @@ import { HelpService } from "./services/help.service";
 import { KeyboardService } from "./services/keyboard.service";
 import { NavConfigService } from "./services/nav-config.service";
 import { SnackbarService } from "./services/snackbar.service";
+import { HiddenPausesService } from "./services/hidden-pauses.service";
 import { TaskFeedStore } from "./services/task-feed.service";
 import { ConnectionStatus } from "./services/connection.service";
 import { ThemeService } from "./services/theme.service";
@@ -560,19 +561,23 @@ export class DeferErrorDirective implements OnInit {
           <g-next-up />
           <a
             class="live-pill tabular"
-            [class.is-idle]="feed.runningCount() === 0 && !dispatchBanner()"
-            [class.is-paused-warn]="dispatchBanner()?.tone === 'warn'"
-            [class.is-paused-error]="dispatchBanner()?.tone === 'error'"
+            [class.is-idle]="
+              feed.runningCount() === 0 && !shownDispatchBanner()
+            "
+            [class.is-paused-warn]="shownDispatchBanner()?.tone === 'warn'"
+            [class.is-paused-error]="shownDispatchBanner()?.tone === 'error'"
             routerLink="/agents"
             data-testid="live-pill"
             [gTip]="livePillTip()"
           >
             <span
               class="live-dot"
-              [class.is-idle]="feed.runningCount() === 0 && !dispatchBanner()"
+              [class.is-idle]="
+                feed.runningCount() === 0 && !shownDispatchBanner()
+              "
               aria-hidden="true"
             ></span>
-            @if (dispatchBanner(); as db) {
+            @if (shownDispatchBanner(); as db) {
               <span class="live-pill-text">{{
                 feed.runningCount() > 0
                   ? feed.runningCount() + " running · " + db.shortLabel
@@ -706,8 +711,8 @@ export class DeferErrorDirective implements OnInit {
           id="main"
           [attr.inert]="modalOpen() ? '' : null"
         >
-          @defer (when dispatchBanner()) {
-            @if (dispatchBanner(); as db) {
+          @defer (when shownDispatchBanner()) {
+            @if (shownDispatchBanner(); as db) {
               <g-dispatch-banner [banner]="db" />
             }
           }
@@ -1068,6 +1073,7 @@ export class AppComponent implements OnInit, OnDestroy {
   protected readonly keyboard = inject(KeyboardService);
   protected readonly directorCtx = inject(DirectorContextService);
   private readonly snackbar = inject(SnackbarService);
+  private readonly hiddenPauses = inject(HiddenPausesService);
   private readonly inboxRef = signal<InboxStore | null>(null);
   private readonly processesRef = signal<ProcessesStore | null>(null);
   private readonly sessionsRef = signal<SessionsStore | null>(null);
@@ -1227,6 +1233,15 @@ export class AppComponent implements OnInit, OnDestroy {
       this.access.clockNow(),
     ),
   );
+  // pausesHidden: the viewer swatted away the model pauses the banner
+  // would show (GU-6), so neither the banner nor the live pill's warning
+  // colour shows until they reset or something new happens.
+  protected readonly pausesHidden = computed(() =>
+    this.hiddenPauses.isHidden(this.dispatchBanner()),
+  );
+  protected readonly shownDispatchBanner = computed(() =>
+    this.pausesHidden() ? null : this.dispatchBanner(),
+  );
 
   protected readonly livePillTip = computed(() => {
     const n = this.feed.runningCount();
@@ -1235,6 +1250,9 @@ export class AppComponent implements OnInit, OnDestroy {
         ? `${n} active agent ${n === 1 ? "run" : "runs"}. Open Live Agents.`
         : "No agents running right now. Open Live Agents.";
     const db = this.dispatchBanner();
+    if (db && this.pausesHidden()) {
+      return `${base} · Model pause warnings hidden until reset: ${db.headline}`;
+    }
     return db
       ? `${base} · ${db.headline}${db.resetText ? ` (${db.resetText})` : ""}`
       : base;
@@ -1595,6 +1613,9 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   protected onGlobalKey(ev: KeyboardEvent): void {
+    if ((ev.target as HTMLElement | null)?.closest?.(".rail-create")) {
+      this.onCreateKey(ev);
+    }
     const key = ev.key.toLowerCase();
     const isAltD = ev.altKey && !ev.ctrlKey && !ev.metaKey && key === "d";
     const isCtrlShiftD = ev.ctrlKey && ev.shiftKey && !ev.altKey && key === "d";
@@ -1797,6 +1818,49 @@ export class AppComponent implements OnInit, OnDestroy {
   protected onCreateFocusOut(ev: FocusEvent): void {
     const next = ev.relatedTarget as HTMLElement | null;
     if (next && !next.closest(".rail-create")) this.createOpen.set(false);
+  }
+
+  // Arrow keys on the rail's New button and inside its menu move between
+  // the menu's entries, as on any menu button. Left to the browser they
+  // scrolled the rail, and a rail scroll closes its floating menus
+  // (onViewportChange), so ArrowDown on an open menu shut it instead.
+  private onCreateKey(ev: KeyboardEvent): void {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(ev.key)) return;
+    if (ev.altKey || ev.ctrlKey || ev.metaKey) return;
+    const arrow = ev.key === "ArrowDown" || ev.key === "ArrowUp";
+    if (!this.createOpen() && !arrow) return;
+    ev.preventDefault();
+    const focusItem = (
+      pick: (items: HTMLElement[]) => HTMLElement | undefined,
+    ) => {
+      const menu = this.doc.getElementById("create-menu");
+      const items = Array.from(
+        menu?.querySelectorAll<HTMLElement>(
+          ".create-menu-item:not([disabled])",
+        ) ?? [],
+      );
+      pick(items)?.focus();
+    };
+    if (!this.createOpen()) {
+      const up = ev.key === "ArrowUp";
+      this.createBtn()?.nativeElement.click();
+      setTimeout(() => focusItem((items) => (up ? items.at(-1) : items[0])));
+      return;
+    }
+    const current = this.doc.activeElement as HTMLElement | null;
+    focusItem((items) => {
+      const at = current ? items.indexOf(current) : -1;
+      switch (ev.key) {
+        case "Home":
+          return items[0];
+        case "End":
+          return items.at(-1);
+        case "ArrowUp":
+          return at <= 0 ? items.at(-1) : items[at - 1];
+        default:
+          return at < 0 || at >= items.length - 1 ? items[0] : items[at + 1];
+      }
+    });
   }
 
   protected onRailMoreFocusOut(ev: FocusEvent): void {

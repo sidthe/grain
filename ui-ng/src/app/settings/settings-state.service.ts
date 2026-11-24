@@ -24,7 +24,43 @@ import {
   computeSettingsPlan,
   formatSettingValue,
   isConfigRepoSection,
+  settingLabel,
 } from "./settings-sections";
+
+// failedSaveLabels names what a refused save was carrying -- the label of
+// each drafted setting, "Deployment identity" for the deployment record
+// and "Deployment memory" for the memory document -- so the section header
+// can say "Couldn't save Branch name template" rather than only that
+// changes are unsaved.
+export function failedSaveLabels(
+  settingsKeys: readonly string[],
+  deploymentKeys: readonly string[],
+  memory: boolean,
+): string[] {
+  const out = settingsKeys.map((k) => settingLabel(k));
+  if (deploymentKeys.length > 0) out.push("Deployment identity");
+  if (memory) out.push("Deployment memory");
+  return out;
+}
+
+// readableSaveError turns a server refusal that opens with the setting's
+// JSON key ("taskBranchTemplate branch template must contain {id}") into
+// one that opens with its label ("Branch name template: branch template
+// must contain {id}"), the name the person sees on the field.
+export function readableSaveError(
+  message: string,
+  keys: readonly string[],
+): string {
+  for (const k of keys) {
+    const label = settingLabel(k);
+    if (label === k) continue;
+    if (message.startsWith(k + " ") || message.startsWith(k + ":")) {
+      const rest = message.slice(k.length).replace(/^:?\s*/, "");
+      return `${label}: ${rest}`;
+    }
+  }
+  return message;
+}
 
 export interface ConfigFileChange {
   path: string;
@@ -100,6 +136,8 @@ export class SettingsStateService {
   readonly deployment = signal<Record<string, unknown>>({});
   readonly draft = signal<Record<string, unknown>>({});
   readonly deployDraft = signal<Record<string, unknown>>({});
+  readonly memoryStored = signal<string | null>(null);
+  readonly memoryDraft = signal<string | null>(null);
   readonly fieldErrors = signal<Record<string, string>>({});
   readonly discardEpoch = signal(0);
 
@@ -107,6 +145,10 @@ export class SettingsStateService {
   readonly planning = signal(false);
   readonly saving = signal(false);
   readonly error = signal<string | null>(null);
+  // The labels of what the last Save changes failed to save, for the
+  // header's "Couldn't save <field>" and the error banner's Retry; empty
+  // once a save succeeds or the drafts are discarded.
+  readonly failedSave = signal<string[]>([]);
   readonly planPreview = signal<SettingsPlanRow[] | null>(null);
   readonly refusedChanges = signal<ConfigFileChange[]>([]);
 
@@ -129,14 +171,38 @@ export class SettingsStateService {
     this.error.set("");
   }
 
-  readonly configRepoOnly = computed(() => {
+  readonly externalConfigRepo = computed(() => {
+    const s = this.settings();
+    const c = this.config() as Record<string, unknown> | null;
+    return String(
+      s["externalConfigRepo"] ?? c?.["externalConfigRepo"] ?? "",
+    ).trim();
+  });
+
+  readonly hasInternalConfigRepo = computed(() => {
     const s = this.settings();
     const c = this.config() as Record<string, unknown> | null;
     return (
-      Boolean(s["configRepoOnly"] ?? c?.["configRepoOnly"]) ||
-      Boolean(s["externalConfigRepo"] ?? c?.["externalConfigRepo"]) ||
-      Boolean(s["settingsLocked"] ?? c?.["settingsLocked"])
+      Boolean(c?.["configRepo"] ?? s["configRepo"]) &&
+      !this.externalConfigRepo()
     );
+  });
+
+  readonly configRepoOnly = computed(() => {
+    const s = this.settings();
+    const c = this.config() as Record<string, unknown> | null;
+    const locked =
+      typeof s["configRepoOnly"] === "boolean"
+        ? s["configRepoOnly"]
+        : Boolean(c?.["configRepoOnly"]);
+    return locked || Boolean(this.externalConfigRepo());
+  });
+
+  readonly pendingRestart = computed<string[]>(() => {
+    const raw = this.settings()["pendingRestart"];
+    return Array.isArray(raw)
+      ? raw.filter((x): x is string => typeof x === "string")
+      : [];
   });
 
   readonly hasSettingsDraft = computed(
@@ -145,18 +211,27 @@ export class SettingsStateService {
   readonly hasDeployDraft = computed(
     () => Object.keys(this.deployDraft()).length > 0,
   );
+  readonly hasMemoryDraft = computed(
+    () =>
+      this.memoryDraft() !== null &&
+      this.memoryDraft() !== (this.memoryStored() ?? ""),
+  );
   readonly hasFieldErrors = computed(
     () => Object.keys(this.fieldErrors()).length > 0,
   );
   readonly isDirty = computed(
     () =>
-      this.hasSettingsDraft() || this.hasDeployDraft() || this.hasFieldErrors(),
+      this.hasSettingsDraft() ||
+      this.hasDeployDraft() ||
+      this.hasMemoryDraft() ||
+      this.hasFieldErrors(),
   );
 
   readonly dirtyCount = computed(
     () =>
       Object.keys(this.draft()).length +
       Object.keys(this.deployDraft()).length +
+      (this.hasMemoryDraft() ? 1 : 0) +
       Object.keys(this.fieldErrors()).length,
   );
 
@@ -265,14 +340,32 @@ export class SettingsStateService {
     });
   }
 
+  memoryValue(): string {
+    return this.memoryDraft() ?? this.memoryStored() ?? "";
+  }
+
+  setMemoryStored(val: string): void {
+    this.memoryStored.set(val);
+    if (this.memoryDraft() === val) {
+      this.memoryDraft.set(null);
+    }
+  }
+
+  setMemoryDraft(val: string): void {
+    const stored = this.memoryStored() ?? "";
+    this.memoryDraft.set(val === stored ? null : val);
+  }
+
   discard(): void {
     this.draft.set({});
     this.deployDraft.set({});
+    this.memoryDraft.set(null);
     this.fieldErrors.set({});
     this.qaRolloutRaw.set(null);
     this.discardEpoch.update((n) => n + 1);
     this.planPreview.set(null);
     this.error.set(null);
+    this.failedSave.set([]);
   }
 
   invalidateReachableRepos(): void {
@@ -396,7 +489,7 @@ export class SettingsStateService {
           }),
         );
       }
-      if (this.access.can("GET /api/settings")) {
+      if (this.access.canGlobal("GET /api/settings")) {
         tasks.push(
           this.api
             .get<Record<string, unknown>>("GET /api/settings")
@@ -404,7 +497,7 @@ export class SettingsStateService {
             .catch(() => undefined),
         );
       }
-      if (this.access.can("GET /api/deployment")) {
+      if (this.access.canGlobal("GET /api/deployment")) {
         tasks.push(
           this.api
             .get<Record<string, unknown>>("GET /api/deployment")
@@ -474,6 +567,9 @@ export class SettingsStateService {
     if (!this.isDirty() || this.hasFieldErrors()) return;
     this.saving.set(true);
     this.error.set(null);
+    const settingsKeys = Object.keys(this.draft());
+    const deploymentKeys = Object.keys(this.deployDraft());
+    const memory = this.hasMemoryDraft();
     try {
       const settingsPayload = this.draft();
       if (Object.keys(settingsPayload).length > 0) {
@@ -506,12 +602,34 @@ export class SettingsStateService {
         }
         this.deployDraft.set({});
       }
+      if (this.hasMemoryDraft()) {
+        if (!this.access.can("PUT /api/memory")) {
+          throw new Error(this.access.deniedReason("PUT /api/memory"));
+        }
+        const nextMem = this.memoryDraft() ?? "";
+        await this.api.put("PUT /api/memory", undefined, { text: nextMem });
+        this.memoryStored.set(nextMem);
+        this.memoryDraft.set(null);
+      }
       this.fieldErrors.set({});
       this.discardEpoch.update((n) => n + 1);
       this.planPreview.set(null);
+      this.refusedChanges.set([]);
+      this.failedSave.set([]);
       this.snackbar.show("Settings saved");
     } catch (err) {
       this.recordError(err);
+      const msg = this.error();
+      if (msg) this.error.set(readableSaveError(msg, settingsKeys));
+      // Only what is still drafted failed: a deployment or memory write
+      // after a successful settings write leaves the settings saved.
+      this.failedSave.set(
+        failedSaveLabels(
+          Object.keys(this.draft()).length > 0 ? settingsKeys : [],
+          Object.keys(this.deployDraft()).length > 0 ? deploymentKeys : [],
+          memory && this.hasMemoryDraft(),
+        ),
+      );
     } finally {
       this.saving.set(false);
     }
