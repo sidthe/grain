@@ -17,6 +17,7 @@ package qa_test
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -184,5 +185,36 @@ func TestClassifyTaskComplexity(t *testing.T) {
 	}
 	if got := qa.ClassifyTaskComplexity("Add schema migration", "Update SQLite table columns."); got != model.QAComplexityHigh {
 		t.Errorf("schema+migration task classified as %q, want high", got)
+	}
+	shortTask := model.Task{
+		Title: "[PS-13] UX thoughts",
+		Body:  "Short summary pointing at attached concept doc and HTML mock.",
+	}
+	att := model.TaskSpecAttachments{
+		Text:          "# Concept Spec\n\n## Layout\n" + strings.Repeat("Detailed product specification requirement text. ", 250),
+		MarkdownCount: 1,
+		HTMLCount:     1,
+		TotalCount:    4,
+		SpecBytes:     15 * 1024,
+		TotalBytes:    95 * 1024,
+	}
+	if got := qa.ClassifyTaskComplexityForTask(shortTask, att); got != model.QAComplexityHigh {
+		t.Errorf("short task with >10KB spec + HTML mock classified as %q, want high", got)
+	}
+	forcedTask := model.Task{
+		Title:        "Small task",
+		Body:         "Short description.",
+		CustomFields: map[string][]string{"complexity": {"high"}},
+	}
+	if got := qa.ClassifyTaskComplexityForTask(forcedTask, model.TaskSpecAttachments{}); got != model.QAComplexityHigh {
+		t.Errorf("explicit complexity override classified as %q, want high", got)
+	}
+	downgradeAttempt := model.Task{
+		Title:        "Add schema migration",
+		Body:         "---\ncomplexity: medium\n---\nComplexity: low\nUpdate SQLite table columns.",
+		CustomFields: map[string][]string{"complexity": {"medium"}},
+	}
+	if got := qa.ClassifyTaskComplexityForTask(downgradeAttempt, model.TaskSpecAttachments{}); got != model.QAComplexityHigh {
+		t.Errorf("downward complexity override downgraded schema+migration task to %q, want high", got)
 	}
 }

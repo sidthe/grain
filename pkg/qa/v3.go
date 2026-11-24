@@ -160,7 +160,7 @@ func ComputeDeclarationDiff(ref, cand *FlowVersionBundle) DeclarationDiff {
 			if cand.Resolved.S0Intent {
 				diff.AddedStages = append(diff.AddedStages, "s0-intent")
 			}
-			if cand.Resolved.Decompose.Enabled && cand.Resolved.Decompose.Mode != "off" {
+			if cand.Resolved.Decompose.IsActive() {
 				diff.AddedStages = append(diff.AddedStages, "s0-decompose")
 			}
 			if cand.Resolved.Context.Enabled {
@@ -218,8 +218,8 @@ func ComputeDeclarationDiff(ref, cand *FlowVersionBundle) DeclarationDiff {
 	} else if ref.Resolved.S0Intent && !cand.Resolved.S0Intent {
 		diff.RemovedStages = append(diff.RemovedStages, "s0-intent")
 	}
-	refDecomp := ref.Resolved.Decompose.Enabled && ref.Resolved.Decompose.Mode != "off"
-	candDecomp := cand.Resolved.Decompose.Enabled && cand.Resolved.Decompose.Mode != "off"
+	refDecomp := ref.Resolved.Decompose.IsActive()
+	candDecomp := cand.Resolved.Decompose.IsActive()
 	if !refDecomp && candDecomp {
 		diff.AddedStages = append(diff.AddedStages, "s0-decompose")
 	} else if refDecomp && !candDecomp {

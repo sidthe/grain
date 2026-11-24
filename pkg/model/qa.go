@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -1339,10 +1340,39 @@ func (s *Store) TaskQASummaries(
 // DefaultTaskSpecAttachmentMaxBytes bounds concatenated UTF-8 specification attachments read per task.
 const DefaultTaskSpecAttachmentMaxBytes = 128 * 1024
 
-// TaskSpecAttachments holds bounded plain-text/markdown attachment content for pre-dispatch complexity classification.
+// TaskAttachmentMeta describes one task attachment for QA complexity scoring and S0/S0b/S1 context indexing.
+type TaskAttachmentMeta struct {
+	ID          int64  `json:"id,omitempty"`
+	Filename    string `json:"filename"`
+	ContentType string `json:"contentType,omitempty"`
+	Size        int64  `json:"size"`
+	SandboxPath string `json:"sandboxPath,omitempty"`
+	IsSpecText  bool   `json:"isSpecText,omitempty"`
+	IsMarkdown  bool   `json:"isMarkdown,omitempty"`
+	IsHTML      bool   `json:"isHtml,omitempty"`
+}
+
+// TaskSpecAttachments holds bounded plain-text/markdown attachment content plus metadata across
+// all task attachments (including HTML mocks and binary deliverables) for pre-dispatch complexity
+// classification and S0/S0b/S1 workflow context discovery.
 type TaskSpecAttachments struct {
 	Text          string
 	MarkdownCount int
+	HTMLCount     int
+	TotalCount    int
+	TotalBytes    int64
+	SpecBytes     int64
+	Files         []TaskAttachmentMeta
+}
+
+// IsHTMLAttachment reports whether an attachment is an HTML mock or document.
+func IsHTMLAttachment(filename, contentType string) bool {
+	lowName := strings.ToLower(strings.TrimSpace(filename))
+	lowCT := strings.ToLower(strings.TrimSpace(contentType))
+	if idx := strings.IndexByte(lowCT, ';'); idx >= 0 {
+		lowCT = strings.TrimSpace(lowCT[:idx])
+	}
+	return strings.HasSuffix(lowName, ".html") || strings.HasSuffix(lowName, ".htm") || lowCT == "text/html"
 }
 
 // IsSpecTextAttachment reports whether an attachment is a plain-text or Markdown specification document
@@ -1459,7 +1489,8 @@ func (s *Store) TaskSpecAttachments(ctx context.Context, taskID string, maxBytes
 	return m[tid], nil
 }
 
-// TaskSpecAttachmentsMap batch-loads bounded plain-text and Markdown attachments for taskIDs.
+// TaskSpecAttachmentsMap batch-loads bounded plain-text and Markdown attachments plus metadata across
+// all attachments for taskIDs without reading binary or HTML blob payloads into memory.
 func (s *Store) TaskSpecAttachmentsMap(ctx context.Context, taskIDs []string, maxBytesPerTask int) (map[string]TaskSpecAttachments, error) {
 	if s == nil || len(taskIDs) == 0 {
 		return nil, nil
@@ -1467,7 +1498,10 @@ func (s *Store) TaskSpecAttachmentsMap(ctx context.Context, taskIDs []string, ma
 	if maxBytesPerTask <= 0 {
 		maxBytesPerTask = DefaultTaskSpecAttachmentMaxBytes
 	}
-	substrLimit := maxBytesPerTask + utf8.UTFMax
+	substrLimit := maxBytesPerTask
+	if substrLimit <= math.MaxInt-utf8.UTFMax {
+		substrLimit += utf8.UTFMax
+	}
 	out := make(map[string]TaskSpecAttachments)
 	const batchChunk = 400
 	for start := 0; start < len(taskIDs); start += batchChunk {
@@ -1479,10 +1513,11 @@ func (s *Store) TaskSpecAttachmentsMap(ctx context.Context, taskIDs []string, ma
 			args = append(args, id)
 		}
 		rows, err := s.db.QueryContext(ctx,
-			"SELECT `task_id`, `filename`, `content_type`, SUBSTR(`content`, 1, ?) "+
-				"FROM `task_attachment` WHERE `task_id` IN ("+placeholders+") "+
-				"AND (LOWER(`filename`) LIKE '%.md' OR LOWER(`filename`) LIKE '%.markdown' OR LOWER(`filename`) LIKE '%.txt' "+
+			"SELECT `id`, `task_id`, `filename`, `content_type`, `size`, "+
+				"CASE WHEN (LOWER(`filename`) LIKE '%.md' OR LOWER(`filename`) LIKE '%.markdown' OR LOWER(`filename`) LIKE '%.txt' "+
 				"OR LOWER(`content_type`) LIKE 'text/markdown%' OR LOWER(`content_type`) LIKE 'text/x-markdown%' OR LOWER(`content_type`) LIKE 'text/plain%') "+
+				"THEN SUBSTR(`content`, 1, ?) ELSE NULL END "+
+				"FROM `task_attachment` WHERE `task_id` IN ("+placeholders+") "+
 				"ORDER BY `id` ASC",
 			args...,
 		)
@@ -1490,35 +1525,70 @@ func (s *Store) TaskSpecAttachmentsMap(ctx context.Context, taskIDs []string, ma
 			return nil, fmt.Errorf("batch reading task specification attachments: %w", err)
 		}
 		for rows.Next() {
+			var attID, attSize int64
 			var tid, fname, ct string
 			var raw []byte
-			if sErr := rows.Scan(&tid, &fname, &ct, &raw); sErr != nil {
+			if sErr := rows.Scan(&attID, &tid, &fname, &ct, &attSize, &raw); sErr != nil {
 				rows.Close()
 				return nil, sErr
 			}
+			if attSize < 0 {
+				attSize = 0
+			}
+			if attSize == 0 && len(raw) > 0 {
+				attSize = int64(len(raw))
+			}
 			isSpec, isMD := IsSpecTextAttachment(fname, ct)
-			if !isSpec || len(raw) == 0 || slices.Contains(raw, 0) {
-				continue
-			}
-			raw = TrimIncompleteTrailingUTF8Bytes(raw, maxBytesPerTask)
-			if len(raw) == 0 || !utf8.Valid(raw) {
-				continue
-			}
-			trimmed := strings.TrimSpace(string(raw))
-			if trimmed == "" {
-				continue
-			}
+			isHTML := IsHTMLAttachment(fname, ct)
+
 			cur := out[tid]
-			if isMD {
-				cur.MarkdownCount++
+			cur.TotalCount++
+			if cur.TotalBytes <= math.MaxInt64-attSize {
+				cur.TotalBytes += attSize
+			} else {
+				cur.TotalBytes = math.MaxInt64
 			}
-			if len(cur.Text) < maxBytesPerTask {
-				joined := trimmed
-				if cur.Text != "" {
-					joined = cur.Text + "\n\n" + trimmed
+			if isHTML {
+				cur.HTMLCount++
+			}
+
+			validSpecText := false
+			var trimmed string
+			if isSpec && len(raw) > 0 && !slices.Contains(raw, 0) {
+				bounded := TrimIncompleteTrailingUTF8Bytes(raw, maxBytesPerTask)
+				if len(bounded) > 0 && utf8.Valid(bounded) {
+					trimmed = strings.TrimSpace(string(bounded))
+					if trimmed != "" {
+						validSpecText = true
+					}
 				}
-				cur.Text = TruncateValidUTF8(joined, maxBytesPerTask)
 			}
+			if validSpecText {
+				if isMD {
+					cur.MarkdownCount++
+				}
+				if cur.SpecBytes <= math.MaxInt64-attSize {
+					cur.SpecBytes += attSize
+				} else {
+					cur.SpecBytes = math.MaxInt64
+				}
+				if len(cur.Text) < maxBytesPerTask {
+					joined := trimmed
+					if cur.Text != "" {
+						joined = cur.Text + "\n\n" + trimmed
+					}
+					cur.Text = TruncateValidUTF8(joined, maxBytesPerTask)
+				}
+			}
+			cur.Files = append(cur.Files, TaskAttachmentMeta{
+				ID:          attID,
+				Filename:    fname,
+				ContentType: ct,
+				Size:        attSize,
+				IsSpecText:  validSpecText,
+				IsMarkdown:  validSpecText && isMD,
+				IsHTML:      isHTML,
+			})
 			out[tid] = cur
 		}
 		if rErr := rows.Err(); rErr != nil {

@@ -15,9 +15,13 @@
 package qa
 
 import (
+	"math"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
+
+	"github.com/ai-on-gke/grain/pkg/model"
 )
 
 var (
@@ -91,16 +95,179 @@ type ComplexityInput struct {
 	Body                    string
 	AttachmentText          string
 	MarkdownAttachmentCount int
+	HTMLAttachmentCount     int
+	AttachmentCount         int
+	AttachmentTotalBytes    int64
+	AttachmentSpecBytes     int64
+	CustomFields            map[string][]string
 	ReadsCount              int
 	WritesCount             int
 	PathHints               []string
 }
 
+// ComplexityInputFromTask constructs a ComplexityInput from a task, its hydrated attachment
+// metadata/content, and optional repository path hints.
+func ComplexityInputFromTask(task model.Task, specAtt model.TaskSpecAttachments, pathHints []string) ComplexityInput {
+	return ComplexityInput{
+		Title:                   task.Title,
+		Body:                    task.Body,
+		AttachmentText:          specAtt.Text,
+		MarkdownAttachmentCount: specAtt.MarkdownCount,
+		HTMLAttachmentCount:     specAtt.HTMLCount,
+		AttachmentCount:         specAtt.TotalCount,
+		AttachmentTotalBytes:    specAtt.TotalBytes,
+		AttachmentSpecBytes:     specAtt.SpecBytes,
+		CustomFields:            task.CustomFields,
+		ReadsCount:              len(task.Reads),
+		WritesCount:             len(task.Writes),
+		PathHints:               pathHints,
+	}
+}
+
 type ComplexityAssessment struct {
-	Tier          ComplexityTier
-	Score         int
-	Signals       []string
-	HasDesignItem bool
+	Tier              ComplexityTier
+	Score             int
+	Signals           []string
+	HasDesignItem     bool
+	ComplexityForced  bool
+	DecomposeOverride string
+}
+
+func normalizeOverrideKey(raw string) string {
+	k := strings.ToLower(strings.TrimSpace(raw))
+	return strings.ReplaceAll(k, "-", "_")
+}
+
+func complexityTierRank(t ComplexityTier) int {
+	switch t {
+	case ComplexityHigh:
+		return 3
+	case ComplexityMedium:
+		return 2
+	case ComplexityLow:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func normalizeComplexityOverride(raw string) ComplexityTier {
+	v := strings.ToLower(strings.TrimSpace(strings.Trim(raw, `"'`)))
+	switch v {
+	case "medium", "med":
+		return ComplexityMedium
+	case "high", "large":
+		return ComplexityHigh
+	default:
+		// Task-authored overrides are strictly tighten-only: "low" cannot downgrade QA gating.
+		return ""
+	}
+}
+
+func normalizeDecomposeOverride(raw string) string {
+	v := strings.ToLower(strings.TrimSpace(strings.Trim(raw, `"'`)))
+	v = strings.ReplaceAll(v, "-", "_")
+	switch v {
+	case "propose_dag", "dag", "subtask_dag", "true", "yes":
+		return "propose_dag"
+	case "slice_plan", "slice":
+		return "slice_plan"
+	default:
+		// Task-authored overrides are strictly tighten-only: "off"/"none"/"false"/"no" cannot disable decomposition.
+		return ""
+	}
+}
+
+func isComplexityOverrideKey(normKey string) bool {
+	switch normKey {
+	case "complexity", "qa_complexity", "complexity_tier":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDecomposeOverrideKey(normKey string) bool {
+	switch normKey {
+	case "decompose", "qa_decompose", "decompose_mode":
+		return true
+	default:
+		return false
+	}
+}
+
+// ParseTaskQAOverrides extracts tighten-only explicit complexity tier and decomposition mode
+// overrides from task/template custom fields, YAML frontmatter, or line-start directives
+// (outside code fences). Only upward overrides ("medium"/"high" and "slice_plan"/"propose_dag")
+// are accepted so task bodies or agent-proposed tasks cannot downgrade or bypass QA stages.
+func ParseTaskQAOverrides(body string, customFields map[string][]string) (ComplexityTier, string) {
+	var forcedTier ComplexityTier
+	var decompMode string
+
+	consider := func(nk, rawVal string) {
+		if isComplexityOverrideKey(nk) {
+			if t := normalizeComplexityOverride(rawVal); complexityTierRank(t) > complexityTierRank(forcedTier) {
+				forcedTier = t
+			}
+		}
+		if isDecomposeOverrideKey(nk) {
+			if m := normalizeDecomposeOverride(rawVal); DecomposeModeRank(m) > DecomposeModeRank(decompMode) {
+				decompMode = m
+			}
+		}
+	}
+
+	// 1. Structured custom fields (copied from Templates onto Tasks as well).
+	if len(customFields) > 0 {
+		keys := make([]string, 0, len(customFields))
+		for k := range customFields {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			nk := normalizeOverrideKey(k)
+			for _, v := range customFields[k] {
+				consider(nk, v)
+			}
+		}
+	}
+
+	// 2. YAML frontmatter at the top of task/template body.
+	trimmedLeft := strings.TrimLeft(body, "\r\n ")
+	if strings.HasPrefix(trimmedLeft, "---\n") || strings.HasPrefix(trimmedLeft, "---\r\n") {
+		lines := strings.Split(trimmedLeft, "\n")
+		for i := 1; i < len(lines) && i <= 40; i++ {
+			line := strings.TrimSpace(lines[i])
+			if line == "---" || line == "..." {
+				break
+			}
+			k, v, ok := strings.Cut(line, ":")
+			if !ok {
+				continue
+			}
+			consider(normalizeOverrideKey(k), v)
+		}
+	}
+
+	// 3. Line-start directives in body outside fenced code blocks (like Design-Item:).
+	inFence := false
+	for _, rawLine := range strings.Split(body, "\n") {
+		line := strings.TrimSpace(rawLine)
+		if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			continue
+		}
+		k, v, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		consider(normalizeOverrideKey(k), v)
+	}
+
+	return forcedTier, decompMode
 }
 
 type perfProfiler interface {
@@ -208,6 +375,8 @@ func countMarkdownSectionHeadings(s string) int {
 }
 
 func assessTaskComplexityInternal(in ComplexityInput) ComplexityAssessment {
+	forcedTier, decomposeOverride := ParseTaskQAOverrides(in.Body, in.CustomFields)
+
 	cleanBody := strings.TrimSpace(stripDispatchEnvelope(stripYAMLFrontmatter(in.Body)))
 	cleanAttachment := strings.TrimSpace(stripDispatchEnvelope(stripYAMLFrontmatter(in.AttachmentText)))
 	combinedSpec := cleanBody
@@ -219,25 +388,66 @@ func assessTaskComplexityInternal(in ComplexityInput) ComplexityAssessment {
 		}
 	}
 
+	attCount := max(in.AttachmentCount, 0)
+	mdCount := max(in.MarkdownAttachmentCount, 0)
+	htmlCount := max(in.HTMLAttachmentCount, 0)
+	if mdCount <= math.MaxInt-htmlCount {
+		if sum := mdCount + htmlCount; sum > attCount {
+			attCount = sum
+		}
+	} else {
+		attCount = math.MaxInt
+	}
+	specBytes := in.AttachmentSpecBytes
+	if int64(len(cleanAttachment)) > specBytes {
+		specBytes = int64(len(cleanAttachment))
+	}
+	totalAttBytes := in.AttachmentTotalBytes
+	if specBytes > totalAttBytes {
+		totalAttBytes = specBytes
+	}
+
 	deliverableRefs := countDeliverableRefs(in.Body)
 	sectionHeadings := countMarkdownSectionHeadings(combinedSpec)
+	attSectionHeadings := countMarkdownSectionHeadings(cleanAttachment)
+	attWordCount := len(strings.Fields(cleanAttachment))
 	hasExplicitDesignItem := strings.Contains(strings.ToLower(in.Body), "design-item:")
 	hasAuthoredSpec := len(cleanAttachment) >= 1500 ||
-		(in.MarkdownAttachmentCount > 0 && countMarkdownSectionHeadings(cleanAttachment) >= 4 && len(cleanAttachment) >= 800) ||
+		specBytes >= 1500 ||
+		(in.MarkdownAttachmentCount > 0 && attSectionHeadings >= 4 && len(cleanAttachment) >= 800) ||
 		(deliverableRefs >= 1 && len(combinedSpec) >= 1500 && sectionHeadings >= 4)
 	hasDesignItem := hasExplicitDesignItem || hasAuthoredSpec
 
 	score := 0
 	var signals []string
 
-	if hasDesignItem || (in.MarkdownAttachmentCount > 0 && len(cleanAttachment) >= 250) || (deliverableRefs >= 1 && len(combinedSpec) >= 350) {
+	if hasDesignItem ||
+		(in.MarkdownAttachmentCount > 0 && len(cleanAttachment) >= 250) ||
+		(deliverableRefs >= 1 && len(combinedSpec) >= 350) ||
+		(in.HTMLAttachmentCount > 0 && totalAttBytes >= 4*1024) {
 		score += 20
 		signals = append(signals, "has design item")
 	}
 
-	if deliverableRefs >= 2 || in.MarkdownAttachmentCount >= 3 {
+	if deliverableRefs >= 2 ||
+		in.MarkdownAttachmentCount >= 2 ||
+		(in.MarkdownAttachmentCount >= 1 && in.HTMLAttachmentCount >= 1) ||
+		attCount >= 3 {
 		score += 25
 		signals = append(signals, "multi-deliverable bundle")
+	}
+
+	if specBytes >= 10*1024 || totalAttBytes >= 24*1024 || attWordCount >= 1200 {
+		score += 20
+		signals = append(signals, "substantial attachment payload")
+	} else if specBytes >= 4*1024 || totalAttBytes >= 10*1024 || attWordCount >= 400 {
+		score += 10
+		signals = append(signals, "moderate attachment payload")
+	}
+
+	if sectionHeadings >= 5 || attSectionHeadings >= 4 {
+		score += 15
+		signals = append(signals, "multi-section spec")
 	}
 
 	if in.WritesCount > 1 {
@@ -288,7 +498,7 @@ func assessTaskComplexityInternal(in ComplexityInput) ComplexityAssessment {
 	}
 
 	hasBackend := false
-	hasFrontend := false
+	hasFrontend := in.HTMLAttachmentCount > 0
 	for _, hint := range pathHints {
 		if strings.HasPrefix(hint, "pkg/") || strings.HasPrefix(hint, "internal/") || strings.HasPrefix(hint, "cmd/") {
 			hasBackend = true
@@ -353,7 +563,7 @@ func assessTaskComplexityInternal(in ComplexityInput) ComplexityAssessment {
 	}
 
 	if strings.Contains(lowTitle, "typo") || strings.Contains(lowTitle, "rename") ||
-		((containsWordBoundary(lowTitle, "icon") || containsWordBoundary(lowTitle, "glyph") || containsWordBoundary(lowTitle, "tooltip")) && !hasBackend) {
+		((containsWordBoundary(lowTitle, "icon") || containsWordBoundary(lowTitle, "glyph") || containsWordBoundary(lowTitle, "tooltip")) && !hasBackend && !hasAuthoredSpec) {
 		score -= 20
 		signals = append(signals, "small-scope cue")
 	}
@@ -374,10 +584,22 @@ func assessTaskComplexityInternal(in ComplexityInput) ComplexityAssessment {
 		tier = ComplexityHigh
 	}
 
+	complexityForced := false
+	if forcedTier != "" && complexityTierRank(forcedTier) > complexityTierRank(tier) {
+		tier = forcedTier
+		complexityForced = true
+		signals = append(signals, "explicit complexity override ("+string(forcedTier)+")")
+	}
+	if decomposeOverride != "" {
+		signals = append(signals, "explicit decompose override ("+decomposeOverride+")")
+	}
+
 	return ComplexityAssessment{
-		Tier:          tier,
-		Score:         score,
-		Signals:       signals,
-		HasDesignItem: hasDesignItem,
+		Tier:              tier,
+		Score:             score,
+		Signals:           signals,
+		HasDesignItem:     hasDesignItem,
+		ComplexityForced:  complexityForced,
+		DecomposeOverride: decomposeOverride,
 	}
 }

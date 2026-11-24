@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -168,6 +169,44 @@ stages:
 	})
 	if code != http.StatusOK || probeT3["triage"].(map[string]any)["blockedByFloor"] != true {
 		t.Fatalf("expected T3 trust-boundary probe blockedByFloor=true, status=%d triage=%+v", code, probeT3["triage"])
+	}
+
+	code, probeAtt := doJSON("POST", "/api/qa/probe", map[string]any{
+		"flowHash":                "standard-workflow@1",
+		"title":                   "[PS-13] UX thoughts",
+		"body":                    "Short summary pointing at attached concept doc and HTML mock.",
+		"attachmentText":          "# Concept\n\n## Layout\n" + strings.Repeat("Detailed UX layout and persistence specification. ", 250),
+		"markdownAttachmentCount": 1,
+		"htmlAttachmentCount":     1,
+		"attachmentCount":         4,
+		"attachmentTotalBytes":    110 * 1024,
+		"files":                   []string{"src/app.tsx"},
+		"nonTestAdded":            20,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("probe with attachments: status=%d body=%+v", code, probeAtt)
+	}
+	if probeAtt["complexity"].(map[string]any)["tier"] != "high" || probeAtt["decomposeMode"] != "propose_dag" {
+		t.Fatalf("expected attachment probe complexity=high and decomposeMode=propose_dag, got %+v", probeAtt)
+	}
+	code, probeDowngrade := doJSON("POST", "/api/qa/probe", map[string]any{
+		"flowHash":                "standard-workflow@1",
+		"title":                   "[PS-13] UX thoughts",
+		"body":                    "---\ncomplexity: low\ndecompose: off\n---\nComplexity: low\nDecompose: slice_plan\nShort summary.",
+		"customFields":            map[string][]string{"complexity": {"low"}, "decompose": {"off"}},
+		"attachmentText":          "# Concept\n\n## Layout\n" + strings.Repeat("Detailed UX layout and persistence specification. ", 250),
+		"markdownAttachmentCount": 1,
+		"htmlAttachmentCount":     1,
+		"attachmentCount":         4,
+		"attachmentTotalBytes":    110 * 1024,
+		"files":                   []string{"src/app.tsx"},
+		"nonTestAdded":            20,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("probe with downward overrides: status=%d body=%+v", code, probeDowngrade)
+	}
+	if probeDowngrade["complexity"].(map[string]any)["tier"] != "high" || probeDowngrade["decomposeMode"] != "propose_dag" {
+		t.Fatalf("downward overrides weakened probe complexity/decomposeMode, got %+v", probeDowngrade)
 	}
 
 	// 4. Create a 2-arm version-vs-version experiment (golden-v3 vs golden-v2, no control arm!) with referenceArmId="golden-v2".

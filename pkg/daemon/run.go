@@ -1472,11 +1472,12 @@ func runDaemon(ctx context.Context, cfg Config, store *model.Store, sandboxes or
 		Profiler:            qaProfiler,
 		ResolveRemote:       directQARemote,
 		ResolveMirrorRemote: NewQAMirrorResolver(proxyURL, store, tokens, directQARemote),
+		StageStartupOverhead: func(sCtx context.Context, task model.Task) time.Duration {
+			return qaStageStartupOverhead(sCtx, store, cfg, task)
+		},
+		RedactText: qaStageErrorRedactor(SecretsDir(cfg.DataDir), secretStore),
 		VerifyS4: func(ctx context.Context, task model.Task, prompt string) (string, int64, int64, error) {
-			fw, err := buildFramework(ctx, orchestrator.AgentChoice{
-				Framework: task.AgentFramework,
-				Model:     task.Model,
-			})
+			fw, err := buildQAStageFramework(ctx, store, cfg, buildFramework, task)
 			if err != nil || fw == nil {
 				return "", 0, 0, fmt.Errorf("qa s4 framework unavailable: %w", err)
 			}
@@ -1495,10 +1496,7 @@ func runDaemon(ctx context.Context, cfg Config, store *model.Store, sandboxes or
 			return res.FinalText, res.Usage.InputTokens, res.Usage.OutputTokens, nil
 		},
 		RunIsolatedPrompt: func(ctx context.Context, task model.Task, runPrefix, prompt string, maxTokens int) (string, int64, int64, error) {
-			fw, err := buildFramework(ctx, orchestrator.AgentChoice{
-				Framework: task.AgentFramework,
-				Model:     task.Model,
-			})
+			fw, err := buildQAStageFramework(ctx, store, cfg, buildFramework, task)
 			if err != nil || fw == nil {
 				return "", 0, 0, fmt.Errorf("qa isolated framework unavailable: %w", err)
 			}

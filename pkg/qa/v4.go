@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -32,11 +33,113 @@ const MaxActiveCodingGuidanceBytes = 8192
 
 // DecomposeDecl configures Stage 1 complexity-gated task decomposition in FlowDeclarationV4.
 type DecomposeDecl struct {
-	Enabled         bool     `json:"enabled,omitempty" yaml:"enabled,omitempty"`
-	Mode            string   `json:"mode,omitempty" yaml:"mode,omitempty"`
-	Complexities    []string `json:"complexities,omitempty" yaml:"complexities,omitempty"`
-	MaxSubtasks     int      `json:"maxSubtasks,omitempty" yaml:"max-subtasks,omitempty"`
-	TargetDiffLines int      `json:"targetDiffLines,omitempty" yaml:"target-diff-lines,omitempty"`
+	Enabled         bool              `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Mode            string            `json:"mode,omitempty" yaml:"mode,omitempty"`
+	Complexities    []string          `json:"complexities,omitempty" yaml:"complexities,omitempty"`
+	TierModes       map[string]string `json:"tierModes,omitempty" yaml:"tier-modes,omitempty"`
+	MaxSubtasks     int               `json:"maxSubtasks,omitempty" yaml:"max-subtasks,omitempty"`
+	TargetDiffLines int               `json:"targetDiffLines,omitempty" yaml:"target-diff-lines,omitempty"`
+}
+
+// DecomposeModeRank orders decomposition modes by strictness: off/"" (0) < slice_plan (1) < propose_dag (2).
+func DecomposeModeRank(mode string) int {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "propose_dag":
+		return 2
+	case "slice_plan":
+		return 1
+	default:
+		return 0
+	}
+}
+
+// EffectiveModeForTier returns the explicit decomposition mode ("propose_dag", "slice_plan", or "")
+// configured for tier without performing any silent tier downgrade.
+func (d DecomposeDecl) EffectiveModeForTier(tier ComplexityTier) string {
+	if !d.Enabled {
+		return ""
+	}
+	normTier := strings.ToLower(strings.TrimSpace(string(tier)))
+	if normTier == "large" {
+		normTier = string(ComplexityHigh)
+	}
+	if len(d.TierModes) > 0 {
+		if raw, ok := d.TierModes[normTier]; ok {
+			m := strings.ToLower(strings.TrimSpace(raw))
+			if m == "" || m == "off" {
+				return ""
+			}
+			return m
+		}
+	}
+	baseMode := strings.ToLower(strings.TrimSpace(d.Mode))
+	if baseMode == "" || baseMode == "off" {
+		return ""
+	}
+	if len(d.Complexities) > 0 {
+		matched := false
+		for _, raw := range d.Complexities {
+			norm := strings.ToLower(strings.TrimSpace(raw))
+			if norm == "large" {
+				norm = string(ComplexityHigh)
+			}
+			if norm == normTier {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return ""
+		}
+	}
+	return baseMode
+}
+
+// EffectiveModeWithOverride returns the tighten-only effective decomposition mode for tier
+// after applying an optional task-level override. Task overrides can only raise strictness
+// (e.g. "" -> slice_plan/propose_dag, or slice_plan -> propose_dag) and can never weaken or
+// disable a flow's configured decomposition policy.
+func (d DecomposeDecl) EffectiveModeWithOverride(tier ComplexityTier, override string) (mode string, overrideApplied bool) {
+	if !d.Enabled {
+		return "", false
+	}
+	base := d.EffectiveModeForTier(tier)
+	ov := strings.ToLower(strings.TrimSpace(override))
+	if DecomposeModeRank(ov) > DecomposeModeRank(base) {
+		return ov, true
+	}
+	return base, false
+}
+
+var canonicalDecomposeTiers = []ComplexityTier{ComplexityLow, ComplexityMedium, ComplexityHigh}
+
+// EffectiveDisplayMode returns the highest active decomposition mode across low/medium/high tiers,
+// or "" when decomposition is inactive for every tier.
+func (d DecomposeDecl) EffectiveDisplayMode() string {
+	best := ""
+	for _, tier := range canonicalDecomposeTiers {
+		m := d.EffectiveModeForTier(tier)
+		if DecomposeModeRank(m) > DecomposeModeRank(best) {
+			best = m
+		}
+	}
+	return best
+}
+
+// ActiveTiers returns the ordered complexity tiers for which d activates decomposition.
+func (d DecomposeDecl) ActiveTiers() []string {
+	var out []string
+	for _, tier := range canonicalDecomposeTiers {
+		if d.EffectiveModeForTier(tier) != "" {
+			out = append(out, string(tier))
+		}
+	}
+	return out
+}
+
+// IsActive reports whether d produces a non-empty decomposition mode for at least one complexity tier.
+func (d DecomposeDecl) IsActive() bool {
+	return d.EffectiveDisplayMode() != ""
 }
 
 // ContextDiscoveryDecl configures Stage 2 caller & memory context discovery in FlowDeclarationV4.
@@ -131,8 +234,8 @@ const standardWorkflowYAML = `schema: grain.dev/qa-flow/v4
 key: standard-workflow
 label: Standard workflow
 summary: >
-  Default 8-stage engineering workflow: tiered subtask DAG decomposition for high-complexity
-  workstreams, caller & memory context discovery, plan critique, language readability packs,
+  Default 8-stage engineering workflow: complexity-gated subtask DAG decomposition for
+  workstreams, caller & attachment context discovery, plan critique, language readability packs,
   deterministic S3 gates, PR contracts, S4 fresh-context verification, and enforced blast-tier merge triage.
 
 decompose:
@@ -586,7 +689,7 @@ func ResolveFlowDeclarationV4(decl FlowDeclarationV4, version int, sourceYAML st
 	if ext := strings.TrimSpace(decl.Extends); ext != "" {
 		if parent, ok := effectiveLookup(ext); ok && parent.DeclarationV4 != nil {
 			pv4 := parent.DeclarationV4
-			if !decl.Decompose.Enabled && decl.Decompose.Mode == "" && len(decl.Decompose.Complexities) == 0 && decl.Decompose.MaxSubtasks == 0 && decl.Decompose.TargetDiffLines == 0 {
+			if !decl.Decompose.Enabled && decl.Decompose.Mode == "" && len(decl.Decompose.Complexities) == 0 && len(decl.Decompose.TierModes) == 0 && decl.Decompose.MaxSubtasks == 0 && decl.Decompose.TargetDiffLines == 0 {
 				decl.Decompose = cloneDecomposeDecl(pv4.Decompose)
 			}
 			if !decl.Context.Enabled && !decl.Context.IncludeCallers && !decl.Context.IncludeMemory && decl.Context.MaxTokens == 0 && len(decl.Context.ExtraPaths) == 0 {
@@ -620,7 +723,7 @@ func ResolveFlowDeclarationV4(decl FlowDeclarationV4, version int, sourceYAML st
 
 	// Validate DecomposeDecl.
 	decompMode := strings.TrimSpace(decl.Decompose.Mode)
-	if decl.Decompose.Enabled && decompMode == "" {
+	if decl.Decompose.Enabled && decompMode == "" && len(decl.Decompose.TierModes) == 0 {
 		decompMode = "slice_plan"
 	}
 	if decompMode != "" && decompMode != "off" && decompMode != "slice_plan" && decompMode != "propose_dag" {
@@ -637,6 +740,20 @@ func ResolveFlowDeclarationV4(decl FlowDeclarationV4, version int, sourceYAML st
 		if c != string(ComplexityLow) && c != string(ComplexityMedium) && c != string(ComplexityHigh) {
 			return FlowVersionBundle{}, fmt.Errorf("qa: invalid decompose complexity %q", c)
 		}
+	}
+	if len(decl.Decompose.TierModes) > 0 {
+		cleanTierModes := make(map[string]string, len(decl.Decompose.TierModes))
+		for tierKey, tierMode := range decl.Decompose.TierModes {
+			if tierKey != string(ComplexityLow) && tierKey != string(ComplexityMedium) && tierKey != string(ComplexityHigh) {
+				return FlowVersionBundle{}, fmt.Errorf("qa: invalid decompose.tier-modes key %q (want low, medium, or high)", tierKey)
+			}
+			m := strings.TrimSpace(tierMode)
+			if m != "off" && m != "slice_plan" && m != "propose_dag" {
+				return FlowVersionBundle{}, fmt.Errorf("qa: invalid decompose.tier-modes[%q] %q (want off, slice_plan, or propose_dag)", tierKey, tierMode)
+			}
+			cleanTierModes[tierKey] = m
+		}
+		decl.Decompose.TierModes = cleanTierModes
 	}
 
 	// Validate ContextDiscoveryDecl.
@@ -946,13 +1063,41 @@ func BuildWorkflowStagesView(b FlowVersionBundle) []WorkflowStageView {
 	}
 
 	// Stage 1: s0-decompose
-	decompEnabled := f.Decompose.Enabled && f.Decompose.Mode != "off"
+	decompDisplayMode := f.Decompose.EffectiveDisplayMode()
+	decompEnabled := decompDisplayMode != ""
 	s0Enabled := f.S0Intent || decompEnabled || hasEnabledSkillStepForStage(f.SkillSteps, "s0")
 	s0Mode := "off"
 	if decompEnabled {
-		s0Mode = defaultNonEmpty(f.Decompose.Mode, "slice_plan")
+		s0Mode = decompDisplayMode
 	} else if f.S0Intent {
 		s0Mode = defaultNonEmpty(f.S0IntentConfig.OnClarification, "warn")
+	}
+	decompScope := joinOrDefault(f.Decompose.Complexities, "medium, high")
+	if len(f.Decompose.TierModes) > 0 {
+		if active := f.Decompose.ActiveTiers(); len(active) > 0 {
+			decompScope = strings.Join(active, ", ")
+		} else {
+			decompScope = "none"
+		}
+	}
+	decompSummary := fmt.Sprintf("Splits complex work into bounded slices (maxSubtasks=%d, targetDiffLines=%d).", f.Decompose.MaxSubtasks, f.Decompose.TargetDiffLines)
+	if !decompEnabled {
+		decompSummary = fmt.Sprintf("Decomposition disabled for all complexity tiers (maxSubtasks=%d, targetDiffLines=%d).", f.Decompose.MaxSubtasks, f.Decompose.TargetDiffLines)
+	} else if len(f.Decompose.TierModes) > 0 {
+		parts := make([]string, 0, len(canonicalDecomposeTiers))
+		for _, tier := range canonicalDecomposeTiers {
+			k := string(tier)
+			eff := f.Decompose.EffectiveModeForTier(tier)
+			_, explicit := f.Decompose.TierModes[k]
+			if eff != "" {
+				parts = append(parts, fmt.Sprintf("%s=%s", k, eff))
+			} else if explicit {
+				parts = append(parts, fmt.Sprintf("%s=off", k))
+			}
+		}
+		decompSummary = fmt.Sprintf("Per-tier decomposition (%s; maxSubtasks=%d, targetDiffLines=%d).", strings.Join(parts, ", "), f.Decompose.MaxSubtasks, f.Decompose.TargetDiffLines)
+	} else if decompDisplayMode == "propose_dag" {
+		decompSummary = fmt.Sprintf("Decomposes matching workstreams into wave-ordered subtask DAGs (maxSubtasks=%d, targetDiffLines=%d).", f.Decompose.MaxSubtasks, f.Decompose.TargetDiffLines)
 	}
 	s0Steps := []WorkflowStepView{
 		{
@@ -973,9 +1118,9 @@ func BuildWorkflowStagesView(b FlowVersionBundle) []WorkflowStageView {
 			Kind:    "decomposition",
 			StageID: "s0-decompose",
 			Enabled: decompEnabled,
-			Mode:    boolMode(decompEnabled, defaultNonEmpty(f.Decompose.Mode, "slice_plan")),
-			Scope:   joinOrDefault(f.Decompose.Complexities, "medium, high"),
-			Summary: fmt.Sprintf("Splits complex work into bounded slices (maxSubtasks=%d, targetDiffLines=%d).", f.Decompose.MaxSubtasks, f.Decompose.TargetDiffLines),
+			Mode:    boolMode(decompEnabled, decompDisplayMode),
+			Scope:   decompScope,
+			Summary: decompSummary,
 		},
 	}
 	s0Steps = append(s0Steps, buildSkillStepViews(f.SkillSteps, "s0", "s0-decompose")...)
@@ -1381,6 +1526,9 @@ func joinOrDefault(items []string, fallback string) string {
 
 func cloneDecomposeDecl(d DecomposeDecl) DecomposeDecl {
 	d.Complexities = slices.Clone(d.Complexities)
+	if d.TierModes != nil {
+		d.TierModes = maps.Clone(d.TierModes)
+	}
 	return d
 }
 
@@ -1554,6 +1702,7 @@ var jsonFlowCamelToYAMLKey = map[string]string{
 	"requireHumanTiers":     "require-human-tiers",
 	"maxSubtasks":           "max-subtasks",
 	"targetDiffLines":       "target-diff-lines",
+	"tierModes":             "tier-modes",
 	"includeCallers":        "include-callers",
 	"includeMemory":         "include-memory",
 	"extraPaths":            "extra-paths",
@@ -1602,7 +1751,7 @@ func normalizeJSONFlowValue(v any, parentKey string) any {
 				continue
 			}
 			mapped := k
-			if parentKey != "checks" {
+			if parentKey != "checks" && parentKey != "tier-modes" {
 				if yamlKey, ok := jsonFlowCamelToYAMLKey[k]; ok {
 					mapped = yamlKey
 				}

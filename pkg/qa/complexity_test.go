@@ -15,6 +15,7 @@
 package qa
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -121,6 +122,73 @@ func TestAssessTaskComplexity(t *testing.T) {
 			},
 			wantTier: ComplexityMedium,
 		},
+		{
+			name: "short description with >10KB markdown spec and HTML mock (no repo paths) scores high",
+			in: ComplexityInput{
+				Title:                   "[PS-13] UX thoughts",
+				Body:                    "Short card summary for UX improvements across inspector and modal controls.",
+				MarkdownAttachmentCount: 1,
+				HTMLAttachmentCount:     1,
+				AttachmentCount:         4,
+				AttachmentSpecBytes:     36 * 1024,
+				AttachmentTotalBytes:    110 * 1024,
+				AttachmentText:          "# UX Thoughts Concept\n\n## Layout\n" + strings.Repeat("Detailed layout and interaction contract paragraph covering panels, navigation, and responsive states. ", 130),
+			},
+			wantTier: ComplexityHigh,
+		},
+		{
+			name: "short description with 1.3KB markdown attachment does not drop to low",
+			in: ComplexityInput{
+				Title:                   "[PS-21] timestamps + 3-dot column sort/filter menu",
+				Body:                    "Add created/updated timestamps and column sort/filter dropdown menu to the main board view. Keep compact card density and preserve existing filters when reloading.",
+				MarkdownAttachmentCount: 1,
+				AttachmentCount:         1,
+				AttachmentSpecBytes:     1350,
+				AttachmentTotalBytes:    1350,
+				AttachmentText:          "# Column Sort & Filter\n\n## Requirements\n" + strings.Repeat("Render created and updated timestamps on each row and expose sort and filter actions inside the 3-dot column header menu. ", 12),
+			},
+			wantTier: ComplexityMedium,
+		},
+		{
+			name: "explicit complexity override in YAML frontmatter forces high",
+			in: ComplexityInput{
+				Title: "Small title",
+				Body:  "---\ncomplexity: high\ndecompose: propose_dag\n---\nShort description.",
+			},
+			wantTier: ComplexityHigh,
+		},
+		{
+			name: "explicit complexity override in custom fields forces high",
+			in: ComplexityInput{
+				Title:        "Small title",
+				Body:         "Short description.",
+				CustomFields: map[string][]string{"qa_complexity": {"high"}, "decompose": {"propose_dag"}},
+			},
+			wantTier: ComplexityHigh,
+		},
+		{
+			name: "override inside fenced code block is ignored",
+			in: ComplexityInput{
+				Title: "Fix typo",
+				Body:  "Example snippet:\n```yaml\ncomplexity: high\ndecompose: propose_dag\n```\nJust fix spelling.",
+			},
+			wantTier: ComplexityLow,
+		},
+		{
+			name: "downward complexity and decompose overrides in frontmatter/customFields cannot downgrade high task",
+			in: ComplexityInput{
+				Title:                   "[PS-13] UX thoughts",
+				Body:                    "---\ncomplexity: low\ndecompose: off\n---\nComplexity: medium\nDecompose: no\nShort summary.",
+				CustomFields:            map[string][]string{"complexity": {"low"}, "decompose": {"off"}},
+				MarkdownAttachmentCount: 1,
+				HTMLAttachmentCount:     1,
+				AttachmentCount:         4,
+				AttachmentSpecBytes:     36 * 1024,
+				AttachmentTotalBytes:    110 * 1024,
+				AttachmentText:          "# UX Thoughts Concept\n\n## Layout\n" + strings.Repeat("Detailed layout and interaction contract paragraph covering panels, navigation, and responsive states. ", 130),
+			},
+			wantTier: ComplexityHigh,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -129,6 +197,32 @@ func TestAssessTaskComplexity(t *testing.T) {
 				t.Errorf("got tier %s, want %s (score %d, signals %v)", got.Tier, tt.wantTier, got.Score, got.Signals)
 			}
 		})
+	}
+}
+
+func TestParseTaskQAOverrides(t *testing.T) {
+	tier, decomp := ParseTaskQAOverrides("Decompose: propose_dag\nQA-Complexity: high\n", nil)
+	if tier != ComplexityHigh || decomp != "propose_dag" {
+		t.Fatalf("body directive override = (%q, %q), want (high, propose_dag)", tier, decomp)
+	}
+	tier2, decomp2 := ParseTaskQAOverrides("Short body", map[string][]string{"qa-decompose": {"slice_plan"}, "complexity": {"medium"}})
+	if tier2 != ComplexityMedium || decomp2 != "slice_plan" {
+		t.Fatalf("customFields override = (%q, %q), want (medium, slice_plan)", tier2, decomp2)
+	}
+	// Prose mentioning "Complexity:" with a full sentence must not falsely trigger an override.
+	tier3, decomp3 := ParseTaskQAOverrides("Complexity: high-level overview of architecture\nDecompose: see section 2 below", nil)
+	if tier3 != "" || decomp3 != "" {
+		t.Fatalf("prose lines should not match overrides, got (%q, %q)", tier3, decomp3)
+	}
+	// Downward overrides ("low", "off", "false", "no", "none") are rejected so task text cannot weaken QA gates.
+	tier4, decomp4 := ParseTaskQAOverrides("---\ncomplexity: low\ndecompose: off\n---\nComplexity: low\nDecompose: false\n", map[string][]string{"complexity": {"low"}, "decompose": {"none"}})
+	if tier4 != "" || decomp4 != "" {
+		t.Fatalf("downward overrides must be ignored, got (%q, %q)", tier4, decomp4)
+	}
+	// Highest-rank directive wins when both a weaker and stronger override appear.
+	tier5, decomp5 := ParseTaskQAOverrides("Complexity: medium\nDecompose: slice_plan\nComplexity: high\nDecompose: propose_dag\n", nil)
+	if tier5 != ComplexityHigh || decomp5 != "propose_dag" {
+		t.Fatalf("highest-rank directive should win, got (%q, %q)", tier5, decomp5)
 	}
 }
 
