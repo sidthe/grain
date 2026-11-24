@@ -354,11 +354,11 @@ func listReleaseTagsFromRepos(
 		}
 		return nil, fmt.Errorf("%s does not include the floor minor release and listing legacy %s failed: %w", primary, legacy, legacyErr)
 	default:
-		if _, _, baseErr := releaseBaselines(legacyTags, target, "", conf); baseErr == nil {
-			return legacyTags, nil
-		} else {
-			return nil, fmt.Errorf("listing %s: %v; legacy %s: %v", primary, primaryErr, legacy, baseErr)
-		}
+		// Never fall back to the frozen legacy repository alone when primary
+		// lookup fails: doing so would silently degrade the latest upgrade
+		// baseline to a pre-cutover release and miss post-cutover releases or
+		// -retracted markers published on primary.
+		return nil, fmt.Errorf("listing %s: %w (not falling back to legacy %s alone)", primary, primaryErr, legacy)
 	}
 }
 
@@ -392,7 +392,13 @@ func hasFloorBaseline(tags []string, target string, conf releaseConf) bool {
 	if lv[0] == conf.major {
 		wantMinor = conf.floorMinor
 	}
-	return fv[0] == lv[0] && fv[1] == wantMinor
+	if fv[0] != lv[0] || fv[1] != wantMinor {
+		return false
+	}
+	floorZero := fmt.Sprintf("v%d.%d.0", lv[0], wantMinor)
+	return fv[2] == 0 ||
+		slices.Contains(conf.neverPromote, floorZero) ||
+		slices.Contains(tags, floorZero+"-retracted")
 }
 
 func TestReleaseBaselines(t *testing.T) {
@@ -599,6 +605,36 @@ func TestResolveReleaseBaselines(t *testing.T) {
 		})
 		if err == nil || !strings.Contains(err.Error(), "docker hub down") || !strings.Contains(err.Error(), "ghcr down") {
 			t.Fatalf("err = %v, want both docker hub down and ghcr down", err)
+		}
+	})
+
+	t.Run("surfaces primary lookup failure instead of falling back to legacy alone", func(t *testing.T) {
+		list := func(_ context.Context, repo string) ([]string, error) {
+			if repo == "docker.io/grainai/grain" {
+				return nil, errors.New("docker hub rate limited")
+			}
+			return []string{"v3.0.0", "v3.1.0"}, nil
+		}
+		_, _, _, err := resolveReleaseBaselines(nil, "", "", conf, func() ([]string, error) {
+			return listReleaseTagsFromRepos(context.Background(), "docker.io/grainai/grain", "ghcr.io/bwsalmon/grain/grain", true, "", conf, list)
+		})
+		if err == nil || !strings.Contains(err.Error(), "docker hub rate limited") {
+			t.Fatalf("err = %v, want primary lookup error surfaced", err)
+		}
+	})
+
+	t.Run("surfaces legacy lookup failure when primary only has a patch of the floor minor", func(t *testing.T) {
+		list := func(_ context.Context, repo string) ([]string, error) {
+			if repo == "docker.io/grainai/grain" {
+				return []string{"v3.0.1", "v3.13.0"}, nil
+			}
+			return nil, errors.New("ghcr unavailable")
+		}
+		_, _, _, err := resolveReleaseBaselines(nil, "", "", conf, func() ([]string, error) {
+			return listReleaseTagsFromRepos(context.Background(), "docker.io/grainai/grain", "ghcr.io/bwsalmon/grain/grain", true, "", conf, list)
+		})
+		if err == nil || !strings.Contains(err.Error(), "ghcr unavailable") {
+			t.Fatalf("err = %v, want legacy lookup error surfaced", err)
 		}
 	})
 }
