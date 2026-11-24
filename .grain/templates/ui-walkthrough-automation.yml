@@ -10,79 +10,80 @@ body: |
 
   ## Coverage
 
-  - Processes: open it from the rail (`/processes`) and check its count
-    (confirming SPA navigation refreshes schedules, templates and suites
-    alongside triggers and suite runs). Use the kind chips (All,
-    Schedules, Workflow schedules, Templates, Suites, Triggers) with
-    their counts, search, the toolbar's narrowing and the sort (Next run,
-    Last run, Name, Kind, Custom order, with reorder through pointer and
-    keyboard/tap). Confirm the narrowing rides in the query (`?kind=`,
-    `?q=`) through reload and Back/Forward, that templates and suites
-    show the last and next runs derived from the schedules that fire them
-    ("on demand" when none does), and that the old `/schedules`,
-    `/templates` and `/suites[/<id>]` links land on the matching
-    Processes view or item.
-  - New: open the header's New menu (Schedule, Template, Suite, and the
-    hint that workflow schedules and triggers are declared in a
-    repository), and confirm that with the kind chips narrowed to one
-    creatable kind New opens that kind directly.
-  - Schedules: create both task-filing and suite-running schedules;
-    exercise recurrence variants (every N minutes and its ten-minute
-    floor, and `git_ref` branch/tag triggers -- confirming forbidden
-    watched repos are refused while existing off-target `git_ref`
-    schedules show their `Suppressed` warning chip, detail line and
-    `"suppressed"` next-run label on `/processes` and can still be
-    paused), overlap policy, template/raw task composition,
-    repo/base/writes/reads, grants (the Grain API group and capability
-    policy verdicts included), Admission (`Standard`, `Bypass queue`,
-    `Durable`), Hosting (`Unattended`, `Interactive console`), Keep
-    running (`keep_running`), network/custom fields, the searchable agent
-    and model picker (only models the deployment's enabled connections
-    advertise, and what a model no connection serves looks like),
-    validation and composition preview (confirming a saved schedule
-    previews its chosen model, a template-backed schedule previews its
-    own hosting, and declared capabilities/source chips stay inside their
-    value column). Edit, pause, resume, run now, follow a schedule's task
-    or suppressed-task link (confirming an unsaved edit asks once before
-    leaving), and delete throwaway schedules, verifying confirmations,
-    persisted next/last-run presentation, and that the row and its
+  - Processes (`/next/processes`, from the rail): its four tabs
+    (Schedules & Triggers, Templates, Suites & Runs, Repo Workflows &
+    Declarations) with their counts, each tab's filter chips (All,
+    Active, Paused, Event triggers, Suppressed on schedules; All,
+    Deployment, Repo-declared, Built-in on templates; Suites / Suite runs
+    on suites), `Filter this view` (`/`) written to `?q=`, and the Sort
+    pill (Custom order, Next run, Last run, Name, and Kind except on
+    suites) in `?sort=`, all kept through tab switches, reload and
+    Back/Forward. In Custom order move a row with Alt+ArrowUp/Down
+    (announced) and by dragging, and confirm the classic `/processes` page
+    shows the same order. Template and suite rows show the last and next
+    run derived from the schedules that fire them ("on demand" when none
+    does). The old `/next/schedules`, `/next/templates`, `/next/suites`
+    links and their `/<id>` and `/next/processes/suites/runs/<id>` item
+    links land on the matching tab and item; a missing id says so.
+  - New: the header's New ▾ menu (Schedule, Template, Suite, and the note
+    that workflow schedules and triggers are declared in a repository's
+    `.grain/`) switches to that kind's tab and opens its form;
+    `?new=template` and `?new=suite` deep-link the same forms; the
+    Create menu's New schedule, Task from template and Run a suite reach
+    them from any page. A refused save shows its error inside the dialog.
+  - Schedules (`/next/processes/schedules`): create prompt-, template- and
+    suite-backed schedules; recurrence (Every N min with its ten-minute
+    floor, Every N hr, Daily, Weekly, Monthly, GitHub workflow, Git ref
+    push -- a forbidden watched repo refused, an off-target `git_ref`
+    schedule showing its Suppressed chip and banner and no next run, yet
+    still pausable); overlap policy; draft and saved composition preview.
+    Pause, Resume, Run now, follow the fired task link, edit, and Delete a
+    throwaway schedule through its confirmation; confirm the row and its
     template's and suite's rows follow without a reload.
-  - Templates: create a fully populated template (its Task priority
-    whole-number and `1e3` validation, Admission, Hosting, Keep running,
-    interactive switch, capability policy verdicts and searchable model
-    picker included); file from it via New task from this template
-    (confirming New task opens on that template with its priority carried
-    across, whereas a template with input fields opens Use… instead) and
-    via Use… (reading the note an interactive template shows there, and
-    confirming an unbound template with `Reads` drops the chosen target
-    repo from `Reads` rather than failing); edit and reopen it (confirming
-    suites referencing it refresh on rename/save and the footer stays one
-    line tall and apart at phone width); use it from a schedule and from
-    a suite (confirming composition previews show its priority, admission
-    and hosting and keep long grant chips inside the pane at phone width);
-    test dependency-aware delete behaviour and then remove only throwaway
-    data.
-  - Suites: create and edit a suite using the searchable Templates
-    picker, create a template inline (and confirm a role lacking
-    `suites:write` sees suite mutations gated with `+ New template` kept
-    in place when refused), exercise run modes/pass
-    limits/approval/auto-merge, and delete a throwaway suite with
-    confirmation.
-  - Start a suite run from both the suite row and the generic Run
-    action. Inspect the Suite runs list under Processes,
-    scheduled/running/finished/failure presentations (confirming a
-    base-less suite run shows "default branch" on its row and pane and
-    the status chip stays whole on a narrow row), direct URLs
-    (`/processes/suites/runs/<id>`), pass grouping, spawned tasks and
-    proposed follow-ups, and task-detail navigation.
-  - Repository-declared templates, suites, schedules, workflow schedules
-    and triggers (`docs/declarations.md`): confirm that a declared row is
-    shown as declared, names the repository and file it came from,
-    disables `GrantsPicker` and mutating controls on its overlay, and
-    refuses to edit or delete it with an explanation rather
-    than failing silently; workflow schedules carry no `System` chip and
-    their Run now says it starts the run straight away, and a trigger row
-    opens its file on the repository's Advanced tab.
+  - A held schedule's detail: the suppression reason in words
+    ("Suppressed -- publishing held: …", not a wire code), the overlap
+    group beside Overlap, each skip saying whether it later fired (and as
+    which task, with occurrences folded in) or was dropped, and no Next
+    line on an event trigger. Check it at phone and desktop widths.
+  - Templates (`/next/processes/templates`): create and edit a template
+    (parameters, field label/default/required, auto-merge), preview with
+    placeholders only for required fields, Launch task (unbound templates
+    with `Reads` drop the chosen target repo rather than failing), rename
+    it while a suite uses it (the suite's members and preview follow
+    without a reload), and try Delete while it is referenced (refused,
+    naming the suite) before removing only throwaway data.
+  - Suites & Runs (`/next/processes/suites`): create and edit a suite
+    (Fixed pass count / Until clean with its maximum, member templates,
+    Require approval, Auto-merge, composition preview); a role without
+    `suites:write` sees New suite and Run suite hidden and the inspector's
+    Run suite, Edit and Delete disabled. Start a run from the inspector
+    and from the header, then inspect Suite runs: Active, Succeeded and
+    Failed runs, a base-less run reading "default branch", a run that
+    filed no pass saying so, pass grouping with `↳ Spawned` follow-ups,
+    task links (Back returns), cancelling an active run, and status chips
+    whole at phone width.
+  - Repo Workflows & Declarations and declared rows: the "Read <repo>'s
+    own declarations" switch (an invalid `.grain/` file shows its line
+    error), Accept declaration, the discovered `.grain/` files, and the
+    trigger rows in Schedules & Triggers ("next: on change", under All and
+    Event triggers, linking to `/next/repos/<owner>/<name>/advanced`).
+    Declared schedules, templates and suites carry their `.grain` badge
+    and a read-only banner naming the repository and file, with Edit and
+    Delete hidden and Pause disabled; a workflow schedule carries no
+    System chip and its Run now confirms that it starts a CI run of the
+    declared workflow straight away.
+  - Classic-only Processes controls (walk them at `/processes` until
+    `/next/` has them): schedule and template Admission (`Standard`,
+    `Bypass queue`, `Durable`), Hosting (`Unattended`, `Interactive
+    console`), Keep running, network, reads/writes and custom fields;
+    `GrantsPicker` with the Grain API group and capability policy
+    verdicts (disabled on declared rows); the searchable agent and model
+    picker; template Task priority (`1e3` normalized, whole numbers only),
+    sandbox shape, Reviewers and the Interactive switch; New task from
+    this template (its priority carried into `/new`, or Use… for a
+    template with input fields, with the interactive-chat note); the
+    suite form's searchable Templates picker and inline `+ New template`;
+    and an unsaved schedule edit asking once before a task link leaves.
   - The demo may not run real agents. Stub only the agent/execution
     boundary, or seed through the real server's supported store/demo
     path, to obtain realistic run states; every create/edit/run gesture
