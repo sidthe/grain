@@ -18,6 +18,7 @@ package sqlite_test
 // store_test.go's own doc comment on why gives the reasoning again here.
 
 import (
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -393,5 +394,71 @@ func TestHasOpenTaskWithTag(t *testing.T) {
 	}
 	if open {
 		t.Fatal("want false for a tag nothing carries")
+	}
+}
+
+func TestListAndDueSchedulesBulkHydrateChildren(t *testing.T) {
+	t.Parallel()
+	store, _, ctx := openStore(t)
+
+	s1 := schedule("sched-a", now.Add(-2*time.Minute))
+	s1.Reads = []model.RepoRef{{Owner: "acme", Name: "zebra"}, {Owner: "acme", Name: "alpha"}}
+	s1.Writes = []model.WriteTarget{{Repo: model.RepoRef{Owner: "acme", Name: "web"}, Base: "main"}}
+	s1.Grants = []model.Grant{{Capability: "cap-b", Via: model.GrantByLabel}, {Capability: "cap-a", Via: model.GrantByLabel}}
+	s1.CustomFields = map[string][]string{"team": {"core", "api"}, "priority": {"p1"}}
+
+	s2 := schedule("sched-b", now.Add(-1*time.Minute))
+	s2.Reads = []model.RepoRef{{Owner: "acme", Name: "docs"}}
+	s2.Grants = []model.Grant{{Capability: "cap-c", Via: model.GrantByLabel}}
+
+	s3 := schedule("sched-c", now.Add(time.Hour))
+	s3.CustomFields = map[string][]string{"env": {"staging"}}
+
+	for _, sc := range []model.Schedule{s1, s2, s3} {
+		if err := store.PutSchedule(ctx, sc); err != nil {
+			t.Fatalf("PutSchedule %s: %v", sc.ID, err)
+		}
+	}
+
+	wantReads := []model.RepoRef{{Owner: "acme", Name: "alpha"}, {Owner: "acme", Name: "zebra"}}
+	wantWrites := []model.WriteTarget{{Repo: model.RepoRef{Owner: "acme", Name: "web"}, Base: "main"}}
+	wantGrants := []model.Grant{{Capability: "cap-a", Via: model.GrantByLabel}, {Capability: "cap-b", Via: model.GrantByLabel}}
+	wantCF := map[string][]string{"priority": {"p1"}, "team": {"api", "core"}}
+
+	due, err := store.DueSchedules(ctx, now)
+	if err != nil {
+		t.Fatalf("DueSchedules: %v", err)
+	}
+	if len(due) != 2 {
+		t.Fatalf("DueSchedules len = %d, want 2", len(due))
+	}
+	if due[0].ID != "sched-a" || due[1].ID != "sched-b" {
+		t.Fatalf("DueSchedules IDs = [%s %s], want [sched-a sched-b]", due[0].ID, due[1].ID)
+	}
+	if !reflect.DeepEqual(due[0].Reads, wantReads) || !reflect.DeepEqual(due[0].Writes, wantWrites) ||
+		!reflect.DeepEqual(due[0].Grants, wantGrants) || !reflect.DeepEqual(due[0].CustomFields, wantCF) {
+		t.Errorf("due[0] children = reads:%+v writes:%+v grants:%+v cf:%+v", due[0].Reads, due[0].Writes, due[0].Grants, due[0].CustomFields)
+	}
+	if !reflect.DeepEqual(due[1].Reads, s2.Reads) || len(due[1].Writes) != 0 ||
+		!reflect.DeepEqual(due[1].Grants, s2.Grants) || due[1].CustomFields != nil {
+		t.Errorf("due[1] children = reads:%+v writes:%+v grants:%+v cf:%+v", due[1].Reads, due[1].Writes, due[1].Grants, due[1].CustomFields)
+	}
+
+	listed, err := store.ListSchedules(ctx)
+	if err != nil {
+		t.Fatalf("ListSchedules: %v", err)
+	}
+	byID := map[string]model.Schedule{}
+	for _, sc := range listed {
+		byID[sc.ID] = sc
+	}
+	if len(byID) != 3 {
+		t.Fatalf("ListSchedules len = %d, want 3", len(byID))
+	}
+	if !reflect.DeepEqual(byID["sched-a"].CustomFields, wantCF) {
+		t.Errorf("ListSchedules sched-a custom fields = %+v, want %+v", byID["sched-a"].CustomFields, wantCF)
+	}
+	if !reflect.DeepEqual(byID["sched-c"].CustomFields, s3.CustomFields) || len(byID["sched-c"].Reads) != 0 {
+		t.Errorf("ListSchedules sched-c = %+v", byID["sched-c"])
 	}
 }

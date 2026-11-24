@@ -37,8 +37,12 @@ package container
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -47,8 +51,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ai-on-gke/grain/pkg/installtrack"
+	"github.com/ai-on-gke/grain/pkg/upgrade"
 )
 
 func TestUpgradeFromReleasedVersions(t *testing.T) {
@@ -62,9 +68,19 @@ func TestUpgradeFromReleasedVersions(t *testing.T) {
 
 	conf := readReleaseConf(t)
 	target := strings.TrimSpace(os.Getenv("GRAIN_UPGRADE_TARGET"))
-	latest, floor, err := releaseBaselines(gitTags(t), target, promotedRelease(t), conf)
+	latest, floor, fromRegistry, err := resolveReleaseBaselines(
+		gitTags(t), target, promotedRelease(t), conf,
+		func() ([]string, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			return registryReleaseTags(ctx, releaseImage, target, conf)
+		},
+	)
 	if err != nil {
 		t.Fatalf("choosing the releases to upgrade from: %v", err)
+	}
+	if fromRegistry {
+		t.Logf("checkout has no promoted release git tags; chose baselines from %s", releaseImage)
 	}
 	t.Logf("upgrading %s (target %q) from latest %s and floor %s", image, target, latest, floor)
 
@@ -243,7 +259,7 @@ func releaseBaselines(tags []string, target, promoted string, conf releaseConf) 
 	var releases []release
 	for _, tag := range tags {
 		m := releaseTag.FindStringSubmatch(tag)
-		if m == nil || slices.Contains(conf.neverPromote, tag) {
+		if m == nil || slices.Contains(conf.neverPromote, tag) || slices.Contains(tags, tag+"-retracted") {
 			continue
 		}
 		v := parseSemver(m)
@@ -274,6 +290,117 @@ func releaseBaselines(tags []string, target, promoted string, conf releaseConf) 
 	return newest.tag, newest.tag, nil
 }
 
+// resolveReleaseBaselines selects latest and floor from local git tags when
+// the checkout has at least one promoted release tag, and falls back to
+// listing published tags from the release image repository when it does not
+// (for example on a fork that carries main without mirroring upstream's
+// release git tags).
+func resolveReleaseBaselines(tags []string, target, promoted string, conf releaseConf, listRegistry func() ([]string, error)) (latest, floor string, fromRegistry bool, err error) {
+	latest, floor, err = releaseBaselines(tags, target, promoted, conf)
+	if err == nil || listRegistry == nil {
+		return latest, floor, false, err
+	}
+	regTags, regErr := listRegistry()
+	if regErr != nil {
+		return "", "", false, fmt.Errorf("%w (registry tag fallback failed: %v)", err, regErr)
+	}
+	// Only promoted releases carry :vX.Y.Z in the image registry, so there is
+	// no unpromoted-git-tag ceiling to apply when selecting from registry tags.
+	latest, floor, regBaseErr := releaseBaselines(regTags, target, "", conf)
+	if regBaseErr != nil {
+		return "", "", false, fmt.Errorf("%w (registry fallback: %v)", err, regBaseErr)
+	}
+	return latest, floor, true, nil
+}
+
+// registryReleaseTags lists published tags from releaseImage and, when
+// installtrack.LegacyRepositoryFor maps it to a pre-cutover legacy repository,
+// merges the deduplicated tags from both repositories so releaseBaselines sees
+// the full release history (including pre-cutover floor releases and
+// -retracted markers from either repository).
+func registryReleaseTags(ctx context.Context, releaseImage, target string, conf releaseConf) ([]string, error) {
+	leg, hasLeg := installtrack.LegacyRepositoryFor(releaseImage)
+	return listReleaseTagsFromRepos(ctx, releaseImage, leg, hasLeg, target, conf, upgrade.ListRegistryTags)
+}
+
+func listReleaseTagsFromRepos(
+	ctx context.Context,
+	primary, legacy string,
+	hasLegacy bool,
+	target string,
+	conf releaseConf,
+	list func(context.Context, string) ([]string, error),
+) ([]string, error) {
+	primaryTags, primaryErr := list(ctx, primary)
+	if !hasLegacy {
+		return primaryTags, primaryErr
+	}
+	legacyTags, legacyErr := list(ctx, legacy)
+	switch {
+	case primaryErr == nil && legacyErr == nil:
+		return mergeUniqueTags(primaryTags, legacyTags), nil
+	case primaryErr != nil && legacyErr != nil:
+		return nil, fmt.Errorf("listing %s: %v; listing legacy %s: %v", primary, primaryErr, legacy, legacyErr)
+	case primaryErr == nil:
+		// Treat a legacy-repository lookup failure as best-effort only when
+		// primary already covers the expected floor minor; otherwise surface
+		// legacyErr so tagless checkouts never silently shift floor forward
+		// across the GHCR -> Docker Hub cutover or hide a lookup error.
+		if hasFloorBaseline(primaryTags, target, conf) {
+			return primaryTags, nil
+		}
+		if _, _, baseErr := releaseBaselines(primaryTags, target, "", conf); baseErr != nil {
+			return nil, fmt.Errorf("%s (%v); listing legacy %s failed: %w", primary, baseErr, legacy, legacyErr)
+		}
+		return nil, fmt.Errorf("%s does not include the floor minor release and listing legacy %s failed: %w", primary, legacy, legacyErr)
+	default:
+		// Never fall back to the frozen legacy repository alone when primary
+		// lookup fails: doing so would silently degrade the latest upgrade
+		// baseline to a pre-cutover release and miss post-cutover releases or
+		// -retracted markers published on primary.
+		return nil, fmt.Errorf("listing %s: %w (not falling back to legacy %s alone)", primary, primaryErr, legacy)
+	}
+}
+
+func mergeUniqueTags(lists ...[]string) []string {
+	seen := make(map[string]struct{})
+	var merged []string
+	for _, list := range lists {
+		for _, tag := range list {
+			if _, ok := seen[tag]; ok {
+				continue
+			}
+			seen[tag] = struct{}{}
+			merged = append(merged, tag)
+		}
+	}
+	return merged
+}
+
+func hasFloorBaseline(tags []string, target string, conf releaseConf) bool {
+	latest, floor, err := releaseBaselines(tags, target, "", conf)
+	if err != nil {
+		return false
+	}
+	lm := releaseTag.FindStringSubmatch(latest)
+	fm := releaseTag.FindStringSubmatch(floor)
+	if lm == nil || fm == nil {
+		return false
+	}
+	lv, fv := parseSemver(lm), parseSemver(fm)
+	wantMinor := 0
+	if lv[0] == conf.major {
+		wantMinor = conf.floorMinor
+	}
+	if fv[0] != lv[0] || fv[1] != wantMinor {
+		return false
+	}
+	floorZero := fmt.Sprintf("v%d.%d.0", lv[0], wantMinor)
+	return fv[2] == 0 ||
+		slices.Contains(conf.neverPromote, floorZero) ||
+		slices.Contains(tags, floorZero+"-retracted")
+}
+
 func TestReleaseBaselines(t *testing.T) {
 	conf := releaseConf{major: 3, floorMinor: 0, neverPromote: []string{"v2.5.0", "v3.2.0"}}
 	tags := []string{
@@ -284,6 +411,7 @@ func TestReleaseBaselines(t *testing.T) {
 		name, target, latest, floor string
 		promoted                    string
 		conf                        *releaseConf
+		tags                        []string
 	}{
 		{name: "an RC upgrades from the release before it", target: "v3.3.0-rc.2", latest: "v3.1.0", floor: "v3.0.0"},
 		{name: "a hotfix RC from its own minor", target: "v3.1.1-rc.1", latest: "v3.1.0", floor: "v3.0.0"},
@@ -296,6 +424,8 @@ func TestReleaseBaselines(t *testing.T) {
 		{name: "a release tagged above latest is not yet published", target: "", promoted: "v3.0.1",
 			latest: "v3.0.1", floor: "v3.0.0"},
 		{name: "no latest tag is no ceiling", target: "main", promoted: "", latest: "v3.1.0", floor: "v3.0.0"},
+		{name: "retracted releases are excluded", target: "", promoted: "",
+			tags: []string{"v3.0.0", "v3.1.0", "v3.1.0-retracted"}, latest: "v3.0.0", floor: "v3.0.0"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -303,7 +433,11 @@ func TestReleaseBaselines(t *testing.T) {
 			if tc.conf != nil {
 				c = *tc.conf
 			}
-			latest, floor, err := releaseBaselines(tags, tc.target, tc.promoted, c)
+			in := tags
+			if tc.tags != nil {
+				in = tc.tags
+			}
+			latest, floor, err := releaseBaselines(in, tc.target, tc.promoted, c)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -315,4 +449,192 @@ func TestReleaseBaselines(t *testing.T) {
 	if _, _, err := releaseBaselines([]string{"v3.0.0-rc.1"}, "", "", conf); err == nil {
 		t.Errorf("releaseBaselines with no promoted release chose one")
 	}
+}
+
+func TestResolveReleaseBaselines(t *testing.T) {
+	conf := releaseConf{major: 3, floorMinor: 0, neverPromote: []string{"v2.5.0"}}
+
+	t.Run("prefers git tags without calling registry", func(t *testing.T) {
+		called := false
+		latest, floor, fromReg, err := resolveReleaseBaselines(
+			[]string{"v3.0.0", "v3.1.0"}, "", "v3.1.0", conf,
+			func() ([]string, error) {
+				called = true
+				return nil, errors.New("unexpected registry call")
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if called || fromReg || latest != "v3.1.0" || floor != "v3.0.0" {
+			t.Fatalf("got (%s, %s, fromReg=%v, called=%v), want (v3.1.0, v3.0.0, false, false)", latest, floor, fromReg, called)
+		}
+	})
+
+	t.Run("falls back to registry tags when checkout has no git tags", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v2/grainai/grain/tags/list" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"grainai/grain","tags":["latest","main","sha-deadbeef","v3.4.0","v3.12.0","v3.13.0","v3.14.0","v3.14.0-retracted","v3.15.0-rc.1"]}`))
+		}))
+		defer srv.Close()
+
+		repo := strings.TrimPrefix(srv.URL, "http://") + "/grainai/grain"
+		latest, floor, fromReg, err := resolveReleaseBaselines(nil, "", "", conf, func() ([]string, error) {
+			return registryReleaseTags(context.Background(), repo, "", conf)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fromReg || latest != "v3.13.0" || floor != "v3.4.0" {
+			t.Fatalf("got (%s, %s, fromReg=%v), want (v3.13.0, v3.4.0, true)", latest, floor, fromReg)
+		}
+	})
+
+	t.Run("respects target bound on registry fallback", func(t *testing.T) {
+		latest, floor, fromReg, err := resolveReleaseBaselines(
+			[]string{"v3.14.0-rc.1"}, "v3.14.0-rc.1", "", conf,
+			func() ([]string, error) {
+				return []string{"v3.4.0", "v3.13.0", "v3.14.0"}, nil
+			},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fromReg || latest != "v3.13.0" || floor != "v3.4.0" {
+			t.Fatalf("got (%s, %s, fromReg=%v), want (v3.13.0, v3.4.0, true)", latest, floor, fromReg)
+		}
+	})
+
+	t.Run("reports registry failure when git tags are absent", func(t *testing.T) {
+		_, _, _, err := resolveReleaseBaselines(nil, "", "", conf, func() ([]string, error) {
+			return nil, errors.New("registry unreachable")
+		})
+		if err == nil || !strings.Contains(err.Error(), "registry unreachable") {
+			t.Fatalf("err = %v, want registry unreachable", err)
+		}
+	})
+
+	t.Run("merges primary and legacy repository tags across cutover", func(t *testing.T) {
+		const primary = "docker.io/grainai/grain"
+		const legacy = "ghcr.io/bwsalmon/grain/grain"
+		if got, ok := installtrack.LegacyRepositoryFor(primary); !ok || got != legacy {
+			t.Fatalf("LegacyRepositoryFor(%q) = (%q, %v), want (%q, true)", primary, got, ok, legacy)
+		}
+		list := func(_ context.Context, repo string) ([]string, error) {
+			switch repo {
+			case primary:
+				return []string{"latest", "v3.5.0", "v3.13.0", "v3.14.0"}, nil
+			case legacy:
+				return []string{"v3.0.0", "v3.1.0", "v3.5.0", "v3.14.0-retracted"}, nil
+			default:
+				return nil, fmt.Errorf("unexpected repo %s", repo)
+			}
+		}
+		latest, floor, fromReg, err := resolveReleaseBaselines(nil, "", "", conf, func() ([]string, error) {
+			return listReleaseTagsFromRepos(context.Background(), primary, legacy, true, "", conf, list)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fromReg || latest != "v3.13.0" || floor != "v3.0.0" {
+			t.Fatalf("got (%s, %s, fromReg=%v), want (v3.13.0, v3.0.0, true)", latest, floor, fromReg)
+		}
+	})
+
+	t.Run("surfaces legacy lookup failure when primary lacks floor minor", func(t *testing.T) {
+		list := func(_ context.Context, repo string) ([]string, error) {
+			if repo == "docker.io/grainai/grain" {
+				return []string{"v3.5.0", "v3.13.0"}, nil
+			}
+			return nil, errors.New("ghcr rate limited")
+		}
+		_, _, _, err := resolveReleaseBaselines(nil, "", "", conf, func() ([]string, error) {
+			return listReleaseTagsFromRepos(context.Background(), "docker.io/grainai/grain", "ghcr.io/bwsalmon/grain/grain", true, "", conf, list)
+		})
+		if err == nil || !strings.Contains(err.Error(), "ghcr rate limited") {
+			t.Fatalf("err = %v, want legacy lookup error surfaced", err)
+		}
+	})
+
+	t.Run("tolerates legacy lookup failure when primary already includes floor minor", func(t *testing.T) {
+		list := func(_ context.Context, repo string) ([]string, error) {
+			if repo == "docker.io/grainai/grain" {
+				return []string{"v3.0.0", "v3.13.0"}, nil
+			}
+			return nil, errors.New("ghcr retired")
+		}
+		latest, floor, fromReg, err := resolveReleaseBaselines(nil, "", "", conf, func() ([]string, error) {
+			return listReleaseTagsFromRepos(context.Background(), "docker.io/grainai/grain", "ghcr.io/bwsalmon/grain/grain", true, "", conf, list)
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fromReg || latest != "v3.13.0" || floor != "v3.0.0" {
+			t.Fatalf("got (%s, %s, fromReg=%v), want (v3.13.0, v3.0.0, true)", latest, floor, fromReg)
+		}
+	})
+
+	t.Run("surfaces both errors when primary has no baseline and legacy lookup fails", func(t *testing.T) {
+		list := func(_ context.Context, repo string) ([]string, error) {
+			if repo == "docker.io/grainai/grain" {
+				return []string{"main", "sha-abc1234"}, nil
+			}
+			return nil, errors.New("ghcr unavailable")
+		}
+		_, _, _, err := resolveReleaseBaselines(nil, "", "", conf, func() ([]string, error) {
+			return listReleaseTagsFromRepos(context.Background(), "docker.io/grainai/grain", "ghcr.io/bwsalmon/grain/grain", true, "", conf, list)
+		})
+		if err == nil || !strings.Contains(err.Error(), "ghcr unavailable") {
+			t.Fatalf("err = %v, want ghcr unavailable", err)
+		}
+	})
+
+	t.Run("surfaces both errors when both primary and legacy lookups fail", func(t *testing.T) {
+		list := func(_ context.Context, repo string) ([]string, error) {
+			if repo == "docker.io/grainai/grain" {
+				return nil, errors.New("docker hub down")
+			}
+			return nil, errors.New("ghcr down")
+		}
+		_, _, _, err := resolveReleaseBaselines(nil, "", "", conf, func() ([]string, error) {
+			return listReleaseTagsFromRepos(context.Background(), "docker.io/grainai/grain", "ghcr.io/bwsalmon/grain/grain", true, "", conf, list)
+		})
+		if err == nil || !strings.Contains(err.Error(), "docker hub down") || !strings.Contains(err.Error(), "ghcr down") {
+			t.Fatalf("err = %v, want both docker hub down and ghcr down", err)
+		}
+	})
+
+	t.Run("surfaces primary lookup failure instead of falling back to legacy alone", func(t *testing.T) {
+		list := func(_ context.Context, repo string) ([]string, error) {
+			if repo == "docker.io/grainai/grain" {
+				return nil, errors.New("docker hub rate limited")
+			}
+			return []string{"v3.0.0", "v3.1.0"}, nil
+		}
+		_, _, _, err := resolveReleaseBaselines(nil, "", "", conf, func() ([]string, error) {
+			return listReleaseTagsFromRepos(context.Background(), "docker.io/grainai/grain", "ghcr.io/bwsalmon/grain/grain", true, "", conf, list)
+		})
+		if err == nil || !strings.Contains(err.Error(), "docker hub rate limited") {
+			t.Fatalf("err = %v, want primary lookup error surfaced", err)
+		}
+	})
+
+	t.Run("surfaces legacy lookup failure when primary only has a patch of the floor minor", func(t *testing.T) {
+		list := func(_ context.Context, repo string) ([]string, error) {
+			if repo == "docker.io/grainai/grain" {
+				return []string{"v3.0.1", "v3.13.0"}, nil
+			}
+			return nil, errors.New("ghcr unavailable")
+		}
+		_, _, _, err := resolveReleaseBaselines(nil, "", "", conf, func() ([]string, error) {
+			return listReleaseTagsFromRepos(context.Background(), "docker.io/grainai/grain", "ghcr.io/bwsalmon/grain/grain", true, "", conf, list)
+		})
+		if err == nil || !strings.Contains(err.Error(), "ghcr unavailable") {
+			t.Fatalf("err = %v, want legacy lookup error surfaced", err)
+		}
+	})
 }
