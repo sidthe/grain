@@ -25,14 +25,8 @@ import (
 func repoDeclaredSuite(id string) (model.RepoRef, string, bool) {
 	return releasepolicy.RepoDeclaredSuite(id)
 }
-func parseQualificationAttempt(extID, baseTag string) (int, bool) {
-	return releasepolicy.ParseQualificationAttempt(extID, baseTag)
-}
 func latestAttemptCheckRun(runs []github.CheckRun, name, app, baseTag string) (int, *github.CheckRun) {
 	return releasepolicy.LatestAttemptCheckRun(runs, name, app, baseTag)
-}
-func peelPendingTag(tags github.ReleaseTagReader, repo model.RepoRef, tag github.TagRef) (commit, message string, err error) {
-	return releasepolicy.PeelPendingTag(tags, repo, tag)
 }
 func readReleaseConf(files github.FileReader, repo model.RepoRef, commit string) (major int, hasMajor bool, never map[string]bool) {
 	return releasepolicy.ReadReleaseConf(files, repo, commit)
@@ -40,10 +34,8 @@ func readReleaseConf(files github.FileReader, repo model.RepoRef, commit string)
 func newestNotesBase(released, retracted, never map[string]bool, target string) string {
 	return releasepolicy.NewestNotesBase(released, retracted, never, target)
 }
-func parseSemverParts(v string) ([3]int, bool) { return releasepolicy.ParseSemverParts(v) }
-func parseSemverMajor(v string) (int, bool)    { return releasepolicy.ParseSemverMajor(v) }
-func semverLess(a, b string) bool              { return releasepolicy.SemverLess(a, b) }
-func commitIsBreaking(c github.Commit) bool    { return releasepolicy.CommitIsBreaking(c) }
+func parseSemverMajor(v string) (int, bool) { return releasepolicy.ParseSemverMajor(v) }
+func commitIsBreaking(c github.Commit) bool { return releasepolicy.CommitIsBreaking(c) }
 func countTaskLinks(t model.Task, kind model.LinkKind) int {
 	n := 0
 	for _, l := range t.Links {

@@ -1118,7 +1118,7 @@ function ImageChooser({
 
 // repositoryOfImage is image without its tag or digest -- the part
 // GET /api/upgrade's repository lists name.
-export function repositoryOfImage(image) {
+function repositoryOfImage(image) {
   const named = (image || "").trim().split("@")[0];
   const colon = named.lastIndexOf(":");
   return colon > named.lastIndexOf("/") ? named.slice(0, colon) : named;

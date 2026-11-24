@@ -28,7 +28,7 @@ import Markdown from "../Markdown.jsx";
 // none of this applies to it.
 
 // isDurable is Task.IsDurable for the browser.
-export function isDurable(t) {
+function isDurable(t) {
   return t?.admission === "durable";
 }
 

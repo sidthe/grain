@@ -36,7 +36,7 @@ import {
 
 // pullRequestNumber extracts the numeric PR number from "owner/repo#42",
 // or "" when t has no numbered pull request yet.
-export function pullRequestNumber(pullRequest) {
+function pullRequestNumber(pullRequest) {
   const m = /#(\d+)$/.exec(String(pullRequest || "").trim());
   return m ? m[1] : "";
 }

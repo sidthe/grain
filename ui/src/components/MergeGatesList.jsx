@@ -21,7 +21,7 @@ import TaskLink from "./detail/TaskLink.jsx";
 // test fixture omits mergeGates.
 // gateId is a gate's identifier: the server's MergeGate sends `id`
 // (model.MergeGate), and gates derived here also carry it as `name`.
-export function gateId(gate) {
+function gateId(gate) {
   return gate?.id || gate?.name || "";
 }
 
@@ -208,19 +208,19 @@ export function unsatisfiedReviewGates(t) {
 }
 
 // hasRunningReviewGate reports whether any review gate on t is still running.
-export function hasRunningReviewGate(t) {
+function hasRunningReviewGate(t) {
   return reviewGates(t).some((g) => g.state === "running");
 }
 
 // hasReviewFindingsGate reports whether any review gate on t is held on
 // findings or open questions.
-export function hasReviewFindingsGate(t) {
+function hasReviewFindingsGate(t) {
   return reviewGates(t).some((g) => g.state === "findings");
 }
 
 // approvalGate returns t's human approval gate, or null if human approval
 // is not a gate on t.
-export function approvalGate(t) {
+function approvalGate(t) {
   return deriveMergeGates(t).find((g) => g.name === "approval") || null;
 }
 
@@ -306,16 +306,6 @@ export function formatGateStatus(gate) {
     default:
       return `${gate.label}: running`;
   }
-}
-
-// pendingGatesSummary returns a concise one-line summary of pending gates
-// for tooltips and Inbox subtitles.
-export function pendingGatesSummary(t) {
-  const pending = deriveMergeGates(t).filter(
-    (g) => g.state !== "passed" && g.state !== "overridden",
-  );
-  if (pending.length === 0) return "";
-  return pending.map(formatGateStatus).join(" \u00b7 ");
 }
 
 function gateToneColor(state) {

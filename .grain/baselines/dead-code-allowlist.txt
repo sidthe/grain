@@ -20,17 +20,30 @@ pkg/lifecycle/lifecycle.go:Registry.Refresh  # satisfies ui.Lifecycles
 pkg/orchestrator/serving_test.go:dialableRunner.DialStream  # satisfies streamRunner for serving.go's type assertion
 pkg/capability/geminikey/geminikey.go:Capability.ScarceResourceProvider  # marker method; model.IsScarceResourceProvider type-asserts model.ScarceResourceProvider
 
-# Run from build files and CI, not imported.
+# Reached only from //go:build ignore test-run helpers.
+pkg/secrets/kmsfake/kmsfake.go:Server.Encrypts  # called by docs/test-runs/*/kmsfakesrv.go alongside Decrypts and Signs
+
+# Run from build files, CI, or CLI, not imported.
+ui/e2e/grantMatrixReport.mjs  # standalone CLI script turning GRANT_MATRIX_OUT JSON into markdown tables
+ui/e2e/run-frozen.mjs  # make test-e2e-quarantined and the ui e2e (quarantined) CI job
 ui/e2e/screenshot.mjs  # make ui-screenshots
 ui/scripts/summarize-trace-network.mjs  # the ui e2e job in .github/workflows/tests.yml and .grain/workflows/tests.yml
 
 # UI exports knip reports that are kept on purpose.
+ui/e2e/frozen.js:LANE_ENV  # imported by ui/e2e/run-frozen.mjs (not a knip entry point)
+ui/e2e/frozen.js:readFrozenEntries  # imported by ui/e2e/run-frozen.mjs (not a knip entry point)
 ui/src/brand/grain-mark.js:DEFAULTS  # vendored verbatim from the grain-mark design pack; ui/scripts/export-mark-sheets.mjs inlines the module and reads it
 ui/src/brand/grain-mark.js:fieldVal  # vendored verbatim from the grain-mark design pack (its public API)
 ui/src/brand/grain-mark.js:overlayLines  # vendored verbatim from the grain-mark design pack (its public API)
 ui/src/brand/grain-mark.js:renderStatic  # vendored design pack; ui/scripts/export-mark-sheets.mjs inlines the module and calls it
 ui/src/components/AttachmentPicker.jsx:getPastedImages  # deliberate alias of getPastedFiles; TaskChat, Timeline and PendingQuestion import it
 ui/src/components/AttachmentPicker.jsx:handleImagePaste  # deliberate alias of handleFilePaste, kept beside getPastedImages and tested
+
+# Imported across sibling UI packages or provided by consuming apps (knip scans one package at a time).
+ui-shared/e2e/accesscode.js  # imported by ui/e2e/accesscode.js and ui-ng/e2e/
+ui-shared/e2e/demo.js  # imported by ui/e2e/ and ui-ng/e2e/
+ui-shared/ThemeModeContext.jsx:react  # peer dependency provided by consuming apps (ui/, ui-hub/)
+ui-shared/primitives.jsx:react  # peer dependency provided by consuming apps (ui/, ui-hub/)
 
 # Unlisted dependencies knip reports that are resolved by a Vite alias, not a package.
 ui-hub/src/App.jsx:@grain/ui-shared  # resolve.alias in ui-hub/vite.config.js points it at ../ui-shared
@@ -40,3 +53,7 @@ ui-hub/src/main.jsx:@grain/ui-shared  # resolve.alias in ui-hub/vite.config.js p
 # Historical records: scripts kept beside the test run that used them.
 docs/test-runs/2026-11-03-sandbox-cli-edges/task-sandbox-grepwalk.sh  # test-run record
 docs/test-runs/2026-11-09-hosted-instance-credentials/hosted-vm-walk.sh  # test-run record
+docs/test-runs/2026-11-15-postgres-sequence-resync/step2-sqlite-to-postgres.sh  # test-run record, invoked dynamically by run_all.sh
+docs/test-runs/2026-11-15-postgres-sequence-resync/step3-staterepo-restore-and-merge.sh  # test-run record, invoked dynamically by run_all.sh
+docs/test-runs/2026-11-15-postgres-sequence-resync/step4-startup-self-heal.sh  # test-run record, invoked dynamically by run_all.sh
+docs/test-runs/2026-11-15-postgres-sequence-resync/step5-two-daemons.sh  # test-run record, invoked dynamically by run_all.sh

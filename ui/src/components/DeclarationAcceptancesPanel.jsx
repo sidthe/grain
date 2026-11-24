@@ -25,7 +25,7 @@ import api from "../api.js";
 // widened past what was accepted shows the new items and waits again.
 // Revoking clears the acceptance, so its next firing is held again until
 // a person accepts once more.
-export function DeclarationAcceptance({ d, onAccept, onRevoke }) {
+function DeclarationAcceptance({ d, onAccept, onRevoke }) {
   const [busy, setBusy] = useState(false);
   const run = async (fn) => {
     if (busy) return;

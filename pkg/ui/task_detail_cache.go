@@ -93,11 +93,7 @@ func (c *taskDetailCache) tokenFor(ctx context.Context, client *Client) string {
 	return token
 }
 
-// response is the body and ETag for GET /api/tasks/{id} (whole or head page).
-func (c *taskDetailCache) response(ctx context.Context, client *Client, id string) ([]byte, string, error) {
-	return c.responseFor(ctx, client, id, TaskPage{}, false)
-}
-
+// responseFor is the body and ETag for GET /api/tasks/{id} (whole or head page).
 func (c *taskDetailCache) responseFor(ctx context.Context, client *Client, id string, page TaskPage, paged bool) ([]byte, string, error) {
 	token := c.tokenFor(ctx, client)
 	return c.responseForWithToken(ctx, client, id, page, paged, token)

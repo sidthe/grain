@@ -43,7 +43,7 @@ export function formatCadence(ns) {
   return `${minutes}m`;
 }
 
-export const STALE_SCHEDULES_REFRESH_MS = 30000;
+const STALE_SCHEDULES_REFRESH_MS = 30000;
 
 // useStaleSchedules is GET /api/sandboxes?section=staleSchedules, re-read
 // while the page is open: a store read, without the sandbox sweep the

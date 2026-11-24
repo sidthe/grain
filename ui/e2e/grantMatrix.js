@@ -356,7 +356,7 @@ function hasProperties(s) {
 // PERSON_GRANTED_KEY mirrors protocol.PersonGrantedArgKey: values in a
 // property's "x-grain-person-granted" list make a grant with that value
 // person-only (protocol.NotePersonGrantedArgs).
-export const PERSON_GRANTED_KEY = "x-grain-person-granted";
+const PERSON_GRANTED_KEY = "x-grain-person-granted";
 
 // isPersonGrantedArg reports whether args selects a value that method's
 // schema reserves to a person via x-grain-person-granted (including via the
@@ -418,33 +418,6 @@ export function invalidArgs(method) {
 export function policyFor(method, surface) {
   const verdict = method.policy?.[surface.kind] || "";
   return verdict === "ci_only" || verdict === "denied" ? verdict : "";
-}
-
-// grantMatrix is every cell: method × surface × argument variant, each
-// saying whether the surface should grant it (expect "grant") or refuse
-// it on policy (expect "refused").
-export function grantMatrix(methods, surfaces = SURFACES) {
-  const cells = [];
-  for (const method of methods) {
-    const variants = argVariants(method);
-    for (const surface of surfaces) {
-      const policy = policyFor(method, surface);
-      for (const { variant, args } of variants) {
-        const refusal = expectedRefusal(method.ref, variant, surface);
-        cells.push({
-          ref: method.ref,
-          surface: surface.id,
-          variant,
-          args,
-          requiresArgs: method.requiresArgs,
-          policy,
-          expect: policy || refusal ? "refused" : "grant",
-          knownGap: knownGap(method.ref, variant, surface.id),
-        });
-      }
-    }
-  }
-  return cells;
 }
 
 // shapeKey is what decides how the form draws a method's arguments and
